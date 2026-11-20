@@ -1,0 +1,420 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Dispatch-only release pipeline: seal -> qualify/export -> import ->
+# dry-run -> promote. Every dispatch re-verifies the sealed candidate
+# from the source commit before running its custody stage, so nothing
+# promotes bytes that skipped export. Custody dispatches run with the
+# workflow ref at the qualification commit Q (evidence-only over C);
+# see RELEASING.md for the operator order.
+#
+# Toolchain pins, matching the tree: Rust 1.100.0 plus
+# nightly-2026-05-20 for the eBPF child build
+# (rust-toolchain.toml, build.rs BPF_TOOLCHAIN) and bpf-linker
+# 0.10.4 (build.rs prerequisite).
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Custody stage to run'
+        required: true
+        type: choice
+        options: [import, dry-run, promote]
+      candidate_sha256:
+        description: 'Sealed candidate digest to release'
+        required: true
+        type: string
+      source_commit:
+        description: 'Source commit C the candidate seals'
+        required: true
+        type: string
+      promote_authorization:
+        description: 'Retype candidate_sha256 to authorize publishing'
+        required: false
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  seal:
+    runs-on: ubuntu-26.04
+    outputs:
+      present: ${{ steps.draft.outputs.present }}
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ inputs.source_commit }}
+      - name: Install Rust toolchains
+        run: |
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup toolchain install nightly-2026-05-20 --profile minimal \
+            --component rust-src
+      - name: Install bpf-linker 0.10.4
+        run: cargo install bpf-linker --version 0.10.4 --locked
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils cpio dpkg-dev patchelf rpm
+      - name: Warm the cargo cache for offline builds
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
+      - name: Build the bundle, deb, and rpm
+        run: |
+          set -eu
+          python3 scripts/package-tarball.py --build --out dist --tag bundle
+          python3 scripts/package-deb.py --bundle dist/bundle --out dist/deb
+          python3 scripts/package-rpm.py --work work/rpm --out dist/rpm \
+            --bundle dist/bundle
+          mkdir -p dist/artifacts
+          cp dist/bundle.tar.gz dist/artifacts/
+          set -- dist/deb/*.deb; test $# -eq 1 && test -f "$1"
+          cp "$1" dist/artifacts/
+          set -- dist/rpm/*.rpm; test $# -eq 1 && test -f "$1"
+          cp "$1" dist/artifacts/
+          git archive --format=tar HEAD | gzip -n \
+            > dist/artifacts/memveil-source.tar.gz
+      - name: Emit the frozen SBOM
+        run: |
+          set -eu
+          cargo build -p memveil-release-entry --locked --offline
+          set -- dist/artifacts/*.deb; test $# -eq 1 && test -f "$1"
+          DEB=$1
+          set -- dist/artifacts/*.rpm; test $# -eq 1 && test -f "$1"
+          RPM=$1
+          target/debug/memveil-release-entry sbom-emit \
+            --manifest dist/bundle/MANIFEST.json \
+            --out dist/artifacts/memveil.spdx.json \
+            --bundle dist/artifacts/bundle.tar.gz \
+            --deb "$DEB" \
+            --rpm "$RPM" \
+            --lock Cargo.lock \
+            --ebpf-lock crates/ebpf/Cargo.lock
+      - name: Record provenance and seal
+        run: |
+          set -eu
+          set -- dist/artifacts/*.deb; test $# -eq 1 && test -f "$1"
+          DEB=$1
+          set -- dist/artifacts/*.rpm; test $# -eq 1 && test -f "$1"
+          RPM=$1
+          ./tools/candidate provenance \
+            --bundle-dir dist/bundle \
+            --bundle dist/artifacts/bundle.tar.gz \
+            --deb "$DEB" \
+            --rpm "$RPM" \
+            --source dist/artifacts/memveil-source.tar.gz \
+            --sbom dist/artifacts/memveil.spdx.json \
+            --out dist/artifacts/memveil.provenance.json \
+            --source-root .
+          ./tools/candidate seal \
+            --bundle-dir dist/bundle \
+            --artifacts-dir dist/artifacts \
+            --policy packaging/candidate-policy.json \
+            --out candidate.json
+          test "$(sha256sum < candidate.json | cut -d' ' -f1)" \
+            = "${{ inputs.candidate_sha256 }}"
+      - name: Sign the artifact checksums
+        run: |
+          set -eu
+          test -n "${{ secrets.QUALIFIER_SIGNING_KEY }}"
+          umask 077
+          printf '%s\n' "${{ secrets.QUALIFIER_SIGNING_KEY }}" \
+            > qualifier.key
+          ./tools/candidate sign-checksums \
+            --artifacts-dir dist/artifacts \
+            --key qualifier.key \
+            --out-dir dist/signed
+          rm -f qualifier.key
+      - name: Stage the sealed set
+        run: |
+          set -eu
+          rm -rf sealed && mkdir sealed
+          cp candidate.json sealed/
+          cp dist/artifacts/* sealed/
+          cp dist/signed/SHA256SUMS.txt dist/signed/SHA256SUMS.txt.sig \
+            dist/signed/signer.pub sealed/
+          cp target/debug/memveil-release-entry sealed/
+          test "$(ls sealed | wc -l)" -eq 11
+          ls sealed
+      - name: Upload the sealed candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: sealed-${{ inputs.candidate_sha256 }}
+          path: sealed/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Check for the holding draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-${{ inputs.candidate_sha256 }}" \
+            >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  qualify:
+    needs: seal
+    if: needs.seal.outputs.present == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ inputs.source_commit }}
+      - name: Install matrix tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cpio rpm
+      - name: Collect the candidate and the campaign evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          gh run download "$GITHUB_RUN_ID" \
+            -n "sealed-${{ inputs.candidate_sha256 }}" -D sealed
+          test "$(sha256sum < sealed/candidate.json | cut -d' ' -f1)" \
+            = "${{ inputs.candidate_sha256 }}"
+          mkdir -p evidence evidence-dl
+          gh release download \
+            "candidate-${{ inputs.candidate_sha256 }}" \
+            -p qualification-evidence.tar.gz -D evidence-dl
+          python3 - evidence-dl/qualification-evidence.tar.gz \
+            evidence <<'EOF'
+          import sys
+          sys.path.insert(0, "tools")
+          import candidate
+          from pathlib import Path
+          candidate.safe_extract(sys.argv[1], Path(sys.argv[2]),
+                                 True, False)
+          EOF
+          cp sealed/SHA256SUMS.txt sealed/SHA256SUMS.txt.sig \
+            sealed/signer.pub evidence/
+      - name: Qualify and export the tested payload
+        run: |
+          set -eu
+          # Read-only display lookup; the export branch below
+          # authenticates the same bytes before evaluating them.
+          MATRIX_DIR=$(python3 - evidence \
+            evidence/qualification.json <<'EOF'
+          import sys
+          sys.path.insert(0, "tools")
+          import candidate
+          from pathlib import Path
+          evidence = Path(sys.argv[1])
+          doc = candidate.read_json(sys.argv[2], sealed=True)
+          gate = doc["gates"][candidate.MATRIX_GATE]
+          record = candidate.read_json(
+              evidence / candidate.relative(gate["receipt"]),
+              sealed=True)
+          inputs = candidate.read_json(
+              evidence / candidate.relative(record["inputs"]),
+              sealed=True)
+          print(inputs["matrix_directory"])
+          EOF
+          )
+          test -n "$MATRIX_DIR"
+          ./tools/candidate qualify \
+            --manifest sealed/candidate.json \
+            --qualification evidence/qualification.json \
+            --policy packaging/candidate-policy.json \
+            --evidence-dir evidence
+          MV_CANDIDATE_MANIFEST=sealed/candidate.json \
+          ./tools/kernel-matrix \
+            --verify-out \
+            --out "evidence/$MATRIX_DIR" \
+            --export-tested tested-payload.sha256 \
+            --lock tests/vm/kernels.lock.json \
+            --evidence-dir evidence \
+            --qualification evidence/qualification.json \
+            --policy packaging/candidate-policy.json \
+            --source-tree .
+      - name: Upload the tested payload
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: tested-${{ inputs.candidate_sha256 }}
+          path: tested-payload.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+  import:
+    needs: qualify
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Install custody tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cpio rpm
+      - name: Import the holding draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CUSTODY_ARM: ARM-IMPORT
+          GITHUB_EVENT_NAME: workflow_dispatch
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -eu
+          gh run download "$GITHUB_RUN_ID" \
+            -n "sealed-$CANDIDATE_SHA256" -D sealed
+          VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
+            | grep -m1 '^version = ' | cut -d'"' -f2)
+          test -n "$VERSION"
+          export FINAL_TAG="v$VERSION"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-$CANDIDATE_SHA256" \
+            > release.json
+          python3 - release.json > request.json <<'EOF'
+          import json, os, sys
+          release = json.load(open(sys.argv[1]))
+          print(json.dumps({
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "qualification_commit": os.environ["GITHUB_SHA"],
+              "candidate_sha256": os.environ["CANDIDATE_SHA256"],
+              "release_id": str(release["id"]),
+              "asset_ids": {a["name"]: str(a["id"])
+                            for a in release["assets"]},
+              "tag": os.environ["FINAL_TAG"]},
+              indent=2, sort_keys=True))
+          EOF
+          ./tools/candidate-custody import \
+            --request request.json \
+            --out custody-out \
+            --harness-bin sealed/memveil-release-entry
+      - name: Upload the stored candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          # Name pinned by the custody verifier: candidate-<digest>.
+          name: candidate-${{ inputs.candidate_sha256 }}
+          path: custody-out/stored
+          if-no-files-found: error
+          retention-days: 90
+      - name: Report the custody binding
+        run: |
+          set -eu
+          sha256sum custody-out/stored/custody.json
+          cat custody-out/SUBJECTS.txt
+
+  dry-run:
+    needs: import
+    if: inputs.mode == 'dry-run' || inputs.mode == 'promote'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Install custody tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cpio rpm
+      - name: Validate the proposed tag without mutation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CUSTODY_ARM: ARM-DRY-RUN
+          GITHUB_EVENT_NAME: workflow_dispatch
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -eu
+          gh run download "$GITHUB_RUN_ID" \
+            -n "sealed-$CANDIDATE_SHA256" -D sealed
+          VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
+            | grep -m1 '^version = ' | cut -d'"' -f2)
+          test -n "$VERSION"
+          export FINAL_TAG="v$VERSION"
+          python3 - packaging/qualifications/remote.json \
+            > request.json <<'EOF'
+          import json, os, sys
+          remote = json.load(open(sys.argv[1]))
+          print(json.dumps({
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "qualification_commit": os.environ["GITHUB_SHA"],
+              "candidate_sha256": os.environ["CANDIDATE_SHA256"],
+              "run_id": remote["run_id"],
+              "artifact_id": remote["artifact_id"],
+              "tag": os.environ["FINAL_TAG"]},
+              indent=2, sort_keys=True))
+          EOF
+          ./tools/candidate-custody dry-run \
+            --request request.json \
+            --out custody-out \
+            --harness-bin sealed/memveil-release-entry
+
+  promote:
+    needs: dry-run
+    if: inputs.mode == 'promote' && inputs.promote_authorization == inputs.candidate_sha256
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Install custody tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cpio rpm
+      - name: Publish the qualified release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CUSTODY_ARM: ARM-PROMOTE
+          GITHUB_EVENT_NAME: workflow_dispatch
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+        run: |
+          set -eu
+          gh run download "$GITHUB_RUN_ID" \
+            -n "sealed-$CANDIDATE_SHA256" -D sealed
+          VERSION=$(git show "$SOURCE_COMMIT:Cargo.toml" \
+            | grep -m1 '^version = ' | cut -d'"' -f2)
+          test -n "$VERSION"
+          export FINAL_TAG="v$VERSION"
+          python3 - packaging/qualifications/remote.json \
+            > request.json <<'EOF'
+          import json, os, sys
+          remote = json.load(open(sys.argv[1]))
+          print(json.dumps({
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "source_commit": os.environ["SOURCE_COMMIT"],
+              "qualification_commit": os.environ["GITHUB_SHA"],
+              "candidate_sha256": os.environ["CANDIDATE_SHA256"],
+              "run_id": remote["run_id"],
+              "artifact_id": remote["artifact_id"],
+              "tag": os.environ["FINAL_TAG"]},
+              indent=2, sort_keys=True))
+          EOF
+          ./tools/candidate-custody promote \
+            --request request.json \
+            --out custody-out \
+            --harness-bin sealed/memveil-release-entry

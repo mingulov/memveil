@@ -1574,3 +1574,74 @@ def test_seal_cross_checks_bpf_linker(workshop, tmp_path):
             fix["bundle_dir"], fix["artifacts"], fix["policy"],
             {"root": str(fix["root"]),
              "harness_bin": workshop.harness_bin()})
+
+
+def _sign_checksums_fixture(tmp_path):
+    """Three fixed artifacts (created out of order) plus a key."""
+    staged = Path(tmp_path) / "staged"
+    staged.mkdir()
+    bodies = {"b.dat": b"b-body\n", "a.dat": b"a-body\n",
+              "c.dat": b"c-body\n"}
+    for name, body in bodies.items():
+        (staged / name).write_bytes(body)
+    private, public = _ephemeral_key(Path(tmp_path) / "key")
+    return staged, private, public
+
+
+def test_sign_checksums_golden_content(tmp_path):
+    m = api()
+    staged, private, public = _sign_checksums_fixture(tmp_path)
+    out = Path(tmp_path) / "signed"
+    argv = [str(ROOT / "tools" / "candidate"), "sign-checksums",
+           "--artifacts-dir", str(staged),
+           "--key", str(private),
+           "--out-dir", str(out)]
+    proc = subprocess.run(argv, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0, proc.stderr
+    names = sorted(path.name for path in staged.iterdir())
+    golden = "".join(
+        sha((staged / name).read_bytes()) + "  " + name + "\n"
+        for name in names)
+    sums = out / "SHA256SUMS.txt"
+    assert sums.read_text() == golden
+    assert proc.stdout.strip() == sha(sums.read_bytes())
+    derived = subprocess.run(
+        ["ssh-keygen", "-y", "-f", str(private)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, check=True).stdout.strip()
+    assert derived.startswith("ssh-ed25519 ")
+    assert (out / "signer.pub").read_bytes() == \
+        (derived + "\n").encode()
+    trusted = [sha((out / "signer.pub").read_bytes())]
+    assert m.verify_signature(
+        sums, out / "SHA256SUMS.txt.sig",
+        out / "signer.pub", trusted) is None
+    assert m.verify_artifact_checksums(staged, sums) == golden
+    rerun = subprocess.run(argv, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True)
+    assert rerun.returncode == 1
+    assert rerun.stderr.strip(), "silent sign-checksums failure"
+
+
+def test_sign_checksums_tampered_artifact_refuses_to_verify(
+        tmp_path):
+    m = api()
+    staged, private, public = _sign_checksums_fixture(tmp_path)
+    out = Path(tmp_path) / "signed"
+    assert m.sign_checksums(staged, private, out) == sha(
+        (out / "SHA256SUMS.txt").read_bytes())
+    m.verify_artifact_checksums(staged, out / "SHA256SUMS.txt")
+    target = staged / "b.dat"
+    with open(target, "ab") as stream:
+        stream.write(b"tampered")
+    with pytest.raises(ValueError, match="differ"):
+        m.verify_artifact_checksums(
+            staged, out / "SHA256SUMS.txt")
+    # The signed bytes themselves still verify standalone:
+    # only the re-derived binding catches the substitution.
+    m.verify_signature(out / "SHA256SUMS.txt",
+                       out / "SHA256SUMS.txt.sig",
+                       out / "signer.pub",
+                       [sha((out / "signer.pub")
+                            .read_bytes())])

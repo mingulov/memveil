@@ -1684,6 +1684,105 @@ def verify_qualification(candidate, qualification, policy,
     return {"ok": True, "gates": sorted(doc["gates"])}
 
 
+def checksums_text(artifacts_dir):
+    """Render the sorted "<sha>  <name>" lines for a directory.
+
+    Every entry must be a regular file; symlinks, directories,
+    newline names, and an empty directory fail closed. Shared by
+    the signer and the verifier so the two cannot drift.
+    """
+    directory = Path(artifacts_dir)
+    require(directory.is_dir() and not directory.is_symlink(),
+            "artifacts directory is missing")
+    leaves = sorted(os.listdir(directory))
+    require(leaves, "no artifacts to sign")
+    lines = []
+    for leaf in leaves:
+        require("\n" not in leaf, "invalid artifact name")
+        fd = os.open(directory / leaf,
+                     os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            require(stat.S_ISREG(info.st_mode),
+                    "artifact is not a regular file: " + leaf)
+            found = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1048576),
+                              b""):
+                found.update(chunk)
+        lines.append(found.hexdigest() + "  " + leaf + "\n")
+    return "".join(lines)
+
+
+def sign_checksums(artifacts_dir, key_path, out_dir):
+    """Hash staged artifacts, write SHA256SUMS.txt, sign it.
+
+    Writes SHA256SUMS.txt (the exact sorted lines), its
+    ssh-keygen -Y signature over the candidate namespace, and
+    signer.pub (the Ed25519 key derived from the private key),
+    then self-verifies the triple. Every write refuses to
+    overwrite; a failed run leaves no partial triple behind.
+    Returns the SHA256SUMS.txt digest hex.
+    """
+    text = checksums_text(artifacts_dir)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    sums = out / "SHA256SUMS.txt"
+    signature = out / "SHA256SUMS.txt.sig"
+    public = out / "signer.pub"
+    for path in (signature, public):
+        require(not os.path.lexists(path),
+                "refusing to overwrite " + path.name)
+    created = []
+    done = False
+    try:
+        write_once(sums, text.encode())
+        created.append(sums)
+        signed = subprocess.run(
+            ["ssh-keygen", "-Y", "sign", "-f", str(key_path),
+             "-n", SIGNING_NAMESPACE, str(sums)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        require(signed.returncode == 0,
+                "checksum signing failed")
+        created.append(signature)
+        derived = subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(key_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        require(derived.returncode == 0,
+                "cannot read signing key")
+        try:
+            key = derived.stdout.decode().strip()
+        except UnicodeError as error:
+            raise ValueError(
+                "unsupported signing key") from error
+        require(key.startswith("ssh-ed25519 ")
+                and "\n" not in key, "unsupported signing key")
+        write_once(public, (key + "\n").encode())
+        created.append(public)
+        verify_signature(sums, signature, public,
+                         [digest(public)])
+        done = True
+    finally:
+        if not done:
+            for path in created:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+    return digest_bytes(text.encode())
+
+
+def verify_artifact_checksums(artifacts_dir, sums_path):
+    """Re-derive the checksums; require the sums file to match.
+
+    A substituted artifact, an added file, or a dropped file
+    fails closed. Returns the re-derived text.
+    """
+    expected = checksums_text(artifacts_dir)
+    require(read_regular(sums_path) == expected.encode(),
+            "signed checksums differ from artifacts")
+    return expected
+
+
 def verify_signed_checksums(manifest, evidence, trusted):
     """Verify the signed artifact checksums against the manifest."""
     evidence = Path(evidence)
@@ -1791,6 +1890,12 @@ def main(argv=None):
     qualify.add_argument("--qualification", required=True)
     qualify.add_argument("--policy", required=True)
     qualify.add_argument("--evidence-dir", required=True)
+    sign = commands.add_parser(
+        "sign-checksums",
+        help="hash staged artifacts and sign the checksums")
+    sign.add_argument("--artifacts-dir", required=True)
+    sign.add_argument("--key", required=True)
+    sign.add_argument("--out-dir", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "seal":
@@ -1809,6 +1914,9 @@ def main(argv=None):
                 read_json(args.policy)["trusted_keys"])
             print("all required signed qualification inputs "
                   "re-derived")
+        elif args.command == "sign-checksums":
+            print(sign_checksums(args.artifacts_dir, args.key,
+                                 args.out_dir))
         else:
             print(emit_provenance(
                 args.bundle_dir,

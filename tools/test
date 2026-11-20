@@ -15,7 +15,8 @@
 # record-failures, output-paths, privacy, render-escaping,
 # offline-environment, perf-replay, perf-region,
 # perf-workload, perf-overhead, soak, preview-package,
-# provenance, docs, examples.
+# provenance, docs, examples, candidate, candidate-matrix,
+# candidate-custody.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -1387,6 +1388,33 @@ suite_provenance() {
     python3 "$ROOT/tests/provenance/test_provenance.py" --selftest
 }
 
+suite_candidate() {
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "candidate: pytest not importable" >&2
+        return 1
+    fi
+    python3 -m pytest "$ROOT/tests/package/test_candidate.py" -q
+}
+
+suite_candidate_matrix() {
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "candidate-matrix: pytest not importable" >&2
+        return 1
+    fi
+    python3 -m pytest \
+        "$ROOT/tests/package/test_candidate_matrix.py" \
+        "$ROOT/tests/support/test_candidate_input.py" -q
+}
+
+suite_candidate_custody() {
+    if ! python3 -m pytest --version >/dev/null 2>&1; then
+        echo "candidate-custody: pytest not importable" >&2
+        return 1
+    fi
+    python3 -m pytest \
+        "$ROOT/tests/package/test_candidate_custody.py" -q
+}
+
 
 suite_docs() {
     python3 "$ROOT/tests/docs/test_docs.py"
@@ -2067,6 +2095,15 @@ case "$1" in
         ;;
     provenance)
         suite_provenance
+        ;;
+    candidate)
+        suite_candidate
+        ;;
+    candidate-matrix)
+        suite_candidate_matrix
+        ;;
+    candidate-custody)
+        suite_candidate_custody
         ;;
     docs)
         suite_docs
