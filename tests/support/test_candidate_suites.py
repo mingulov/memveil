@@ -590,3 +590,106 @@ def test_guest_identity_mismatch_refuses(sealed):
     assert refused.returncode != 0
     assert 'digest' in refused.stderr
     assert 'digest=' not in refused.stdout
+
+
+def test_topwalk_product_paths_resolve_packaged(sealed):
+    sys.path.insert(0, str(ROOT / 'tests/vm'))
+    import guest_lifecycle
+    from support.candidate_input import load
+    selected = load(env=sealed)
+    try:
+        memveil, attempt = \
+            guest_lifecycle.topwalk_product_paths(
+                '/repo', selected)
+        assert memveil == str(selected.root / 'bin/memveil')
+        assert attempt == str(
+            selected.root / 'bpf/swiotlb_attempt.bpf.o')
+        executed = subprocess.run(
+            [memveil], capture_output=True, text=True,
+            timeout=60)
+        assert executed.stdout == 'packaged-synthetic\n'
+        dev = guest_lifecycle.topwalk_product_paths(
+            '/repo', None)
+        assert dev == ('/repo/build/memveil',
+                       '/repo/build/bpf/swiotlb_attempt.bpf.o')
+    finally:
+        selected.close()
+
+
+def test_topwalk_guest_uses_packaged_paths(
+        sealed, tmp_path, capsys):
+    sys.path.insert(0, str(ROOT / 'tests/vm'))
+    import guest_lifecycle
+    from types import SimpleNamespace
+    from support.candidate_input import load
+    gate = SimpleNamespace(repo=str(tmp_path), candidate=None)
+    with pytest.raises(SystemExit):
+        guest_lifecycle.run_topwalk(gate)
+    assert ('missing ' + str(tmp_path / 'build/memveil')) \
+        in capsys.readouterr().err
+    selected = load(env=sealed)
+    try:
+        gate = SimpleNamespace(
+            repo=str(tmp_path), candidate=selected)
+        with pytest.raises(SystemExit):
+            guest_lifecycle.run_topwalk(gate)
+        err = capsys.readouterr().err
+        assert 'gate-profile.json' in err
+        assert 'build/memveil' not in err
+    finally:
+        selected.close()
+
+
+def test_topwalk_replay_selects_packaged_binary(
+        sealed, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests/vm'))
+    import guest_lifecycle
+    from support import candidate_input
+    for key in list(os.environ):
+        if key in candidate_input.OVERRIDES \
+                or key.startswith('MEMVEIL_TEST_'):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in sealed.items():
+        monkeypatch.setenv(key, value)
+    previous, candidate_input._cached = \
+        candidate_input._cached, None
+    try:
+        memveil, selected = \
+            guest_lifecycle.topwalk_replay_binary('/repo')
+        assert selected is not None
+        assert memveil == str(selected.root / 'bin/memveil')
+        executed = subprocess.run(
+            [memveil], capture_output=True, text=True,
+            timeout=60)
+        assert executed.stdout == 'packaged-synthetic\n'
+    finally:
+        if candidate_input._cached is not None:
+            candidate_input._cached.close()
+        candidate_input._cached = previous
+    monkeypatch.delenv('MV_BUNDLE_TARBALL')
+    monkeypatch.delenv('MV_CANDIDATE_MANIFEST')
+    memveil, selected = \
+        guest_lifecycle.topwalk_replay_binary('/repo')
+    assert selected is None
+    assert memveil == '/repo/build/memveil'
+
+
+def test_topwalk_memveil_binding_refuses_mismatch(sealed):
+    sys.path.insert(0, str(ROOT / 'tests/vm'))
+    import guest_lifecycle
+    from support.candidate_input import load
+    selected = load(env=sealed)
+    try:
+        pinned = selected.manifest['files']['bin/memveil']
+        guest_lifecycle.assert_topwalk_memveil_binding(
+            {'memveil_sha': pinned}, selected)
+        guest_lifecycle.assert_topwalk_memveil_binding(
+            {'memveil_sha': '0' * 64}, None)
+        with pytest.raises(ValueError, match='memveil_sha'):
+            guest_lifecycle.assert_topwalk_memveil_binding(
+                {'memveil_sha': '0' * 64}, selected)
+        with pytest.raises(ValueError, match='memveil_sha'):
+            guest_lifecycle.assert_topwalk_memveil_binding(
+                {}, selected)
+    finally:
+        selected.close()

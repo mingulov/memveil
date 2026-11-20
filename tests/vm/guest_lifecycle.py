@@ -129,6 +129,53 @@ def guest_bpf_objects(repo, candidate=None):
                 repo, "build", "bpf", "swiotlb_copy.bpf.o")}
 
 
+def topwalk_product_paths(repo, candidate=None):
+    """(memveil, attempt object) for a topwalk leg.
+
+    Candidate mode resolves the verified packaged bytes
+    under the verified root; dev resolves the build tree.
+    """
+    if candidate is not None:
+        return (str(candidate.path("bin/memveil")),
+                str(candidate.path(
+                    "bpf/swiotlb_attempt.bpf.o")))
+    return (os.path.join(repo, "build", "memveil"),
+            os.path.join(
+                repo, "build", "bpf", "swiotlb_attempt.bpf.o"))
+
+
+def topwalk_replay_binary(repo):
+    """(replay binary, selection-or-None) for host top replay.
+
+    Candidate inputs select the verified packaged bytes via
+    load()/binary(); without them the dev tree binary runs.
+    """
+    sys.path.insert(0, os.path.join(repo, "tests"))
+    from support.candidate_input import binary, load
+    development = os.path.join(repo, "build", "memveil")
+    selected = load()
+    if selected is None:
+        return development, None
+    return binary(development), selected
+
+
+def assert_topwalk_memveil_binding(ledger, selected):
+    """Refuse unless walk.json names the verified binary.
+
+    A selected candidate pins bin/memveil bytes; the guest
+    records the executed binary's sha in walk.json, so a
+    mismatch proves the leg ran foreign bytes. Dev runs
+    (no selection) record without asserting.
+    """
+    if selected is None:
+        return
+    pinned = selected.manifest["files"]["bin/memveil"]
+    if ledger.get("memveil_sha") != pinned:
+        raise ValueError(
+            "walk.json memveil_sha differs from the verified "
+            "candidate binary")
+
+
 class Gate:
     """One subcommand run: paths, checks, consumer control."""
 
@@ -1112,9 +1159,8 @@ def run_topwalk(gate):
     comparison. An independent debugfs witness brackets the
     run; BPF inventory must settle back to baseline.
     """
-    memveil = os.path.join(gate.repo, "build", "memveil")
-    attempt_obj = os.path.join(
-        gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
+    memveil, attempt_obj = topwalk_product_paths(
+        gate.repo, gate.candidate)
     profile = os.path.join(
         gate.repo, "build", "vm", "gate-profile.json")
     for path in (memveil, attempt_obj, profile):
