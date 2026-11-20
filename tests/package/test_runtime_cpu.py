@@ -17,8 +17,18 @@ def engine(tmp_path, level):
     source = tmp_path / 'probe.c'
     source.write_text('int main(void) { return 0; }\n')
     output = tmp_path / 'probe'
-    flags = [] if level == 'baseline' else ['-Wl,-z,x86-64-' + level]
-    subprocess.run(['cc', '-march=x86-64', *flags, str(source), '-o', str(output)],
+    # Hermetic: compile only, then link the single object directly so no
+    # host startup objects, default libraries, or compiler-driver specs
+    # flags can leak ISA declarations into the property note. The binary
+    # is inspection-only and never executed, so entering at main without
+    # the C runtime is safe.
+    obj = tmp_path / 'probe.o'
+    subprocess.run(['cc', '-march=x86-64', '-O2', '-c', str(source), '-o', str(obj)],
+                   check=True, capture_output=True)
+    link = ['ld', '-m', 'elf_x86_64', '-e', 'main']
+    if level != 'baseline':
+        link.extend(['-z', 'x86-64-' + level])
+    subprocess.run([*link, str(obj), '-o', str(output)],
                    check=True, capture_output=True)
     return output
 
