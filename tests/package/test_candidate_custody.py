@@ -1242,15 +1242,42 @@ def test_release_modes_gate_each_stage():
     assert modes == ["seal", "import", "dry-run", "promote"]
     assert doc["jobs"]["seal"]["if"] == "inputs.mode == 'seal'"
     assert doc["jobs"]["sign"]["if"] == "inputs.mode == 'seal'"
-    qualify = doc["jobs"]["qualify"]["if"]
-    assert "inputs.mode == 'seal'" in qualify
-    assert "needs.sign.outputs.present == 'true'" in qualify
+    assert doc["jobs"]["qualify"]["if"] == \
+        "inputs.mode == 'seal'"
     assert doc["jobs"]["import"]["if"] == \
         "inputs.mode == 'import'"
     assert "promote_authorization" in doc["jobs"]["promote"][
         "if"]
     for job in ("import", "dry-run", "promote"):
         assert "needs" not in doc["jobs"][job], job
+
+
+def test_release_qualify_consumes_same_run_seal():
+    doc = _release_workflow()
+    qualify = doc["jobs"]["qualify"]
+    needs = qualify.get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    assert "seal" in needs and "sign" in needs
+    # The sealed bytes come from this run's own artifact,
+    # never from a second dispatch's rebuild.
+    collect = next(
+        step for step in qualify["steps"]
+        if "campaign evidence" in step.get("name", ""))
+    assert 'gh run download "$GITHUB_RUN_ID"' in collect["run"]
+    assert '-n "sealed-$CANDIDATE_SHA256"' in collect["run"]
+    # No second-dispatch machinery remains: no
+    # draft-presence output gates the job, and no step
+    # triggers another workflow run.
+    assert "outputs" not in doc["jobs"]["sign"]
+    whole = json.dumps(doc["jobs"])
+    assert "needs.sign.outputs.present" not in whole
+    assert "steps.draft.outputs" not in whole
+    for job, spec in sorted(doc["jobs"].items()):
+        for step in spec.get("steps", []):
+            run = str(step.get("run", ""))
+            assert "gh workflow run" not in run, job
+            assert "/dispatches" not in run, job
 
 
 def test_release_custody_stages_never_rebuild():

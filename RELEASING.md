@@ -11,8 +11,9 @@ a human can follow and audit it.
 
 Mode to jobs:
 
-- `seal` runs `seal`, `sign`, and `qualify` (`qualify` only
-  after the holding draft exists; re-dispatch `seal` then).
+- `seal` runs `seal`, `sign`, and `qualify` in one run (the
+  holding draft with the campaign evidence must exist before
+  dispatching).
 - `import` runs `import` only: it stages the holding draft
   byte-for-byte, stores the remote artifact, and attests.
 - `dry-run` runs `dry-run` only: it consumes the recorded
@@ -37,25 +38,29 @@ Mode to jobs:
 
 ## Seal and qualify
 
-3. Dispatch the workflow with `mode: seal`,
+3. Create the holding draft release tagged
+   `candidate-<candidate_sha256>` and upload the campaign
+   evidence archive (`qualification-evidence.tar.gz`) to it.
+   The seal dispatch below qualifies the sealed bytes
+   against exactly this evidence, so the draft must exist
+   before dispatching.
+4. Dispatch the workflow once with `mode: seal`,
    `candidate_sha256`, and `source_commit: C`. The seal job
    builds the bundle, `.deb`, and `.rpm` from C, emits the
    frozen SBOM, records provenance, seals `candidate.json`,
    signs the artifact checksums, and refuses unless the sealed
-   digest equals the dispatched one. The qualify job skips
-   until the holding draft below exists.
-4. Upload the six sealed artifacts plus the evidence archive to
-   a draft release tagged `candidate-<candidate_sha256>`
-   (seven assets, no more), then dispatch `mode: seal` again:
-   the qualify job re-derives every required signed gate over
-   the campaign evidence, then exports the tested payload
-   through the matrix lock binding and uploads it. Commit
-   Q, evidence-only over C, carrying
-   `packaging/qualifications/candidate.json`,
+   digest equals the dispatched one; then the qualify job, in
+   the same run, downloads this run's sealed bytes (never a
+   rebuild), re-derives every required signed gate over the
+   draft evidence, and exports the tested payload through the
+   matrix lock binding. Commit Q, evidence-only over C,
+   carrying `packaging/qualifications/candidate.json`,
    `packaging/qualifications/qualification.json`, and the
    exported `packaging/tested-payload.sha256`; see
    `packaging/qualifications/README.md` for the layout and the
-   evidence-only rule.
+   evidence-only rule. Then upload the six sealed artifacts
+   from the run's `sealed-<candidate_sha256>` artifact to the
+   holding draft, so it holds all seven assets before import.
 
 ## Walk the custody stages
 

@@ -71,11 +71,12 @@ newline).
 
 ## Dispatch order
 
-Seal and qualify first with `mode: seal` dispatches, then
-walk one custody stage per dispatch with the ref at Q:
-`import`, `dry-run`, `promote`. Dry-run refuses when the
-final tag already exists; after it is green, the owner
-creates `v<version>` on C and only then dispatches promote
-with the matching authorization. Promote requires the tag
-to resolve to C. Custody dispatches consume stored bytes
-only and never rebuild the candidate.
+One `mode: seal` dispatch runs seal, sign, and qualify
+(the holding draft with the campaign evidence must exist
+before dispatching); then walk one custody stage per
+dispatch with the ref at Q: `import`, `dry-run`, `promote`.
+Dry-run refuses when the final tag already exists; after it
+is green, the owner creates `v<version>` on C and only then
+dispatches promote with the matching authorization. Promote
+requires the tag to resolve to C. Custody dispatches consume
+stored bytes only and never rebuild the candidate.

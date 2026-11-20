@@ -2,8 +2,10 @@
 # Dispatch-only release pipeline: one mode per dispatch, each
 # dispatch runs only its own stage and never rebuilds another
 # stage's bytes. Mode to jobs:
-#   seal    -> seal, sign, qualify (qualify only after the
-#              holding draft exists; re-dispatch seal then)
+#   seal    -> seal, sign, qualify in one run (the holding
+#              draft with the campaign evidence must exist
+#              before dispatching; qualify consumes this
+#              run's sealed bytes, never a rebuild)
 #   import  -> import (consumes the sealed set via the draft
 #              assets, stores the remote artifact, attests)
 #   dry-run -> dry-run (consumes the recorded import only)
@@ -231,8 +233,6 @@ jobs:
     needs: seal
     if: inputs.mode == 'seal'
     runs-on: ubuntu-26.04
-    outputs:
-      present: ${{ steps.draft.outputs.present }}
     permissions:
       contents: read
       actions: write
@@ -316,23 +316,10 @@ jobs:
           path: sealed/
           if-no-files-found: error
           retention-days: 90
-      - name: Check for the holding draft
-        id: draft
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-        run: |
-          if gh api \
-            "repos/$GITHUB_REPOSITORY/releases/tags/candidate-$CANDIDATE_SHA256" \
-            >/dev/null 2>&1; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
 
   qualify:
     needs: [seal, sign]
-    if: inputs.mode == 'seal' && needs.sign.outputs.present == 'true'
+    if: inputs.mode == 'seal'
     runs-on: ubuntu-26.04
     permissions:
       contents: read
