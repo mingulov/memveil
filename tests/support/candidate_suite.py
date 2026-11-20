@@ -659,8 +659,10 @@ def _run_journey(suite, argv, live):
     link-free (links refuse outright, never followed),
     normalizing strictly inside the configured stages
     tree (itself link-free at every component): a digest
-    match alone never authorizes an outside path. The
-    tool-owned
+    match alone never authorizes an outside path.
+    Containment is verified before any executable byte
+    is opened or read, so an outside path refuses
+    without its bytes ever being touched. The tool-owned
     prep directory holding every record, stage, and
     publication scratch file is excluded wholesale from
     the digest through the exclusion list shared with
@@ -724,6 +726,12 @@ def _run_journey(suite, argv, live):
     refuse_symlinked_path(staged)
     stages_root = Path(journey_staging_root())
     refuse_symlinked_path(stages_root)
+    if stages_root not in Path(
+            os.path.abspath(entry['staged'])).parents:
+        raise ValueError(
+            'recorded journey staged executable is outside '
+            'the stages directory; re-run '
+            'tests/support/journey_prep.py: ' + suite)
     if not os.access(staged, os.X_OK):
         raise ValueError(
             'recorded journey staged executable is not '
@@ -734,12 +742,6 @@ def _run_journey(suite, argv, live):
             'recorded journey staged executable changed; '
             're-run tests/support/journey_prep.py: '
             + suite)
-    if stages_root not in Path(
-            os.path.abspath(entry['staged'])).parents:
-        raise ValueError(
-            'recorded journey staged executable is outside '
-            'the stages directory; re-run '
-            'tests/support/journey_prep.py: ' + suite)
     commit, tree = checkout_identity(
         exclude=journey_identity_excludes())
     if commit != record['commit'] or tree != record['tree']:

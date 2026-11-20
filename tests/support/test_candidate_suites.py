@@ -1518,7 +1518,11 @@ def test_journey_tampered_executable_post_prep_refuses(
                              'journey_gate_matrix')
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
-    assert 'changed' in combined, combined
+    # The tampered copy sits outside the stages tree, so
+    # containment refuses before any byte is read; the
+    # launch-time digest refusal stays pinned by the
+    # lying-record test.
+    assert 'outside the stages' in combined, combined
     assert hashlib.sha256(
         original.read_bytes()).hexdigest() \
         == original_digest
@@ -2177,6 +2181,58 @@ def test_journey_launcher_refuses_exe_outside_stages(
     combined = result.stdout + result.stderr
     assert result.returncode == 2, combined
     assert 'outside the stages' in combined, combined
+    assert 'journey-marker' not in result.stdout, combined
+
+
+def test_journey_launcher_refuses_outside_exe_without_reading(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root
+    from support.journey_prep import TARGETS
+    # Containment precedes any byte read: the outside
+    # executable is unreadable, yet the refusal is still
+    # the containment error rather than an IO error, so
+    # the launch never opens unauthorized bytes.
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    outside = tmp_path / 'outside-unreadable-exe'
+    outside.write_text(harness)
+    digest = hashlib.sha256(
+        outside.read_bytes()).hexdigest()
+    record_path = _prep_record_path('stub-outside-unread')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    assert Path(journey_staging_root()).resolve() \
+        not in outside.resolve().parents
+    record_path.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {'deb': {
+             'path': str(outside),
+             'staged': str(outside),
+             'sha256': digest,
+             'target': TARGETS['deb']}}}))
+    outside.chmod(0o000)
+    try:
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(record_path)
+        result = _launch_journey('deb', environment)
+    finally:
+        outside.chmod(0o755)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'outside the stages' in combined, combined
+    assert 'not executable' not in combined, combined
+    assert 'unreadable' not in combined, combined
+    assert 'Traceback' not in combined, combined
     assert 'journey-marker' not in result.stdout, combined
 
 
