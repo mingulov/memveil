@@ -334,6 +334,177 @@ def test_perf_workload_docs_deferred():
         'deferred suite'
 
 
+def _shadow_cargo_bin(tmp_path):
+    """PATH dir whose cargo stub fails loudly, leaving a sentinel."""
+    bindir = tmp_path / 'shadowbin'
+    bindir.mkdir()
+    sentinel = tmp_path / 'cargo-invoked'
+    stub = bindir / 'cargo'
+    stub.write_text(
+        '#!/bin/sh\necho CARGO-SHADOWED-STUB >&2\n'
+        'touch "%s"\nexit 99\n' % sentinel)
+    stub.chmod(0o755)
+    return str(bindir), str(sentinel)
+
+
+def test_journey_prep_records_executables(tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import JOURNEY_SUITES
+    record = tmp_path / 'prep.json'
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/journey_prep.py'),
+         str(record)],
+        capture_output=True, text=True, timeout=900,
+        cwd=str(ROOT))
+    assert result.returncode == 0, result.stderr[-2000:]
+    doc = json.loads(record.read_text())
+    assert doc['schema'] == 'memveil-journey-prep/1'
+    assert set(doc['suites']) == set(JOURNEY_SUITES)
+    for suite, entry in doc['suites'].items():
+        assert set(entry) == {'path', 'sha256'}, suite
+        exe = Path(entry['path'])
+        assert exe.is_absolute(), suite
+        assert exe.is_file() and not exe.is_symlink(), suite
+        assert os.access(exe, os.X_OK), suite
+        assert hashlib.sha256(exe.read_bytes()).hexdigest() \
+            == entry['sha256'], suite
+
+
+def test_journey_dispatch_never_invokes_cargo():
+    text = (ROOT / 'tests/support/candidate_suite.py') \
+        .read_text()
+    assert 'JOURNEY_SUITES' in text
+    assert '_run_journey' in text
+    assert '"cargo"' not in text, \
+        'qualification dispatch must not name cargo'
+    assert "'cargo'" not in text, \
+        'qualification dispatch must not name cargo'
+
+
+def test_journey_launcher_runs_recorded_binary(sealed,
+                                               tmp_path):
+    import hashlib
+    import json
+    stub = tmp_path / 'fake-journey'
+    stub.write_text('#!/bin/sh\necho journey-marker\n')
+    stub.chmod(0o755)
+    digest = hashlib.sha256(stub.read_bytes()).hexdigest()
+    record_path = tmp_path / 'prep.json'
+    record_path.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'suites': {'deb': {'path': str(stub),
+                            'sha256': digest}}}))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+
+    def launched(suite):
+        return subprocess.run(
+            [sys.executable,
+             str(ROOT / 'tests/support/candidate_suite.py'),
+             suite],
+            env=environment, capture_output=True,
+            text=True, timeout=120)
+
+    result = launched('deb')
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
+    with stub.open('ab') as stream:
+        stream.write(b'# tampered\n')
+    result = launched('deb')
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'changed' in combined, combined
+    result = launched('rpm-journey')
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'lacks suite' in combined, combined
+    bare = {key: value for key, value in environment.items()
+            if key != 'MV_JOURNEY_PREP'}
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         'deb'],
+        env=bare, capture_output=True, text=True,
+        timeout=120)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'journey_prep.py' in combined, combined
+
+
+def test_journey_shadowed_cargo_stays_green(sealed, tmp_path):
+    record = tmp_path / 'prep.json'
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/journey_prep.py'),
+         str(record)],
+        capture_output=True, text=True, timeout=900,
+        cwd=str(ROOT))
+    assert result.returncode == 0, result.stderr[-2000:]
+    bindir, sentinel = _shadow_cargo_bin(tmp_path)
+    env = {'PATH': bindir + ':/usr/bin:/bin',
+           'MV_JOURNEY_PREP': str(record)}
+    env.update(sealed)
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/candidate_suite.py'),
+         'deb', 'journey_gate_matrix'],
+        env=env, capture_output=True, text=True,
+        timeout=300)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
+    assert 'CARGO-SHADOWED-STUB' not in combined, combined
+    assert not Path(sentinel).exists(), \
+        'qualification invoked cargo'
+
+
+def test_journey_shadowed_rehomed_legs_green(tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests/package'))
+    from sealed_fixture import (candidate_env,
+                                seal_candidate)
+    import test_release_runtime as legs
+    sealed = seal_candidate(tmp_path, 'shadowed', shaped=True)
+    record = tmp_path / 'prep.json'
+    result = subprocess.run(
+        [sys.executable,
+         str(ROOT / 'tests/support/journey_prep.py'),
+         str(record)],
+        capture_output=True, text=True, timeout=900,
+        cwd=str(ROOT))
+    assert result.returncode == 0, result.stderr[-2000:]
+    bindir, sentinel = _shadow_cargo_bin(tmp_path)
+    env = {'PATH': bindir + ':/usr/bin:/bin',
+           'MV_JOURNEY_PREP': str(record)}
+    env.update(candidate_env(sealed))
+    targets = {'package_deb': 'deb',
+               'package_rpm': 'rpm-journey'}
+    assert set(target for target, _ in legs.CANDIDATE_SUITES) \
+        == set(targets)
+    for target, names in legs.CANDIDATE_SUITES:
+        suite = targets[target]
+        for name in names:
+            result = subprocess.run(
+                [sys.executable,
+                 str(ROOT
+                     / 'tests/support/candidate_suite.py'),
+                 suite, name],
+                env=env, capture_output=True, text=True,
+                timeout=300)
+            combined = result.stdout + result.stderr
+            assert result.returncode == 0, \
+                '%s %s: %s' % (
+                    suite, name, combined[-2000:])
+            assert '1 passed' in combined, \
+                '%s ran no %s' % (suite, name)
+    assert not Path(sentinel).exists(), \
+        'qualification invoked cargo'
+
+
 def test_inventory_excludes_only_named_evidence_files(tmp_path):
     sys.path.insert(0, str(ROOT / 'tools'))
     import source_inventory

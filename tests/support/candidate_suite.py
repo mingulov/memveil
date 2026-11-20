@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Dispatch exact-candidate suites without product build fallbacks."""
+"""Dispatch exact-candidate suites without product build fallbacks.
+
+Journey suites launch prebuilt executables recorded by
+tests/support/journey_prep.py (MV_JOURNEY_PREP names the
+record); the qualification path itself never invokes a
+build.
+"""
 import atexit
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -24,6 +32,14 @@ SUITE_ARMING = {
     'vm-kernels': 'MEMVEIL_VM_KERNELS',
     'vm-scenarios': 'MEMVEIL_VM_SCENARIOS',
 }
+
+# Journey suites launch prebuilt executables, never cargo:
+# tests/support/journey_prep.py builds them once and
+# records their paths, MV_JOURNEY_PREP names the record,
+# and the launcher below re-hashes before exec.
+JOURNEY_SUITES = ('deb', 'rpm-journey')
+
+JOURNEY_PREP_SCHEMA = 'memveil-journey-prep/1'
 
 
 def _checked(suite, code, live):
@@ -51,6 +67,66 @@ def _checked(suite, code, live):
     return 1
 
 
+def _journey_record(live):
+    """Validated prep record for the journey launcher.
+
+    Refuses a missing, unreadable, or misshapen record
+    instead of falling back to a build.
+    """
+    name = live.get('MV_JOURNEY_PREP', '')
+    if not name:
+        raise ValueError(
+            'qualification needs prebuilt journey '
+            'executables: run tests/support/journey_prep.py '
+            'first (MV_JOURNEY_PREP unset)')
+    try:
+        with open(name, encoding='utf-8') as stream:
+            record = json.load(stream)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            'journey prep record unreadable: %s' % exc)
+    if not isinstance(record, dict) \
+            or record.get('schema') != JOURNEY_PREP_SCHEMA \
+            or not isinstance(record.get('suites'), dict):
+        raise ValueError('journey prep record shape differs')
+    return record['suites']
+
+
+def _run_journey(suite, argv, live):
+    """Launch one recorded journey executable directly.
+
+    The recorded bytes are re-hashed before exec; a stale
+    record, a missing or aliased executable, or digest
+    drift refuses. No build invocation on this path.
+    """
+    entry = _journey_record(live).get(suite)
+    if not isinstance(entry, dict) \
+            or set(entry) != {'path', 'sha256'}:
+        raise ValueError(
+            'journey prep record lacks suite: ' + suite)
+    path = Path(entry['path'])
+    if not path.is_absolute() or path.is_symlink() \
+            or not path.is_file():
+        raise ValueError(
+            'recorded journey executable is not a plain '
+            'file: ' + entry['path'])
+    if not os.access(path, os.X_OK):
+        raise ValueError(
+            'recorded journey executable is not '
+            'executable: ' + entry['path'])
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != entry['sha256']:
+        raise ValueError(
+            'recorded journey executable changed; re-run '
+            'tests/support/journey_prep.py: ' + suite)
+    env = dict(live)
+    env['MV_VALID_EMPTY'] = str(
+        ROOT / 'tests/package/valid-empty')
+    env.pop('RUSTUP_TOOLCHAIN', None)
+    return subprocess.run(
+        [str(path), *argv], cwd=ROOT, env=env).returncode
+
+
 def _run(suite, argv, live, selected):
     entry = lookup(suite)
     if entry is not None:
@@ -63,6 +139,9 @@ def _run(suite, argv, live, selected):
         raise ValueError('qualification fuzz campaign requires '
                          'at least 10000 seeds')
     print('qualification input: ' + selected.digest, flush=True)
+    if suite in JOURNEY_SUITES:
+        return _checked(
+            suite, _run_journey(suite, argv, live), live)
     commands = {
         'perf-replay': ['tests/perf/replay.py'],
         'perf-region': ['tests/perf/region_replay.py'],
@@ -80,10 +159,6 @@ def _run(suite, argv, live, selected):
         'package': ['-m', 'pytest',
                     'tests/package/test_release_runtime.py',
                     'tests/package/test_clean_runtime.py', '-q'],
-        'deb': ['cargo', 'test', '--locked', '--test',
-                'package_deb'],
-        'rpm-journey': ['cargo', 'test', '--locked', '--test',
-                        'package_rpm'],
     }
     if suite in ('vm-kernels', 'vm-scenarios'):
         scenarios = suite == 'vm-scenarios'
@@ -119,14 +194,10 @@ def _run(suite, argv, live, selected):
     if suite not in commands:
         raise ValueError('suite has no candidate qualification '
                          'adapter: ' + suite)
-    command = commands[suite] + list(argv)
+    command = [sys.executable, *(commands[suite] + list(argv))]
     env = dict(live)
     env['MV_VALID_EMPTY'] = str(
         ROOT / 'tests/package/valid-empty')
-    if command[0] == 'cargo':
-        env.pop('RUSTUP_TOOLCHAIN', None)
-    else:
-        command = [sys.executable, *command]
     return _checked(suite, subprocess.run(
         command, cwd=ROOT, env=env).returncode, live)
 

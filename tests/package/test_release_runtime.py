@@ -686,11 +686,14 @@ def test_sealed_inputs_used(tmp_path, audited_target_dir):
             ran["sealed_inputs_used"], \
             "%s never consumed %s" % (
                 suite, markers[suite])
-    # The cargo-driven shape dispatch uses must work too:
-    # cargo injects LD_LIBRARY_PATH into the test binary,
-    # which the entry check recognizes (cargo-only passes)
-    # while every candidate spawn still runs scrubbed. This
-    # leg fails if recognition or the scrub regresses.
+    # The cargo-driven development shape must work too:
+    # dispatch itself launches prebuilt executables directly
+    # (see the launcher tests in tests/support), but a manual
+    # cargo run with candidate inputs still injects
+    # LD_LIBRARY_PATH into the test binary, which the entry
+    # check recognizes (cargo-only passes) while every
+    # candidate spawn still runs scrubbed. This leg fails if
+    # recognition or the scrub regresses.
     for suite, tests in CANDIDATE_SUITES:
         ran = _run_cargo_suite(sealed, suite, target_dir,
                                tests)
