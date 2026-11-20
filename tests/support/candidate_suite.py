@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
@@ -158,49 +159,120 @@ def checkout_identity(exclude=()):
     return head, material.hexdigest()
 
 
-def journey_staging_root(record_path):
-    """Staging root beside the prep record.
+# Tool-owned output directory (relative to the checkout
+# root) holding every fixture-prep record, stage, and
+# publication scratch file. Prep writes only here,
+# launch reads only here, and checkout identity excludes
+# the directory wholesale, so any number of records
+# coexist without invalidating each other, and scratch
+# never reads as source.
+JOURNEY_PREP_DIRNAME = '.candidate-prep'
 
-    Every prep stage for this record lives under this one
-    directory, so excluding it keeps all present and
-    future stages out of checkout identity. The prep tool
-    creates its fresh stage inside it; prep and launch
-    derive the same path from the record path through
+
+def journey_prep_dir():
+    """Absolute path of the tool-owned prep directory.
+
+    The single location for fixture-prep outputs; both
+    the prep tool and the launcher derive it through
     this one function, never by recomputing the name.
     """
-    resolved = Path(record_path).resolve()
-    return str(resolved.parent / (resolved.stem + '.stages'))
+    return str(ROOT / JOURNEY_PREP_DIRNAME)
 
 
-def journey_identity_excludes(record_path, staged_paths):
+def journey_staging_root():
+    """Staging root inside the tool-owned prep directory.
+
+    Every prep stage for every record lives under this
+    one directory, so excluding the prep directory keeps
+    all present and future stages out of checkout
+    identity. The prep tool creates its fresh stage
+    inside it; prep and launch derive the same path
+    through this one function, never by recomputing the
+    name.
+    """
+    return str(ROOT / JOURNEY_PREP_DIRNAME / 'stages')
+
+
+def refuse_symlinked_path(path):
+    """Refuse when any existing component of path is a symlink.
+
+    Walks the unresolved absolute path from the leaf to
+    the root with lstat, never following: a planted link
+    anywhere along the path would redirect tool outputs
+    outside the operator's directory. Missing components
+    are skipped: the setup creates them as real
+    directories and re-checks afterwards. Shared with
+    the prep tool, which imports it from here.
+    """
+    for candidate in (path, *path.parents):
+        try:
+            mode = os.lstat(candidate).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(
+                'path unavailable: %s' % exc)
+        if stat.S_ISLNK(mode):
+            raise ValueError(
+                'refuses symlink: %s' % candidate)
+
+
+def resolve_journey_record(name):
+    """Validate a prep record path; return its absolute form.
+
+    The record must live under the tool-owned prep
+    directory, so records, stages, and publication
+    scratch share the one excluded location. Refuses an
+    empty name, a symlinked parent component, and any
+    destination outside the directory. Both the prep
+    tool and the launcher validate through this one
+    function.
+    """
+    if not name:
+        raise ValueError(
+            'journey prep record must live under %s'
+            % JOURNEY_PREP_DIRNAME)
+    raw = Path(os.path.abspath(name))
+    refuse_symlinked_path(raw.parent)
+    resolved = raw.resolve()
+    if Path(journey_prep_dir()) not in resolved.parents:
+        raise ValueError(
+            'journey prep record must live under %s: %s'
+            % (JOURNEY_PREP_DIRNAME, name))
+    return str(resolved)
+
+
+def journey_identity_excludes():
     """Checkout-identity exclusion set shared by prep and launch.
 
-    The prep record, the staging root holding every
-    present and future stage, and the listed staged
-    executables are derived outputs, never source: the
-    prep tool (before and after its builds) and the
-    journey launcher exclude the same absolute paths from
-    the checkout digest, so a freshly prepared record
-    verifies instead of self-invalidating, a repeat prep
-    sees no earlier stage, and deleting a retired stage
-    keeps the current record valid. Both sides call this
-    one function; no duplicated lists to drift.
+    The tool-owned prep directory holds every record,
+    stage, and publication scratch file, so excluding it
+    wholesale keeps all present and future prep outputs
+    out of the checkout digest: a freshly prepared
+    record verifies instead of self-invalidating, a
+    repeat prep sees no earlier output, and deleting a
+    retired stage keeps the current record valid. Both
+    sides call this one function; no duplicated lists
+    to drift. Refuses when the directory holds tracked
+    files: the exclusion must never mask versioned
+    source, even force-added.
     """
-    excludes = [str(Path(record_path).resolve()),
-                journey_staging_root(record_path)]
-    excludes.extend(str(Path(path).resolve())
-                   for path in staged_paths)
-    return excludes
+    tracked = [entry for entry in _git_lines(
+        'ls-files', '-z', '--', JOURNEY_PREP_DIRNAME)
+        if entry]
+    if tracked:
+        raise ValueError(
+            'journey prep directory holds tracked files; '
+            'refusing: %s' % tracked[0])
+    return [journey_prep_dir()]
 
 
 def _journey_record(live):
     """Validated prep record for the journey launcher.
 
-    Refuses a missing, unreadable, or misshapen record
-    instead of falling back to a build. Returns the
-    (record, record path) pair: the launcher needs the
-    path to exclude the record itself from checkout
-    identity.
+    Refuses a missing, misplaced, unreadable, or
+    misshapen record instead of falling back to a build.
+    Returns the record.
     """
     name = live.get('MV_JOURNEY_PREP', '')
     if not name:
@@ -208,8 +280,9 @@ def _journey_record(live):
             'qualification needs prebuilt journey '
             'executables: run tests/support/journey_prep.py '
             'first (MV_JOURNEY_PREP unset)')
+    resolved = resolve_journey_record(name)
     try:
-        with open(name, encoding='utf-8') as stream:
+        with open(resolved, encoding='utf-8') as stream:
             record = json.load(stream)
     except (OSError, ValueError) as exc:
         raise ValueError(
@@ -230,7 +303,7 @@ def _journey_record(live):
         raise ValueError('journey prep record shape differs')
     if set(record) != {'schema', 'commit', 'tree', 'suites'}:
         raise ValueError('journey prep record shape differs')
-    return record, name
+    return record
 
 
 def _require_harness_evidence(suite, stdout):
@@ -272,13 +345,12 @@ def _run_journey(suite, argv, live):
     suite's), and the staged executable bytes (re-hashed
     before exec); a stale record, a rebuilt-from-dirty
     checkout, a suite mixup, a missing or aliased staged
-    executable, or digest drift refuses. The record, the
-    staging root holding every present and future stage,
-    and every staged executable the record names are
-    derived outputs excluded from the digest through the
-    exclusion list shared with the prep tool, so both
-    sides hash the identical source set. The staged copy
-    is the only
+    executable, or digest drift refuses. The tool-owned
+    prep directory holding every record, stage, and
+    publication scratch file is excluded wholesale from
+    the digest through the exclusion list shared with
+    the prep tool, so both sides hash the identical
+    source set. The staged copy is the only
     executed path: the original build output is
     provenance only and is never resolved here. The run's
     own output must carry executed-test evidence
@@ -288,8 +360,9 @@ def _run_journey(suite, argv, live):
     Chain of custody: the prep tool builds each suite
     executable, stages the verified bytes into its owned
     directory, hashes the staged copy, binds the checkout
-    state it built from, and writes the one record file
-    this launcher reads back. A hand-written record never
+    state it built from, and writes one record file under
+    the owned directory; this launcher reads it back. A
+    hand-written record never
     passes through the prep tool, so it can only name
     bytes the writer already holds; any substitution
     (another binary, a rebuilt checkout, a bare-success
@@ -302,7 +375,7 @@ def _run_journey(suite, argv, live):
     bytes).
     """
     from support.journey_prep import TARGETS
-    record, name = _journey_record(live)
+    record = _journey_record(live)
     entry = record['suites'].get(suite)
     if not isinstance(entry, dict) \
             or set(entry) \
@@ -333,14 +406,8 @@ def _run_journey(suite, argv, live):
             'recorded journey staged executable changed; '
             're-run tests/support/journey_prep.py: '
             + suite)
-    staged_paths = [
-        other['staged'] for other in record['suites'].values()
-        if isinstance(other, dict)
-        and isinstance(other.get('staged'), str)
-        and Path(other['staged']).is_absolute()]
-    commit, tree = checkout_identity(exclude=
-                                     journey_identity_excludes(
-                                         name, staged_paths))
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
     if commit != record['commit'] or tree != record['tree']:
         raise ValueError(
             'checkout changed since fixture prep; re-run '

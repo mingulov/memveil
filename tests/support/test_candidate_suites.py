@@ -21,6 +21,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+import uuid
 from test_candidate_input import sealed, api
 import pytest
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,6 +42,43 @@ def candidate_clean_env():
     return {key: value for key, value in os.environ.items()
             if key not in api().OVERRIDES
             and not key.startswith('MEMVEIL_TEST_')}
+
+
+def _prep_record_path(tag):
+    """Unique record path inside the tool-owned prep dir."""
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    return Path(journey_prep_dir()) / (
+        '%s-%d-%s.json'
+        % (tag, os.getpid(), uuid.uuid4().hex[:8]))
+
+
+@pytest.fixture(autouse=True)
+def _clean_journey_prep_dir():
+    """Remove prep-dir entries the test added; keep the rest.
+
+    Journey tests share the checkout's tool-owned prep
+    directory; only entries created during the test are
+    removed afterwards, so operator outputs survive.
+    """
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    top = Path(journey_prep_dir())
+    before = {entry.name for entry in top.iterdir()} \
+        if top.is_dir() and not top.is_symlink() else None
+    yield
+    if before is None:
+        if top.is_symlink() or top.is_file():
+            top.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(top, ignore_errors=True)
+    elif top.is_dir() and not top.is_symlink():
+        for entry in top.iterdir():
+            if entry.name not in before:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize('suite', PARTIAL_SUITES)
@@ -352,9 +390,10 @@ def test_journey_prep_records_executables(tmp_path):
     import json
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import JOURNEY_SUITES, \
-        checkout_identity
+        checkout_identity, journey_identity_excludes, \
+        journey_prep_dir
     from support.journey_prep import TARGETS
-    record = tmp_path / 'prep.json'
+    record = _prep_record_path('prep')
     result = subprocess.run(
         [sys.executable,
          str(ROOT / 'tests/support/journey_prep.py'),
@@ -367,9 +406,13 @@ def test_journey_prep_records_executables(tmp_path):
     assert set(doc) == {'schema', 'commit', 'tree', 'suites'}
     assert set(doc['suites']) == set(JOURNEY_SUITES)
     commit, tree = checkout_identity(
-        exclude=[str(record.resolve())])
+        exclude=journey_identity_excludes())
     assert doc['commit'] == commit
     assert doc['tree'] == tree
+    top = Path(journey_prep_dir())
+    assert top in record.resolve().parents
+    for entry in doc['suites'].values():
+        assert top in Path(entry['staged']).resolve().parents
     for suite, entry in doc['suites'].items():
         assert set(entry) == {
             'path', 'staged', 'sha256', 'target'}, suite
@@ -405,7 +448,8 @@ def _journey_stub_record(tmp_path, script, suite='deb'):
     import json
     import shutil
     sys.path.insert(0, str(ROOT / 'tests'))
-    from support.candidate_suite import checkout_identity
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes
     from support.journey_prep import TARGETS
     stub = tmp_path / ('stub-' + suite)
     stub.write_text(script)
@@ -413,9 +457,10 @@ def _journey_stub_record(tmp_path, script, suite='deb'):
     staged = tmp_path / ('staged-' + suite)
     shutil.copyfile(stub, staged)
     staged.chmod(0o755)
-    record_path = tmp_path / ('prep-' + suite + '.json')
+    record_path = _prep_record_path('stub-' + suite)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
     commit, tree = checkout_identity(
-        exclude=[str(record_path.resolve())])
+        exclude=journey_identity_excludes())
     record_path.write_text(json.dumps(
         {'schema': 'memveil-journey-prep/1',
          'commit': commit, 'tree': tree,
@@ -520,7 +565,7 @@ def test_journey_honest_prep_and_launch_accepts(sealed,
     # suite, and bytes verify, and the real run carries
     # executed-test evidence. A unit filter keeps the leg
     # fast and sudo-free.
-    record = tmp_path / 'prep.json'
+    record = _prep_record_path('prep')
     result = subprocess.run(
         [sys.executable,
          str(ROOT / 'tests/support/journey_prep.py'),
@@ -539,41 +584,43 @@ def test_journey_honest_prep_and_launch_accepts(sealed,
     assert '0 failed' in combined, combined
 
 
-def test_journey_identity_excludes_stage_not_sources():
+def test_journey_identity_excludes_prep_dir_wholesale():
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import checkout_identity, \
-        journey_identity_excludes
-    probe = ROOT / ('journey-exclusion-probe-%d' % os.getpid())
-    probe.mkdir()
+        journey_identity_excludes, journey_prep_dir
+    top = Path(journey_prep_dir())
+    top.mkdir(parents=True, exist_ok=True)
+    tag = 'wholesale-%d' % os.getpid()
+    record = top / (tag + '.json')
+    record.write_text('{}\n')
+    staged = top / 'stages' / 'stage' / 'staged-exe'
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(b'staged-bytes\n')
+    scratch = top / (tag + '.json.stale.tmp')
+    scratch.write_bytes(b'{"partial": ')
+    source = ROOT / (tag + '-source.py')
+    source.write_text('print("source")\n')
     try:
-        record = probe / 'prep.json'
-        record.write_text('{}\n')
-        staged = probe / 'staged-exe'
-        staged.write_bytes(b'staged-bytes\n')
-        source = probe / 'source.py'
-        source.write_text('print("source")\n')
-        excludes = journey_identity_excludes(
-            str(record), [str(staged)])
-        root = probe / 'prep.stages'
-        assert excludes == [str(record.resolve()),
-                            str(root.resolve()),
-                            str(staged.resolve())]
+        excludes = journey_identity_excludes()
+        assert excludes == [str(top)]
         _, first = checkout_identity(exclude=excludes)
         with staged.open('ab') as stream:
             stream.write(b'more-staged-bytes\n')
         with record.open('ab') as stream:
             stream.write(b'more-record-bytes\n')
+        with scratch.open('ab') as stream:
+            stream.write(b'more-scratch\n')
         assert checkout_identity(
             exclude=excludes)[1] == first
-        # A later stage under the root (absent when the
+        # A later file under the dir (absent when the
         # list was built) stays excluded; removing the
-        # whole root is invisible too.
-        future = root / 'future-stage' / 'staged-exe'
+        # whole dir is invisible too.
+        future = top / 'stages' / 'future-stage' / 'exe'
         future.parent.mkdir(parents=True)
         future.write_bytes(b'future-staged-bytes\n')
         assert checkout_identity(
             exclude=excludes)[1] == first
-        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(top, ignore_errors=True)
         assert checkout_identity(
             exclude=excludes)[1] == first
         with source.open('ab') as stream:
@@ -581,7 +628,7 @@ def test_journey_identity_excludes_stage_not_sources():
         assert checkout_identity(
             exclude=excludes)[1] != first
     finally:
-        shutil.rmtree(probe, ignore_errors=True)
+        source.unlink(missing_ok=True)
     prep_text = (ROOT / 'tests/support/journey_prep.py') \
         .read_text()
     dispatch_text = (
@@ -590,18 +637,26 @@ def test_journey_identity_excludes_stage_not_sources():
         'def journey_identity_excludes') \
         + dispatch_text.count(
             'def journey_identity_excludes') == 1
+    assert prep_text.count(
+        'def journey_prep_dir') \
+        + dispatch_text.count(
+            'def journey_prep_dir') == 1
     assert 'journey_identity_excludes(' in prep_text
     assert dispatch_text.count(
         'journey_identity_excludes(') >= 2
-    assert 'journey_staging_root' in prep_text
+    assert 'journey_staging_root(' in prep_text
+    assert 'journey_prep_dir(' in prep_text
+    assert '.candidate-prep' not in prep_text
+    assert "'stages'" not in prep_text
     assert '.stages' not in prep_text
 
 
 def test_journey_in_checkout_prep_and_launch_accepts(
         sealed, tmp_path, monkeypatch):
     # The record and its stage live inside the checkout, so
-    # the digest would see them: identical exclusion sets on
-    # both sides accept instead of self-invalidating.
+    # the digest would see them: the wholesale prep-dir
+    # exclusion on both sides accepts instead of
+    # self-invalidating.
     harness = ('#!/bin/sh\necho journey-marker\n'
                'echo "running 1 tests"\n'
                'echo "test journey_probe ... ok"\n'
@@ -614,21 +669,125 @@ def test_journey_in_checkout_prep_and_launch_accepts(
     import support.journey_prep as prep
     monkeypatch.setattr(
         prep, 'build_executable', lambda target: fake)
-    probe = ROOT / ('journey-roundtrip-probe-%d' % os.getpid())
-    probe.mkdir()
-    try:
-        prep.prepare(str(probe / 'prep.json'))
-        environment = candidate_clean_env()
-        environment.update(sealed)
-        environment['MV_JOURNEY_PREP'] = str(
-            probe / 'prep.json')
+    record = _prep_record_path('prep')
+    prep.prepare(str(record))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
+    assert '1 passed' in combined, combined
+
+
+def test_journey_records_coexist_in_prep_dir(
+        sealed, tmp_path, monkeypatch):
+    # Two records share the tool-owned directory: prep A,
+    # prep B, launch both accept, and both bind the
+    # identical checkout identity (neither record, stage,
+    # nor scratch invalidates the other).
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    fake = tmp_path / 'fake-exe'
+    fake.write_text(harness)
+    fake.chmod(0o755)
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    record_a = _prep_record_path('prep-a')
+    record_b = _prep_record_path('prep-b')
+    first = prep.prepare(str(record_a))
+    second = prep.prepare(str(record_b))
+    assert first['commit'] == second['commit']
+    assert first['tree'] == second['tree']
+    assert Path(first['suites']['deb']['staged']).parent \
+        != Path(second['suites']['deb']['staged']).parent
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    for record in (record_a, record_b):
+        environment['MV_JOURNEY_PREP'] = str(record)
         result = _launch_journey('deb', environment)
         combined = result.stdout + result.stderr
         assert result.returncode == 0, combined
         assert 'journey-marker' in result.stdout, combined
         assert '1 passed' in combined, combined
+
+
+def test_journey_prep_dir_ignored_narrowly_by_git():
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import JOURNEY_PREP_DIRNAME
+    lines = (ROOT / '.gitignore').read_text().splitlines()
+    assert [line for line in lines
+            if 'candidate-prep' in line] \
+        == ['/' + JOURNEY_PREP_DIRNAME + '/']
+    inside = subprocess.run(
+        ['git', '-C', str(ROOT), 'check-ignore', '-q',
+         JOURNEY_PREP_DIRNAME + '/probe.json'])
+    assert inside.returncode == 0
+    outside = subprocess.run(
+        ['git', '-C', str(ROOT), 'check-ignore', '-q',
+         JOURNEY_PREP_DIRNAME + '-evil/probe.json'])
+    assert outside.returncode == 1
+
+
+def test_journey_prep_dir_refuses_tracked_content(tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import \
+        journey_identity_excludes, journey_prep_dir
+    import support.journey_prep as prep
+    top = Path(journey_prep_dir())
+    top.mkdir(parents=True, exist_ok=True)
+    plant = top / ('tracked-%d.txt' % os.getpid())
+    plant.write_text('force-added\n')
+    added = subprocess.run(
+        ['git', '-C', str(ROOT), 'add', '-f', str(plant)],
+        capture_output=True, text=True)
+    assert added.returncode == 0, added.stderr
+    try:
+        with pytest.raises(ValueError, match='tracked'):
+            journey_identity_excludes()
+        with pytest.raises(ValueError, match='tracked'):
+            prep.prepare(str(top / 'prep.json'))
     finally:
-        shutil.rmtree(probe, ignore_errors=True)
+        subprocess.run(
+            ['git', '-C', str(ROOT), 'reset', '-q', '--',
+             str(plant)],
+            capture_output=True, text=True)
+        plant.unlink(missing_ok=True)
+
+
+def test_journey_record_outside_prep_dir_refuses(
+        sealed, tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    outside = tmp_path / 'prep.json'
+    with pytest.raises(ValueError, match='must live under'):
+        prep.prepare(str(outside))
+    assert not outside.exists()
+    stray = ROOT / ('journey-stray-probe-%d.json'
+                    % os.getpid())
+    try:
+        with pytest.raises(ValueError, match='must live under'):
+            prep.prepare(str(stray))
+        assert not stray.exists()
+        environment = candidate_clean_env()
+        environment.update(sealed)
+        environment['MV_JOURNEY_PREP'] = str(outside)
+        result = _launch_journey('deb', environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 2, combined
+        assert 'must live under' in combined, combined
+    finally:
+        stray.unlink(missing_ok=True)
 
 
 def test_journey_retired_stage_cleanup_keeps_record_valid(
@@ -648,25 +807,20 @@ def test_journey_retired_stage_cleanup_keeps_record_valid(
     import support.journey_prep as prep
     monkeypatch.setattr(
         prep, 'build_executable', lambda target: fake)
-    probe = ROOT / ('journey-cleanup-probe-%d' % os.getpid())
-    probe.mkdir()
-    try:
-        first = prep.prepare(str(probe / 'prep.json'))
-        stage_one = Path(
-            first['suites']['deb']['staged']).parent
-        prep.prepare(str(probe / 'prep.json'))
-        shutil.rmtree(stage_one)
-        environment = candidate_clean_env()
-        environment.update(sealed)
-        environment['MV_JOURNEY_PREP'] = str(
-            probe / 'prep.json')
-        result = _launch_journey('deb', environment)
-        combined = result.stdout + result.stderr
-        assert result.returncode == 0, combined
-        assert 'journey-marker' in result.stdout, combined
-        assert '1 passed' in combined, combined
-    finally:
-        shutil.rmtree(probe, ignore_errors=True)
+    record = _prep_record_path('prep')
+    first = prep.prepare(str(record))
+    stage_one = Path(
+        first['suites']['deb']['staged']).parent
+    prep.prepare(str(record))
+    shutil.rmtree(stage_one)
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker' in result.stdout, combined
+    assert '1 passed' in combined, combined
 
 
 def test_journey_repeat_prep_keeps_identity_pure(
@@ -686,27 +840,22 @@ def test_journey_repeat_prep_keeps_identity_pure(
     import support.journey_prep as prep
     monkeypatch.setattr(
         prep, 'build_executable', lambda target: fake)
-    probe = ROOT / ('journey-purity-probe-%d' % os.getpid())
-    probe.mkdir()
-    try:
-        first = prep.prepare(str(probe / 'prep.json'))
-        environment = candidate_clean_env()
-        environment.update(sealed)
-        environment['MV_JOURNEY_PREP'] = str(
-            probe / 'prep.json')
-        result = _launch_journey('deb', environment)
-        combined = result.stdout + result.stderr
-        assert result.returncode == 0, combined
-        assert '1 passed' in combined, combined
-        second = prep.prepare(str(probe / 'prep.json'))
-        assert second['commit'] == first['commit']
-        assert second['tree'] == first['tree']
-        result = _launch_journey('deb', environment)
-        combined = result.stdout + result.stderr
-        assert result.returncode == 0, combined
-        assert '1 passed' in combined, combined
-    finally:
-        shutil.rmtree(probe, ignore_errors=True)
+    record = _prep_record_path('prep')
+    first = prep.prepare(str(record))
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
+    second = prep.prepare(str(record))
+    assert second['commit'] == first['commit']
+    assert second['tree'] == first['tree']
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
 
 
 def test_journey_tampered_executable_post_prep_refuses(
@@ -714,7 +863,7 @@ def test_journey_tampered_executable_post_prep_refuses(
     import hashlib
     import json
     import shutil
-    record = tmp_path / 'prep.json'
+    record = _prep_record_path('prep')
     result = subprocess.run(
         [sys.executable,
          str(ROOT / 'tests/support/journey_prep.py'),
@@ -754,10 +903,12 @@ def test_journey_record_non_string_path_refuses(sealed,
                                                tmp_path):
     import json
     sys.path.insert(0, str(ROOT / 'tests'))
-    from support.candidate_suite import checkout_identity
-    record_path = tmp_path / 'prep.json'
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes
+    record_path = _prep_record_path('prep')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
     commit, tree = checkout_identity(
-        exclude=[str(record_path.resolve())])
+        exclude=journey_identity_excludes())
     record_path.write_text(json.dumps(
         {'schema': 'memveil-journey-prep/1',
          'commit': commit, 'tree': tree,
@@ -782,9 +933,9 @@ def test_journey_record_non_string_path_refuses(sealed,
     # Control: the same complete record with a valid path
     # type passes the entry check and fails later, proving
     # the refusal above fires on the type check.
-    control_path = tmp_path / 'prep-control.json'
+    control_path = _prep_record_path('prep-control')
     commit, tree = checkout_identity(
-        exclude=[str(control_path.resolve())])
+        exclude=journey_identity_excludes())
     control_path.write_text(json.dumps(
         {'schema': 'memveil-journey-prep/1',
          'commit': commit, 'tree': tree,
@@ -824,7 +975,7 @@ def test_journey_prep_refuses_mid_prep_edit(tmp_path,
 
     monkeypatch.setattr(prep, 'checkout_identity', flipping)
     with pytest.raises(ValueError, match='changed during'):
-        prep.prepare(str(tmp_path / 'prep.json'))
+        prep.prepare(str(_prep_record_path('prep')))
 
 
 def test_journey_prep_uses_fresh_private_stage(tmp_path,
@@ -841,7 +992,7 @@ def test_journey_prep_uses_fresh_private_stage(tmp_path,
     current = [first]
     monkeypatch.setattr(
         prep, 'build_executable', lambda target: current[0])
-    record_path = tmp_path / 'prep.json'
+    record_path = _prep_record_path('prep')
     record_one = prep.prepare(str(record_path))
     stage_one = Path(
         record_one['suites']['deb']['staged']).parent
@@ -883,7 +1034,7 @@ def test_journey_concurrent_preps_keep_private_stages(
         return fakes[tag]
 
     monkeypatch.setattr(prep, 'build_executable', build)
-    record_path = tmp_path / 'prep.json'
+    record_path = _prep_record_path('prep')
     outcomes = {}
 
     def run(tag):
@@ -934,7 +1085,7 @@ def test_journey_record_publishes_via_temp_replace(
         return real_replace(src, dst)
 
     monkeypatch.setattr(os, 'replace', recording)
-    record_path = tmp_path / 'prep.json'
+    record_path = _prep_record_path('prep')
     before = prep.prepare(str(record_path))
     assert json.loads(record_path.read_text()) == before
     first_inode = record_path.stat().st_ino
@@ -965,7 +1116,7 @@ def test_journey_record_reads_valid_under_concurrent_prep(
         return payloads[int(threading.current_thread().name)]
 
     monkeypatch.setattr(prep, 'build_executable', build)
-    record_path = tmp_path / 'prep.json'
+    record_path = _prep_record_path('prep')
     barrier = threading.Barrier(4)
     stop = threading.Event()
     errors = []
@@ -1020,14 +1171,17 @@ def test_journey_record_reads_valid_under_concurrent_prep(
 def test_journey_prep_refuses_symlinked_staging_path(
         tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
     import support.journey_prep as prep
     fake = tmp_path / 'fake-exe'
     fake.write_bytes(b'#!/bin/sh\necho fake\n')
     monkeypatch.setattr(
         prep, 'build_executable', lambda target: fake)
+    top = Path(journey_prep_dir())
+    top.mkdir(parents=True, exist_ok=True)
     real = tmp_path / 'real'
     real.mkdir()
-    linked = tmp_path / 'linked'
+    linked = top / ('linked-%d' % os.getpid())
     linked.symlink_to(real, target_is_directory=True)
     with pytest.raises(ValueError, match='symlink'):
         prep.prepare(str(linked / 'prep.json'))
@@ -1038,6 +1192,7 @@ def test_journey_prep_refuses_symlinked_staging_path(
 def test_journey_prep_leaves_planted_stage_name_untouched(
         tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_staging_root
     import support.journey_prep as prep
     fake = tmp_path / 'fake-exe'
     fake.write_bytes(b'#!/bin/sh\necho fake\n')
@@ -1047,8 +1202,10 @@ def test_journey_prep_leaves_planted_stage_name_untouched(
     victim.mkdir()
     sentinel = victim / 'sentinel'
     sentinel.write_text('untouched\n')
-    record_path = tmp_path / 'prep.json'
-    plant = tmp_path / 'prep.staged'
+    record_path = _prep_record_path('prep')
+    root = Path(journey_staging_root())
+    root.mkdir(parents=True, exist_ok=True)
+    plant = root / (record_path.stem + '.staged')
     plant.symlink_to(victim, target_is_directory=True)
     record = prep.prepare(str(record_path))
     assert plant.is_symlink()
@@ -1062,6 +1219,7 @@ def test_journey_prep_leaves_planted_stage_name_untouched(
 def test_journey_prep_refuses_symlinked_staging_root(
         tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_staging_root
     import support.journey_prep as prep
     fake = tmp_path / 'fake-exe'
     fake.write_bytes(b'#!/bin/sh\necho fake\n')
@@ -1069,12 +1227,22 @@ def test_journey_prep_refuses_symlinked_staging_root(
         prep, 'build_executable', lambda target: fake)
     real = tmp_path / 'real'
     real.mkdir()
-    root = tmp_path / 'prep.stages'
-    root.symlink_to(real, target_is_directory=True)
-    with pytest.raises(ValueError, match='symlink'):
-        prep.prepare(str(tmp_path / 'prep.json'))
-    assert sorted(entry.name for entry in real.iterdir()) \
-        == []
+    root = Path(journey_staging_root())
+    root.parent.mkdir(parents=True, exist_ok=True)
+    aside = tmp_path / 'staging-root-aside'
+    if root.exists() or root.is_symlink():
+        shutil.move(str(root), str(aside))
+    try:
+        root.symlink_to(real, target_is_directory=True)
+        with pytest.raises(ValueError, match='symlink'):
+            prep.prepare(str(_prep_record_path('prep')))
+        assert sorted(
+            entry.name for entry in real.iterdir()) == []
+    finally:
+        if root.is_symlink():
+            root.unlink()
+        if aside.exists():
+            shutil.move(str(aside), str(root))
 
 
 def test_journey_launcher_ignores_original_post_stage(
@@ -1098,7 +1266,7 @@ def test_journey_launcher_ignores_original_post_stage(
 
 
 def test_journey_shadowed_cargo_stays_green(sealed, tmp_path):
-    record = tmp_path / 'prep.json'
+    record = _prep_record_path('prep')
     result = subprocess.run(
         [sys.executable,
          str(ROOT / 'tests/support/journey_prep.py'),
@@ -1130,7 +1298,7 @@ def test_journey_shadowed_rehomed_legs_green(tmp_path):
                                 seal_candidate)
     import test_release_runtime as legs
     sealed = seal_candidate(tmp_path, 'shadowed', shaped=True)
-    record = tmp_path / 'prep.json'
+    record = _prep_record_path('prep')
     result = subprocess.run(
         [sys.executable,
          str(ROOT / 'tests/support/journey_prep.py'),

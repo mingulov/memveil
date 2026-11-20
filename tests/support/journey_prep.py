@@ -4,8 +4,8 @@
 
 Builds the journey test executables once, stages their
 verified bytes into a fresh private directory under the
-staging root beside the record, and records the staged
-paths plus SHA-256 digests,
+tool-owned staging root, and records the staged paths
+plus SHA-256 digests,
 so qualification can launch them directly without invoking
 cargo. Each prep creates its own staging directory: a
 previous stage is never reused or overwritten, and
@@ -13,14 +13,16 @@ symlinks anywhere in the staging path refuse. Usage:
 
     tests/support/journey_prep.py RECORD
 
-RECORD is the JSON record file to write; dispatch reads it
-through MV_JOURNEY_PREP. The record binds the checkout the
-executables were built from (HEAD commit plus worktree
-digest), the dispatched suite's build target, and the
-hashed staged bytes, so the launcher can verify all four
-live. The checkout must stay stable across the builds:
-identity is recorded before the first build and re-verified
-after the last, and any change refuses. Re-run after any
+RECORD is the JSON record file to write, under the
+tool-owned prep directory at the checkout root;
+dispatch reads it through MV_JOURNEY_PREP. The record
+binds the checkout the executables were built from
+(HEAD commit plus worktree digest), the dispatched
+suite's build target, and the hashed staged bytes, so
+the launcher can verify all four live. The checkout
+must stay stable across the builds: identity is
+recorded before the first build and re-verified after
+the last, and any change refuses. Re-run after any
 rebuild or checkout change: the launcher re-hashes the
 staged bytes before exec and refuses stale records instead
 of rebuilding. This is the only step that compiles: the
@@ -39,7 +41,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from support.candidate_suite import JOURNEY_SUITES, \
     checkout_identity, journey_identity_excludes, \
-    journey_staging_root
+    journey_prep_dir, journey_staging_root, \
+    refuse_symlinked_path, resolve_journey_record
 
 SCHEMA = 'memveil-journey-prep/1'
 
@@ -47,71 +50,54 @@ SCHEMA = 'memveil-journey-prep/1'
 TARGETS = {'deb': 'package_deb', 'rpm-journey': 'package_rpm'}
 
 
-def _refuse_symlinked_path(path):
-    """Refuse when any existing component of path is a symlink.
+def _ensure_owned_dir(path):
+    """Create a tool-owned directory; refuse links and aliases.
 
-    Walks the unresolved absolute path from the leaf to the
-    root with lstat, never following: a planted link
-    anywhere along the staging path would redirect staged
-    bytes outside the operator's directory. Missing
-    components are skipped: the stage setup creates them as
-    real directories and re-checks afterwards.
+    The path and its parents must hold no symlink, both
+    before and after creation; the result is re-verified
+    as a real directory whose resolved path equals its
+    spelled path, so a planted link can neither redirect
+    tool outputs nor widen the identity exclusion onto
+    source.
     """
-    for candidate in (path, *path.parents):
-        try:
-            mode = os.lstat(candidate).st_mode
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise ValueError(
-                'staging path unavailable: %s' % exc)
-        if stat.S_ISLNK(mode):
-            raise ValueError(
-                'staging path refuses symlink: %s' % candidate)
-
-
-def _private_stage_dir(record_abs):
-    """Create a fresh private stage under the root.
-
-    The staging root (derived from the record path through
-    the shared helper) holds every stage for this record;
-    each prep gets its own unique directory inside it
-    (exclusive creation: the call fails rather than reusing
-    an existing path), so a concurrent prep can never
-    replace staged bytes between hashing and launch.
-    Symlinks anywhere in the staging path refuse, both
-    before and after the directory setup; the root and the
-    created directory are each re-verified as a real
-    directory whose resolved path equals its spelled path.
-    Previous stages are never reused or overwritten: they
-    stay under the root for operator cleanup.
-    """
-    parent = record_abs.parent
-    _refuse_symlinked_path(parent)
+    refuse_symlinked_path(path)
     try:
-        parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise ValueError(
             'staging directory unavailable: %s' % exc)
-    _refuse_symlinked_path(parent)
-    root = Path(journey_staging_root(str(record_abs)))
+    refuse_symlinked_path(path)
     try:
-        root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise ValueError(
-            'staging directory unavailable: %s' % exc)
-    try:
-        mode = os.lstat(root).st_mode
+        mode = os.lstat(path).st_mode
     except OSError as exc:
         raise ValueError(
             'staging directory unavailable: %s' % exc)
     if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
         raise ValueError(
-            'staging path refuses symlink: %s' % root)
-    if os.path.realpath(root) != str(root):
+            'staging path refuses symlink: %s' % path)
+    if os.path.realpath(path) != str(path):
         raise ValueError(
-            'staging path changed during prep: %s' % root)
-    os.chmod(root, 0o700)
+            'staging path changed during prep: %s' % path)
+    os.chmod(path, 0o700)
+
+
+def _private_stage_dir(record_abs):
+    """Create a fresh private stage under the owned root.
+
+    The staging root (inside the tool-owned prep
+    directory, derived through the shared helper) holds
+    every stage for every record; each prep gets its own
+    unique directory inside it (exclusive creation: the
+    call fails rather than reusing an existing path), so
+    a concurrent prep can never replace staged bytes
+    between hashing and launch. The owned directories
+    are verified as real directories, never links.
+    Previous stages are never reused or overwritten:
+    they stay under the root for operator cleanup.
+    """
+    _ensure_owned_dir(Path(journey_prep_dir()))
+    root = Path(journey_staging_root())
+    _ensure_owned_dir(root)
     try:
         staged_dir = Path(tempfile.mkdtemp(
             prefix=record_abs.stem + '-', suffix='.staged',
@@ -236,27 +222,26 @@ def build_executable(target):
 def prepare(record_path):
     """Build every journey suite; write the record file.
 
-    Checkout identity is recorded before the first build
-    and re-verified after the last: the two must agree, so
-    an edit during prep refuses instead of mislabelling an
-    older executable. The record file itself, the staging
-    root holding every present and future stage, and the
-    listed staged copies are derived outputs excluded from
-    the digest through the exclusion list shared with the
-    launcher, so both sides hash the identical source set.
+    The record lives under the tool-owned prep directory
+    (refused elsewhere). Checkout identity is recorded
+    before the first build and re-verified after the
+    last: the two must agree, so an edit during prep
+    refuses instead of mislabelling an older executable.
+    The prep directory holding every record, stage, and
+    publication scratch file is excluded wholesale from
+    the digest through the exclusion list shared with
+    the launcher, so both sides hash the identical
+    source set.
     """
     if set(JOURNEY_SUITES) != set(TARGETS):
         raise ValueError(
             'prep targets differ from dispatched journey '
             'suites')
+    record_abs = Path(resolve_journey_record(record_path))
     raw_abs = Path(os.path.abspath(record_path))
-    _refuse_symlinked_path(raw_abs.parent)
-    record_abs = raw_abs.resolve()
+    _ensure_owned_dir(record_abs.parent)
     staged_dir = _private_stage_dir(record_abs)
-    planned = [str(staged_dir / TARGETS[suite])
-               for suite in JOURNEY_SUITES]
-    excludes = journey_identity_excludes(
-        str(record_abs), planned)
+    excludes = journey_identity_excludes()
     commit_before, tree_before = checkout_identity(
         exclude=excludes)
     suites = {}
