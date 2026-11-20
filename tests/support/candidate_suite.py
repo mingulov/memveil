@@ -380,13 +380,16 @@ def refuse_unowned_prep_contents():
     siblings refusing plus the launcher re-validating
     its own record before exec. Under stages, every
     stage directory holds only staged executables, and
-    a staged file whose path some valid record
-    references must hash to a digest some valid record
-    references; anything else refuses. Files no record
-    binds (a stage mid-publish, a retired stage awaiting
-    operator cleanup) are inert, since launch reads only
-    referenced paths and re-hashes them, so they refuse
-    nowhere here. The prep directory's own components
+    a staged file whose path some valid record binds
+    must hash to one of the digests claimed for that
+    exact path: a digest claimed for another path never
+    authorizes these bytes, so a staged file cannot pass
+    on a digest recorded for a different file. Anything
+    else refuses. Files no record binds (a stage
+    mid-publish, a retired stage awaiting operator
+    cleanup) are inert, since launch reads only bound
+    paths and re-hashes them, so they refuse nowhere
+    here. The prep directory's own components
     are verified link-free before the scan. A missing
     directory is fine: the prep tool creates it. Entries
     are judged without following links, and link safety
@@ -407,8 +410,11 @@ def refuse_unowned_prep_contents():
             'journey prep directory is not a directory: '
             '%s' % top)
     staged_names = set(TARGETS.values())
-    referenced_paths = set()
-    referenced_digests = set()
+    # Bound path to the digests claimed for that exact
+    # path across every valid record: a staged file
+    # passes only against its own path's claims, never
+    # against a digest recorded for another path.
+    referenced = {}
 
     def refuse(entry):
         raise ValueError(
@@ -474,11 +480,14 @@ def refuse_unowned_prep_contents():
             if not isinstance(entry, dict):
                 continue
             staged = entry.get('staged')
-            if isinstance(staged, str):
-                referenced_paths.add(os.path.abspath(staged))
             digest = entry.get('sha256')
-            if isinstance(digest, str):
-                referenced_digests.add(digest)
+            if not isinstance(staged, str) \
+                    or not isinstance(digest, str):
+                continue
+            path = os.path.abspath(staged)
+            if path not in referenced:
+                referenced[path] = set()
+            referenced[path].add(digest)
 
     def staged_digest(path):
         try:
@@ -520,16 +529,16 @@ def refuse_unowned_prep_contents():
                 refuse(child.path)
             if entry_kind == 'link':
                 continue
-            if os.path.abspath(child.path) \
-                    not in referenced_paths:
+            claimed = referenced.get(
+                os.path.abspath(child.path))
+            if claimed is None:
                 continue
-            if staged_digest(child.path) \
-                    not in referenced_digests:
+            if staged_digest(child.path) not in claimed:
                 raise ValueError(
                     'journey prep directory holds staged '
                     'bytes matching no digest referenced '
-                    'by any valid prep record: %s'
-                    % child.path)
+                    'for that path by any valid prep '
+                    'record: %s' % child.path)
 
     def check_stages(directory):
         for child in children(directory):

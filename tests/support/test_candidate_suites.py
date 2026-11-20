@@ -2876,3 +2876,83 @@ def test_topwalk_memveil_binding_refuses_mismatch(sealed):
                 {}, selected)
     finally:
         selected.close()
+
+
+def test_journey_scan_binds_digests_per_path(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root, \
+        refuse_unowned_prep_contents
+    from support.journey_prep import TARGETS
+
+    def harness(marker):
+        return ('#!/bin/sh\necho %s\n'
+                'echo "running 1 tests"\n'
+                'echo "test journey_probe ... ok"\n'
+                'echo "test result: ok. 1 passed; 0 failed; '
+                '0 ignored; 0 measured; 0 filtered out"\n'
+                % marker)
+
+    # One stage holding both genuine harnesses; the
+    # record binds each staged path to its own digest.
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    stage_dir = Path(journey_staging_root()) / (
+        'stub-bound-%s.staged' % tag)
+    stage_dir.mkdir(parents=True)
+    deb_file = stage_dir / TARGETS['deb']
+    rpm_file = stage_dir / TARGETS['rpm-journey']
+    deb_file.write_text(harness('journey-marker-deb'))
+    rpm_file.write_text(harness('journey-marker-rpm'))
+    deb_file.chmod(0o755)
+    rpm_file.chmod(0o755)
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path = _prep_record_path('stub-bound')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(
+        {'schema': 'memveil-journey-prep/1',
+         'commit': commit, 'tree': tree,
+         'suites': {
+             'deb': {
+                 'path': str(deb_file),
+                 'staged': str(deb_file),
+                 'sha256': hashlib.sha256(
+                     deb_file.read_bytes()).hexdigest(),
+                 'target': TARGETS['deb']},
+             'rpm-journey': {
+                 'path': str(rpm_file),
+                 'staged': str(rpm_file),
+                 'sha256': hashlib.sha256(
+                     rpm_file.read_bytes()).hexdigest(),
+                 'target': TARGETS['rpm-journey']}}}))
+    # Honest bytes pass the scan and launch green.
+    refuse_unowned_prep_contents()
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    for suite, marker in (('deb', 'journey-marker-deb'),
+                          ('rpm-journey',
+                           'journey-marker-rpm')):
+        result = _launch_journey(suite, environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert marker in result.stdout, combined
+    # Swap the deb staged bytes for the rpm bytes: the
+    # resulting digest is genuine (claimed for the rpm
+    # path) but claimed for no deb path, so the scan
+    # refuses instead of crediting cross-path bytes.
+    deb_file.write_bytes(rpm_file.read_bytes())
+    with pytest.raises(
+            ValueError,
+            match='matching no digest referenced'):
+        refuse_unowned_prep_contents()
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert 'matching no digest referenced' in combined, \
+        combined
+    assert 'journey-marker-rpm' not in result.stdout, \
+        combined
