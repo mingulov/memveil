@@ -2114,6 +2114,86 @@ def test_inventory_rejects_symlinked_row_directory(workshop,
                                source_tree=str(ctx["root"]))
 
 
+def test_inventory_accepts_runner_harness_and_summary(
+        workshop, tmp_path):
+    m, ctx = _sealed_for_qualify(workshop, tmp_path,
+                                 _matrix_required_gates())
+    evidence = Path(tmp_path) / "evidence"
+    evidence.mkdir()
+    _write_matrix_evidence(m, ctx, evidence)
+    matrix = evidence / "matrix"
+    harness = {"vng": "vng test", "qemu": "qemu test",
+               "bpftrace": "bpftrace test",
+               "bpftool": "bpftool test",
+               "run_id": "20261101T000000Z",
+               "deb_sha256": "d" * 64,
+               "harness_commit": "c" * 40,
+               "harness_dirty": False}
+    (matrix / "harness.json").write_bytes(m.canonical(harness))
+    (matrix / "summary.txt").write_text(
+        "kernel vng doctor record report channels "
+        "detail/aggregate verdict run\n"
+        + MATRIX_ROW + " vng PASS run=20261101T000000Z\n")
+    inventory = m.build_evidence_inventory(evidence, "matrix")
+    assert inventory["harness.json"] == sha(
+        (matrix / "harness.json").read_bytes())
+    assert inventory["summary.txt"] == sha(
+        (matrix / "summary.txt").read_bytes())
+    binding = _signed_gate(m, ctx, evidence, MATRIX_GATE,
+                           "inputs.json", "receipt.json",
+                           _matrix_inputs(m, evidence))
+    q_path = Path(tmp_path) / "qualification.json"
+    _write_qualification(m, ctx, q_path,
+                         {MATRIX_GATE: binding})
+    assert m.verify_qualification(
+        ctx["manifest_path"], q_path, ctx["policy_path"],
+        evidence, source_tree=str(ctx["root"]))["ok"] is True
+    archive = Path(tmp_path) / "qualification-evidence.tar.gz"
+    excluded = m.build_evidence_archive(evidence, archive)
+    assert "matrix/harness.json" not in excluded
+    assert "matrix/summary.txt" not in excluded
+    with tarfile.open(archive, "r:gz") as stream:
+        names = stream.getnames()
+    assert "evidence/matrix/harness.json" in names
+    assert "evidence/matrix/summary.txt" in names
+
+
+@pytest.mark.parametrize("name", ["harness.json", "summary.txt"])
+def test_inventory_admits_each_runner_output(tmp_path, name):
+    m = api()
+    assert set(m.MATRIX_RUNNER_FILES) == {"harness.json",
+                                          "summary.txt"}
+    matrix = Path(tmp_path) / "matrix"
+    row = matrix / "row-a"
+    row.mkdir(parents=True)
+    (row / "receipt.json").write_text("{}\n")
+    (row / "oracle-inputs.json").write_text("{}\n")
+    (matrix / "summary.json").write_text("[]\n")
+    (matrix / name).write_text("runner output\n")
+    inventory = m.build_evidence_inventory(tmp_path, "matrix")
+    assert inventory[name] == sha(b"runner output\n")
+    assert inventory["summary.json"] == sha(b"[]\n")
+    assert inventory["row-a/receipt.json"] == sha(b"{}\n")
+
+
+@pytest.mark.parametrize("name", ["Harness.json",
+                                  "harness.json.sig",
+                                  "summary.txt~",
+                                  "summary.json.bak"])
+def test_inventory_still_rejects_runner_lookalikes(tmp_path,
+                                                   name):
+    m = api()
+    matrix = Path(tmp_path) / "matrix"
+    row = matrix / "row-a"
+    row.mkdir(parents=True)
+    (row / "receipt.json").write_text("{}\n")
+    (row / "oracle-inputs.json").write_text("{}\n")
+    (matrix / "summary.json").write_text("[]\n")
+    (matrix / name).write_text("runner output\n")
+    with pytest.raises(ValueError, match="extra"):
+        m.build_evidence_inventory(tmp_path, "matrix")
+
+
 def test_redaction_replay_ignores_local_vng_cmd(workshop,
                                                   tmp_path):
     m, ctx, evidence, q_path, _ = _matrix_qualified(

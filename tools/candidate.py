@@ -84,6 +84,16 @@ BPF_OBJECTS = ("swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
                "swiotlb_copy.bpf.o")
 DOCUMENT_LIMIT = 16 * 1024 * 1024
 HARNESS_PACKAGE = "memveil-release-entry"
+# Matrix-runner top-level outputs the signed evidence
+# inventory authenticates when present: the campaign
+# provenance record (harness.json: tool versions, run ID,
+# source digest, harness commit) and the rendered verdict
+# log (summary.txt: the same merged verdicts as
+# summary.json in operator-readable form). Row verdict
+# sidecars and summary.json keep their own rules below;
+# the raw boot command line stays local-only and is never
+# admitted here.
+MATRIX_RUNNER_FILES = frozenset({"harness.json", "summary.txt"})
 
 
 def require(condition, message):
@@ -1588,11 +1598,13 @@ def build_evidence_inventory(evidence_dir, matrix_directory):
     Keys are matrix-relative POSIX paths: per-row receipt.json,
     oracle-inputs.json and retained raws, the <id>.json sidecar
     recs the tested export re-derives against, plus
-    summary.json. A sidecar is admitted only when it names a
-    retained row directory, so unrelated files still fail as
-    extra. The signed gate receipt stays outside its own
-    inventory, so the binding is noncircular. Raises ValueError
-    on missing, extra, unknown, or non-regular evidence.
+    summary.json and, when the campaign retained them, the
+    MATRIX_RUNNER_FILES outputs (harness.json, summary.txt).
+    A sidecar is admitted only when it names a retained row
+    directory, so unrelated files still fail as extra. The
+    signed gate receipt stays outside its own inventory, so
+    the binding is noncircular. Raises ValueError on missing,
+    extra, unknown, or non-regular evidence.
     """
     base = Path(evidence_dir)
     mdir = base / relative(matrix_directory)
@@ -1626,6 +1638,13 @@ def build_evidence_inventory(evidence_dir, matrix_directory):
         elif stat.S_ISREG(mode) and name.endswith(".json") \
                 and name[:-5] in rows:
             inventory[name] = _required_evidence(full, name)
+        elif stat.S_ISREG(mode) and name in MATRIX_RUNNER_FILES:
+            try:
+                inventory[name] = digest(full)
+            except OSError as error:
+                raise ValueError(
+                    "matrix evidence cannot hash: "
+                    + name) from error
         else:
             raise ValueError(
                 "matrix evidence has an extra file: " + name)
