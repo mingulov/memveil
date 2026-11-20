@@ -398,8 +398,9 @@ gh workflow run release.yml --ref release-q1 \
 13. After a green import, record the remote receipt and
 commit Q2. Record four bindings now; do not record
 `promotion-dry-run/1` here: its check-run is published by
-the dry-run dispatch in step 14 (under MV31-15), so
-dispatch dry-run before recording its check binding
+the dry-run dispatch in step 14 (a later
+remote-execution step), so dispatch dry-run before
+recording its check binding
 (step 15). Fetch the
 immutable import coordinates (the signer commit is Q1,
 the ref the import ran at):
@@ -480,8 +481,9 @@ bindings, so four suffice here.
 provisional dry-run receipt and carry it forward. The
 dry-run ran at Q2, so the check-run named exactly
 `promotion-dry-run/1` carries head SHA Q2. That
-check-run is published under MV31-15 at Q2: select it
-by its exact check name, never the dispatch's native
+check-run is published by the dry-run dispatch at
+Q2: select it by its exact check name, never the
+dispatch's native
 `dry-run` job check (promote re-checks the name
 against the binding and rejects any other check):
 
@@ -497,8 +499,8 @@ gh api repos/<OWNER>/<REPO>/commits/$Q2/check-runs \
 That prints the check-run ID, its head SHA, and its
 details URL; keep the numeric check-run ID once the
 head SHA reads Q2 and the details URL sits under run
-$DRY_RUN_ID. The MV31-15 producer is deferred per the
-accepted D1 carry, so Q3 awaits that evidence:
+$DRY_RUN_ID. That check producer runs as a later
+remote-execution step, so Q3 awaits that evidence:
 finalize Q3 only after this check-run exists and is
 green. Write the provisional receipt beside the
 scratch evidence (kept under ignored `dist/`, never

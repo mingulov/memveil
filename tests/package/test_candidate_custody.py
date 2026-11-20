@@ -1598,10 +1598,16 @@ def test_release_runbook_binds_dryrun_published_check():
         text.index("provisional dry-run receipt"):
         text.index("final promotion evidence")]
     assert 'select(.name == "promotion-dry-run/1")' in step15
-    assert "MV31-15" in step15
     flat = " ".join(step15.split())
+    assert "published by the dry-run dispatch at Q2" in flat
     assert "Q3 awaits that evidence" in flat
+    assert "finalize Q3 only after this check-run exists" in flat
     assert "never the dispatch's native" in flat
+    order = " ".join(text.split())
+    assert "dispatch dry-run before recording its check " \
+        "binding" in order
+    assert "MV31" not in text
+    assert re.search(r"\bD1\b", text) is None
     assert "promotion-dry-run/1" in api().REMOTE_CHECKS
     assert 'select(.name == "dry-run")' not in text
 
