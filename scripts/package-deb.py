@@ -440,7 +440,27 @@ def installed_file_path(name):
     raise ValueError("unknown bundle path: " + name)
 
 
-def verify_installed(root, manifest):
+def _owned_sweep_roots(expected):
+    """Manifest-derived owned sweep roots for live installs.
+
+    Each expected installed path contributes the longest
+    leading prefix ending in the package namespace: the
+    FHS subtrees the package owns outright. Shared system
+    directories (no namespace component) contribute
+    nothing, so unrelated system files beside the package
+    never refuse a live install.
+    """
+    roots = set()
+    for target in expected:
+        parts = target.split("/")
+        for stop in range(len(parts) - 1, 0, -1):
+            if parts[stop - 1] == "memveil":
+                roots.add("/".join(parts[:stop]))
+                break
+    return sorted(roots)
+
+
+def verify_installed(root, manifest, live=False):
     """Every staged copy must equal the verified bundle bytes.
 
     Port of the Mojo packager's installed check (minus the
@@ -451,6 +471,14 @@ def verify_installed(root, manifest):
     plus the generated copyright/changelog. Symlinks
     enumerate first-class as (path, target): any alias
     refuses naming what it points at. Raises ValueError.
+
+    Staging roots check the package-exclusive tree the
+    packager built. Live roots check a real install: the
+    exact member checks still cover every mapped file, but
+    the extra-member sweep scopes to the manifest-derived
+    owned roots, so unrelated system binaries beside the
+    package accept while added files and aliases under
+    owned paths still refuse.
     """
     expected = {}
     for name, sha256 in manifest["files"].items():
@@ -474,9 +502,13 @@ def verify_installed(root, manifest):
     # them and stay owned by their own pins): every file and
     # every symlink must be a mapped bundle member or a
     # generated file, or the tree refuses.
-    for prefix in ("usr/bin", "usr/lib/memveil",
-                   "usr/share/memveil",
-                   "usr/share/doc/memveil"):
+    if live:
+        prefixes = _owned_sweep_roots(expected)
+    else:
+        prefixes = ("usr/bin", "usr/lib/memveil",
+                    "usr/share/memveil",
+                    "usr/share/doc/memveil")
+    for prefix in prefixes:
         base = os.path.join(root, *prefix.split("/"))
         for current, dirs, files in os.walk(base):
             for leaf in sorted(dirs):

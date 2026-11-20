@@ -469,11 +469,25 @@ pub fn journey_scratch(name: &str) -> (PathBuf, QualifyScratch) {
     (tmp, dirs)
 }
 
-/// Installed-closure leg (candidate mode only): the installed
-/// tree must equal the verified candidate files closure,
-/// through the packager's own predicate. Missing, tampered,
-/// aliased, and extra members refuse.
+/// Installed-closure leg over a staged tree (candidate mode only):
+/// the extracted tree must equal the verified candidate
+/// files closure, through the packager's own predicate.
+/// Missing, tampered, aliased, and extra members refuse.
 pub fn assert_installed_closure(root: &Path) {
+    installed_closure(root, false);
+}
+
+/// Installed-closure leg over a live root (candidate mode only):
+/// same predicate scoped to MemVeil-owned paths. A live
+/// `/usr/bin` holds unrelated system binaries the sweep
+/// must ignore, while added files and aliases under owned
+/// paths still refuse.
+pub fn assert_installed_closure_live(root: &Path) {
+    installed_closure(root, true);
+}
+
+/// Installed-closure check, staged or live scoped.
+fn installed_closure(root: &Path, live: bool) {
     assert!(
         super::candidate_mode(),
         "installed-closure check needs candidate inputs"
@@ -483,13 +497,14 @@ pub fn assert_installed_closure(root: &Path) {
         .to_str()
         .unwrap()
         .to_string();
+    let flag = if live { ", True" } else { "" };
     let text = super::loader_probe(
         &[
             "import importlib.util",
             &format!("spec = importlib.util.spec_from_file_location('pkgdeb', {script:?})"),
             "pkgdeb = importlib.util.module_from_spec(spec)",
             "spec.loader.exec_module(pkgdeb)",
-            "pkgdeb.verify_installed(sys.argv[1], selected.manifest)",
+            &format!("pkgdeb.verify_installed(sys.argv[1], selected.manifest{flag})"),
             "print('closure-ok')",
         ],
         &[root.to_str().unwrap()],

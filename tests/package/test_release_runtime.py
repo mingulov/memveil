@@ -490,6 +490,50 @@ def test_installed_closure_matches_candidate(tmp_path):
     DEBPKG.verify_installed(str(dest), manifest)
 
 
+@pytest.mark.qualification
+def test_installed_closure_live_scopes_owned_paths(tmp_path):
+    # Live installs share /usr/bin with the system: an
+    # unrelated binary beside the package accepts under
+    # live scoping, while added files and aliases under
+    # owned paths refuse. Staging keeps refusing the
+    # unrelated binary, proving the flag.
+    members = {
+        "bin/memveil": b"live binary\n",
+        "lib/memveil/libx.so.1": b"live lib\n",
+        "bpf/o.bpf.o": b"live object\n",
+        "profiles/p.json": b"{}\n",
+        "docs/d.md": b"# live\n",
+    }
+    manifest = {"files": {
+        name: hashlib.sha256(data).hexdigest()
+        for name, data in members.items()}}
+    root = tmp_path / "live-root"
+    for name, data in members.items():
+        dest = root / DEBPKG.installed_file_path(name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    (root / "usr/bin/unrelated-system-binary").write_bytes(
+        b"not ours\n")
+    DEBPKG.verify_installed(str(root), manifest, live=True)
+    alias = root / "usr/lib/memveil/alias.so"
+    alias.symlink_to("nowhere-live-target")
+    with pytest.raises(ValueError, match="alias.so"):
+        DEBPKG.verify_installed(str(root), manifest, live=True)
+    with pytest.raises(ValueError,
+                       match="nowhere-live-target"):
+        DEBPKG.verify_installed(str(root), manifest, live=True)
+    alias.unlink()
+    DEBPKG.verify_installed(str(root), manifest, live=True)
+    smuggled = root / "usr/share/memveil/profiles/smuggled.json"
+    smuggled.write_text("{}\n")
+    with pytest.raises(ValueError, match="smuggled"):
+        DEBPKG.verify_installed(str(root), manifest, live=True)
+    smuggled.unlink()
+    with pytest.raises(
+            ValueError, match="unrelated-system-binary"):
+        DEBPKG.verify_installed(str(root), manifest)
+
+
 # Re-homed tests the candidate legs execute per suite:
 # every test with a candidate branch plus the structural
 # pins that prove the seal is real-shaped. Excluded with
@@ -509,6 +553,7 @@ CANDIDATE_DEB_TESTS = (
     "lintian_overrides_exact",
     "changelog_debian",
     "installed_closure_wiring",
+    "installed_closure_live_scopes_owned_paths",
     "no_maintainer_scripts",
     "receipts_state_dir_staged",
     "md5sums_match_payload",
@@ -520,6 +565,7 @@ CANDIDATE_DEB_TESTS = (
 
 CANDIDATE_RPM_TESTS = (
     "sealed_inputs_used",
+    "installed_closure_live_scopes_owned_paths",
     "rpm_header",
     "rpm_manual_deps_only",
     "rpm_file_list_exact",

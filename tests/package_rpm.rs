@@ -25,6 +25,7 @@ use package_helpers as h;
 use package_helpers::journey as j;
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::PathBuf;
 
 /// Pinned payload, from the one shared pin
 /// (`package_helpers::FHS_FIXED_FILES`) both FHS formats consume,
@@ -510,7 +511,7 @@ fn rpm_install_doctor_uninstall_smoke() {
         // Sealed installs prove the installed tree equals the
         // verified candidate closure before running anything.
         if h::candidate_mode() {
-            j::assert_installed_closure(std::path::Path::new("/"));
+            j::assert_installed_closure_live(std::path::Path::new("/"));
         }
         j::assert_receipts_installed(receipts);
         j::assert_loader_closure();
@@ -1019,4 +1020,60 @@ fn sealed_inputs_used() {
     assert!(inputs.deb.is_file());
     eprintln!("sealed .rpm: {}", inputs.rpm.display());
     eprintln!("sealed .deb: {}", inputs.deb.display());
+}
+
+#[test]
+fn installed_closure_live_scopes_owned_paths() {
+    if !h::candidate_mode() {
+        eprintln!("skip: live closure scoping needs candidate inputs");
+        return;
+    }
+    // Same live predicate as the deb suite, through the
+    // sealed rpm tree: an unrelated system binary beside
+    // the package accepts, while an added alias under an
+    // owned path refuses naming path and target.
+    fn trial_copy(tmp: &std::path::Path, extracted: &std::path::Path, name: &str) -> PathBuf {
+        let trial = tmp.join(name);
+        h::run_ok(
+            "cp",
+            &["-r", extracted.to_str().unwrap(), trial.to_str().unwrap()],
+            None,
+        );
+        trial
+    }
+    fn refusal_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
+        match std::panic::catch_unwind(f) {
+            Ok(()) => panic!("closure wiring passed a doctored tree"),
+            Err(payload) => payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|line| line.to_string()))
+                .unwrap_or_default(),
+        }
+    }
+    let rpm = h::ensure_rpm();
+    let extracted = h::rpm_extract(&rpm, "closure-live-rpm");
+    let tmp = h::scratch("closure-live-neg-rpm");
+    let live = trial_copy(&tmp, &extracted, "live");
+    fs::write(
+        live.join("usr").join("bin").join("unrelated-system-binary"),
+        b"not ours",
+    )
+    .unwrap();
+    j::assert_installed_closure_live(&live);
+    let linked = trial_copy(&tmp, &extracted, "live-linked");
+    std::os::unix::fs::symlink(
+        "nowhere-live-target",
+        linked
+            .join("usr")
+            .join("lib")
+            .join("memveil")
+            .join("alias.so"),
+    )
+    .unwrap();
+    let message = refusal_message(std::panic::AssertUnwindSafe(|| {
+        j::assert_installed_closure_live(&linked);
+    }));
+    assert!(message.contains("alias.so"), "{message}");
+    assert!(message.contains("nowhere-live-target"), "{message}");
 }
