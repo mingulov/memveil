@@ -98,6 +98,73 @@ def test_unarmed_soak_77(sealed, monkeypatch):
         candidate_input._cached = previous
 
 
+def _sealed_arming_env(monkeypatch, sealed):
+    from support import candidate_input
+    for key in list(os.environ):
+        if key in candidate_input.OVERRIDES or key.startswith('MEMVEIL_TEST_'):
+            monkeypatch.delenv(key, raising=False)
+    for key, value in sealed.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv('MEMVEIL_VM_LIVE_SOAK', raising=False)
+    monkeypatch.delenv('MEMVEIL_VM_PERF', raising=False)
+    previous, candidate_input._cached = candidate_input._cached, None
+    return previous
+
+
+def _restore_sealed(previous):
+    from support import candidate_input
+    if candidate_input._cached is not None:
+        candidate_input._cached.close()
+    candidate_input._cached = previous
+
+
+def test_host_arming_is_per_mode(sealed, monkeypatch):
+    m = api()
+    assert m.ARMED_VARS == {'overhead': 'MEMVEIL_VM_PERF',
+                            'soak': 'MEMVEIL_VM_LIVE_SOAK',
+                            'pool': 'MEMVEIL_VM_LIVE_SOAK'}
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    try:
+        monkeypatch.setenv('MEMVEIL_VM_LIVE_SOAK', '1')
+        with pytest.raises(SystemExit) as caught:
+            m.host('overhead')
+        assert caught.value.code == 77
+        monkeypatch.delenv('MEMVEIL_VM_LIVE_SOAK')
+        monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+        with pytest.raises(SystemExit) as caught:
+            m.host('soak')
+        assert caught.value.code == 77
+        with pytest.raises(SystemExit) as caught:
+            m.host('pool')
+        assert caught.value.code == 77
+    finally:
+        _restore_sealed(previous)
+
+
+def test_host_overhead_armed_via_perf_flag(sealed, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    calls = []
+    def fake_guest(cmd, timeout):
+        calls.append((list(cmd), timeout))
+        return SimpleNamespace(returncode=1)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        with pytest.raises(ValueError, match='guest campaign failed'):
+            m.host('overhead')
+    finally:
+        _restore_sealed(previous)
+    assert len(calls) == 1
+    assert calls[0][1] == m.TIMEOUTS['overhead']
+    assert 'overhead' in calls[0][0][-1]
+
+
 @pytest.mark.parametrize('returncode', [1, 2, 3, 4, -9])
 def test_attach_or_capture_refusal_is_failure(returncode):
     with pytest.raises(ValueError, match='exit'):
@@ -228,7 +295,7 @@ def test_admitted_journal_detail_fail_refuses_campaign():
 
 def test_journal_admission_maps_doctor_verdicts(tmp_path):
     m = api()
-    for code in (0, 3, 1):
+    for code in (0, 3, 1, 2):
         script = tmp_path / ('doctor%d' % code)
         script.write_text('#!/bin/sh\nexit %d\n' % code)
         script.chmod(0o755)
@@ -237,6 +304,10 @@ def test_journal_admission_maps_doctor_verdicts(tmp_path):
     assert admitted is False and 'conversion-journal' in reason
     with pytest.raises(ValueError):
         m.journal_admission(tmp_path / 'doctor1')
+    # An unknown capability (doctor exit 2) is a failure,
+    # never an admission decline.
+    with pytest.raises(ValueError):
+        m.journal_admission(tmp_path / 'doctor2')
 
 
 @pytest.mark.parametrize('failure', ['product', 'report', 'cleanup'])

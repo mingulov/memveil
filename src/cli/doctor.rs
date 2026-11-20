@@ -590,7 +590,8 @@ fn apply_copy_preflight(
 /// Passive: no BPF load, no attach, no bridge access. Each of the three
 /// record capabilities runs `decide_record` over its own set for its
 /// display row, and the verdict judges the requested set through one
-/// more call; conversion-observe has no record channel. A failed passive
+/// more call; conversion-observe and conversion-journal have no
+/// record channel. A failed passive
 /// pre-check demotes an admitted capability to unavailable with that
 /// check's code. Bad roots, profiles, or capability lists yield an
 /// unavailable report naming the failure; the exit-code mapping lives in
@@ -716,9 +717,9 @@ pub fn assess_doctor(opts: &DoctorOptions) -> DoctorReport2 {
             id: cap.clone(),
             ..DoctorCap::default()
         };
-        if cap == "conversion-observe" {
+        if cap == "conversion-observe" || cap == "conversion-journal" {
             entry.status = "unsupported".to_string();
-            entry.reason = "capability conversion-observe has no record channel".to_string();
+            entry.reason = format!("capability {cap} has no record channel");
             entry.reason_code = "unsupported".to_string();
             out.caps.push(entry);
             continue;
@@ -1827,6 +1828,42 @@ mod tests {
     fn exit_bad_profiles() {
         let code = run_doctor_with(&fx("ordinary-7.0"), "no-such-profiles", false);
         assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn exit_journal_admission_protocol() {
+        // Recognized journal names answer admission via exit 3
+        // (unsupported, no record channel); unknown ids stay a
+        // usage error (exit 2). The live-campaign probe maps 3
+        // to SKIP-with-reason and any other failure to fail.
+        for cap in ["conversion-journal", "conversion-observe"] {
+            let opts = doctor2_opts(
+                fx("ordinary-7.0"),
+                profiles_dir(),
+                cap,
+                &elf("ok.o"),
+                &elf("lc-ok.o"),
+                &elf("cp-ok.o"),
+            );
+            let rep = assess_doctor(&opts);
+            assert_eq!(rep.caps.len(), 1, "{cap}");
+            assert_eq!(rep.caps[0].status, "unsupported", "{cap}");
+            assert!(
+                rep.caps[0].reason.contains("has no record channel"),
+                "{cap}: {}",
+                rep.caps[0].reason
+            );
+            assert_eq!(run_doctor_opts(&opts), EXIT_UNAVAILABLE, "{cap}");
+        }
+        let bad = doctor2_opts(
+            fx("ordinary-7.0"),
+            profiles_dir(),
+            "attempt-trace,nope",
+            &elf("ok.o"),
+            &elf("lc-ok.o"),
+            &elf("cp-ok.o"),
+        );
+        assert_eq!(run_doctor_opts(&bad), 2);
     }
 
     #[test]

@@ -38,6 +38,9 @@ JOURNAL_MODES = ('journal-summary', 'journal-callers-detail')
 JOURNAL_CAPABILITY = 'conversion-journal'
 CAMPAIGN_MODES = ('overhead', 'soak', 'pool')
 ARMED_VAR = 'MEMVEIL_VM_LIVE_SOAK'
+PERF_ARMED_VAR = 'MEMVEIL_VM_PERF'
+ARMED_VARS = {'overhead': PERF_ARMED_VAR, 'soak': ARMED_VAR,
+              'pool': ARMED_VAR}
 TIMEOUTS = {'soak': SOAK_SECONDS + POOL_SECONDS + 1800, 'overhead': 7200,
             'pool': POOL_SECONDS + 1800}
 
@@ -607,9 +610,11 @@ def host(mode, candidate=None, opts=None):
     The verified candidate inputs load first: without them the
     campaign refuses instead of running development bytes. A
     caller-held selection may pin the run but never replaces
-    the environment inputs. The campaign runs only when armed;
-    unarmed exits 77. Recognized options: out, the evidence
-    parent (a fresh temporary directory by default).
+    the environment inputs. The campaign runs only when armed
+    for its mode (overhead needs MEMVEIL_VM_PERF=1, soak and
+    pool need MEMVEIL_VM_LIVE_SOAK=1); unarmed exits 77.
+    Recognized options: out, the evidence parent (a fresh
+    temporary directory by default).
     """
     selected = load(required=True)
     if candidate is not None and getattr(candidate, 'digest', None) != selected.digest:
@@ -620,8 +625,9 @@ def host(mode, candidate=None, opts=None):
     unknown = set(options) - {'out'}
     if unknown:
         raise ValueError('unknown live campaign option: ' + ', '.join(sorted(unknown)))
-    if os.environ.get(ARMED_VAR) != '1':
-        print('SKIP: needs ' + ARMED_VAR + '=1')
+    armed_var = ARMED_VARS[mode]
+    if os.environ.get(armed_var) != '1':
+        print('SKIP: needs ' + armed_var + '=1')
         raise SystemExit(77)
     try: deb = selected.artifact('deb')
     except StopIteration: raise ValueError('candidate has no deb artifact')

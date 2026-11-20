@@ -61,9 +61,10 @@
 # extracted-robustness run against the verified candidate.
 # Partial inputs fail closed with exit 2, as do other
 # suites given candidate inputs. Unarmed vm-live-soak
-# without candidate inputs skips with exit 77. The
-# candidate-inputs suite aggregates the loader,
-# dispatch and live-campaign tests.
+# without candidate inputs skips with exit 77; armed
+# without inputs fails closed. The candidate-inputs
+# suite aggregates the loader, dispatch and
+# live-campaign tests.
 
 set -u
 
@@ -74,6 +75,10 @@ if [ "$#" = 1 ] && [ "$1" != --help ] && [ "$1" != -h ] && \
     exec python3 "$ROOT/tests/support/candidate_suite.py" "$1"
 fi
 if [ "$#" = 1 ] && [ "$1" = vm-live-soak ]; then
+    if [ "${MEMVEIL_VM_LIVE_SOAK:-0}" = 1 ]; then
+        echo "vm-live-soak: FAIL: armed but candidate inputs missing" >&2
+        exit 1
+    fi
     echo "vm-live-soak: SKIP: needs candidate inputs" >&2
     exit 77
 fi

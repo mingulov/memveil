@@ -82,6 +82,19 @@ def test_unarmed_soak_skips_77():
     assert 'SKIP' in result.stdout + result.stderr
 
 
+def test_armed_soak_without_inputs_fails():
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('MV_CANDIDATE', 'MV_BUNDLE',
+                                   'MEMVEIL_VM_'))}
+    env['MEMVEIL_VM_LIVE_SOAK'] = '1'
+    result = subprocess.run(
+        [str(ROOT / 'tools/test'), 'vm-live-soak'],
+        env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert 'FAIL' in result.stdout + result.stderr
+    assert '77' not in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize('runner', ['perf/replay.py',
                                     'perf/region_replay.py',
                                     'perf/soak.py',

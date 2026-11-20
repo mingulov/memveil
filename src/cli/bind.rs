@@ -25,6 +25,7 @@ use crate::render::json::escape_json;
 const LIFECYCLE: &str = "mapping-lifecycle";
 const COPY: &str = "copy-actual";
 const CONVERT: &str = "conversion-observe";
+const JOURNAL: &str = "conversion-journal";
 const ZLIB: &str = "libz.so.1";
 const RING_ATTEMPT: &str = "8388608";
 const RING_EXTRA: &str = "33554432";
@@ -617,6 +618,9 @@ pub fn run_bind_with(root: &str, exe_path: &str, profiles_dir: &str, opts: &Bind
         if cap == CONVERT {
             return bind_failed("capability conversion-observe has no record channel");
         }
+        if cap == JOURNAL {
+            return bind_failed("capability conversion-journal has no record channel");
+        }
     }
     if opts.has_profile_id && !valid_profile_id(&opts.profile_id) {
         return bind_misused(&format!("bad --profile-id: {}", opts.profile_id));
@@ -1027,5 +1031,8 @@ mod tests {
         let mut opts5 = bind_opts(format!("{}/v.json", tmp.as_str()));
         opts5.capabilities = "conversion-observe".to_string();
         assert_eq!(run_bind_with(&host(), "", &pdir(), &opts5), 3);
+        let mut opts6 = bind_opts(format!("{}/u.json", tmp.as_str()));
+        opts6.capabilities = "conversion-journal".to_string();
+        assert_eq!(run_bind_with(&host(), "", &pdir(), &opts6), 3);
     }
 }
