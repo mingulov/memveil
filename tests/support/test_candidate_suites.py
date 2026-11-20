@@ -782,6 +782,66 @@ def test_journey_prep_dir_refuses_tracked_content(tmp_path):
             'real index gained staged changes'
 
 
+def test_journey_prep_refuses_tracked_before_any_write(
+        tmp_path):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_prep_dir
+    import support.journey_prep as prep
+    top = Path(journey_prep_dir())
+    aside = tmp_path / 'prep-dir-aside'
+    if top.exists() or top.is_symlink():
+        shutil.move(str(top), str(aside))
+    try:
+        # Plant the tracked file, stage it into an index
+        # copy, then remove the directory from disk: the
+        # future prep path holds tracked content while
+        # existing nowhere on disk.
+        top.mkdir(parents=True)
+        plant = top / ('tracked-%d.txt' % os.getpid())
+        plant.write_text('force-added\n')
+        git_dir = subprocess.run(
+            ['git', '-C', str(ROOT), 'rev-parse', '--git-dir'],
+            capture_output=True, text=True)
+        assert git_dir.returncode == 0, git_dir.stderr
+        resolved = Path(git_dir.stdout.strip())
+        if not resolved.is_absolute():
+            resolved = ROOT / resolved
+        index_copy = tmp_path / 'index-copy'
+        shutil.copyfile(resolved / 'index', index_copy)
+        saved = os.environ.get('GIT_INDEX_FILE')
+        os.environ['GIT_INDEX_FILE'] = str(index_copy)
+        try:
+            added = subprocess.run(
+                ['git', '-C', str(ROOT), 'add', '-f',
+                 str(plant)],
+                capture_output=True, text=True)
+            assert added.returncode == 0, added.stderr
+            shutil.rmtree(top, ignore_errors=True)
+            assert not os.path.lexists(top)
+            with pytest.raises(ValueError, match='tracked'):
+                prep.prepare(str(top / 'prep.json'))
+            assert not os.path.lexists(top), \
+                'refused prep created its directory'
+        finally:
+            if saved is None:
+                os.environ.pop('GIT_INDEX_FILE', None)
+            else:
+                os.environ['GIT_INDEX_FILE'] = saved
+        untouched = subprocess.run(
+            ['git', '-C', str(ROOT), 'diff', '--cached',
+             '--quiet'],
+            capture_output=True, text=True)
+        assert untouched.returncode == 0, \
+            'real index gained staged changes'
+    finally:
+        if top.is_symlink():
+            top.unlink()
+        else:
+            shutil.rmtree(top, ignore_errors=True)
+        if aside.exists():
+            shutil.move(str(aside), str(top))
+
+
 def test_journey_record_outside_prep_dir_refuses(
         sealed, tmp_path, monkeypatch):
     sys.path.insert(0, str(ROOT / 'tests'))

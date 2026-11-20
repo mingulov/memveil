@@ -232,10 +232,14 @@ def prepare(record_path):
     """Build every journey suite; write the record file.
 
     The record lives under the tool-owned prep directory
-    (refused elsewhere). Checkout identity is recorded
-    before the first build and re-verified after the
-    last: the two must agree, so an edit during prep
-    refuses instead of mislabelling an older executable.
+    (refused elsewhere). The tracked-content boundary
+    check runs before any directory creation, mode
+    change, or write: only a prep directory empty of
+    tracked content proceeds to creation. Checkout
+    identity is recorded before the first build and
+    re-verified after the last: the two must agree, so
+    an edit during prep refuses instead of mislabelling
+    an older executable.
     The prep directory holding every record, stage, and
     publication scratch file is excluded wholesale from
     the digest through the exclusion list shared with
@@ -248,9 +252,9 @@ def prepare(record_path):
             'suites')
     record_abs = Path(resolve_journey_record(record_path))
     raw_abs = Path(os.path.abspath(record_path))
+    excludes = journey_identity_excludes()
     _ensure_owned_dir(record_abs.parent)
     staged_dir = _private_stage_dir(record_abs)
-    excludes = journey_identity_excludes()
     commit_before, tree_before = checkout_identity(
         exclude=excludes)
     suites = {}
