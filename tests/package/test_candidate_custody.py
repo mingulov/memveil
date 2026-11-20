@@ -1288,10 +1288,11 @@ def test_release_permissions_pin_exact_matrix():
         "contents": "read", "attestations": "write",
         "id-token": "write"}
     assert doc["jobs"]["dry-run"]["permissions"] == {
-        "contents": "read", "actions": "read"}
+        "contents": "read", "actions": "read",
+        "attestations": "read"}
     assert doc["jobs"]["promote"]["permissions"] == {
         "contents": "write", "actions": "read",
-        "checks": "read"}
+        "checks": "read", "attestations": "read"}
 
 
 def test_release_custody_builds_trusted_harness():
