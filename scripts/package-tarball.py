@@ -1305,7 +1305,7 @@ def git_rev_or_none(path):
 def git_clean(path):
     if not owns_git_root(path):
         fail("cannot inspect owning Git tree at %s" % path)
-    proc = run(["git", "-C", path, "status", "--short"])
+    proc = run(["git", "-C", path, "status", "--porcelain"])
     if proc.returncode != 0:
         fail("cannot inspect %s" % path)
     return proc.stdout.strip() == ""
@@ -1373,6 +1373,7 @@ def main(argv):
         if memveil_rev is not None:
             if not git_clean(root):
                 fail("worktree has uncommitted changes; commit first")
+            clean_tree = True
         else:
             # Git-free source export: no commit identity to record
             # and no worktree state to enforce. The manifest says
@@ -1380,6 +1381,10 @@ def main(argv):
             # build, and tarball mtimes fall back to the youngest
             # staged file instead of the commit clock.
             memveil_rev = "export"
+            # No receipt is recorded below, so the seal's
+            # clean_tree requirement can never pass: the export
+            # cleanliness value stays false by absence.
+            clean_tree = False
             print("package-tarball: git-free export; "
                   "revision recorded as export")
         rust_dir = root
@@ -1845,13 +1850,14 @@ def main(argv):
                  + rerun.stderr)
 
         # Build-time receipt: source C plus the tree inventory, the
-        # probed tool versions, and the engine/BPF output digests,
-        # recorded from the verified staging reads above (never
-        # re-walked). The provenance emitter and the seal bind this
-        # recording: a prebuilt engine from another commit, or one
-        # swapped after packaging, fails against it. Git-free
-        # exports carry no commit identity, so they record no
-        # receipt and cannot seal.
+        # probed tool versions, the engine/BPF output digests, and
+        # the build-time worktree cleanliness, recorded from the
+        # verified staging reads above (never re-walked). The
+        # provenance emitter and the seal bind this recording: a
+        # prebuilt engine from another commit, one swapped after
+        # packaging, or one built from a dirty tree fails against
+        # it. Git-free exports carry no commit identity, so they
+        # record no receipt and cannot seal.
         build_receipt = None
         if memveil_rev != "export":
             _tree_entries, tree_digest = git_tree_inventory(
@@ -1867,6 +1873,7 @@ def main(argv):
                     "bpf": {shipped: observed["bpf/" + shipped]
                             for _channel, shipped in CHANNELS},
                 },
+                "clean_tree": clean_tree,
             }
 
         # Known manifest gaps, intentionally unported (not

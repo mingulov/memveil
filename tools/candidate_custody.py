@@ -24,7 +24,6 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import tarfile
 import tempfile
 import tomllib
 import zipfile
@@ -168,7 +167,8 @@ def checked_git_file(root, commit, name, output):
               'evidence file must be present non-executable '
               'regular data')
     data = subprocess.check_output(
-        ['git', '-C', str(root), 'show', commit + ':' + name])
+        ['git', '-C', str(root), 'show', commit + ':' + name],
+        env=c.git_env())
     c.write_once(output, data)
 
 
@@ -181,20 +181,27 @@ def verify_source(root, manifest):
              ('crates/ebpf/Cargo.lock', 'ebpf_lock_sha256')]
     for name, field in locks:
         data = subprocess.check_output(
-            ['git', '-C', str(root), 'show', commit + ':' + name])
+            ['git', '-C', str(root), 'show', commit + ':' + name],
+            env=c.git_env())
         c.require(c.digest_bytes(data)
                   == manifest['toolchain'][field],
                   'candidate toolchain/source mismatch')
     policy = subprocess.check_output(
         ['git', '-C', str(root), 'show',
-         commit + ':packaging/candidate-policy.json'])
+         commit + ':packaging/candidate-policy.json'],
+        env=c.git_env())
     c.require(c.digest_bytes(policy)
               == manifest['policy_sha256'],
               'candidate policy differs from C')
 
 
 def verify_artifacts(root, manifest, directory, harness_bin=None):
-    """Verify retained bytes, closure, source, SBOM and origin."""
+    """Verify retained bytes, closure, source, SBOM and origin.
+
+    Returns (paths, bundled): the role paths plus the already
+    verified parsed bundle facts, so callers never re-read the
+    bundle from disk after verification.
+    """
     c.validate_manifest(manifest)
     directory = Path(directory)
     paths = {entry['role']: directory / entry['name']
@@ -244,7 +251,7 @@ def verify_artifacts(root, manifest, directory, harness_bin=None):
     c.verify_provenance(origin, manifest['source'],
                         manifest['toolchain'], manifest['files'],
                         subjects, recorded)
-    return paths
+    return paths, bundled
 
 
 def verify_sbom(sbom, manifest):
@@ -433,13 +440,14 @@ def run(mode, request, out, harness_bin=None):
     c.verify_file(stored / archive_record['name'], archive_record)
     evidence = c.safe_extract(stored / archive_record['name'],
                               out / 'evidence', True, False)
-    c.verify_qualification(out / 'candidate.json',
-                           out / 'qualification.json',
-                           out / 'policy.json', evidence)
-    paths = verify_artifacts(root, manifest, stored, harness_bin)
+    qualified = c.verify_qualification(
+        out / 'candidate.json', out / 'qualification.json',
+        out / 'policy.json', evidence)
+    paths, bundled = verify_artifacts(
+        root, manifest, stored, harness_bin)
     policy = c.read_json(out / 'policy.json')
     expected_checksums = c.verify_signed_checksums(
-        manifest, evidence, policy['trusted_keys'])
+        manifest, evidence, qualified['trusted_keys'])
     if mode == 'promote':
         verify_remote_checks(remote['checks'], api, repo, source,
                              request['candidate_sha256'], policy)
@@ -450,13 +458,10 @@ def run(mode, request, out, harness_bin=None):
         c.write_once(out / 'SUBJECTS.txt', checksums.encode())
     else:
         tag = request['tag']
-        with tarfile.open(paths['bundle'], 'r:gz') as archive:
-            member = next(m for m in archive.getmembers()
-                          if m.name.endswith('/MANIFEST.json'))
-            bundled = json.load(archive.extractfile(member))
         version_source = subprocess.check_output(
             ['git', '-C', str(root), 'show',
-             source + ':Cargo.toml']).decode()
+             source + ':Cargo.toml'],
+            env=c.git_env()).decode()
         version = tomllib.loads(version_source)['package'][
             'version']
         verify_release_version(tag, bundled['engine_version'],
@@ -485,10 +490,15 @@ def run(mode, request, out, harness_bin=None):
                           for item in listing),
                   'release already exists; overwrite refused')
         if mode == 'promote':
+            # Notes come from the C blob (mode-pinned), never
+            # the ambient worktree file a stray edit could swap.
+            checked_git_file(root, source,
+                             'docs/release-notes.md',
+                             out / 'release-notes.md')
             command = ['gh', 'release', 'create', tag, '--repo',
                        repo, '--verify-tag', '--draft', '--title',
                        tag, '--notes-file',
-                       str(root / 'docs/release-notes.md')]
+                       str(out / 'release-notes.md')]
             if tag.startswith('v0.') or '-' in tag:
                 command.append('--prerelease')
             subprocess.run(command, check=True)

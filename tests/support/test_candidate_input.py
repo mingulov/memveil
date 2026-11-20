@@ -39,7 +39,8 @@ def test_partial_or_empty_inputs_refuse_before_execution(env):
                                 'LD_LIBRARY_PATH',
                                 'MEMVEIL_TEST_NO_BPF',
                                 'LMB_SANITIZE',
-                                'MV_CANDIDATE_ROOT'])
+                                'MV_CANDIDATE_ROOT',
+                                'MV_REPO'])
 def test_overrides_refused_before_reading_inputs(key):
     with pytest.raises(ValueError, match='override'):
         api().load(env={'MV_BUNDLE_TARBALL': 'absent',
@@ -72,8 +73,10 @@ def sealed(tmp_path):
                'tools': {'cargo': '1.100.0', 'rustc': '1.100.0',
                          'bpf_linker': '0.10.4'},
                'outputs': {'engine_sha256': files['bin/memveil'],
-                           'bpf': bpf}}
+                           'bpf': bpf},
+               'clean_tree': True}
     bm = {'files': files, 'embedded_bpf': bpf,
+          'engine_version': '0.1.0',
           'memveil_revision': 'a' * 40,
           'cargo': {'lock_sha256': 'e' * 64,
                     'ebpf_lock_sha256': 'f' * 64},

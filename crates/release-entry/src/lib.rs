@@ -253,6 +253,32 @@ fn tar_typed_members(tarball: &Path, label: &str) -> Result<Vec<(String, bool)>,
     Ok(members)
 }
 
+/// Refuse any extracted symlink or special file under a root.
+///
+/// The pre-extraction listings cannot prove what the extractor
+/// wrote: a member swapped between listing and extraction would
+/// sail through the typed listing, so every extractor sweeps
+/// its own output before any payload byte is read.
+fn refuse_extracted_links(root: &Path, label: &str) -> Result<(), String> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .map_err(|err| format!("{label}: extracted tree list failed: {err}"))?;
+        for entry in entries.flatten() {
+            let info = entry
+                .file_type()
+                .map_err(|err| format!("{label}: extracted tree list failed: {err}"))?;
+            if info.is_symlink() || (!info.is_file() && !info.is_dir()) {
+                return Err(format!("{label}: links and special files are forbidden"));
+            }
+            if info.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Extract the bundle tarball after listing it strictly.
 fn extract_bundle(tarball: &Path, tmp: &Path) -> Result<PathBuf, String> {
     let label = "payload-closure";
@@ -279,6 +305,7 @@ fn extract_bundle(tarball: &Path, tmp: &Path) -> Result<PathBuf, String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
+    refuse_extracted_links(&dest, label)?;
     Ok(dest.join(tops.into_iter().next().unwrap()))
 }
 
@@ -340,6 +367,7 @@ fn extract_deb(deb: &Path, tmp: &Path) -> Result<PathBuf, String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
+    refuse_extracted_links(&dest, "payload-closure")?;
     Ok(dest)
 }
 
@@ -427,22 +455,7 @@ fn extract_rpm(rpm: &Path, tmp: &Path) -> Result<PathBuf, String> {
     }
     // The name listing cannot see member types, so refuse any
     // extracted symlink or special file before reading payload.
-    let mut stack = vec![dest.clone()];
-    while let Some(dir) = stack.pop() {
-        let entries =
-            fs::read_dir(&dir).map_err(|err| format!("payload-closure: rpm list failed: {err}"))?;
-        for entry in entries.flatten() {
-            let info = entry
-                .file_type()
-                .map_err(|err| format!("payload-closure: rpm list failed: {err}"))?;
-            if info.is_symlink() || (!info.is_file() && !info.is_dir()) {
-                return Err("payload-closure: links and special files are forbidden".to_string());
-            }
-            if info.is_dir() {
-                stack.push(entry.path());
-            }
-        }
-    }
+    refuse_extracted_links(&dest, "payload-closure")?;
     Ok(dest)
 }
 
@@ -1171,6 +1184,47 @@ mod tests {
         let err = write_once_bytes(&out, b"second\n").expect_err("overwrite");
         assert!(err.contains("refusing to overwrite"), "{err}");
         assert_eq!(fs::read(&out).expect("read"), b"first\n");
+    }
+
+    #[test]
+    fn extracted_sweep_rejects_swapped_member() {
+        // A member swapped between listing and extraction: the
+        // typed listing saw a regular file, the tree holds a
+        // link. The post-extraction sweep must refuse it.
+        let scratch = Scratch::fresh("sweep").expect("scratch");
+        let root = scratch.path.join("root");
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        fs::write(root.join("sub/file"), b"payload").expect("write");
+        std::os::unix::fs::symlink("file", root.join("sub/link")).expect("symlink");
+        let err = refuse_extracted_links(&root, "payload-closure").expect_err("link must fail");
+        assert!(err.contains("links and special files"), "{err}");
+        fs::remove_file(root.join("sub/link")).expect("remove");
+        refuse_extracted_links(&root, "payload-closure").expect("clean tree passes");
+    }
+
+    #[test]
+    fn bundle_extract_rejects_link_member() {
+        // End to end: a crafted bundle tarball carrying a link
+        // member fails extraction (the typed listing refuses it
+        // first; the sweep is the second refusal for members
+        // swapped after listing).
+        let scratch = Scratch::fresh("swap").expect("scratch");
+        let top = scratch.path.join("top");
+        fs::create_dir_all(&top).expect("mkdir");
+        fs::write(top.join("payload.txt"), b"payload").expect("write");
+        std::os::unix::fs::symlink("payload.txt", top.join("swapped")).expect("symlink");
+        let tarball = scratch.path.join("bundle.tar.gz");
+        let status = Command::new("tar")
+            .args(["-czf"])
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&scratch.path)
+            .arg("top")
+            .status()
+            .expect("run tar");
+        assert!(status.success());
+        let err = extract_bundle(&tarball, &scratch.path).expect_err("link member must fail");
+        assert!(err.contains("links and special files"), "{err}");
     }
 
     #[test]

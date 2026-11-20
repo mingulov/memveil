@@ -127,12 +127,13 @@ jobs:
           test "$(sha256sum < candidate.json | cut -d' ' -f1)" \
             = "${{ inputs.candidate_sha256 }}"
       - name: Sign the artifact checksums
+        env:
+          QUALIFIER_SIGNING_KEY: ${{ secrets.QUALIFIER_SIGNING_KEY }}
         run: |
           set -eu
-          test -n "${{ secrets.QUALIFIER_SIGNING_KEY }}"
+          test -n "$QUALIFIER_SIGNING_KEY"
           umask 077
-          printf '%s\n' "${{ secrets.QUALIFIER_SIGNING_KEY }}" \
-            > qualifier.key
+          printf '%s\n' "$QUALIFIER_SIGNING_KEY" > qualifier.key
           ./tools/candidate sign-checksums \
             --artifacts-dir dist/artifacts \
             --key qualifier.key \
@@ -147,7 +148,7 @@ jobs:
           cp dist/signed/SHA256SUMS.txt dist/signed/SHA256SUMS.txt.sig \
             dist/signed/signer.pub sealed/
           cp target/debug/memveil-release-entry sealed/
-          test "$(ls sealed | wc -l)" -eq 11
+          set -- sealed/*; test $# -eq 11
           ls sealed
       - name: Upload the sealed candidate
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -211,8 +212,14 @@ jobs:
       - name: Qualify and export the tested payload
         run: |
           set -eu
-          # Read-only display lookup; the export branch below
-          # authenticates the same bytes before evaluating them.
+          ./tools/candidate qualify \
+            --manifest sealed/candidate.json \
+            --qualification evidence/qualification.json \
+            --policy packaging/candidate-policy.json \
+            --evidence-dir evidence
+          # Derived only after the qualify gate above
+          # authenticated the same bytes; the export branch below
+          # authenticates them once more before evaluating them.
           MATRIX_DIR=$(python3 - evidence \
             evidence/qualification.json <<'EOF'
           import sys
@@ -232,11 +239,6 @@ jobs:
           EOF
           )
           test -n "$MATRIX_DIR"
-          ./tools/candidate qualify \
-            --manifest sealed/candidate.json \
-            --qualification evidence/qualification.json \
-            --policy packaging/candidate-policy.json \
-            --evidence-dir evidence
           MV_CANDIDATE_MANIFEST=sealed/candidate.json \
           ./tools/kernel-matrix \
             --verify-out \

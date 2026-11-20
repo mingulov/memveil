@@ -21,7 +21,8 @@ Anything stale, tampered, or /1 fails closed with ValueError.
 
 The packager records the build receipt in the bundle MANIFEST.json
 when the engine is built: source C, tree inventory, tool versions,
-and the engine/BPF output digests. `tools/candidate provenance`
+the engine/BPF output digests, and the build-time worktree
+cleanliness. `tools/candidate provenance`
 composes the local-build provenance record from that recorded
 receipt plus the re-hashed artifact subjects, never inventing
 values. The seal requires the provenance receipt to equal the
@@ -62,6 +63,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 
 SCHEMA = "memveil-candidate/2"
 PROVENANCE_SCHEMA = "memveil-local-build/2"
@@ -200,6 +202,22 @@ def write_once(path, data):
         os.fsync(stream.fileno())
 
 
+def has_runtime_so(files):
+    """True when files{} carries a lib/memveil/*.so* member.
+
+    A bare prefix match would let a README satisfy the runtime
+    closure requirement; only a direct lib entry whose name
+    carries `.so` counts.
+    """
+    for name in files:
+        if not name.startswith("lib/memveil/"):
+            continue
+        rest = name[len("lib/memveil/"):]
+        if rest and "/" not in rest and ".so" in rest:
+            return True
+    return False
+
+
 def validate_manifest(doc):
     """Validate a memveil-candidate/2 manifest; return it or ValueError.
 
@@ -240,8 +258,7 @@ def validate_manifest(doc):
         installed_file_path(name)
     require("bin/memveil" in doc["files"],
             "missing required runtime component")
-    require(any(name.startswith("lib/memveil/")
-                for name in doc["files"]),
+    require(has_runtime_so(doc["files"]),
             "missing required runtime component")
     require({name for name in doc["files"]
              if name.startswith("bpf/")}
@@ -496,19 +513,30 @@ def probe_tool_versions(root):
 
 
 def toolchain_channel(root):
-    """`channel` value from the source root rust-toolchain.toml."""
+    """`channel` value from the source root rust-toolchain.toml.
+
+    Parsed with the standard TOML reader, so quoted styles,
+    trailing comments, and whitespace all resolve exactly as
+    the toolchain file means them.
+    """
+    path = os.path.join(str(root), "rust-toolchain.toml")
     try:
-        with open(os.path.join(str(root), "rust-toolchain.toml"),
-                  encoding="utf-8") as handle:
-            text = handle.read()
+        with open(path, "rb") as handle:
+            doc = tomllib.load(handle)
     except OSError as error:
         raise ValueError(
             "source lacks rust-toolchain.toml") from error
-    for line in text.splitlines():
-        key, sep, value = line.partition("=")
-        if sep and key.strip() == "channel":
-            return value.strip().strip('"')
-    raise ValueError("source toolchain pin has no channel")
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(
+            "source toolchain pin is invalid") from error
+    try:
+        channel = doc["toolchain"]["channel"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "source toolchain pin has no channel") from error
+    require(isinstance(channel, str) and channel,
+            "source toolchain pin has no channel")
+    return channel
 
 
 def check_toolchain_pin(root, tools):
@@ -574,7 +602,7 @@ def verify_bundle_dir(bundle_dir):
         require(observed[name] == value,
                 "bundle file differs from MANIFEST.json: " + name)
     require("bin/memveil" in files, "bundle lacks the engine")
-    require(any(name.startswith("lib/memveil/") for name in files),
+    require(has_runtime_so(files),
             "bundle lacks the runtime closure")
     require({name for name in files if name.startswith("bpf/")}
             == {"bpf/" + name for name in BPF_OBJECTS},
@@ -595,10 +623,13 @@ def verify_bundle_dir(bundle_dir):
         raise ValueError(
             "bundle MANIFEST.json lacks a build receipt") from error
     exact(receipt,
-          {"source_commit", "inventory_sha256", "tools", "outputs"},
+          {"source_commit", "inventory_sha256", "tools", "outputs",
+           "clean_tree"},
           "recorded build receipt")
     hexid(receipt["source_commit"], 40)
     hexid(receipt["inventory_sha256"])
+    require(receipt["clean_tree"] is True,
+            "bundle was built from a dirty worktree")
     exact(receipt["tools"], {"cargo", "rustc", "bpf_linker"},
           "recorded build tools")
     for tool in ("cargo", "rustc", "bpf_linker"):
@@ -633,10 +664,17 @@ def verify_bundle_dir(bundle_dir):
     require(isinstance(cargo_ver, str) and cargo_ver
             and isinstance(rustc_ver, str) and rustc_ver,
             "bundle MANIFEST.json lacks tool versions")
+    try:
+        engine_version = bundled["engine_version"]
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "bundle MANIFEST.json lacks an engine version") from error
+    version(engine_version)
     manifest_bytes = read_regular(manifest_path)
     return {"files": files, "manifest_bytes": manifest_bytes,
             "manifest_sha256": digest_bytes(manifest_bytes),
-            "revision": revision, "lock_sha256": lock_sha,
+            "revision": revision, "engine_version": engine_version,
+            "lock_sha256": lock_sha,
             "ebpf_lock_sha256": ebpf_lock_sha,
             "cargo_version": cargo_ver, "rustc_version": rustc_ver,
             "build_receipt": receipt}
@@ -997,7 +1035,8 @@ def verify_provenance(provenance, source, toolchain, files, subjects,
             "false provenance origin/source/toolchain")
     receipt = provenance["build_receipt"]
     exact(receipt,
-          {"source_commit", "inventory_sha256", "tools", "outputs"},
+          {"source_commit", "inventory_sha256", "tools", "outputs",
+           "clean_tree"},
           "build receipt")
     require(receipt == recorded,
             "provenance build receipt differs from the recorded "
@@ -1479,7 +1518,13 @@ def _row_inventory_files(allowlist, row):
     receipt construction.
     """
     found = {}
-    for dirpath, _dirnames, filenames in os.walk(row):
+    for dirpath, dirnames, filenames in os.walk(row):
+        for name in sorted(dirnames):
+            target = Path(dirpath) / name
+            if os.path.islink(target):
+                raise ValueError(
+                    "matrix row refuses symlinked directory %s"
+                    % target.relative_to(row).as_posix())
         for name in sorted(filenames):
             path = Path(dirpath) / name
             rel = path.relative_to(row).as_posix()
@@ -1589,10 +1634,14 @@ def verify_qualification(candidate, qualification, policy,
     verified before the signature, the signature before any
     predicate, and predicates before export; other gates verify
     the signature chain, then retained measurements, then
-    predicates. Returns {"ok": True, "gates": [...]} with the
-    verified gate IDs sorted; raises ValueError otherwise. The
-    qualification's evidence_archive entry is shape-checked only:
-    archive bytes are verified by whoever extracts them.
+    predicates. Returns {"ok": True, "gates": [...],
+    "trusted_keys": [...]} with the verified gate IDs sorted and
+    the validated policy's pinned trust; raises ValueError
+    otherwise. Callers reuse the returned trust instead of
+    re-reading the policy file, so the bytes verified here are
+    the bytes used downstream. The qualification's
+    evidence_archive entry is shape-checked only: archive bytes
+    are verified by whoever extracts them.
     """
     manifest = load_manifest(candidate)
     candidate_id = digest(candidate)
@@ -1681,7 +1730,8 @@ def verify_qualification(candidate, qualification, policy,
             rederive_measurements(
                 retained,
                 validated["required_gates"][ident])
-    return {"ok": True, "gates": sorted(doc["gates"])}
+    return {"ok": True, "gates": sorted(doc["gates"]),
+            "trusted_keys": list(validated["trusted_keys"])}
 
 
 def checksums_text(artifacts_dir):
@@ -1768,6 +1818,13 @@ def sign_checksums(artifacts_dir, key_path, out_dir):
                     os.unlink(path)
                 except OSError:
                     pass
+            # A failed ssh-keygen run may still leave a partial
+            # .sig behind before the success path records it; the
+            # pre-check above guarantees any such file is ours.
+            try:
+                os.unlink(signature)
+            except OSError:
+                pass
     return digest_bytes(text.encode())
 
 
@@ -1852,11 +1909,11 @@ def qualify_candidate(source, manifest_path, qualification_path,
         evidence = safe_extract(evidence_archive,
                                 Path(tmp) / "evidence", True,
                                 False)
-        verify_qualification(manifest_path, qualification_path,
-                             policy_path, evidence)
+        qualified = verify_qualification(
+            manifest_path, qualification_path, policy_path,
+            evidence)
         verify_signed_checksums(
-            manifest, evidence,
-            read_json(policy_path)["trusted_keys"])
+            manifest, evidence, qualified["trusted_keys"])
     expected = expected_payload(manifest)
     write_once(output, "".join(
         value + "  " + name + "\n"
@@ -1905,13 +1962,13 @@ def main(argv=None):
                  "harness_bin": args.harness_bin})
             print(seal_manifest(manifest, args.out))
         elif args.command == "qualify":
-            verify_qualification(
+            qualified = verify_qualification(
                 args.manifest, args.qualification,
                 args.policy, args.evidence_dir)
             verify_signed_checksums(
                 load_manifest(args.manifest),
                 args.evidence_dir,
-                read_json(args.policy)["trusted_keys"])
+                qualified["trusted_keys"])
             print("all required signed qualification inputs "
                   "re-derived")
         elif args.command == "sign-checksums":

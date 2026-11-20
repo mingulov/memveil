@@ -179,6 +179,7 @@ class Workshop:
                          "swiotlb_lifecycle.bpf.o",
                          "swiotlb_copy.bpf.o")},
             },
+            "clean_tree": True,
         }
         manifest = {
             "bundle": "memveil-fixture",
@@ -472,6 +473,44 @@ def test_seal_rejects_receipt_source_mismatch(workshop, tmp_path):
              "harness_bin": workshop.harness_bin()})
 
 
+def test_seal_rejects_receipt_stripped_bundle(workshop,
+                                              tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    manifest_path = fix["bundle_dir"] / "MANIFEST.json"
+    doc = json.loads(manifest_path.read_text())
+    del doc["build_receipt"]
+    manifest_path.write_text(
+        json.dumps(doc, indent=2, sort_keys=True))
+    with pytest.raises(ValueError, match="[Bb]uild receipt"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+
+
+def test_seal_requires_clean_tree_receipt(workshop, tmp_path):
+    m, fix = seal_paths(workshop, tmp_path)
+    manifest_path = fix["bundle_dir"] / "MANIFEST.json"
+    doc = json.loads(manifest_path.read_text())
+    assert doc["build_receipt"]["clean_tree"] is True
+    doc["build_receipt"]["clean_tree"] = False
+    manifest_path.write_text(
+        json.dumps(doc, indent=2, sort_keys=True))
+    with pytest.raises(ValueError, match="[Dd]irty worktree"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+    del doc["build_receipt"]["clean_tree"]
+    manifest_path.write_text(
+        json.dumps(doc, indent=2, sort_keys=True))
+    with pytest.raises(ValueError, match="[Bb]uild receipt"):
+        m.create_manifest(
+            fix["bundle_dir"], fix["artifacts"], fix["policy"],
+            {"root": str(fix["root"]),
+             "harness_bin": workshop.harness_bin()})
+
+
 def test_seal_rejects_tampered_source_archive(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
     path = next(fix["artifacts"].glob("*source.tar.gz"))
@@ -597,6 +636,31 @@ def test_manifest_rejects_damaged_bindings(workshop, tmp_path, damage):
         m.validate_manifest(manifest)
 
 
+def test_runtime_closure_requires_shared_object(workshop,
+                                                tmp_path):
+    m, manifest = sealed_manifest(workshop, tmp_path)
+    lib = "lib/memveil/libfixture.so.1"
+    # A lib/memveil/ entry with no .so member must not satisfy
+    # the runtime closure requirement, in the manifest or the
+    # bundle directory it seals.
+    doctored = json.loads(json.dumps(manifest))
+    doctored["files"]["lib/memveil/README"] = \
+        doctored["files"].pop(lib)
+    with pytest.raises(ValueError, match="runtime component"):
+        m.validate_manifest(doctored)
+    m, fix = seal_paths(workshop, tmp_path / "bundle")
+    bundle_manifest = fix["bundle_dir"] / "MANIFEST.json"
+    doc = json.loads(bundle_manifest.read_text())
+    doc["files"]["lib/memveil/README"] = doc["files"].pop(lib)
+    (fix["bundle_dir"] / lib).unlink()
+    (fix["bundle_dir"] / "lib/memveil/README").write_bytes(
+        b"synthetic-lib\n")
+    bundle_manifest.write_text(
+        json.dumps(doc, indent=2, sort_keys=True))
+    with pytest.raises(ValueError, match="runtime closure"):
+        m.verify_bundle_dir(fix["bundle_dir"])
+
+
 def test_expected_payload_covers_full_closure(workshop, tmp_path):
     m, manifest = sealed_manifest(workshop, tmp_path)
     expected = m.expected_payload(manifest)
@@ -632,6 +696,36 @@ def test_installed_paths_match_packagers():
         m.installed_file_path("MANIFEST.json")
     with pytest.raises(ValueError):
         m.installed_file_path("../escape")
+
+
+@pytest.mark.parametrize("line", [
+    'channel = "1.100.0"',
+    "channel = '1.100.0'",
+    'channel = "1.100.0"  # pinned toolchain',
+    "channel = '1.100.0'  # pinned toolchain",
+    'channel="1.100.0"',
+])
+def test_toolchain_channel_parses_quoting_and_comments(
+        tmp_path, line):
+    m = api()
+    (Path(tmp_path) / "rust-toolchain.toml").write_text(
+        "[toolchain]\n" + line + "\n")
+    assert m.toolchain_channel(tmp_path) == "1.100.0"
+
+
+def test_toolchain_channel_rejects_missing_or_invalid(
+        tmp_path):
+    m = api()
+    with pytest.raises(ValueError, match="[Tt]oolchain"):
+        m.toolchain_channel(tmp_path)
+    (Path(tmp_path) / "rust-toolchain.toml").write_text(
+        "[toolchain]\n# no channel here\n")
+    with pytest.raises(ValueError, match="[Cc]hannel"):
+        m.toolchain_channel(tmp_path)
+    (Path(tmp_path) / "rust-toolchain.toml").write_text(
+        "channel = \n")
+    with pytest.raises(ValueError, match="[Tt]oolchain"):
+        m.toolchain_channel(tmp_path)
 
 
 def test_write_once_refuses_overwrite(tmp_path):
@@ -930,6 +1024,34 @@ def test_provenance_emitter_binds_recorded_receipt(workshop, tmp_path):
     assert manifest["schema"] == "memveil-candidate/2"
     assert manifest["build_receipt_sha256"] == m.digest_canonical(
         recorded)
+
+
+@pytest.mark.parametrize("edge", ["missing-role", "symlink-subject",
+                                  "duplicate-basenames",
+                                  "dirty-root"])
+def test_provenance_emitter_rejects_bad_inputs(workshop,
+                                               tmp_path, edge):
+    m, fix = seal_paths(workshop, tmp_path)
+    info = _emit_source_info(fix)
+    out = Path(tmp_path) / ("emitter-%s.provenance.json" % edge)
+    if edge == "missing-role":
+        del info["sbom"]
+    elif edge == "symlink-subject":
+        link = Path(tmp_path) / "linked.deb"
+        os.symlink(info["deb"], link)
+        info["deb"] = str(link)
+    elif edge == "duplicate-basenames":
+        twin = Path(tmp_path) / "twin"
+        twin.mkdir()
+        same = twin / Path(info["deb"]).name
+        shutil.copy2(info["deb"], same)
+        info["rpm"] = str(same)
+    elif edge == "dirty-root":
+        (fix["root"] / "src" / "uncommitted.txt").write_text(
+            "dirty\n")
+    with pytest.raises(ValueError):
+        m.emit_provenance(fix["bundle_dir"], info, out)
+    assert not out.exists(), "refused emit must not write bytes"
 
 
 def _advance_fixture_to_c1(fix):
@@ -1240,7 +1362,9 @@ def test_inventory_rejects_altered_row_receipt(workshop,
         workshop, tmp_path)
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
-        evidence) == {"ok": True, "gates": [MATRIX_GATE]}
+        evidence) == {"ok": True, "gates": [MATRIX_GATE],
+                      "trusted_keys": [sha(
+                          ctx["pub"].read_bytes())]}
     receipt_path = evidence / "matrix" / MATRIX_ROW \
         / "receipt.json"
     receipt = json.loads(receipt_path.read_text())
@@ -1284,13 +1408,28 @@ def test_inventory_rejects_extra_file(workshop, tmp_path):
                                ctx["policy_path"], evidence)
 
 
+def test_inventory_rejects_symlinked_row_directory(workshop,
+                                                   tmp_path):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    (row / "real.d").mkdir()
+    (row / "real.d" / "kept.txt").write_text("kept\n")
+    os.symlink("real.d", row / "linked.d")
+    with pytest.raises(ValueError, match="symlink"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence)
+
+
 def test_original_signature_rejects_mutated_evidence(workshop,
                                                      tmp_path):
     m, ctx, evidence, q_path, doc = _matrix_qualified(
         workshop, tmp_path)
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
-        evidence) == {"ok": True, "gates": [MATRIX_GATE]}
+        evidence) == {"ok": True, "gates": [MATRIX_GATE],
+                      "trusted_keys": [sha(
+                          ctx["pub"].read_bytes())]}
     signed = {name: sha((evidence / name).read_bytes())
               for name in ("receipt.json", "receipt.json.sig",
                            "inputs.json")}
@@ -1364,7 +1503,8 @@ def test_nonmatrix_gate_chain_unchanged(workshop, tmp_path):
     q_path = Path(tmp_path) / "qualification.json"
     _write_qualification(m, ctx, q_path,
                          {NONMATRIX_GATE: binding})
-    expected = {"ok": True, "gates": [NONMATRIX_GATE]}
+    expected = {"ok": True, "gates": [NONMATRIX_GATE],
+                "trusted_keys": [sha(ctx["pub"].read_bytes())]}
     assert m.verify_qualification(
         ctx["manifest_path"], q_path, ctx["policy_path"],
         evidence) == expected
@@ -1645,3 +1785,26 @@ def test_sign_checksums_tampered_artifact_refuses_to_verify(
                        out / "signer.pub",
                        [sha((out / "signer.pub")
                             .read_bytes())])
+
+
+def test_sign_checksums_cleans_partial_signature_on_failure(
+        tmp_path, monkeypatch):
+    m = api()
+    staged, private, public = _sign_checksums_fixture(tmp_path)
+    out = Path(tmp_path) / "signed"
+    real_run = subprocess.run
+
+    def failing_sign(argv, **kw):
+        if argv[:3] == ["ssh-keygen", "-Y", "sign"]:
+            # The signer wrote a partial .sig, then failed.
+            Path(str(argv[-1]) + ".sig").write_bytes(
+                b"partial\n")
+            return subprocess.CompletedProcess(
+                argv, 1, "", "boom")
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(m.subprocess, "run", failing_sign)
+    with pytest.raises(ValueError, match="signing failed"):
+        m.sign_checksums(staged, private, out)
+    assert list(out.iterdir()) == [], \
+        "failed sign must leave no partial triple"

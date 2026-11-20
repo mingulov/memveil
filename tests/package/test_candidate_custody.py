@@ -174,6 +174,7 @@ class CustodyBase:
                          "swiotlb_lifecycle.bpf.o",
                          "swiotlb_copy.bpf.o")},
             },
+            "clean_tree": True,
         }
         bundled = {
             "bundle": "memveil-custody",
