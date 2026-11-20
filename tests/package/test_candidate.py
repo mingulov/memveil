@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 
 import pytest
 
@@ -277,6 +278,12 @@ class Workshop:
             target = staged / m.installed_file_path(rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(bundle / rel, target)
+        # Pin staged mtimes: the RPM %install copy below must not
+        # mint fresh timestamps (distro rpm macros differ on
+        # SOURCE_DATE_EPOCH clamping; unclamped installs fail the
+        # determinism comparison whenever two shops land in
+        # different seconds).
+        _clamp_tree(staged)
         deb_stage = self.base / "deb-stage"
         shutil.copytree(staged, deb_stage / "payload")
         (deb_stage / "payload" / "DEBIAN").mkdir(parents=True)
@@ -300,7 +307,7 @@ class Workshop:
             "Summary: synthetic seal fixture\n"
             "License: GPL-3.0-or-later\n\n"
             "%description\nsynthetic seal fixture\n\n"
-            "%install\ncp -r %{payload}/* %{buildroot}/\n\n"
+            "%install\ncp -r --preserve=timestamps %{payload}/* %{buildroot}/\n\n"
             "%files\n" + "".join(
                 '/%s\n' % m.installed_file_path(rel)
                 for rel in sorted(files)) + "\n"
@@ -1028,14 +1035,31 @@ def test_sbom_emit_honors_source_date_epoch(workshop,
     assert doc["creationInfo"]["created"] == _want_created()
 
 
+def _rpm_filemtimes(rpm):
+    proc = subprocess.run(
+        ["rpm", "-q", "--qf", "[%{FILENAMES} %{FILEMTIMES}\n]",
+         "-p", str(rpm)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
 def test_seal_is_deterministic(tmp_path):
     m = api()
     harness = cargo_build_harness()
     ids = []
     sets = []
+    shops = []
     for leaf in ("det-a", "det-b"):
+        if leaf == "det-b":
+            # Force the two installs into different wall-clock
+            # seconds: unclamped RPM file mtimes would fail the
+            # comparison below, so this sleep is the regression
+            # coverage for second-straddling installs.
+            time.sleep(1.25 - time.time() % 1.0)
         shop = Workshop(tmp_path / leaf)
         fix = shop.fresh(tmp_path / (leaf + "-use"))
+        shops.append(fix)
         manifest = m.create_manifest(
             fix["bundle_dir"], fix["artifacts"], fix["policy"],
             {"root": str(fix["root"]),
@@ -1047,7 +1071,22 @@ def test_seal_is_deterministic(tmp_path):
                          fix["artifacts"].iterdir())})
     assert sets[0].keys() == sets[1].keys()
     for name in sets[0]:
+        if sets[0][name] != sets[1][name] and name.endswith(".rpm"):
+            first = next(shops[0]["artifacts"].glob("*.rpm"))
+            second = next(shops[1]["artifacts"].glob("*.rpm"))
+            pytest.fail(
+                "rpm bytes differ\n--- det-a FILEMTIMES ---\n"
+                + _rpm_filemtimes(first)
+                + "--- det-b FILEMTIMES ---\n"
+                + _rpm_filemtimes(second))
         assert sets[0][name] == sets[1][name], name
+    # The install tree is clamped: every recorded file mtime
+    # must equal the fixed epoch, on any distro macro set.
+    for fix in shops:
+        rpm = next(fix["artifacts"].glob("*.rpm"))
+        for line in _rpm_filemtimes(rpm).splitlines():
+            stamp = line.rsplit(" ", 1)[1]
+            assert stamp == str(FIXED_EPOCH), (rpm.name, line)
     assert ids[0] == ids[1]
 
 
