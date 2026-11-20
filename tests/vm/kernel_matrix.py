@@ -5965,20 +5965,31 @@ def _required_row_ids(lock):
 
 
 def verify_tested_rows(out_dir, lock, manifest):
-    """Re-derive every required row's receipt, then its predicates.
+    """Re-derive every required row's receipt, predicates, bindings.
 
     The evidence inventory is already verified by the caller;
-    this is the row core shared by qualify and export. Every
-    row under the out dir must first re-derive PASS from its
-    own receipt (verify_matrix_out: validated receipt, files[]
-    hashes matching the retained bytes, rec/summary merge,
-    exact required row set), then each required row replays
-    its predicates: the cached oracle inputs must transcribe
-    the retained raw files, the oracle predicates must
-    re-derive ok, the re-derived checks must equal the
-    receipt's recorded checks, and the row must name this
-    candidate. Returns the {row id: checks} map; raises
-    ValueError and writes nothing otherwise.
+    this is the full acceptance core shared by qualify,
+    export, and custody. Every row under the out dir must
+    first re-derive PASS from its own receipt
+    (verify_matrix_out: validated receipt, files[] hashes
+    matching the retained bytes, rec/summary merge, exact
+    required row set), then each required row replays its
+    predicates and its row-to-candidate bindings: the cached
+    oracle inputs must transcribe the retained raw files, the
+    oracle predicates must re-derive ok, the re-derived checks
+    must equal the receipt's recorded checks, the row must
+    name this candidate, and the row must have tested these
+    exact bytes (pinned lock entry, full-run non-smoke mode,
+    source, toolchain, executable, selected artifact, BPF
+    objects, runtime closure). Returns the {row id: checks}
+    map; raises ValueError and writes nothing otherwise.
+
+    Toolchain binding is split: the receipt's single lock slot
+    binds the Cargo lock only (receipt toolchain lock_sha256
+    against manifest toolchain cargo_lock_sha256). The eBPF
+    lock is bound at seal via manifest toolchain
+    ebpf_lock_sha256, and the eBPF object bytes are bound here
+    via the manifest files bpf/... digest checks below.
     """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]
@@ -5993,8 +6004,9 @@ def verify_tested_rows(out_dir, lock, manifest):
         "required matrix rows did not pass")
     want_id = candidate.digest_bytes(
         candidate.canonical(manifest))
+    expected_engine = manifest["files"]["bin/memveil"]
     checked = {}
-    for ident in wanted:
+    for ident, entry in wanted.items():
         row = Path(out_dir) / ident
         receipt = candidate.read_json(row / "receipt.json")
         inputs = candidate.read_json(row / "oracle-inputs.json")
@@ -6010,38 +6022,10 @@ def verify_tested_rows(out_dir, lock, manifest):
             result["checks"] == receipt["actual"]["checks"],
             "matrix recorded checks differ from re-derived "
             "predicates")
-        checked[ident] = result["checks"]
-    return checked
-
-
-def export_tested_candidate(out_dir, lock, manifest, destination):
-    """Export payload expectations after every locked row proves itself.
-
-    Each required row must re-derive PASS from its receipt, keep
-    its cached oracle inputs consistent with the retained raw
-    files, re-execute the oracle predicates, and bind the exact
-    candidate source, toolchain, executable, selected artifact,
-    BPF objects, and runtime closure. Returns the expected
-    payload map; raises ValueError and writes nothing otherwise.
-
-    Toolchain binding is split: the receipt's single lock slot
-    binds the Cargo lock only (receipt toolchain lock_sha256
-    against manifest toolchain cargo_lock_sha256). The eBPF
-    lock is bound at seal via manifest toolchain
-    ebpf_lock_sha256, and the eBPF object bytes are bound at
-    export via the manifest files bpf/... digest checks below.
-    """
-    import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
-                            / "tools"))
-    import candidate
-    candidate.validate_manifest(manifest)
-    wanted = _required_row_ids(lock)
-    verify_tested_rows(out_dir, lock, manifest)
-    expected_engine = manifest["files"]["bin/memveil"]
-    for ident, entry in wanted.items():
-        row = Path(out_dir) / ident
-        receipt = candidate.read_json(row / "receipt.json")
+        candidate.require(
+            inputs.get("entry") == entry,
+            "matrix expectations differ from "
+            "pinned lock")
         candidate.require(
             receipt["mode"] == "matrix"
             and not receipt["smoke"],
@@ -6055,10 +6039,6 @@ def export_tested_candidate(out_dir, lock, manifest, destination):
             receipt["toolchain"]["lock_sha256"]
             == manifest["toolchain"]["cargo_lock_sha256"],
             "matrix toolchain differs")
-        inputs = candidate.read_json(row / "oracle-inputs.json")
-        candidate.require(inputs.get("entry") == entry,
-                          "matrix expectations differ from "
-                          "pinned lock")
         candidate.require(
             receipt["artifacts"]["binary_sha256"]
             == expected_engine,
@@ -6092,6 +6072,25 @@ def export_tested_candidate(out_dir, lock, manifest, destination):
         candidate.require(
             inputs.get("candidate_files") == manifest["files"],
             "matrix runtime/profile closure differs")
+        checked[ident] = result["checks"]
+    return checked
+
+
+def export_tested_candidate(out_dir, lock, manifest, destination):
+    """Export payload expectations after every locked row proves itself.
+
+    Acceptance is exactly verify_tested_rows (receipts,
+    predicates, and every row-to-candidate binding); this
+    wrapper only writes the expected payload once the shared
+    core accepts. Returns the expected payload map; raises
+    ValueError and writes nothing otherwise.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                            / "tools"))
+    import candidate
+    candidate.validate_manifest(manifest)
+    verify_tested_rows(out_dir, lock, manifest)
     expected = candidate.expected_payload(manifest)
     candidate.write_once(
         destination,

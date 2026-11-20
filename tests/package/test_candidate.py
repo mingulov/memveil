@@ -1547,6 +1547,12 @@ def _write_real_matrix_row(m, matrix_dir, doc):
                      for nsecs, text in ev[field]]
     ev["candidate_sha256"] = m.digest_bytes(m.canonical(doc))
     ev["candidate_files"] = copy.deepcopy(doc["files"])
+    measured = json.loads(ev["artifacts_text"])
+    measured["binary"]["sha256"] = doc["files"]["bin/memveil"]
+    for channel in ("attempt", "lifecycle", "copy"):
+        measured["bpf"][channel] = \
+            doc["files"]["bpf/swiotlb_%s.bpf.o" % channel]
+    ev["artifacts_text"] = json.dumps(measured)
     ev["persisted"]["counter_snapshot"] = \
         2 * len(ev["counters"])
     ev["oracle_mode"] = "full"
@@ -2032,6 +2038,81 @@ def test_qualify_rejects_receipt_files_drift(workshop,
     _resign_matrix_inputs(m, ctx, evidence, q_path)
     with pytest.raises(ValueError,
                        match="required matrix rows did not pass"):
+        m.verify_qualification(ctx["manifest_path"], q_path,
+                               ctx["policy_path"], evidence,
+                               source_tree=str(ctx["root"]))
+
+
+@pytest.mark.parametrize(
+    "damage,blame",
+    [("engine", "matrix executable differs"),
+     ("bpf", "matrix BPF object differs"),
+     ("smoke", "smoke-only"),
+     ("package", "matrix selected artifact differs"),
+     ("source", "matrix product source differs"),
+     ("toolchain", "matrix toolchain differs"),
+     ("entry", "pinned lock"),
+     ("closure", "runtime/profile closure differs")])
+def test_qualify_refuses_foreign_tested_bytes(
+        workshop, tmp_path, damage, blame):
+    m, ctx, evidence, q_path, _ = _matrix_qualified(
+        workshop, tmp_path)
+    row = evidence / "matrix" / MATRIX_ROW
+    receipt_path = row / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    cached_path = row / "oracle-inputs.json"
+    ev = json.loads(cached_path.read_text())
+    if damage in ("engine", "bpf"):
+        # The attack: the row tested different bytes, kept
+        # consistent across the retained artifacts file, the
+        # cached transcription, and the receipt, so only the
+        # row-to-candidate binding can refuse.
+        measured = json.loads((row / "artifacts.json")
+                              .read_text())
+        if damage == "engine":
+            measured["binary"]["sha256"] = "9" * 64
+            receipt["artifacts"]["binary_sha256"] = "9" * 64
+        else:
+            measured["bpf"]["attempt"] = "9" * 64
+            receipt["artifacts"]["bpf"]["attempt"] = "9" * 64
+        (row / "artifacts.json").write_text(
+            json.dumps(measured))
+        ev["artifacts_text"] = json.dumps(measured)
+        cached_path.write_text(json.dumps(ev))
+        receipt["files"] = km.row_receipt_files(row)
+    elif damage == "smoke":
+        # A short smoke run, consistently relabelled in the
+        # job transcript and the receipt workload, still
+        # refuses: qualification needs full-run rows.
+        job = json.loads((row / "job.json").read_text())
+        job["duration"] = 61
+        (row / "job.json").write_text(json.dumps(job))
+        receipt["command"]["duration_s"] = 61
+        receipt["workload"]["duration_s"] = 61
+        receipt["smoke"] = True
+        receipt["files"] = km.row_receipt_files(row)
+    elif damage == "package":
+        receipt["command"]["source_sha256"] = "9" * 64
+    elif damage == "source":
+        receipt["source"]["memveil"]["commit"] = "9" * 40
+    elif damage == "toolchain":
+        receipt["toolchain"]["lock_sha256"] = "9" * 64
+    elif damage == "entry":
+        # A predicate-neutral lock field: the oracle verdicts
+        # re-derive identically, only the pinned-entry binding
+        # can refuse.
+        assert ev["entry"]["upstream"] != "9.9.99"
+        ev["entry"]["upstream"] = "9.9.99"
+        cached_path.write_text(json.dumps(ev))
+        receipt["files"] = km.row_receipt_files(row)
+    else:
+        assert ev["candidate_files"]["bin/memveil"] != "9" * 64
+        ev["candidate_files"]["bin/memveil"] = "9" * 64
+        cached_path.write_text(json.dumps(ev))
+        receipt["files"] = km.row_receipt_files(row)
+    receipt_path.write_bytes(m.canonical(receipt))
+    _resign_matrix_inputs(m, ctx, evidence, q_path)
+    with pytest.raises(ValueError, match=blame):
         m.verify_qualification(ctx["manifest_path"], q_path,
                                ctx["policy_path"], evidence,
                                source_tree=str(ctx["root"]))
