@@ -251,11 +251,13 @@ def prepare(record_path):
     tool-owned prep directory (refused elsewhere);
     staged executables live under the sibling stages
     subdir. The tracked-content and tool-owned-content
-    boundary checks run before any directory creation,
-    mode change, or write: only a prep directory empty
-    of tracked content and holding nothing outside
-    valid tool-owned records, digest-bound stages, and
-    publication scratch proceeds to creation. Checkout
+    boundary checks plus a staging-root verification run
+    before any directory creation, mode change, or
+    write: only a prep directory empty of tracked
+    content, holding nothing outside valid tool-owned
+    records, digest-bound stages, and publication
+    scratch, and whose staging roots are link-free real
+    directories, proceeds to creation. Checkout
     identity is
     recorded before the first build and re-verified
     after the last: the two must agree, so an edit
@@ -275,6 +277,27 @@ def prepare(record_path):
     raw_abs = Path(os.path.abspath(record_path))
     excludes = journey_identity_excludes()
     refuse_unowned_prep_contents()
+    # Verify the staging roots before any write: the prep
+    # directory, the record's parent directory, and the
+    # stages root must hold no symlink and, where present,
+    # must be real directories. Without this ordering a
+    # linked stages root would refuse only after the
+    # records directory was already created and chmodded.
+    for probe in (Path(journey_prep_dir()),
+                  record_abs.parent,
+                  Path(journey_staging_root())):
+        refuse_symlinked_path(probe)
+        try:
+            probe_mode = os.lstat(probe).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValueError(
+                'staging directory unavailable: %s' % exc)
+        if stat.S_ISLNK(probe_mode) \
+                or not stat.S_ISDIR(probe_mode):
+            raise ValueError(
+                'staging path refuses symlink: %s' % probe)
     _ensure_owned_dir(record_abs.parent)
     staged_dir = _private_stage_dir(record_abs)
     commit_before, tree_before = checkout_identity(

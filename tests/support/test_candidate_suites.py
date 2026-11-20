@@ -3203,3 +3203,48 @@ def test_journey_scan_validates_suite_entries(tmp_path):
         write_record(bad)
         with pytest.raises(ValueError, match='invalid shape'):
             refuse_unowned_prep_contents()
+
+
+def test_journey_prep_verifies_roots_before_any_write(
+        tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import journey_records_dir, \
+        journey_staging_root
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    records = Path(journey_records_dir())
+    root = Path(journey_staging_root())
+    root.parent.mkdir(parents=True, exist_ok=True)
+    real = tmp_path / 'real'
+    real.mkdir()
+    root.symlink_to(real, target_is_directory=True)
+    calls = []
+    real_chmod = os.chmod
+
+    def recording(path, mode):
+        calls.append((str(path), mode))
+        return real_chmod(path, mode)
+
+    monkeypatch.setattr(os, 'chmod', recording)
+    # The linked stages root refuses before any write: the
+    # records directory is never created and no mode
+    # changes.
+    assert not os.path.lexists(records)
+    with pytest.raises(ValueError, match='symlink'):
+        prep.prepare(str(records / 'prep.json'))
+    assert calls == [], 'refused prep attempted chmod'
+    assert not os.path.lexists(records), \
+        'refused prep created its records dir'
+    assert sorted(entry.name for entry in real.iterdir()) \
+        == []
+    # Honest control: without the link the same prep
+    # proceeds and verifies.
+    root.unlink()
+    record = prep.prepare(str(records / 'prep.json'))
+    assert (records / 'prep.json').is_file()
+    for suite, entry in record['suites'].items():
+        assert Path(entry['staged']).is_file(), suite
