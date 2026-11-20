@@ -134,7 +134,7 @@ inputs retain their existing scope; unsupported qualification suites fail
 closed.
 
 `tools/test perf-replay`, `perf-region`, `soak`, `privacy`, `fuzz-smoke`,
-`fuzz-campaign`, `perf-workload`, `perf-overhead`, `vm-live-soak`,
+`fuzz-campaign`, `perf-overhead`, `vm-live-soak`,
 `vm-kernels`, `vm-scenarios`, `extracted-robustness`, `package`,
 `release-runtime`, `deb` and `rpm-journey` consume the selected bytes. The
 extracted robustness suite reuses the supplied archive. Pacing remains
@@ -152,9 +152,14 @@ one-second refreshes: adjacent refreshes must remain within 0.5–1.5 seconds,
 both window edges within 1.5 seconds, and at least 59 refreshes for a
 sixty-second window. Missing middle intervals or startup bursts fail. Missing
 or unadmitted requested journal support skips its row with a recorded reason;
-an attach refusal is never a performance pass. The existing `perf-workload`
-remains a laboratory consumer measurement, with candidate BPF inputs when
-selected; it does not become a product-summary receipt.
+an attach refusal is never a performance pass.
+
+`perf-workload` is DEFERRED under qualification inputs: the sealed
+candidate carries no retired perf-workload guest inputs, so dispatch
+skips the suite with its recorded reason instead of executing it. It
+remains a laboratory consumer measurement in development runs only; it
+never executes against candidate bytes and never produces a
+product-summary receipt.
 
 Installed campaign workload units are a 16 MiB direct scratch read and 32
 paced packets to the guest's emulated peer, run concurrently. Each leg warms

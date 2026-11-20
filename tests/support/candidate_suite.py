@@ -25,9 +25,8 @@ def _checked(suite, code):
 def _run(suite, argv, live, selected):
     entry = lookup(suite)
     if entry is not None:
-        print('SKIP: %s [deferred to %s]'
-              % (entry['reason'], entry['owning-card']),
-              flush=True)
+        print('SKIP: %s [deferred]'
+              % entry['reason'], flush=True)
         return 77
     if suite in ('fuzz-campaign', 'extracted-robustness') \
             and int(live.get('MEMVEIL_FUZZ_SEEDS', '10000')) \

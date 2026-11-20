@@ -156,7 +156,8 @@ def test_perf_workload_derouted_skips_with_reason(sealed):
     assert result.returncode == 77, combined
     assert 'mv_consume' in combined and 'bridge' in combined \
         and 'oracle ko' in combined, combined
-    assert 'MV31-12' in combined, combined
+    assert '[deferred]' in combined, combined
+    assert re.search(r'MV\d+-\d+', combined) is None, combined
     assert 'perf-workload:' not in combined, \
         'de-routed suite executed its runner'
 
@@ -184,20 +185,24 @@ def test_deferred_allowlist_shape_validated():
     from types import SimpleNamespace
     ds.validate()
     entry = ds.lookup('perf-workload')
-    assert entry['owning-card'] == 'MV31-12'
-    assert ds.listed_reason(entry['reason'])
-    assert not ds.listed_reason('unlisted reason')
+    assert set(entry) == {'suite', 'reason', 'nodes'}
+    assert entry['nodes'] == []
     assert ds.lookup('vm-kernels') is None
+    good = [{'suite': 'x', 'reason': 'r',
+             'nodes': ['n1', 'n2']}]
+    ds.validate(good)
     bad_lists = [
         [{'suite': 'x', 'reason': 'r'}],
+        [{'suite': 'x', 'reason': 'r', 'nodes': [],
+          'owning-card': 'y'}],
+        [{'suite': '', 'reason': 'r', 'nodes': []}],
+        [{'suite': 'x', 'reason': '  ', 'nodes': []}],
         [{'suite': 'x', 'reason': 'r',
-          'owning-card': 'MV31-12', 'extra': 1}],
-        [{'suite': '', 'reason': 'r',
-          'owning-card': 'MV31-12'}],
-        [{'suite': 'x', 'reason': '  ',
-          'owning-card': 'MV31-12'}],
+          'nodes': 'n1'}],
+        [{'suite': 'x', 'reason': 'r', 'nodes': ['']}],
         [{'suite': 'x', 'reason': 'r',
-          'owning-card': 'MV31'}],
+          'nodes': ['n1', 'n1']}],
+        [{'suite': 'x', 'reason': 'r', 'nodes': [1]}],
         [dict(entry), dict(entry)],
         'not-a-list',
     ]
@@ -211,15 +216,27 @@ def test_deferred_allowlist_shape_validated():
         longrepr=('f', 1, 'Skipped'))) is None
     assert ds.skip_reason(
         SimpleNamespace(longrepr='weird')) is None
-    assert ds.unlisted_skips([SimpleNamespace(
-        nodeid='a',
-        longrepr=('f', 1, 'Skipped: nope'))]) != []
-    assert ds.unlisted_skips([SimpleNamespace(
-        nodeid='a', longrepr=(
-            'f', 1, 'Skipped: ' + entry['reason']))]) == []
+
+    def report(nodeid, reason):
+        return SimpleNamespace(
+            nodeid=nodeid,
+            longrepr=('f', 1, 'Skipped: ' + reason))
+    # Exemption needs the exact node plus the exact
+    # reason; either half failing keeps the skip unlisted.
+    assert ds.unlisted_skips(
+        [report('n1', 'r')], good) == []
+    assert ds.unlisted_skips(
+        [report('n3', 'r')], good) != []
+    assert ds.unlisted_skips(
+        [report('n1', 'other')], good) != []
+    assert ds.unlisted_skips(
+        [report('n1', 'r')]) != []
+    assert ds.unlisted_skips(
+        [report('a', 'nope')]) != []
 
 
-def test_conftest_passes_listed_skip_reason(sealed, tmp_path):
+def test_conftest_refuses_same_reason_unlisted_node(
+        sealed, tmp_path):
     import json
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.deferred_skips import lookup
@@ -231,7 +248,7 @@ def test_conftest_passes_listed_skip_reason(sealed, tmp_path):
         if environment.get('PYTHONPATH') else '')
     shutil.copy(str(ROOT / 'tests/package/conftest.py'),
                 tmp_path / 'conftest.py')
-    (tmp_path / 'test_listed_skip.py').write_text(
+    (tmp_path / 'test_same_reason_skip.py').write_text(
         'import pytest\n'
         'pytestmark = pytest.mark.skip(reason='
         + json.dumps(reason) + ')\n'
@@ -239,14 +256,28 @@ def test_conftest_passes_listed_skip_reason(sealed, tmp_path):
         '    pass\n')
     result = subprocess.run(
         [sys.executable, '-m', 'pytest',
-         'test_listed_skip.py', '-q', '-p',
+         'test_same_reason_skip.py', '-q', '-p',
          'no:cacheprovider'],
         env=environment, capture_output=True, text=True,
         cwd=tmp_path)
-    assert 'skipped' in result.stdout, \
-        result.stdout + result.stderr
-    assert result.returncode == 0, \
-        result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert 'skipped' in result.stdout, combined
+    assert result.returncode == 1, combined
+    assert 'unlisted' in combined, combined
+
+
+def test_perf_workload_docs_deferred():
+    text = (ROOT / 'docs' / 'performance.md').read_text()
+    flat = ' '.join(text.split())
+    assert '`perf-workload` is DEFERRED ' \
+        'under qualification inputs' in flat
+    assert 'never executes against candidate bytes' in flat
+    at = flat.index('consume the selected bytes')
+    sentence = flat[flat.rfind('.', 0, at) + 1:
+                   flat.index('.', at)]
+    assert 'perf-workload' not in sentence, \
+        'docs advertise candidate execution for a ' \
+        'deferred suite'
 
 
 def test_inventory_excludes_only_named_evidence_files(tmp_path):
