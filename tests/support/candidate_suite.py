@@ -34,9 +34,10 @@ SUITE_ARMING = {
 }
 
 # Journey suites launch prebuilt executables, never cargo:
-# tests/support/journey_prep.py builds them once and
-# records their paths, MV_JOURNEY_PREP names the record,
-# and the launcher below verifies checkout, suite, and
+# tests/support/journey_prep.py builds them once, stages
+# the verified bytes into an owned directory, and records
+# the staged paths, MV_JOURNEY_PREP names the record, and
+# the launcher below verifies checkout, suite, and staged
 # bytes before exec plus executed-test evidence after.
 JOURNEY_SUITES = ('deb', 'rpm-journey')
 
@@ -228,35 +229,40 @@ def _run_journey(suite, argv, live):
     The record must bind this checkout (commit plus tree
     digest recomputed live), the requested suite (the
     recorded build target must equal the dispatched
-    suite's), and the executable bytes (re-hashed before
-    exec); a stale record, a rebuilt-from-dirty checkout, a
-    suite mixup, a missing or aliased executable, or digest
-    drift refuses. The run's own output must carry
-    executed-test evidence (the load-bearing control: a
-    stub reporting bare success has none). No build
-    invocation on this path.
+    suite's), and the staged executable bytes (re-hashed
+    before exec); a stale record, a rebuilt-from-dirty
+    checkout, a suite mixup, a missing or aliased staged
+    executable, or digest drift refuses. The staged copy
+    is the only executed path: the original build output
+    is provenance only and is never resolved here. The
+    run's own output must carry executed-test evidence
+    (the load-bearing control: a stub reporting bare
+    success has none). No build invocation on this path.
 
     Chain of custody: the prep tool builds each suite
-    executable, hashes the bytes it just built, binds the
-    checkout state it built from, and writes the one
-    record file this launcher reads back. A hand-written
-    record never passes through the prep tool, so it can
-    only name bytes the writer already holds; any
-    substitution (another binary, a rebuilt checkout, a
-    bare-success stub) breaks at least one verified
-    binding. Residual: a local writer who hand-builds a
-    binary, forges harness output inside it, and hand-writes
-    a fully consistent record defeats file checks; that
-    fraud is active (not a stale artifact) and re-running
-    the prep tool exposes it (the honest record names
-    different bytes).
+    executable, stages the verified bytes into its owned
+    directory, hashes the staged copy, binds the checkout
+    state it built from, and writes the one record file
+    this launcher reads back. A hand-written record never
+    passes through the prep tool, so it can only name
+    bytes the writer already holds; any substitution
+    (another binary, a rebuilt checkout, a bare-success
+    stub) breaks at least one verified binding. Residual:
+    a local writer who hand-builds a binary, forges
+    harness output inside it, and hand-writes a fully
+    consistent record defeats file checks; that fraud is
+    active (not a stale artifact) and re-running the prep
+    tool exposes it (the honest record names different
+    bytes).
     """
     from support.journey_prep import TARGETS
     record, name = _journey_record(live)
     entry = record['suites'].get(suite)
     if not isinstance(entry, dict) \
-            or set(entry) != {'path', 'sha256', 'target'} \
+            or set(entry) \
+            != {'path', 'staged', 'sha256', 'target'} \
             or not isinstance(entry['path'], str) \
+            or not isinstance(entry['staged'], str) \
             or not isinstance(entry['sha256'], str) \
             or not isinstance(entry['target'], str):
         raise ValueError(
@@ -265,21 +271,22 @@ def _run_journey(suite, argv, live):
         raise ValueError(
             'journey prep record names another suite\'s '
             'executable: ' + suite)
-    path = Path(entry['path'])
-    if not path.is_absolute() or path.is_symlink() \
-            or not path.is_file():
+    staged = Path(entry['staged'])
+    if not staged.is_absolute() or staged.is_symlink() \
+            or not staged.is_file():
         raise ValueError(
-            'recorded journey executable is not a plain '
-            'file: ' + entry['path'])
-    if not os.access(path, os.X_OK):
+            'recorded journey staged executable is not a '
+            'plain file: ' + entry['staged'])
+    if not os.access(staged, os.X_OK):
         raise ValueError(
-            'recorded journey executable is not '
-            'executable: ' + entry['path'])
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            'recorded journey staged executable is not '
+            'executable: ' + entry['staged'])
+    digest = hashlib.sha256(staged.read_bytes()).hexdigest()
     if digest != entry['sha256']:
         raise ValueError(
-            'recorded journey executable changed; re-run '
-            'tests/support/journey_prep.py: ' + suite)
+            'recorded journey staged executable changed; '
+            're-run tests/support/journey_prep.py: '
+            + suite)
     commit, tree = checkout_identity(exclude=[name])
     if commit != record['commit'] or tree != record['tree']:
         raise ValueError(
@@ -290,7 +297,7 @@ def _run_journey(suite, argv, live):
         ROOT / 'tests/package/valid-empty')
     env.pop('RUSTUP_TOOLCHAIN', None)
     proc = subprocess.run(
-        [str(path), *argv], cwd=ROOT, env=env,
+        [str(staged), *argv], cwd=ROOT, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, errors='replace')
     if proc.stdout:

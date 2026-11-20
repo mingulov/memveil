@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Fixture-prep phase for journey qualification.
 
-Builds the journey test executables once and records their
-paths plus SHA-256 digests, so qualification can launch
-them directly without invoking cargo. Usage:
+Builds the journey test executables once, stages their
+verified bytes into an owned directory beside the record,
+and records the staged paths plus SHA-256 digests, so
+qualification can launch them directly without invoking
+cargo. Usage:
 
     tests/support/journey_prep.py RECORD
 
@@ -12,12 +14,14 @@ RECORD is the JSON record file to write; dispatch reads it
 through MV_JOURNEY_PREP. The record binds the checkout the
 executables were built from (HEAD commit plus worktree
 digest), the dispatched suite's build target, and the
-hashed bytes, so the launcher can verify all four live.
-Re-run after any rebuild or checkout change: the launcher
-re-hashes the recorded bytes before exec and refuses stale
-records instead of rebuilding. This is the only step that
-compiles: the qualification path itself contains no cargo
-invocation.
+hashed staged bytes, so the launcher can verify all four
+live. The checkout must stay stable across the builds:
+identity is recorded before the first build and re-verified
+after the last, and any change refuses. Re-run after any
+rebuild or checkout change: the launcher re-hashes the
+staged bytes before exec and refuses stale records instead
+of rebuilding. This is the only step that compiles: the
+qualification path itself contains no cargo invocation.
 """
 import hashlib
 import json
@@ -75,29 +79,53 @@ def build_executable(target):
 def prepare(record_path):
     """Build every journey suite; write the record file.
 
-    Checkout identity is read after the builds, so the
-    bound state is the one the executables were built
-    from; the record file itself is excluded from the
-    digest.
+    Checkout identity is recorded before the first build
+    and re-verified after the last: the two must agree, so
+    an edit during prep refuses instead of mislabelling an
+    older executable. The record file itself and the staged
+    copies are excluded from the digest.
     """
     if set(JOURNEY_SUITES) != set(TARGETS):
         raise ValueError(
             'prep targets differ from dispatched journey '
             'suites')
+    record_abs = Path(record_path).resolve()
+    commit_before, tree_before = checkout_identity(
+        exclude=[str(record_abs)])
+    staged_dir = record_abs.parent \
+        / (record_abs.stem + '.staged')
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(staged_dir, 0o700)
     suites = {}
     for suite in JOURNEY_SUITES:
         executable = build_executable(TARGETS[suite])
-        digest = hashlib.sha256(
-            executable.read_bytes()).hexdigest()
+        data = executable.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        staged = staged_dir / TARGETS[suite]
+        staged.write_bytes(data)
+        os.chmod(staged, 0o700)
+        if hashlib.sha256(staged.read_bytes()).hexdigest() \
+                != digest:
+            raise ValueError(
+                'fixture prep staged copy differs: %s'
+                % suite)
         suites[suite] = {'path': str(executable),
+                         'staged': str(staged),
                          'sha256': digest,
                          'target': TARGETS[suite]}
         print('prep: %s -> %s sha256:%s'
-              % (suite, executable, digest[:16]))
-    commit, tree = checkout_identity(
-        exclude=[str(Path(record_path).resolve())])
-    record = {'schema': SCHEMA, 'commit': commit,
-              'tree': tree, 'suites': suites}
+              % (suite, staged, digest[:16]))
+    staged_paths = [entry['staged']
+                    for entry in suites.values()]
+    commit_after, tree_after = checkout_identity(
+        exclude=[str(record_abs)] + staged_paths)
+    if commit_after != commit_before \
+            or tree_after != tree_before:
+        raise ValueError(
+            'checkout changed during fixture prep; re-run '
+            'tests/support/journey_prep.py')
+    record = {'schema': SCHEMA, 'commit': commit_before,
+              'tree': tree_before, 'suites': suites}
     Path(record_path).write_text(
         json.dumps(record, indent=2, sort_keys=True) + '\n')
     return record

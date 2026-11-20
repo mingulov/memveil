@@ -371,12 +371,19 @@ def test_journey_prep_records_executables(tmp_path):
     assert doc['commit'] == commit
     assert doc['tree'] == tree
     for suite, entry in doc['suites'].items():
-        assert set(entry) == {'path', 'sha256', 'target'}, suite
+        assert set(entry) == {
+            'path', 'staged', 'sha256', 'target'}, suite
         assert entry['target'] == TARGETS[suite], suite
         exe = Path(entry['path'])
         assert exe.is_absolute(), suite
         assert exe.is_file() and not exe.is_symlink(), suite
-        assert os.access(exe, os.X_OK), suite
+        staged = Path(entry['staged'])
+        assert staged.is_absolute(), suite
+        assert staged.is_file() \
+            and not staged.is_symlink(), suite
+        assert os.access(staged, os.X_OK), suite
+        assert hashlib.sha256(staged.read_bytes()).hexdigest() \
+            == entry['sha256'], suite
         assert hashlib.sha256(exe.read_bytes()).hexdigest() \
             == entry['sha256'], suite
 
@@ -396,12 +403,16 @@ def _journey_stub_record(tmp_path, script, suite='deb'):
     """Hand-written prep-shaped record for one stub script."""
     import hashlib
     import json
+    import shutil
     sys.path.insert(0, str(ROOT / 'tests'))
     from support.candidate_suite import checkout_identity
     from support.journey_prep import TARGETS
     stub = tmp_path / ('stub-' + suite)
     stub.write_text(script)
     stub.chmod(0o755)
+    staged = tmp_path / ('staged-' + suite)
+    shutil.copyfile(stub, staged)
+    staged.chmod(0o755)
     record_path = tmp_path / ('prep-' + suite + '.json')
     commit, tree = checkout_identity(
         exclude=[str(record_path.resolve())])
@@ -410,10 +421,11 @@ def _journey_stub_record(tmp_path, script, suite='deb'):
          'commit': commit, 'tree': tree,
          'suites': {suite: {
              'path': str(stub),
+             'staged': str(staged),
              'sha256': hashlib.sha256(
-                 stub.read_bytes()).hexdigest(),
+                 staged.read_bytes()).hexdigest(),
              'target': TARGETS[suite]}}}))
-    return stub, record_path
+    return stub, staged, record_path
 
 
 def _launch_journey(suite, environment, *argv):
@@ -432,7 +444,7 @@ def test_journey_launcher_runs_recorded_binary(sealed,
                'echo "test journey_probe ... ok"\n'
                'echo "test result: ok. 1 passed; 0 failed; '
                '0 ignored; 0 measured; 0 filtered out"\n')
-    stub, record_path = _journey_stub_record(
+    stub, staged, record_path = _journey_stub_record(
         tmp_path, harness)
     environment = candidate_clean_env()
     environment.update(sealed)
@@ -446,7 +458,7 @@ def test_journey_launcher_runs_recorded_binary(sealed,
     assert result.returncode == 0, combined
     assert 'journey-marker' in result.stdout, combined
     assert '1 passed' in combined, combined
-    with stub.open('ab') as stream:
+    with staged.open('ab') as stream:
         stream.write(b'# tampered\n')
     result = launched('deb')
     combined = result.stdout + result.stderr
@@ -474,7 +486,7 @@ def test_journey_launcher_refuses_bare_success_stub(sealed,
     # A stub that exits 0 with bare output (no harness
     # envelope, no executed checks) refuses even though
     # its record fields are fully consistent.
-    stub, record_path = _journey_stub_record(
+    stub, staged, record_path = _journey_stub_record(
         tmp_path, '#!/bin/sh\necho journey-marker\n')
     environment = candidate_clean_env()
     environment.update(sealed)
@@ -489,12 +501,12 @@ def test_journey_launcher_refuses_bare_success_stub(sealed,
     forged = ('#!/bin/sh\necho "running 0 tests"\n'
               'echo "test result: ok. 0 passed; 0 failed; '
               '0 ignored; 0 measured; 0 filtered out"\n')
-    stub.write_text(forged)
+    staged.write_text(forged)
     import hashlib
     import json
     record = json.loads(record_path.read_text())
     record['suites']['deb']['sha256'] = hashlib.sha256(
-        stub.read_bytes()).hexdigest()
+        staged.read_bytes()).hexdigest()
     record_path.write_text(json.dumps(record))
     result = _launch_journey('deb', environment)
     combined = result.stdout + result.stderr
@@ -540,10 +552,10 @@ def test_journey_tampered_executable_post_prep_refuses(
         cwd=str(ROOT))
     assert result.returncode == 0, result.stderr[-2000:]
     doc = json.loads(record.read_text())
-    exe = Path(doc['suites']['deb']['path'])
-    saved = exe.read_bytes()
+    staged = Path(doc['suites']['deb']['staged'])
+    saved = staged.read_bytes()
     try:
-        with exe.open('ab') as stream:
+        with staged.open('ab') as stream:
             stream.write(b'# tampered-post-prep\n')
         environment = candidate_clean_env()
         environment.update(sealed)
@@ -554,10 +566,11 @@ def test_journey_tampered_executable_post_prep_refuses(
         assert result.returncode == 2, combined
         assert 'changed' in combined, combined
     finally:
-        # Restore the prebuilt bytes so later tests inherit
+        # Restore the staged bytes so later tests inherit
         # no tamper.
-        exe.write_bytes(saved)
-        assert hashlib.sha256(exe.read_bytes()).hexdigest() \
+        staged.write_bytes(saved)
+        assert hashlib.sha256(
+            staged.read_bytes()).hexdigest() \
             == doc['suites']['deb']['sha256']
 
 
@@ -588,6 +601,47 @@ def test_journey_record_non_string_path_refuses(sealed,
     assert result.returncode == 2, combined
     assert 'Traceback' not in combined, combined
     assert 'lacks suite' in combined, combined
+
+
+def test_journey_prep_refuses_mid_prep_edit(tmp_path,
+                                           monkeypatch):
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import support.journey_prep as prep
+    fake = tmp_path / 'fake-exe'
+    fake.write_bytes(b'#!/bin/sh\necho fake\n')
+    monkeypatch.setattr(
+        prep, 'build_executable', lambda target: fake)
+    calls = []
+
+    def flipping(exclude=()):
+        calls.append(1)
+        if len(calls) == 1:
+            return ('a' * 40, 'a' * 64)
+        return ('a' * 40, 'b' * 64)
+
+    monkeypatch.setattr(prep, 'checkout_identity', flipping)
+    with pytest.raises(ValueError, match='changed during'):
+        prep.prepare(str(tmp_path / 'prep.json'))
+
+
+def test_journey_launcher_ignores_original_post_stage(
+        sealed, tmp_path):
+    harness = ('#!/bin/sh\necho journey-marker\n'
+               'echo "running 1 tests"\n'
+               'echo "test journey_probe ... ok"\n'
+               'echo "test result: ok. 1 passed; 0 failed; '
+               '0 ignored; 0 measured; 0 filtered out"\n')
+    stub, staged, record_path = _journey_stub_record(
+        tmp_path, harness)
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    with stub.open('ab') as stream:
+        stream.write(b'# original-swapped\n')
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert '1 passed' in combined, combined
 
 
 def test_journey_shadowed_cargo_stays_green(sealed, tmp_path):
