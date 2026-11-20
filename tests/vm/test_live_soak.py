@@ -989,6 +989,36 @@ def test_verify_live_campaign_refuses_workload_tamper(tmp_path):
         _verify(m, export, manifest, 'overhead')
 
 
+def test_verify_live_campaign_refuses_lying_comparison(tmp_path):
+    import json
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _overhead_export(export, manifest)
+    # Lie only in the recorded comparison outcome: the legs
+    # (and every cached value) stay honest, so the refusal
+    # must come from the re-derived comparison replay, not
+    # from an upstream gate.
+    campaign_path = export / 'campaign.json'
+    doc = json.loads(campaign_path.read_bytes())
+    row = next(item for item in doc['comparisons']
+               if item['status'] != 'SKIP')
+    assert row['status'] == 'PASS'
+    row['measurement']['fields']['throughput']['median'] *= 2.0
+    doc['totals'] = m.campaign_totals(doc)
+    campaign_path.write_bytes(
+        json.dumps(doc, sort_keys=True).encode())
+    # The lie is well-formed upstream: the target gate still
+    # passes and the totals still match the retained legs.
+    assert doc['totals'] == {'legs': '20', 'failed_legs': '0',
+                             'target_failures': '0',
+                             'cleanup_mismatches': '0'}
+    m.require_campaign_targets(doc['comparisons'])
+    with pytest.raises(ValueError, match='retained workloads'):
+        _verify(m, export, manifest, 'overhead')
+
+
 def test_verify_live_campaign_refuses_nonzero_leg(tmp_path):
     import json
     m = api()
