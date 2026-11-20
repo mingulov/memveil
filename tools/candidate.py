@@ -49,11 +49,24 @@ Usage:
       --rpm R --source S --sbom J --out P [--source-root R]
   tools/candidate qualify --manifest M --qualification Q --policy P \\
       --evidence-dir E [--source-tree S]
+  tools/candidate write-gate-receipt --gate G --candidate C \\
+      --inputs I --key K --out R
+  tools/candidate write-qualification --manifest M --policy P \\
+      --gates G... --evidence-dir E --out Q
+  tools/candidate write-remote --import I --checks C... --out R
 Standard library only. Exit 0 prints the sealed digest; exit 1
 reports the reason on stderr.
+
+The authoring commands verify before they write and never
+invent values: gate receipts bind retained inputs bytes under
+the qualifier key, qualifications assemble only verified
+receipt sets that equal the policy and pack the evidence once
+so the archived digest binds real bytes, and remote custody
+assembles only import-bound check sets whose envelopes agree.
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -74,7 +87,22 @@ QUALIFICATION_SCHEMA = "memveil-qualification/1"
 GATE_RECEIPT_SCHEMA = "memveil-gate-receipt/1"
 GATE_INPUT_SCHEMA = "memveil-gate-input/1"
 POLICY_SCHEMA = "memveil-candidate-policy/1"
+IMPORT_SCHEMA = "memveil-candidate-import/1"
+REMOTE_CUSTODY_SCHEMA = "memveil-remote-custody/1"
+REMOTE_GATE_SCHEMA = "memveil-remote-gate/1"
+CHECK_FILE_SCHEMA = "memveil-remote-check/1"
 MATRIX_GATE = "kernel-matrix/2"
+GATE_ID_RE = r"[a-z][a-z0-9-]*/[1-9][0-9]*"
+# Required remote checks with their count measurement. Mirrors
+# candidate_custody.REMOTE_CHECKS exactly; the mirror is pinned
+# by test_remote_checks_mirror_custody, since this module cannot
+# import the custody layer without inverting the dependency.
+REMOTE_CHECKS = {"tampered-payload/1": "refusals",
+                 "promotion-dry-run/1": "verified_files",
+                 "independent-attestation/1":
+                 "verified_subjects",
+                 "required-checks/1": "enforced_checks",
+                 "no-overwrite/1": "preserved_assets"}
 SIGNING_NAMESPACE = "memveil-candidate"
 EVIDENCE_TESTED = "packaging/tested-payload.sha256"
 EVIDENCE_QUALIFICATIONS = "packaging/qualifications/"
@@ -1392,8 +1420,7 @@ def validate_policy(path):
             and policy["required_gates"],
             "required gates are empty")
     for ident, gate in policy["required_gates"].items():
-        require(re.fullmatch(r"[a-z][a-z0-9-]*/[1-9][0-9]*",
-                             ident),
+        require(re.fullmatch(GATE_ID_RE, ident),
                 "gate IDs must be versioned")
         require(isinstance(gate, dict)
                 and {"environment", "predicates"} <= set(gate)
@@ -2084,6 +2111,434 @@ def verify_tested_payload(manifest, tested_path):
     return entries
 
 
+def remote_id(value):
+    """Immutable remote decimal ID: no zero, no leading zeros."""
+    require(isinstance(value, str)
+            and re.fullmatch(r"[1-9][0-9]*", value),
+            "invalid immutable remote ID")
+    return value
+
+
+def remote_repository(value):
+    """Owner/name repository identity."""
+    require(isinstance(value, str)
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+                             value),
+            "invalid repository")
+    return value
+
+
+def validate_inputs_doc(doc):
+    """Shape-check one gate inputs document for authoring.
+
+    Matrix inputs need their exact inventory binding; other
+    gates need rederivation-shaped measurements with
+    shape-checked source bindings. Retained bytes are bound
+    at assembly, never here: receipt authoring takes no
+    evidence directory. Returns "matrix" or "gate".
+    """
+    require(isinstance(doc, dict),
+            "gate inputs must be an object")
+    schema = doc.get("schema")
+    if schema == MATRIX_INPUT_SCHEMA:
+        exact(doc, {"schema", "matrix_directory",
+                    "evidence_inventory_sha256"},
+              "matrix inputs")
+        relative(doc["matrix_directory"])
+        hexid(doc["evidence_inventory_sha256"])
+        return "matrix"
+    require(schema == GATE_INPUT_SCHEMA,
+            "unsupported gate input schema %r: /1 inputs "
+            "fail closed" % (schema,))
+    require(set(doc) in ({"schema", "environment", "product",
+                          "oracle"},
+                         {"schema", "environment", "product",
+                          "oracle", "sources"}),
+            "gate inputs have invalid fields")
+    require(doc["environment"] in ("offline", "ordinary-linux",
+                                   "snp", "tdx", "hyperv"),
+            "unknown gate environment")
+    for side in ("product", "oracle"):
+        require(isinstance(doc[side], dict) and doc[side],
+                side + " measurements are empty")
+        for value in doc[side].values():
+            parse_size(value)
+    sources = doc.get("sources")
+    if sources is not None:
+        exact(sources, {"product", "oracle"},
+              "retained measurement sources")
+        for side in ("product", "oracle"):
+            require(isinstance(sources[side], dict),
+                    side + " source bindings are invalid")
+            for binding in sources[side].values():
+                exact(binding, {"file", "sha256", "path",
+                                "encoding"},
+                      "measurement source binding")
+                relative(binding["file"])
+                hexid(binding["sha256"])
+                require(isinstance(binding["path"], list)
+                        and len(binding["path"]) <= 64,
+                        "invalid measurement path")
+                require(binding["encoding"] in ("boolean",
+                                                "u64"),
+                        "unknown measurement encoding")
+    return "gate"
+
+
+def derive_signer_pub(key_path):
+    """Ed25519 public key for a signing key via ssh-keygen -y."""
+    try:
+        derived = subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(key_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as error:
+        raise ValueError(
+            "cannot read signing key: %s" % error) from error
+    require(derived.returncode == 0,
+            "cannot read signing key")
+    try:
+        key = derived.stdout.decode().strip()
+    except UnicodeError as error:
+        raise ValueError(
+            "unsupported signing key") from error
+    require(key.startswith("ssh-ed25519 ")
+            and "\n" not in key, "unsupported signing key")
+    return (key + "\n").encode()
+
+
+def write_gate_receipt(gate, candidate_path, inputs_path,
+                       key_path, out_path):
+    """Author one signed gate receipt over retained inputs.
+
+    Binds the versioned gate ID, the candidate file digest and
+    source commit, and the inputs digest; the recorded inputs
+    name is the basename of the given inputs file, which must
+    be a clean evidence-relative name. Matrix gates require
+    matrix inputs and every other gate requires gate inputs.
+    Writes the canonical receipt to out_path (refusing to
+    overwrite), its ssh-keygen -Y signature next to it, and
+    stages the derived signer key as signer.pub beside the
+    receipt: an existing staged key must equal the signing
+    key, so one evidence directory keeps one qualifier key.
+    Self-verifies the triple, prints nothing, and returns the
+    receipt digest hex. A failed run leaves no partial files
+    behind and never deletes a pre-existing staged key.
+    """
+    require(isinstance(gate, str)
+            and re.fullmatch(GATE_ID_RE, gate),
+            "gate IDs must be versioned")
+    manifest = load_manifest(candidate_path)
+    candidate_id = digest(candidate_path)
+    inputs_bytes = read_regular(inputs_path)
+    kind = validate_inputs_doc(_parse_json(inputs_bytes))
+    require((gate == MATRIX_GATE) == (kind == "matrix"),
+            "gate inputs schema mismatches the gate")
+    pub = derive_signer_pub(key_path)
+    record = {"schema": GATE_RECEIPT_SCHEMA, "gate": gate,
+              "candidate_sha256": candidate_id,
+              "source_commit":
+              manifest["source"]["commit"],
+              "inputs": relative(Path(inputs_path).name),
+              "inputs_sha256":
+              digest_bytes(inputs_bytes)}
+    out = Path(out_path)
+    signature = Path(str(out) + ".sig")
+    require(not os.path.lexists(signature),
+            "refusing to overwrite " + signature.name)
+    created = []
+    done = False
+    try:
+        write_once(out, canonical(record))
+        created.append(out)
+        try:
+            signed = subprocess.run(
+                ["ssh-keygen", "-Y", "sign", "-f",
+                 str(key_path), "-n", SIGNING_NAMESPACE,
+                 str(out)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+        except OSError as error:
+            raise ValueError(
+                "gate receipt signing failed: %s"
+                % error) from error
+        require(signed.returncode == 0,
+                "gate receipt signing failed")
+        created.append(signature)
+        staged = out.parent / "signer.pub"
+        if os.path.lexists(staged):
+            require(staged.read_bytes() == pub,
+                    "evidence signer differs from the "
+                    "signing key")
+        else:
+            write_once(staged, pub)
+            created.append(staged)
+        verify_signature(out, signature, staged,
+                         [digest(staged)])
+        done = True
+    finally:
+        if not done:
+            for path in created:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            try:
+                os.unlink(signature)
+            except OSError:
+                pass
+    return digest_bytes(canonical(record))
+
+
+def write_qualification(manifest_path, policy_path, gate_paths,
+                        evidence_dir, out_path):
+    """Assemble a qualification from verified gate receipts.
+
+    Every receipt must be sealed inside the evidence
+    directory, honestly signed by the policy trust staged as
+    evidence signer.pub, bound to the sealed candidate and
+    source, and digest-bound to its retained inputs bytes;
+    non-matrix gates additionally re-derive their retained
+    measurements against the policy, and the matrix gate
+    re-derives its evidence inventory. The receipt set must
+    equal the policy's required gates exactly: unknown,
+    missing, or duplicate gates refuse. Matrix row predicates
+    are not re-derived here (they need the source lock at C);
+    qualify owns them. On success packs the evidence once,
+    writes the archive beside the qualification under the
+    required evidence name, and writes the sealed
+    qualification binding its real digest and size, so the
+    digest can never describe bytes packed later. Returns the
+    qualification digest hex.
+    """
+    require(gate_paths, "no gate receipts")
+    manifest = load_manifest(manifest_path)
+    candidate_id = digest(manifest_path)
+    validated, policy_digest = validate_policy(policy_path)
+    require(policy_digest == manifest["policy_sha256"],
+            "policy differs from candidate")
+    base = Path(evidence_dir)
+    require(base.is_dir() and not base.is_symlink(),
+            "evidence directory is missing")
+    root = base.resolve()
+    bindings = {}
+    for gate_path in gate_paths:
+        receipt = Path(gate_path)
+        try:
+            rel = receipt.resolve().relative_to(root)
+        except ValueError:
+            rel = None
+        require(rel is not None,
+                "gate receipt is outside the evidence "
+                "directory: " + str(gate_path))
+        relname = relative(rel.as_posix())
+        record = read_json(receipt, sealed=True)
+        exact(record,
+              {"schema", "gate", "candidate_sha256",
+               "source_commit", "inputs", "inputs_sha256"},
+              "signed gate receipt")
+        require(record["schema"] == GATE_RECEIPT_SCHEMA,
+                "unsupported gate receipt")
+        ident = record["gate"]
+        require(ident in validated["required_gates"],
+                "gate receipt is outside the policy: "
+                + str(ident))
+        require(ident not in bindings,
+                "duplicate gate receipt: " + str(ident))
+        bindings[ident] = (relname, receipt, record)
+    require(set(bindings)
+            == set(validated["required_gates"]),
+            "gate receipts differ from the policy")
+    trusted = validated["trusted_keys"]
+    public = base / "signer.pub"
+    gates = {}
+    for ident in sorted(bindings):
+        relname, receipt, record = bindings[ident]
+        verify_signature(receipt,
+                         Path(str(receipt) + ".sig"),
+                         public, trusted)
+        require(record["candidate_sha256"] == candidate_id
+                and record["source_commit"]
+                == manifest["source"]["commit"],
+                "gate subject mismatch")
+        relative(record["inputs"])
+        inputs = base / record["inputs"]
+        require(digest(inputs)
+                == hexid(record["inputs_sha256"]),
+                "retained gate inputs changed")
+        gates[ident] = {
+            "receipt": relname,
+            "receipt_sha256": digest(receipt),
+            "signature": relname + ".sig",
+            "public_key": "signer.pub"}
+        retained = read_json(inputs, sealed=True)
+        if ident == MATRIX_GATE:
+            verify_evidence_inventory(retained, base)
+        else:
+            verify_measurement_sources(retained, base)
+            rederive_measurements(
+                retained,
+                validated["required_gates"][ident])
+    out = Path(out_path)
+    try:
+        nested = out.resolve().relative_to(root)
+    except ValueError:
+        nested = None
+    require(nested is None,
+            "qualification must live beside the evidence "
+            "archive, never inside it")
+    archive = out.parent / "qualification-evidence.tar.gz"
+    build_evidence_archive(base, archive)
+    doc = {"schema": QUALIFICATION_SCHEMA,
+           "candidate_sha256": candidate_id,
+           "source_commit": manifest["source"]["commit"],
+           "claim": validated["claim"], "gates": gates,
+           "evidence_archive": {
+               "name": "qualification-evidence.tar.gz",
+               "size": str(archive.stat().st_size),
+               "sha256": digest(archive)}}
+    try:
+        write_once(out, canonical(doc))
+    except OSError:
+        try:
+            os.unlink(archive)
+        except OSError:
+            pass
+        raise
+    return digest_bytes(canonical(doc))
+
+
+def write_remote(import_path, check_paths, out_path):
+    """Assemble remote custody from a verified import + checks.
+
+    The import record must be the sealed local-build custody
+    statement; each check file carries one import-run identity
+    envelope plus one signed check binding. Every envelope
+    must agree byte for byte, every receipt must bind the
+    import's candidate and source, every inputs digest must
+    match, every count predicate is re-derived, and every
+    signature must verify over its receipt against its own
+    staged key, which proves the record is internally
+    consistent but not yet authorized: qualifier-key trust
+    and the live check-run verification stay in promote,
+    which re-verifies all of this against policy trust. The
+    check set must equal the required remote checks exactly.
+    Writes the sealed remote custody record binding the
+    import-run identity, the custody statement digest, and
+    the verified checks. Returns the record digest hex.
+    """
+    require(check_paths, "no remote checks")
+    custody = read_json(import_path, sealed=True)
+    exact(custody, {"schema", "operation", "build_origin",
+                    "repository", "release_id", "assets",
+                    "candidate_sha256", "source_commit"},
+          "candidate import record")
+    require(custody["schema"] == IMPORT_SCHEMA
+            and custody["operation"] == "import"
+            and custody["build_origin"] == "local-build",
+            "untrusted custody origin/subject")
+    remote_repository(custody["repository"])
+    remote_id(custody["release_id"])
+    require(isinstance(custody["assets"], dict)
+            and custody["assets"], "import assets are empty")
+    for name, ident in custody["assets"].items():
+        require("/" not in relative(name),
+                "asset name must be a basename")
+        remote_id(ident)
+    candidate_id = hexid(custody["candidate_sha256"])
+    source = hexid(custody["source_commit"], 40)
+    envelopes = []
+    bindings = {}
+    for check_path in check_paths:
+        doc = read_json(check_path, sealed=True)
+        exact(doc, {"schema", "import_run", "check"},
+              "remote check record")
+        require(doc["schema"] == CHECK_FILE_SCHEMA,
+                "unsupported remote check record")
+        run = doc["import_run"]
+        exact(run, {"repository_id", "run_id", "artifact_id",
+                    "artifact_sha256", "signer_commit"},
+              "import run identity")
+        for key in ("repository_id", "run_id",
+                    "artifact_id"):
+            remote_id(run[key])
+        hexid(run["artifact_sha256"])
+        hexid(run["signer_commit"], 40)
+        envelopes.append(run)
+        binding = doc["check"]
+        exact(binding, {"check_id", "run_id", "head_sha",
+                        "receipt", "inputs",
+                        "signature_base64", "public_key"},
+              "remote check binding")
+        remote_id(binding["check_id"])
+        remote_id(binding["run_id"])
+        hexid(binding["head_sha"], 40)
+        require(isinstance(binding["signature_base64"], str)
+                and isinstance(binding["public_key"], str),
+                "remote check signature encoding is invalid")
+        require(isinstance(binding["inputs"], dict),
+                "remote check inputs must be an object")
+        receipt = binding["receipt"]
+        exact(receipt, {"schema", "gate", "candidate_sha256",
+                        "source_commit", "inputs_sha256"},
+              "remote gate receipt")
+        require(receipt["schema"] == REMOTE_GATE_SCHEMA,
+                "unsupported remote gate receipt")
+        ident = receipt["gate"]
+        require(ident in REMOTE_CHECKS,
+                "unknown remote check: " + str(ident))
+        require(ident not in bindings,
+                "duplicate remote check: " + str(ident))
+        require(receipt["candidate_sha256"] == candidate_id
+                and receipt["source_commit"] == source,
+                "remote receipt subject differs")
+        bindings[ident] = binding
+    require(set(bindings) == set(REMOTE_CHECKS),
+            "remote checks differ from the required set")
+    first = envelopes[0]
+    for run in envelopes[1:]:
+        require(run == first,
+                "import run identity differs across check "
+                "records")
+    for ident in sorted(bindings):
+        binding = bindings[ident]
+        require(digest_bytes(canonical(binding["inputs"]))
+                == hexid(binding["receipt"]["inputs_sha256"]),
+                "remote oracle inputs differ")
+        rederive_measurements(
+            binding["inputs"],
+            {"environment": "offline",
+             "predicates": {REMOTE_CHECKS[ident]: "equal",
+                            "failures": "zero"}})
+        with tempfile.TemporaryDirectory(
+                prefix="remote-receipt-") as tmp:
+            tmp = Path(tmp)
+            write_once(tmp / "receipt",
+                       canonical(binding["receipt"]))
+            write_once(tmp / "signature", base64.b64decode(
+                binding["signature_base64"], validate=True))
+            write_once(tmp / "public",
+                       binding["public_key"].encode())
+            verify_signature(tmp / "receipt",
+                             tmp / "signature",
+                             tmp / "public",
+                             [digest(tmp / "public")])
+    doc = {"schema": REMOTE_CUSTODY_SCHEMA,
+           "candidate_sha256": candidate_id,
+           "source_commit": source,
+           "repository": custody["repository"],
+           "repository_id": first["repository_id"],
+           "run_id": first["run_id"],
+           "artifact_id": first["artifact_id"],
+           "artifact_sha256": first["artifact_sha256"],
+           "signer_commit": first["signer_commit"],
+           "custody_sha256":
+           digest_bytes(canonical(custody)),
+           "checks": {ident: bindings[ident]
+                      for ident in sorted(bindings)}}
+    write_once(out_path, canonical(doc))
+    return digest_bytes(canonical(doc))
+
+
 def qualify_candidate(source, manifest_path, qualification_path,
                       policy_path, evidence_archive, output):
     """Qualify an evidence archive; export the tested payload.
@@ -2167,6 +2622,34 @@ def main(argv=None):
         "local-only files")
     pack.add_argument("--evidence-dir", required=True)
     pack.add_argument("--out", required=True)
+    receipt = commands.add_parser(
+        "write-gate-receipt",
+        help="author one signed gate receipt over retained "
+        "inputs")
+    receipt.add_argument("--gate", required=True)
+    receipt.add_argument("--candidate", required=True)
+    receipt.add_argument("--inputs", required=True)
+    receipt.add_argument("--key", required=True)
+    receipt.add_argument("--out", required=True)
+    qualification = commands.add_parser(
+        "write-qualification",
+        help="assemble a qualification from verified gate "
+        "receipts")
+    qualification.add_argument("--manifest", required=True)
+    qualification.add_argument("--policy", required=True)
+    qualification.add_argument("--gates", nargs="+",
+                               required=True)
+    qualification.add_argument("--evidence-dir",
+                               required=True)
+    qualification.add_argument("--out", required=True)
+    remote = commands.add_parser(
+        "write-remote",
+        help="assemble remote custody from a verified "
+        "import plus check records")
+    remote.add_argument("--import", dest="import_record",
+                        required=True)
+    remote.add_argument("--checks", nargs="+", required=True)
+    remote.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "seal":
@@ -2189,6 +2672,17 @@ def main(argv=None):
         elif args.command == "sign-checksums":
             print(sign_checksums(args.artifacts_dir, args.key,
                                  args.out_dir))
+        elif args.command == "write-gate-receipt":
+            print(write_gate_receipt(
+                args.gate, args.candidate, args.inputs,
+                args.key, args.out))
+        elif args.command == "write-qualification":
+            print(write_qualification(
+                args.manifest, args.policy, args.gates,
+                args.evidence_dir, args.out))
+        elif args.command == "write-remote":
+            print(write_remote(
+                args.import_record, args.checks, args.out))
         elif args.command == "pack-evidence":
             excluded = build_evidence_archive(
                 args.evidence_dir, args.out)

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Rust gates: supply-chain policy (cargo-deny over the root
-# and eBPF manifests) and the full workspace test suite.
+# and eBPF manifests), the full workspace test suite, and the
+# audited offline pytest selection
+# (tests/pytest-ci-selection.json).
 # Unprivileged; safe for pull requests.
 #
 # Toolchain pins, matching the tree: Rust 1.100.0 plus
@@ -130,3 +132,92 @@ jobs:
             target/package-test/tarball/*.tar.gz
           if-no-files-found: warn
           retention-days: 7
+
+  pytest:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+      # Fail fast on an armed environment before any build:
+      # this job runs the offline selection unarmed, so any
+      # MEMVEIL_* arming variable (anything outside the
+      # parameter allowlist in the selection file) refuses.
+      - name: 'Guard: refuse armed environment'
+        run: |
+          python3 - <<'EOF'
+          import json
+          import os
+          import sys
+          sel = json.load(
+              open("tests/pytest-ci-selection.json"))
+          allow = set(sel["unarmed_allow_env"]["exact"])
+          prefixes = tuple(
+              sel["unarmed_allow_env"]["prefixes"])
+          armed = sorted(
+              key for key in os.environ
+              if key.startswith("MEMVEIL_")
+              and key not in allow
+              and not key.startswith(prefixes))
+          if armed:
+              print("unarmed guard: refusing armed "
+                    "environment: " + ", ".join(armed))
+              sys.exit(1)
+          print("unarmed: no MEMVEIL_* arming variables set")
+          EOF
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            binutils bpftrace bpftool cpio python3-pytest \
+            python3-yaml rpm rpm2cpio strace
+          # readelf (binutils), rpmbuild (rpm), rpm2cpio,
+          # cpio, and strace serve the packaging and
+          # cleanroom suites; bpftrace and bpftool are only
+          # resolved (never executed) by two matrix unit
+          # tests over mocked row runs. The runner already
+          # ships git, a C toolchain, ssh-keygen, and
+          # dpkg-deb.
+      - name: Install Rust toolchains
+        run: |
+          curl -fsSL -o /tmp/rustup-init \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+          curl -fsSL -o /tmp/rustup-init.sha256 \
+            https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init.sha256
+          (cd /tmp && sha256sum --check rustup-init.sha256)
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # Same pins as the rust-test job; this job runs
+          # no lint or format gates, so it skips the
+          # clippy/rustfmt components.
+          rustup toolchain install 1.100.0 --profile minimal
+          rustup toolchain install nightly-2026-05-20 --profile minimal \
+            --component rust-src
+      - name: Install bpf-linker 0.10.4
+        run: cargo install bpf-linker --version 0.10.4 --locked
+      - name: Warm the cargo cache for offline queries
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/ebpf/Cargo.toml
+      - name: Require pytest and PyYAML on the system interpreter
+        run: |
+          python3 -m pytest --version
+          python3 -c "import yaml"
+      - name: Build the release binary under test
+        run: |
+          cargo build --locked --release
+          test -x target/release/memveil
+          mkdir -p build
+          ln -sfn "$GITHUB_WORKSPACE/target/release/memveil" build/memveil
+      - name: Build the dev bundle tarball the runtime suites need
+        run: |
+          cargo test --locked --test package_tarball
+      - name: Run the audited offline pytest selection
+        run: |
+          set -eu
+          mapfile -t FILES < <(python3 -c 'import json; print("\n".join(json.load(open("tests/pytest-ci-selection.json"))["run"]))')
+          test "${#FILES[@]}" -gt 0
+          python3 -m pytest "${FILES[@]}" -q
