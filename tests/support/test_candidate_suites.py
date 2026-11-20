@@ -1502,9 +1502,11 @@ def test_journey_tampered_executable_post_prep_refuses(
         original.read_bytes()).hexdigest()
     assert original_digest == doc['suites']['deb']['sha256']
     # Mutate a private copy, never the shared build output:
-    # the copy lives in this test's directory, the record is
-    # repointed at it, and no restoration is needed.
-    private = tmp_path / 'private-exe'
+    # the copy lives in this test's directory, carries the
+    # honest staged name (so this leg exercises containment
+    # rather than the staged-filename binding), the record
+    # is repointed at it, and no restoration is needed.
+    private = tmp_path / doc['suites']['deb']['target']
     shutil.copyfile(original, private)
     private.chmod(0o755)
     doc['suites']['deb']['staged'] = str(private)
@@ -1658,7 +1660,10 @@ def test_journey_record_non_string_path_refuses(sealed,
     assert 'lacks suite' in combined, combined
     # Control: the same complete record with a valid path
     # type passes the entry check and fails later, proving
-    # the refusal above fires on the type check.
+    # the refusal above fires on the type check. The
+    # unstaged path carries the honest staged name, so the
+    # control exercises the missing-file check rather than
+    # the staged-filename binding.
     control_path = _prep_record_path('prep-control')
     commit, tree = checkout_identity(
         exclude=journey_identity_excludes())
@@ -1667,7 +1672,7 @@ def test_journey_record_non_string_path_refuses(sealed,
          'commit': commit, 'tree': tree,
          'suites': {'deb': {'path': str(tmp_path / 'orig'),
                             'staged': str(
-                                tmp_path / 'unstaged'),
+                                tmp_path / 'package_deb'),
                             'sha256': '0' * 64,
                             'target': 'package_deb'}}}))
     environment['MV_JOURNEY_PREP'] = str(control_path)
@@ -2156,7 +2161,10 @@ def test_journey_launcher_refuses_exe_outside_stages(
     stub = tmp_path / 'stub-outside'
     stub.write_text(harness)
     stub.chmod(0o755)
-    outside = tmp_path / 'outside-stages-exe'
+    # The outside file carries the honest staged name, so
+    # this leg exercises containment rather than the
+    # staged-filename binding.
+    outside = tmp_path / TARGETS['deb']
     shutil.copyfile(stub, outside)
     outside.chmod(0o755)
     assert Path(journey_staging_root()).resolve() \
@@ -2201,7 +2209,10 @@ def test_journey_launcher_refuses_outside_exe_without_reading(
                'echo "test journey_probe ... ok"\n'
                'echo "test result: ok. 1 passed; 0 failed; '
                '0 ignored; 0 measured; 0 filtered out"\n')
-    outside = tmp_path / 'outside-unreadable-exe'
+    # The outside file carries the honest staged name, so
+    # this leg exercises containment rather than the
+    # staged-filename binding.
+    outside = tmp_path / TARGETS['deb']
     outside.write_text(harness)
     digest = hashlib.sha256(
         outside.read_bytes()).hexdigest()
@@ -2956,3 +2967,91 @@ def test_journey_scan_binds_digests_per_path(
         combined
     assert 'journey-marker-rpm' not in result.stdout, \
         combined
+
+
+def test_journey_launcher_refuses_cross_suite_staged_exe(
+        sealed, tmp_path):
+    import hashlib
+    import json
+    sys.path.insert(0, str(ROOT / 'tests'))
+    from support.candidate_suite import checkout_identity, \
+        journey_identity_excludes, journey_staging_root, \
+        refuse_unowned_prep_contents
+    from support.journey_prep import TARGETS
+
+    def harness(marker):
+        return ('#!/bin/sh\necho %s\n'
+                'echo "running 1 tests"\n'
+                'echo "test journey_probe ... ok"\n'
+                'echo "test result: ok. 1 passed; 0 failed; '
+                '0 ignored; 0 measured; 0 filtered out"\n'
+                % marker)
+
+    # Both genuine staged harnesses under one stage.
+    tag = '%d-%s' % (os.getpid(), uuid.uuid4().hex[:8])
+    stage_dir = Path(journey_staging_root()) / (
+        'stub-mixed-%s.staged' % tag)
+    stage_dir.mkdir(parents=True)
+    deb_file = stage_dir / TARGETS['deb']
+    rpm_file = stage_dir / TARGETS['rpm-journey']
+    deb_file.write_text(harness('journey-marker-deb'))
+    rpm_file.write_text(harness('journey-marker-rpm'))
+    deb_file.chmod(0o755)
+    rpm_file.chmod(0o755)
+    deb_digest = hashlib.sha256(
+        deb_file.read_bytes()).hexdigest()
+    rpm_digest = hashlib.sha256(
+        rpm_file.read_bytes()).hexdigest()
+    commit, tree = checkout_identity(
+        exclude=journey_identity_excludes())
+    record_path = _prep_record_path('stub-mixed')
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_record(deb_staged, deb_digest):
+        record_path.write_text(json.dumps(
+            {'schema': 'memveil-journey-prep/1',
+             'commit': commit, 'tree': tree,
+             'suites': {
+                 'deb': {
+                     'path': str(deb_staged),
+                     'staged': str(deb_staged),
+                     'sha256': deb_digest,
+                     'target': TARGETS['deb']},
+                 'rpm-journey': {
+                     'path': str(rpm_file),
+                     'staged': str(rpm_file),
+                     'sha256': rpm_digest,
+                     'target': TARGETS['rpm-journey']}}}))
+
+    # The deb entry aims at the rpm staged bytes with the
+    # rpm digest: every byte binding is genuine, and the
+    # swapped binary's output would satisfy the generic
+    # executed-test check, so only the pre-exec filename
+    # binding can refuse the misattribution.
+    write_record(rpm_file, rpm_digest)
+    refuse_unowned_prep_contents()
+    environment = candidate_clean_env()
+    environment.update(sealed)
+    environment['MV_JOURNEY_PREP'] = str(record_path)
+    result = _launch_journey('deb', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 2, combined
+    assert "stages another suite's" in combined, combined
+    assert 'journey-marker-rpm' not in result.stdout, \
+        combined
+    # The honestly-aimed suite in the same record still
+    # launches: only the mixed-up entry refuses.
+    result = _launch_journey('rpm-journey', environment)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert 'journey-marker-rpm' in result.stdout, combined
+    # Honest control: each entry aimed at its own staged
+    # file launches green for both suites.
+    write_record(deb_file, deb_digest)
+    for suite, marker in (('deb', 'journey-marker-deb'),
+                          ('rpm-journey',
+                           'journey-marker-rpm')):
+        result = _launch_journey(suite, environment)
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined
+        assert marker in result.stdout, combined

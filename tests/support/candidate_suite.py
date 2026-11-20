@@ -659,10 +659,14 @@ def _run_journey(suite, argv, live):
     The record must bind this checkout (commit plus tree
     digest recomputed live), the requested suite (the
     recorded build target must equal the dispatched
-    suite's), and the staged executable bytes (re-hashed
-    before exec); a stale record, a rebuilt-from-dirty
-    checkout, a suite mixup, a missing or aliased staged
-    executable, an executable outside the stages
+    suite's, and the staged filename must equal that
+    target too, so a record aiming one suite at another
+    suite's genuine staged bytes refuses instead of
+    crediting the wrong run), and the staged executable
+    bytes (re-hashed before exec); a stale record, a
+    rebuilt-from-dirty checkout, a suite mixup, a
+    missing or aliased staged executable, an executable
+    outside the stages
     directory, or digest drift refuses. The staged path
     must be a regular file with every path component
     link-free (links refuse outright, never followed),
@@ -681,7 +685,10 @@ def _run_journey(suite, argv, live):
     provenance only and is never resolved here. The run's
     own output must carry executed-test evidence
     (the load-bearing control: a stub reporting bare
-    success has none). No build invocation on this path.
+    success has none); suite attribution rests on the
+    executed file's pre-exec binding instead, since the
+    output text carries no suite marker. No build
+    invocation on this path.
 
     Chain of custody: the prep tool builds each suite
     executable, stages the verified bytes into its owned
@@ -716,6 +723,10 @@ def _run_journey(suite, argv, live):
     if TARGETS.get(suite) != entry['target']:
         raise ValueError(
             'journey prep record names another suite\'s '
+            'executable: ' + suite)
+    if Path(entry['staged']).name != entry['target']:
+        raise ValueError(
+            'journey prep record stages another suite\'s '
             'executable: ' + suite)
     staged = Path(entry['staged'])
     if not staged.is_absolute():
