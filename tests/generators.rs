@@ -176,15 +176,111 @@ fn run(bin: &Path, args: &[&str]) -> Output {
         .unwrap_or_else(|err| panic!("cannot run {}: {err}", bin.display()))
 }
 
+/// Split space-separated flags the way a Unix shell words them.
+///
+/// Single quotes, double quotes, and backslash escapes (the
+/// backslash stays literal inside single quotes); an
+/// unterminated quote or a trailing backslash panics naming
+/// the input, since cargo would refuse the same value
+/// outright.
+fn split_shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if let Some(mark) = quote {
+            if ch == mark {
+                quote = None;
+            } else if mark == '"' && ch == '\\' {
+                match chars.next() {
+                    Some(next) => word.push(next),
+                    None => panic!("cannot split RUSTFLAGS {text:?}: trailing backslash"),
+                }
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            '\\' => match chars.next() {
+                Some(next) => {
+                    word.push(next);
+                    in_word = true;
+                }
+                None => panic!("cannot split RUSTFLAGS {text:?}: trailing backslash"),
+            },
+            ch if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            _ => {
+                word.push(ch);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        panic!("cannot split RUSTFLAGS {text:?}: unterminated quote");
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
 /// The release binary, built once per test process.
+///
+/// The build remaps build-machine paths out of the output
+/// (home first, checkout last under /build-root, the same
+/// pair the BPF build script and the packager apply), so the
+/// binary this suite leaves behind stays shippable: the
+/// packaging suites reuse the release binary as-is, and a
+/// bare rebuild here would dirty the bytes they package.
+/// The encoded spelling wins over RUSTFLAGS when both reach
+/// cargo, so an ambient RUSTFLAGS is merged in and dropped
+/// rather than clobbered. A missing or empty HOME
+/// contributes no remap.
 fn release_bin() -> PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let cargo = std::env::var_os("CARGO").expect("CARGO is set by cargo");
+        let root = manifest_dir();
+        let mut flags: Vec<String> = Vec::new();
+        if let Ok(encoded) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+            flags.extend(
+                encoded
+                    .split('\u{1f}')
+                    .filter(|flag| !flag.is_empty())
+                    .map(str::to_string),
+            );
+        }
+        if let Ok(rustflags) = std::env::var("RUSTFLAGS") {
+            flags.extend(split_shell_words(&rustflags));
+        }
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+        {
+            flags.push(format!("--remap-path-prefix={home}=/build-prefix"));
+        }
+        flags.push(format!(
+            "--remap-path-prefix={}=/build-root",
+            root.display()
+        ));
         let status = Command::new(cargo)
             .arg("build")
             .arg("--release")
-            .current_dir(manifest_dir())
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .env("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"))
+            .env_remove("RUSTFLAGS")
+            .current_dir(&root)
             .status()
             .expect("run cargo build --release");
         assert!(status.success(), "cargo build --release failed");
