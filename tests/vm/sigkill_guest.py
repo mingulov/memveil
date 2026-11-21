@@ -129,7 +129,7 @@ def reserve_allocated(capture):
 def snapshot_barrier(scenario, nonce, marker, capture, identity):
     try:
         doc = independent(Path(capture))
-    except AssertionError as exc:
+    except (AssertionError, KeyError) as exc:
         raise ValueError('independent prefix check failed: %s' % exc)
     if doc is None:
         raise ValueError('no durable checkpoint at barrier')
@@ -337,7 +337,7 @@ def run_scenario(scenario, nonce, work, export, inputs, identity, spawn,
         child = None
         try:
             after = independent(capture)
-        except AssertionError as exc:
+        except (AssertionError, KeyError) as exc:
             raise ValueError('durable prefix failed re-verification across '
                              'the kill: %s' % exc)
         if after is None or after['capture']['integrity'] != barrier['integrity']:
@@ -358,9 +358,12 @@ def run_scenario(scenario, nonce, work, export, inputs, identity, spawn,
         stop.set()
         if helper is not None:
             helper.join(timeout=70)
-        if child is not None and child.poll() is None:
-            child.kill()
-            child.communicate(timeout=10)
+        if child is not None:
+            if child.poll() is None:
+                child.kill()
+                child.communicate(timeout=10)
+            if child.stdout is not None:
+                child.stdout.close()
 
 
 def main():
