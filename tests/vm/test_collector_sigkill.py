@@ -400,6 +400,35 @@ class SigkillSelfTests(unittest.TestCase):
             finally:
                 sigkill_guest.check_cleanup = real_cleanup
 
+    def test_capture_inventory_matches_armed_product_shape(self):
+        # Pins the armed capture-dir shape WITHOUT the mock collector: the
+        # exact file set the real `record` leaves at each kill boundary
+        # (derivation in the CAPTURE_INVENTORY comment). The mock and the
+        # gate must agree with this shape independently, so a
+        # stand-in/harness co-drift cannot hide a mismatch again.
+        from sigkill_verify import CAPTURE_INVENTORY
+        for scenario in ('readiness', 'checkpoint'):
+            with self.subTest(scenario=scenario), \
+                    tempfile.TemporaryDirectory() as tmp:
+                capture = Path(tmp) / 'capture'
+                capture.mkdir(mode=0o700)
+                sigkill_mock.write_reserve(capture / '.finalization-reserve')
+                (capture / 'session.finalizing').write_bytes(b'')
+                events, kinds = sigkill_mock.make_events(0)
+                first = sigkill_mock.checkpoint_doc(1, events, kinds)
+                if scenario == 'checkpoint':
+                    (capture / 'checkpoint.json.tmp').write_text(
+                        json.dumps(first) + '\n')
+                    events, _ = sigkill_mock.make_events(
+                        sigkill_mock.EVENT_COUNT)
+                    sigkill_mock.publish(capture, 2, events, kinds)
+                else:
+                    sigkill_mock.publish(capture, 1, events, kinds)
+                cleanup = sigkill_guest.check_cleanup(
+                    scenario, capture, 'memveil-test-no-such-process')
+                self.assertEqual(set(cleanup['capture_inventory']),
+                                 set(CAPTURE_INVENTORY[scenario]))
+
     def test_held_lock_fails_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             capture = Path(tmp) / 'capture'
@@ -466,7 +495,8 @@ class SigkillSelfTests(unittest.TestCase):
                                  dir_lock_released=True,
                                  capture_inventory=['.finalization-reserve',
                                                     'checkpoint.json',
-                                                    'events.ndjson']),
+                                                    'events.ndjson',
+                                                    'session.finalizing']),
                     identity=dict(inputs=inputs))
         validate_result(good, barrier, inputs)
         bads = [dict(good, nonce='other'),

@@ -18,14 +18,39 @@ EMPTY_SHA = hashlib.sha256(b'').hexdigest()
 RESERVE_BYTES = 17 * 1048576
 KILLED_BY_SIGKILL = -9
 
-# Owned capture members per scenario. A SIGKILL always precedes final
-# publication, so session.json must never exist; session.finalizing is
-# expected only when the kill lands during finalization.
+# Owned capture members per scenario, bound to the product writer's file
+# lifecycle and the fault-shim stop points (not a bare list):
+# - EventWriter::new creates events.ndjson (src/capture/writer.rs:461-470).
+# - LiveWriter::create runs prepare(), which creates the EMPTY
+#   session.finalizing staging file AND the 17 MiB .finalization-reserve
+#   (src/capture/writer.rs:584-591) before any append; the product's own
+#   live.rs::reserves_before_append asserts both exist right after create
+#   with staging size 0. So session.finalizing is present at EVERY
+#   post-setup kill, not only during finalization.
+# - The readiness checkpoint publishes checkpoint.json BEFORE the `ready`
+#   line (src/capture/collector.rs:1568 vs :1604), so every post-readiness
+#   kill sees all four files.
+# - The checkpoint-2 shim stops the collector inside checkpoint #2's
+#   post-rename dir syncs (tests/cli/capture_faults.c:70-77,84-87),
+#   before the exchanged previous checkpoint is removed
+#   (src/capture/writer.rs:732-734), so the checkpoint kill also sees
+#   checkpoint.json.tmp holding the previous generation.
+# A SIGKILL always precedes final publication, so session.json must never
+# exist (final-stop halts at the session.json rename itself,
+# tests/cli/capture_faults.c:82).
+# Caveat: the finalization set below is the pre-armed expectation, NOT a
+# verified armed shape. finalize() releases .finalization-reserve BEFORE
+# the stopped session.json rename (src/capture/writer.rs:928-936,
+# release_reserve at :1198-1216, rename at :989), so an armed final-stop
+# capture holds no reserve and the barrier's reserve stat cannot run
+# there. Re-derive this set from an armed final-stop capture (plus a
+# barrier-semantics fix) before trusting it.
 CAPTURE_INVENTORY = {
     'readiness': frozenset(('.finalization-reserve', 'checkpoint.json',
-                            'events.ndjson')),
+                            'events.ndjson', 'session.finalizing')),
     'checkpoint': frozenset(('.finalization-reserve', 'checkpoint.json',
-                             'events.ndjson')),
+                             'checkpoint.json.tmp', 'events.ndjson',
+                             'session.finalizing')),
     'finalization': frozenset(('.finalization-reserve', 'checkpoint.json',
                                'events.ndjson', 'session.finalizing')),
 }

@@ -75,6 +75,10 @@ def collector(capture, marker, mode, lie=False):
     write_reserve(capture / '.finalization-reserve')
     events, kinds = make_events(0)
     publish(capture, 1, events, kinds)
+    # The real writer stages the empty session.finalizing file at setup
+    # (EventWriter::prepare), so it exists at every post-setup kill.
+    (capture / 'session.finalizing').write_bytes(b'')
+    previous = (capture / 'checkpoint.json').read_text()
     sys.stdout.write('ready session=%s\n' % SESSION)
     sys.stdout.flush()
     if mode == 'readiness':
@@ -95,6 +99,10 @@ def collector(capture, marker, mode, lie=False):
                                                    + '\n')
         marker_text = 'final-stop'
     elif mode == 'checkpoint-2':
+        # The checkpoint-2 fault halts the collector after the exchange
+        # rename but before the previous checkpoint is removed, so the
+        # previous generation stays behind at checkpoint.json.tmp.
+        (capture / 'checkpoint.json.tmp').write_text(previous)
         marker_text = 'checkpoint-2'
     else:
         sys.stderr.write('mock collector: unknown mode %s\n' % mode)
