@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kernel_matrix as km
 import kernel_matrix_guest as guest
+import kernel_scenarios_guest as scguest
 
 
 def _lock_entry(verdicts=None, omitted=None, vng="v6.6.160",
@@ -6465,10 +6466,10 @@ def test_row_receipt_scenarios_roundtrip(tmp_path):
     assert ok, detail
 
 
-# Scenario-rootfs evidence (MV31-12 R104): the runner-written
-# rootfs.json plus the single-file ro-deb expose record are
-# allowlisted in scenarios mode only, with strict shape checks.
-# Matrix rows keep the historical set exactly.
+# Scenario-rootfs evidence: the runner-written rootfs.json plus
+# the single-file ro-deb expose record are allowlisted in
+# scenarios mode only, with strict shape checks. Matrix rows keep
+# the historical set exactly.
 
 _DEB_BYTES = b"staged-deb-bytes"
 
@@ -6735,6 +6736,220 @@ def test_row_receipt_staged_deb_tamper_breaks_rederive(
         b"tampered")
     ok, _ = km.rederive_row(row)
     assert ok is False
+
+
+# Scenario guest tool versions: the guest records every
+# artifacts.json key with real --version first lines when the
+# tools resolve and the explicit unresolved marker when they do
+# not. The receipt admits the marker in scenarios mode only;
+# matrix rows keep the measured-only rule exactly.
+
+
+def _scenario_guest_bundle(tmp_path):
+    bindir = tmp_path / "guestbin"
+    bindir.mkdir(exist_ok=True)
+    mv = bindir / "memveil"
+    mv.write_bytes(b"memveil-binary")
+    for _, leaf in scguest.BPF_OBJECTS:
+        (bindir / leaf).write_bytes(b"obj-" + leaf.encode())
+    return str(mv)
+
+
+def _scenario_guest_artifacts(tmp_path, monkeypatch,
+                              path_dir):
+    out = tmp_path / "guestout"
+    out.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setattr(scguest, "_OUT", str(tmp_path))
+    scguest.record_artifacts(
+        km, str(out), _scenario_guest_bundle(tmp_path),
+        "bundle")
+    return json.loads((out / "artifacts.json").read_text())
+
+
+def _fake_tool(tool_dir, name, first_line=None, rc=0):
+    script = tool_dir / name
+    text = "#!/bin/sh\n"
+    if first_line is not None:
+        text += "echo '%s'\n" % first_line
+    text += "exit %d\n" % rc
+    script.write_text(text)
+    script.chmod(0o755)
+
+
+def test_scenario_guest_marks_unresolvable_tools(
+        tmp_path, monkeypatch):
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     empty)
+    assert set(arts) == {"mode", "binary", "dpkg_version",
+                         "bpf", "bpftrace", "bpftool"}
+    assert arts["bpftrace"] == km.ARTIFACTS_TOOL_UNRESOLVED
+    assert arts["bpftool"] == km.ARTIFACTS_TOOL_UNRESOLVED
+
+
+def test_scenario_guest_measures_resolvable_tools(
+        tmp_path, monkeypatch):
+    tools = tmp_path / "toolbin"
+    tools.mkdir()
+    _fake_tool(tools, "bpftrace", "bpftrace v0.25.0")
+    _fake_tool(tools, "bpftool", "bpftool v7.7.0")
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     tools)
+    assert arts["bpftrace"] == "bpftrace v0.25.0"
+    assert arts["bpftool"] == "bpftool v7.7.0"
+
+
+def test_scenario_guest_unreadable_tool_version_marks(
+        tmp_path, monkeypatch):
+    tools = tmp_path / "toolbin"
+    tools.mkdir()
+    _fake_tool(tools, "bpftrace", "bpftrace v0.25.0")
+    _fake_tool(tools, "bpftool", rc=1)
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     tools)
+    assert arts["bpftrace"] == "bpftrace v0.25.0"
+    assert arts["bpftool"] == km.ARTIFACTS_TOOL_UNRESOLVED
+
+
+def test_row_receipt_scenarios_guest_markers_roundtrip(
+        tmp_path, monkeypatch):
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     empty)
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    rec = _scenarios_rootfs_rec(neg_sha)
+    rec["binary_sha256"] = arts["binary"]["sha256"]
+    doc = km.write_row_receipt(
+        row, rec, _lock_entry(), _scenarios_rootfs_ctx())
+    assert doc["artifacts"]["status"] == "measured"
+    assert doc["artifacts"]["bpftrace"] == \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    assert doc["artifacts"]["bpftool"] == \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_scenarios_mixed_tool_marker_roundtrip(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    arts = _row_artifacts()
+    arts["bpftool"] = km.ARTIFACTS_TOOL_UNRESOLVED
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    assert doc["artifacts"]["bpftrace"] == \
+        "bpftrace v0.25.0"
+    assert doc["artifacts"]["bpftool"] == \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_scenarios_refuses_silent_tool_absence(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    arts = _row_artifacts()
+    del arts["bpftrace"]
+    del arts["bpftool"]
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+    arts["bpftrace"] = "bpftrace v0.25.0"
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_scenarios_refuses_blank_tool_version(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    arts = _row_artifacts()
+    arts["bpftrace"] = ""
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_matrix_refuses_unresolved_tool_markers(
+        tmp_path):
+    arts = _row_artifacts()
+    arts["bpftrace"] = km.ARTIFACTS_TOOL_UNRESOLVED
+    arts["bpftool"] = km.ARTIFACTS_TOOL_UNRESOLVED
+    row = _admitted_row(
+        tmp_path, **{"artifacts.json": json.dumps(arts)})
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+    arts["bpftrace"] = "bpftrace v0.25.0"
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+    arts["bpftool"] = "bpftool v7.7.0"
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    doc["artifacts"]["bpftrace"] = \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    with pytest.raises(ValueError):
+        km.validate_row_receipt(doc)
+
+
+def test_row_receipt_scenarios_failure_without_guest(
+        tmp_path):
+    neg_sha = hashlib.sha256(b"obj").hexdigest()
+    row = _write_row(tmp_path, {
+        "job.json": json.dumps(dict(
+            _row_job(),
+            negatives={"renamed_field": neg_sha})),
+        "cache.txt": "hit /cache\n",
+        "vng.exit": "42",
+        "console.txt": "9p mounts\nscenario mounts "
+                       "missing: /tmp/mv/repo\n",
+        "FAIL.txt": "scenario mounts missing: "
+                    "/tmp/mv/repo\n",
+    })
+    rec = {"id": "6.6", "mode": "scenarios", "ok": False,
+           "detail": "0 ok; guest FAIL: scenario mounts "
+                     "missing: /tmp/mv/repo",
+           "run_id": "20261030T000000Z",
+           "vng_version": "v6.6.160",
+           "release": "6.6.160-0606160-generic",
+           "elapsed": 1.0, "binary_sha256": None,
+           "negatives": {},
+           "scenarios": [{"name": "base", "status": "fail",
+                          "checks": [{"name": "precondition",
+                                      "ok": False,
+                                      "detail": "no guest "
+                                                "evidence",
+                                      "skipped": False}]}]}
+    doc = km.write_row_receipt(
+        row, rec, _lock_entry(), _row_ctx(mode="scenarios"))
+    assert doc["actual"]["ok"] is False
+    assert doc["negatives"] == {}
+    assert doc["artifacts"] == {"status": "no-guest"}
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert "FAIL" in detail
 
 
 # Row source/toolchain identity reads the Rust tree: the git

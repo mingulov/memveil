@@ -150,6 +150,23 @@ def sha_file(path):
     return digest.hexdigest()
 
 
+def tool_version(name, unresolved):
+    """First --version line, or the unresolved marker.
+
+    The scenario guest never sees the host tool paths, so it
+    probes its own PATH; a missing or version-unreadable tool
+    records the explicit marker instead of failing or omitting
+    the key (a real --version first line is never the marker).
+    """
+    path = shutil.which(name)
+    if path is not None:
+        proc = sh([path, "--version"])
+        for line in (proc.stdout or "").splitlines():
+            if line.strip():
+                return line.strip()
+    return unresolved
+
+
 def record_artifacts(km, out, mv, mode):
     if mode == "deb":
         roots = ["/usr/lib/memveil"]
@@ -178,7 +195,11 @@ def record_artifacts(km, out, mv, mode):
     write(os.path.join(out, "artifacts.json"), json.dumps(
         {"mode": mode, "binary": {"path": mv,
                                  "sha256": km.sha_file(mv)},
-         "dpkg_version": dpkg_version, "bpf": bpf},
+         "dpkg_version": dpkg_version, "bpf": bpf,
+         "bpftrace": tool_version(
+             "bpftrace", km.ARTIFACTS_TOOL_UNRESOLVED),
+         "bpftool": tool_version(
+             "bpftool", km.ARTIFACTS_TOOL_UNRESOLVED)},
         indent=2, sort_keys=True) + "\n")
 
 

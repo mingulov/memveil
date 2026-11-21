@@ -1157,3 +1157,63 @@ def test_main_half_env_refuses_pre_boot(tmp_path,
     assert "candidate refused" in err
     assert "MV_BUNDLE_TARBALL" in err
     assert "MV_CANDIDATE_MANIFEST" in err
+
+
+# --- collect_scenarios without guest evidence ---
+
+def _collect_entry():
+    return {"id": "7.0", "release": "7.0-test"}
+
+
+def _collect_export(tmp_path, artifacts=None):
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "job.json").write_text(json.dumps({
+        "id": "7.0", "release": "7.0-test",
+        "negatives": dict(NEG_SHAS)}))
+    (export / "FAIL.txt").write_text(
+        "scenario mounts missing: /tmp/mv/repo\n")
+    if artifacts is not None:
+        (export / "artifacts.json").write_text(
+            json.dumps(artifacts))
+    return export
+
+
+def _collect(rec_export, tmp_path):
+    return kmt.collect_scenarios(
+        _collect_entry(), str(rec_export), {}, 1.0,
+        "20261121T000000Z", False, str(tmp_path))
+
+
+def test_collect_scenarios_absent_artifacts_empties_negatives(
+        tmp_path):
+    export = _collect_export(tmp_path)
+    rec = _collect(export, tmp_path)
+    assert rec["negatives"] == {}
+    assert rec["binary_sha256"] is None
+    assert rec["ok"] is False
+    assert "guest FAIL" in rec["detail"]
+    assert "scenario mounts missing: /tmp/mv/repo" in \
+        rec["detail"]
+    assert json.loads((export / "job.json").read_text())[
+        "negatives"] == NEG_SHAS
+
+
+def test_collect_scenarios_keeps_negatives_when_guest_ran(
+        tmp_path):
+    export = _collect_export(
+        tmp_path,
+        artifacts={"binary": {"path": "/usr/bin/memveil",
+                              "sha256": "b" * 64}})
+    rec = _collect(export, tmp_path)
+    assert rec["negatives"] == dict(NEG_SHAS)
+    assert rec["binary_sha256"] == "b" * 64
+
+
+def test_collect_scenarios_unparseable_artifacts_keeps_negs(
+        tmp_path):
+    export = _collect_export(tmp_path)
+    (export / "artifacts.json").write_text("{bad\n")
+    rec = _collect(export, tmp_path)
+    assert rec["negatives"] == dict(NEG_SHAS)
+    assert rec["binary_sha256"] is None

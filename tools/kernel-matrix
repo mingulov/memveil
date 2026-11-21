@@ -991,12 +991,12 @@ def stage_scenario_files(export, job, neg_shas, deb=None,
 # reviewed amendment or next-seal integration plus an affected-gate
 # rerun.
 #
-# MV31-12 R104 repair identity: the guest shares moved from /mv/*
-# (outside every vng overlay, so their mountpoints could never be
-# created on the read-only root: EROFS, shares absent, vng.exit 2)
-# to /tmp/mv/* (/tmp is in vng's default overlay set in both its rw
-# and non-rw branches, so mkdir -p lands on the overlay upper), and
-# the guest command grew a mount guard that fails fast with the
+# Guest share placement: the shares sit under /tmp/mv/* because
+# /mv/* lies outside every vng overlay, so the read-only guest
+# root could never create those mountpoints (EROFS, shares absent,
+# vng.exit 2); /tmp is in vng's default overlay set in both its rw
+# and non-rw branches, so mkdir -p lands on the overlay upper. The
+# guest command runs a mount guard first that fails fast with the
 # exact missing share (exit 42) instead of a bare python ENOENT.
 SCENARIO_GUEST_REPO = "/tmp/mv/repo"
 SCENARIO_GUEST_DEBDIR = "/tmp/mv/deb"
@@ -1416,13 +1416,21 @@ def collect_scenarios(entry, export, tools, elapsed, run_id,
         binary_sha = artifacts["binary"]["sha256"]
     except (OSError, ValueError, KeyError, TypeError):
         binary_sha = None
+    # A row whose guest never ran (the mount guard tripped
+    # before the guest wrote artifacts) carries no negatives:
+    # the receipt refuses negatives without guest evidence, so
+    # the job pins stay in job.json while the rec omits them
+    # and the row can receipt its failure. The guest-ran check
+    # is file presence, mirroring the receipt exactly; the
+    # FAIL.txt detail above keeps the failure loud.
+    guest_ran = Path(export, "artifacts.json").is_file()
     return {"id": ident, "mode": "scenarios", "ok": ok,
             "detail": detail, "run_id": run_id,
             "vng_version": km.row_boot_label(entry),
             "release": entry["release"],
             "elapsed": round(elapsed, 1),
             "binary_sha256": binary_sha,
-            "negatives": dict(negs),
+            "negatives": dict(negs) if guest_ran else {},
             "scenarios": results}
 
 

@@ -3968,6 +3968,13 @@ def prog_misses(progs, names):
 
 ROW_RECEIPT_SCHEMA_V1 = "memveil-matrix-row/1"
 ROW_RECEIPT_SCHEMA = "memveil-matrix-row/2"
+# artifacts.json tool value when the guest considered the tool
+# and could not resolve it: the key stays present (never
+# silently absent) so the audit trail distinguishes
+# considered-and-unresolvable from forgot-to-record. Admitted
+# only in scenarios mode; the matrix guest fails closed on an
+# unreadable tool version, so a matrix row carrying it refuses.
+ARTIFACTS_TOOL_UNRESOLVED = "unresolved"
 QUAL_DURATION_S = 60
 QUAL_DD_COUNT = 128
 PROFILE_REASON = ("matrix rows assert lock expectations and "
@@ -4013,11 +4020,10 @@ _ROW_BUSY_RES = (re.compile(r"progs[0-9]+\.json"),)
 _ROW_NEG_RE = re.compile(
     r"swiotlb_copy-(renamed_field|widened_layout|wrong_shift"
     r"|wrong_argcnt)\.bpf\.o")
-# Scenario-rootfs evidence, admitted only in scenarios mode
-# (MV31-12 R104): the runner-written rootfs record plus the
-# single-file staged-deb expose dir. Matrix rows keep the
-# historical set exactly: neither constant joins the shared
-# top-level allowlist.
+# Scenario-rootfs evidence, admitted only in scenarios mode:
+# the runner-written rootfs record plus the single-file
+# staged-deb expose dir. Matrix rows keep the historical set
+# exactly: neither constant joins the shared top-level allowlist.
 _ROW_ROOTFS_RECORD = "rootfs.json"
 _ROW_STAGE_DEB_DIR = "ro-deb"
 _ROW_STAGE_DEB_RE = re.compile(
@@ -4803,8 +4809,12 @@ def write_row_receipt(row_dir, rec, entry, ctx):
         for name, digest in bpf.items():
             _check_hex(digest, 64, "bpf hash " + name)
         for key in ("bpftrace", "bpftool"):
-            if not isinstance(artifacts[key], str) \
-                    or not artifacts[key]:
+            value = artifacts[key]
+            if value == ARTIFACTS_TOOL_UNRESOLVED:
+                if mode != "scenarios":
+                    raise ValueError(
+                        "row receipt rejects artifacts.json")
+            elif not isinstance(value, str) or not value:
                 raise ValueError(
                     "row receipt rejects artifacts.json")
     else:
@@ -5182,8 +5192,12 @@ def validate_row_receipt(doc, entry=None):
         for digest in bpf.values():
             _check_hex(digest, 64, "bpf hash")
         for key in ("bpftrace", "bpftool"):
-            if not isinstance(artifacts[key], str) \
-                    or not artifacts[key]:
+            value = artifacts[key]
+            if value == ARTIFACTS_TOOL_UNRESOLVED:
+                if mode != "scenarios":
+                    raise ValueError(
+                        "row receipt rejects artifacts")
+            elif not isinstance(value, str) or not value:
                 raise ValueError(
                     "row receipt rejects artifacts")
     elif set(artifacts) != {"status"}:
