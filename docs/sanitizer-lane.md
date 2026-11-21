@@ -64,9 +64,10 @@ $LANE test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --test wire_co
 Reader-adversarial on the instrumented binary: route this
 leg through `tools/test` with `MEMVEIL_BIN` set to the
 lane binary. When `MEMVEIL_BIN` holds a slash path naming
-an executable file, `tools/test` canonicalizes it against
-the caller directory first (so later directory changes
-cannot lose it), then uses the absolute path: `memveil_bin`
+an executable file, `tools/test` resolves it to an absolute
+path first (relative paths are canonicalized against the
+caller directory so later directory changes cannot lose
+them; absolute paths are used verbatim), then `memveil_bin`
 returns it and `rust_bin_setup` skips its release relink
 (`tools/test:192-252`, called at `tools/test:2117`); a
 set-but-missing or non-executable value fails closed, as
