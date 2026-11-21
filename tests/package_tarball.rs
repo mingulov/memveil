@@ -164,6 +164,16 @@ fn manifest_identity() {
         "false"
     );
     assert_eq!(h::json_probe(&manifest, "'source_inventory' in d"), "false");
+    // The engine normalization record carries no build-machine
+    // path: the in-flow build compiles into a fresh temporary
+    // target dir, so any path would name disposable build state.
+    assert_eq!(
+        h::json_probe(
+            &manifest,
+            "'source_path' in d['normalization']['bin/memveil']"
+        ),
+        "false"
+    );
 }
 
 #[test]

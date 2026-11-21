@@ -2028,18 +2028,25 @@ def main(argv):
             if needed(path) != before:
                 fail("canonical normalization changed dependencies: "
                      + relative)
-            transformations[relative] = {
+            # No source_path on the engine record: the in-flow
+            # build compiles into a fresh temporary target dir,
+            # so any path would name disposable build state.
+            # The input digest plus the build receipt below
+            # already bind the engine bytes and source commit.
+            # Shipped libs keep their repo-relative provider
+            # path, which names a pinned vendored input.
+            record = {
                 "source_sha256": original,
                 "output_sha256": sha256_file(path),
                 "operations": operations,
                 "working_directory": "bundle-root",
                 "source_root": "input-tree",
-                "source_path": (os.path.abspath(binary_input)
-                                if relative == "bin/memveil"
-                                else os.path.join(
-                                    LIBGCC_DIR, LIBGCC_DEB_NAME)),
                 "staged_input_path": source_relative,
             }
+            if relative != "bin/memveil":
+                record["source_path"] = os.path.join(
+                    LIBGCC_DIR, LIBGCC_DEB_NAME)
+            transformations[relative] = record
         for relative in list(observed):
             if relative.startswith("lib/"):
                 observed["lib/memveil/" + relative[4:]] = \
