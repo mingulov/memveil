@@ -125,8 +125,10 @@ Three independent checks, all required:
    `added=yes` (normally the child never reaches the wrapper, so
    no `bpfel` line appears at all).
 2. Lane environment: `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`
-   are unset, so the flags `build.rs` forwards cannot carry a
-   sanitizer flag. Print both with the run.
+   are unset, so `build.rs` forwards the config layer instead:
+   assert `CARGO_BUILD_RUSTFLAGS` is also unset and no config
+   file under the lane environment sets `rustflags`, or print
+   the forwarded flag set with the run.
 3. BPF artifacts: the three `memveil-ebpf-*` objects under the
    lane `OUT_DIR` contain no `__asan` symbols
    (`nm`/`llvm-objdump` check) and the child build succeeds.

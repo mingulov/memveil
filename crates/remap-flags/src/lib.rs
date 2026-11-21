@@ -31,7 +31,9 @@ use std::path::{Path, PathBuf};
 /// Entries that are not valid UTF-8 are dropped, except a non-UTF-8 name
 /// matching the target-flags pattern byte-for-byte, which refuses like its
 /// readable counterpart: presence alone refuses, so an unreadable match
-/// must too.
+/// must too. A set-but-unreadable value refuses as well when the name feeds
+/// selection (the flag channels, the home lookups, or the target pattern):
+/// treating it as unset would silently fall through to a lower layer.
 pub fn process_env() -> Result<BTreeMap<String, String>, String> {
     let mut env = BTreeMap::new();
     for (key, value) in std::env::vars_os() {
@@ -48,11 +50,30 @@ pub fn process_env() -> Result<BTreeMap<String, String>, String> {
             }
         };
         let Ok(value) = value.into_string() else {
+            if is_target_rustflags(name.as_bytes()) {
+                return Err(format!(
+                    "{name} sets target rustflags: pass its flags through RUSTFLAGS instead"
+                ));
+            }
+            if is_significant_env(&name) {
+                return Err(format!(
+                    "{name} value is not valid UTF-8: unset it or set UTF-8 text instead"
+                ));
+            }
             continue;
         };
         env.insert(name, value);
     }
     Ok(env)
+}
+
+/// Whether `name` feeds flag selection: its value is read, so a
+/// set-but-unreadable spelling refuses rather than reading as unset.
+fn is_significant_env(name: &str) -> bool {
+    matches!(
+        name,
+        "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" | "CARGO_BUILD_RUSTFLAGS" | "CARGO_HOME" | "HOME"
+    )
 }
 
 /// Whether `name` selects target rustflags: `CARGO_TARGET_*_RUSTFLAGS` with a
@@ -562,9 +583,11 @@ fn insert_dotted(
     Ok(())
 }
 
-/// Physical lines joined into logical lines: an unclosed `[` continues on
-/// the next line so multi-line arrays parse; braces must close on their own
-/// line since inline tables stay single-line.
+/// Physical lines joined into logical lines: each line loses its `#`
+/// comment first (quote-aware), then an unclosed `[` continues on the next
+/// line so multi-line arrays parse; braces must close on their own line
+/// since inline tables stay single-line. Comment text never joins lines or
+/// unbalances brackets, exactly as the TOML reader treats it.
 fn logical_lines(text: &str, path: &Path) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut buf = String::new();
@@ -573,6 +596,7 @@ fn logical_lines(text: &str, path: &Path) -> Result<Vec<String>, String> {
         if line.chars().any(is_control) {
             return Err(parse_err(path, "invalid control character"));
         }
+        let line = strip_comment(line);
         if !buf.is_empty() {
             buf.push('\n');
         }
@@ -1609,6 +1633,140 @@ mod tests {
             ),
             words(&["-C", "x"])
         );
+    }
+
+    /// A `[` in a comment must not join the following lines into it: the
+    /// flags survive instead of vanishing with a clean parse.
+    #[test]
+    fn comment_bracket_does_not_swallow_next_line() {
+        assert_eq!(
+            effective_of(
+                "comment-swallow",
+                "[build]\njobs = 4 # [\nrustflags = [\"-C\", \"x\"] # ]\n"
+            ),
+            words(&["-C", "x"])
+        );
+    }
+
+    /// A comment-only bracket line must not swallow the header below it.
+    #[test]
+    fn comment_bracket_does_not_swallow_header() {
+        assert_eq!(
+            effective_of(
+                "comment-swallow-header",
+                "# [\n[build] # ]\nrustflags = [\"-C\", \"x\"]\n"
+            ),
+            words(&["-C", "x"])
+        );
+    }
+
+    /// The same sandwich around an array table still refuses: the shape is
+    /// visible again instead of hidden inside a joined comment.
+    #[test]
+    fn comment_bracket_array_table_still_refuses() {
+        let err = effective_err(
+            "comment-swallow-array-table",
+            "# [\n[[build]]\njobs = 4 # ]\n",
+        );
+        assert!(err.contains("array tables"), "{err}");
+    }
+
+    /// Unbalanced brackets and braces in comments neither join nor refuse.
+    #[test]
+    fn unbalanced_comment_brackets_accepted() {
+        for (n, comment) in ["# ]", "# [", "# {", "# }", "# [[", "# c [x]"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                effective_of(
+                    &format!("comment-bracket-{n}"),
+                    &format!("[build]\njobs = 4 {comment}\nrustflags = [\"-C\"]\n")
+                ),
+                words(&["-C"]),
+                "{comment}"
+            );
+        }
+    }
+
+    /// A comment inside a multi-line array is not a syntax error.
+    #[test]
+    fn comment_inside_multiline_array_accepts() {
+        assert_eq!(
+            effective_of(
+                "comment-multiline",
+                "[build]\nrustflags = [\"a\", # trailing\n\"b\"]\n"
+            ),
+            words(&["a", "b"])
+        );
+        assert_eq!(
+            effective_of(
+                "comment-multiline-own-line",
+                "[build]\nrustflags = [\n# whole line\n\"a\",\n]\n"
+            ),
+            words(&["a"])
+        );
+    }
+
+    /// A set-but-unreadable significant name refuses instead of reading as
+    /// unset; anything else unreadable stays dropped. Serial by
+    /// construction: the only test that mutates the process environment,
+    /// and every name is restored afterwards.
+    #[test]
+    fn non_utf8_significant_env_refuses() {
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: this is the only test that mutates the process
+        // environment, no other thread reads these names, and every
+        // name is restored before the test returns.
+        let raw = std::ffi::OsStr::from_bytes(b"\xff\xfe");
+        let restore = |name: &str, saved: Option<std::ffi::OsString>| unsafe {
+            match saved {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        };
+        for name in [
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+            "CARGO_HOME",
+            "HOME",
+        ] {
+            let saved = std::env::var_os(name);
+            unsafe { std::env::set_var(name, raw) };
+            let err = process_env().expect_err("must refuse");
+            assert!(err.contains("not valid UTF-8"), "{name}: {err}");
+            restore(name, saved);
+        }
+        // Presence alone refuses on the target pattern, readable or not.
+        let saved = std::env::var_os("CARGO_TARGET_X_RUSTFLAGS");
+        unsafe { std::env::set_var("CARGO_TARGET_X_RUSTFLAGS", raw) };
+        let err = process_env().expect_err("must refuse");
+        assert!(err.contains("target rustflags"), "{err}");
+        restore("CARGO_TARGET_X_RUSTFLAGS", saved);
+        let raw_name = std::ffi::OsStr::from_bytes(b"CARGO_TARGET_\xff_RUSTFLAGS");
+        let saved = std::env::var_os(raw_name);
+        unsafe { std::env::set_var(raw_name, "x") };
+        let err = process_env().expect_err("must refuse");
+        assert!(err.contains("target rustflags"), "{err}");
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var(raw_name, value),
+                None => std::env::remove_var(raw_name),
+            }
+        }
+        // Unrelated unreadable entries stay dropped, not refused.
+        let probe = std::ffi::OsStr::from_bytes(b"MEMVEIL_REMAP_FLAGS_PROBE");
+        let saved = std::env::var_os(probe);
+        unsafe { std::env::set_var(probe, raw) };
+        let env = process_env().expect("unrelated stays dropped");
+        assert!(!env.keys().any(|key| key == "MEMVEIL_REMAP_FLAGS_PROBE"));
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var(probe, value),
+                None => std::env::remove_var(probe),
+            }
+        }
     }
 
     #[test]
