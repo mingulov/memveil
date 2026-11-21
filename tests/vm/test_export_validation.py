@@ -1671,3 +1671,220 @@ def test_bundle_export_refuses_retired_bridge_key(tmp_path):
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match='export key inventory drift'):
         validate_lifecycle_exports({'bundle.json': path}, 'bundle')
+
+
+def peer_valid_contents():
+    """One valid body per peer-leg export, keyed by short name."""
+    import test_peer_oracle as peer_tests
+    doc = peer_tests.peer_doc(peer_tests.traffic_fixture_doc(),
+                              peer_tests.bracket_fixture_doc())
+    return {
+        'peer.json': json.dumps(doc, sort_keys=True),
+        'cap-session.json': (
+            REPO / 'tests/fixtures/baseline/session.json'
+        ).read_text(),
+        'cap-events.ndjson': (
+            REPO / 'tests/fixtures/baseline/events.ndjson'
+        ).read_text(),
+        'record.out': 'ready session=cap-1-1 start_ns=10000000000\n'
+                      'record: end=duration outcome=finalized '
+                      'exit=0\n',
+        'record.stderr': '',
+    }
+
+
+def peer_run(tmp_path, change=None):
+    """A mocked peer-leg run dir: exact inventory plus sidecars."""
+    import peer_oracle
+    contents = peer_valid_contents()
+    assert set(contents) == set(peer_oracle.EXPORT_NAMES)
+    if change is not None:
+        change(contents)
+    run = tmp_path / 'run'
+    export = run / 'export'
+    export.mkdir(parents=True)
+    for name, text in contents.items():
+        target = export / ('peer-' + name)
+        target.write_text(text)
+        Path(str(target) + '.sha256').write_text(
+            hashlib.sha256(target.read_bytes()).hexdigest() + '\n')
+    return run
+
+
+def test_peer_gate_admits_exact_l11_inventory(tmp_path):
+    import peer_oracle
+    from export_validation import validate_lifecycle_exports
+    contents = peer_valid_contents()
+    assert set(contents) == set(peer_oracle.EXPORT_NAMES)
+    paths = {}
+    for name, text in contents.items():
+        path = tmp_path / name
+        path.write_text(text)
+        paths[name] = path
+    validate_lifecycle_exports(paths, 'peer')
+
+
+def test_peer_success_path_retains_through_cleanup(
+        tmp_path, monkeypatch):
+    import evidence_retention
+    import peer_oracle
+    from evidence_retention import expected_from_verified
+    run = peer_run(tmp_path)
+    owned = owned_dir(tmp_path, monkeypatch)
+    got = peer_oracle.verify_peer_exports(
+        run, 'peer', peer_oracle.EXPORT_NAMES)
+    expected = expected_from_verified(got, 'peer')
+    peer_oracle.validate_peer_exports(got)
+    test_attempt_capture.cleanup(run, 'peer', expected=expected)
+    assert not run.exists(), 'temporary exports must still be removed'
+    doc = evidence_retention.verify_retained('peer')
+    assert doc['disposition'] == 'passed'
+    assert doc['complete'] is True
+    assert {entry['name'] for entry in doc['files']} == {
+        'peer-' + name for name in peer_oracle.EXPORT_NAMES}
+    assert (owned / 'gates' / 'peer' / 'peer-record.out').is_file()
+    assert (owned / 'gates' / 'peer' / 'peer-record.stderr').is_file()
+
+
+def test_peer_failure_path_retains_record_logs(
+        tmp_path, monkeypatch):
+    import evidence_retention
+    import peer_oracle
+    run = peer_run(tmp_path)
+    owned = owned_dir(tmp_path, monkeypatch)
+    receipt = evidence_retention.retain_failure(run, 'peer')
+    assert receipt is not None
+    doc = evidence_retention.verify_retained('peer')
+    assert doc['disposition'] == 'failed'
+    assert doc['complete'] is False
+    assert {entry['name'] for entry in doc['files']} == {
+        'peer-' + name for name in peer_oracle.EXPORT_NAMES}
+    for name in peer_oracle.EXPORT_NAMES:
+        assert (owned / 'gates' / 'peer' / ('peer-' + name)).is_file()
+    assert doc['file_errors'] == []
+
+
+def mutate_peer_extra_key(doc):
+    doc['smuggled'] = 1
+
+
+def mutate_peer_missing_key(doc):
+    doc.pop('case')
+
+
+def mutate_peer_bad_schema(doc):
+    doc['schema'] = 'memveil-peer-oracle/999'
+
+
+def mutate_peer_unforced(doc):
+    doc['guest']['swiotlb_force'] = False
+
+
+@pytest.mark.parametrize('mutate', [
+    mutate_peer_extra_key, mutate_peer_missing_key,
+    mutate_peer_bad_schema, mutate_peer_unforced,
+])
+def test_peer_json_malformed_still_refused(tmp_path, mutate):
+    import test_peer_oracle as peer_tests
+    from export_validation import validate_lifecycle_exports
+    doc = peer_tests.peer_doc(peer_tests.traffic_fixture_doc(),
+                              peer_tests.bracket_fixture_doc())
+    mutate(doc)
+    path = tmp_path / 'peer.json'
+    path.write_text(json.dumps(doc, sort_keys=True))
+    with pytest.raises(ValueError):
+        validate_lifecycle_exports({'peer.json': path}, 'peer')
+
+
+def test_peer_record_log_shape_refused(tmp_path):
+    from export_validation import validate_lifecycle_exports
+    over = tmp_path / 'record.out'
+    over.write_bytes(b'x' * 65537)
+    with pytest.raises(ValueError, match='64 KiB cap'):
+        validate_lifecycle_exports({'record.out': over}, 'peer')
+    binary = tmp_path / 'record.stderr'
+    binary.write_bytes(b'\xff\xfe not utf-8 \x00')
+    with pytest.raises(ValueError, match='not UTF-8 text'):
+        validate_lifecycle_exports({'record.stderr': binary}, 'peer')
+    edge = tmp_path / 'edge.out'
+    edge.write_bytes(b'y' * 65536)
+    validate_lifecycle_exports({'record.out': edge}, 'peer')
+
+
+def test_peer_json_duplicate_key_refused(tmp_path):
+    from export_validation import validate_lifecycle_exports
+    path = tmp_path / 'peer.json'
+    path.write_text('{"schema": "memveil-peer-oracle/1", '
+                    '"case": "peer", "case": "peer"}')
+    with pytest.raises(ValueError):
+        validate_lifecycle_exports({'peer.json': path}, 'peer')
+
+
+def test_peer_malformed_doc_fails_retention(
+        tmp_path, monkeypatch):
+    import evidence_retention
+    import test_peer_oracle as peer_tests
+    doc = peer_tests.peer_doc(peer_tests.traffic_fixture_doc(),
+                              peer_tests.bracket_fixture_doc())
+    doc['smuggled'] = 1
+    run = peer_run(
+        tmp_path,
+        lambda contents: contents.update(
+            {'peer.json': json.dumps(doc, sort_keys=True)}))
+    owned = owned_dir(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match='passed gate without'):
+        evidence_retention.retain_gate_evidence(
+            run, 'peer', 'passed')
+    receipt = evidence_retention.retain_failure(run, 'peer')
+    assert receipt is not None
+    kept = {path.name for path in (owned / 'gates' / 'peer').iterdir()}
+    assert kept == {'receipt.json'}
+
+
+@pytest.mark.parametrize('sub', [
+    'matrix', 'scenario', 'battery', 'perf', 'cleanup'])
+@pytest.mark.parametrize('name', [
+    'peer.json', 'record.out', 'record.stderr'])
+def test_peer_exports_refused_outside_peer_gate(
+        tmp_path, sub, name):
+    from export_validation import validate_lifecycle_exports
+    path = tmp_path / name
+    path.write_text(peer_valid_contents()[name])
+    with pytest.raises(ValueError, match='unrecognized lifecycle'):
+        validate_lifecycle_exports({name: path}, sub)
+
+
+def test_non_peer_gate_still_validates_own_exports(tmp_path):
+    path = tmp_path / 'inventory.json'
+    path.write_text(json.dumps(inventory_doc()))
+    export_validation.validate_lifecycle_exports(
+        {'inventory.json': path}, 'matrix')
+
+
+def test_peer_set_refuses_smuggled_foreign_file(
+        tmp_path, monkeypatch):
+    import evidence_retention
+    import peer_oracle
+    from export_validation import validate_lifecycle_exports
+    owned_dir(tmp_path, monkeypatch)
+    contents = peer_valid_contents()
+    paths = {}
+    for name, text in contents.items():
+        path = tmp_path / name
+        path.write_text(text)
+        paths[name] = path
+    forged = tmp_path / 'evil.txt'
+    forged.write_text('smuggled')
+    with pytest.raises(ValueError, match='unrecognized lifecycle'):
+        validate_lifecycle_exports(dict(paths, **{'evil.txt': forged}),
+                                   'peer')
+    run = peer_run(tmp_path)
+    export = run / 'export'
+    (export / 'peer-evil.txt').write_text('smuggled')
+    Path(str(export / 'peer-evil.txt') + '.sha256').write_text(
+        hashlib.sha256(b'smuggled').hexdigest() + '\n')
+    with pytest.raises(ValueError, match='passed gate without'):
+        evidence_retention.retain_gate_evidence(
+            run, 'peer', 'passed',
+            expected={'peer-' + name: '0' * 64
+                      for name in peer_oracle.EXPORT_NAMES})

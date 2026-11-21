@@ -440,6 +440,41 @@ def validate_overhead_probe(doc):
             raise ValueError('overhead probe identity drift')
 
 
+def _peer_export_names():
+    """The peer-leg export inventory, owned by peer_oracle."""
+    from peer_oracle import EXPORT_NAMES
+    return EXPORT_NAMES
+
+
+def _validate_peer_record_log(path):
+    body=path.read_bytes()
+    if len(body)>65536:raise ValueError('peer record log exceeds 64 KiB cap')
+    try:body.decode('utf-8')
+    except UnicodeDecodeError:raise ValueError('peer record log is not UTF-8 text')
+
+
+def _validate_peer_export(name,path):
+    """Strict per-file checks for one peer-leg export.
+
+    peer.json carries the exact-key oracle document.
+    record.out/record.stderr carry free-form product
+    diagnostics (a refusal explanation on failure
+    paths), so only their text shape is bounded, never
+    their content. Anything else in the inventory
+    refuses here: the cap-session.json/cap-events.ndjson
+    pair never reaches this branch (the generic
+    product-schema branches above claim it), and a new
+    inventory member fails closed until it gains an
+    explicit strict validator.
+    """
+    from peer_oracle import RECORD_LOGS, validate_peer_doc
+    if name=='peer.json':
+        validate_peer_doc(strict_json(path.read_text()))
+    elif name in RECORD_LOGS:
+        _validate_peer_record_log(path)
+    else:raise ValueError('unrecognized lifecycle export '+name)
+
+
 def validate_lifecycle_exports(got,sub):
     for name,path in got.items():
         if name=='identity.json': identity(strict_json(path.read_text()),sub)
@@ -629,6 +664,8 @@ def validate_lifecycle_exports(got,sub):
             validate_overhead_legs(strict_json(path.read_text()))
         elif name=='probe.json':
             validate_overhead_probe(strict_json(path.read_text()))
+        elif sub=='peer' and name in _peer_export_names():
+            _validate_peer_export(name,path)
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 
