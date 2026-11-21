@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Collector-SIGKILL recovery gate: armed live run plus offline self-test.
+
+Armed (MEMVEIL_VM_SIGKILL=1): boots one pinned guest per kill boundary
+(readiness, durable checkpoint, finalization), SIGKILLs the live
+collector exactly at the boundary, then verifies the recovered prefix
+with independent hashes/counts and the owned cleanup.
+
+Unarmed (default): runs the offline self-test, which drives the exact
+guest flow against a mock collector and mock report, plus negative
+controls proving each verdict can fail. No VM, product binary, or
+privilege needed.
+"""
+import argparse
+import copy
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+import uuid
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / 'tests' / 'cli'))
+sys.path.insert(0, str(ROOT / 'tests' / 'fuzz'))
+from sigkill_verify import (SCENARIOS, validate_barrier, validate_result,
+                            validate_export_inventory, recompute_prefix,
+                            load_json)
+import sigkill_guest
+import sigkill_mock
+
+ARMED_VAR = 'MEMVEIL_VM_SIGKILL'
+GUEST_TIMEOUT = 600
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for block in iter(lambda: stream.read(1048576), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def boot(vng, config_path, kernel, scenario, nonce, export, logs):
+    if '/' in kernel or kernel[:1] == '-' or not kernel:
+        raise ValueError('kernel is not a plain vng release token')
+    command = [vng, '--run', kernel, '-m', '2G', '--append',
+               'swiotlb=force memveil_sigkill_gate=' + nonce,
+               '--disable-microvm', '--network', 'user',
+               '--qemu-opts=-device pcnet,netdev=pcnet0'
+               ' -netdev user,id=pcnet0,net=10.0.3.0/24',
+               '--rwdir=/tmp/export=' + str(export), '--exec',
+               shlex.join([sys.executable, str(HERE / 'sigkill_guest.py'),
+                           str(config_path), scenario, nonce])]
+    (logs / 'command.json').write_text(json.dumps(command, indent=2) + '\n')
+    stdout = (logs / 'guest.stdout').open('wb')
+    stderr = (logs / 'guest.stderr').open('wb')
+    try:
+        return subprocess.Popen(command, stdout=stdout, stderr=stderr,
+                                start_new_session=True)
+    finally:
+        stdout.close()
+        stderr.close()
+
+
+def stop_owned(child):
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait(timeout=60)
+
+
+def host_verify(case, export, nonce, scenario, inputs):
+    names = sorted(p.name for p in export.iterdir())
+    validate_export_inventory(names, scenario)
+    barrier = load_json(export / 'barrier.json')
+    validate_barrier(barrier, nonce, scenario, inputs)
+    result = load_json(export / 'result.json')
+    validate_result(result, barrier, inputs)
+    checkpoint_doc = load_json(export / 'checkpoint.json')
+    if hashlib.sha256((export / 'checkpoint.json').read_bytes()).hexdigest() \
+            != barrier['checkpoint_sha256']:
+        raise ValueError('exported checkpoint disagrees with barrier digest')
+    prefix_bytes = (export / 'prefix-events.ndjson').read_bytes()
+    recomputed = recompute_prefix(prefix_bytes, checkpoint_doc)
+    if recomputed != barrier['integrity']:
+        raise ValueError('host recomputation disagrees with barrier')
+    if recomputed != result['integrity']:
+        raise ValueError('host recomputation disagrees with result')
+    receipt = dict(status='PASS', scenario=scenario, nonce=nonce,
+                   integrity=recomputed,
+                   checkpoint_sha256=barrier['checkpoint_sha256'])
+    (case / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+    return receipt
+
+
+def execute(args):
+    from harness_env import check_harness_versions
+    vng = shutil.which('vng')
+    if not vng or not os.access('/dev/kvm', os.R_OK | os.W_OK):
+        raise ValueError('owned unprivileged QEMU needs vng and writable /dev/kvm')
+    harness = check_harness_versions(vng)
+    config = {key: str(getattr(args, key).resolve(strict=True))
+              for key in ('binary', 'object', 'bridge', 'profile')}
+    shim = args.shim.resolve(strict=True) if args.shim else \
+        (ROOT / 'build/shim/capture_faults.so').resolve(strict=True)
+    config['shim'] = str(shim)
+    config['expect_release'] = args.expect_release
+    if digest(config['binary']) != args.binary_sha256:
+        raise ValueError('candidate executable hash mismatch')
+    inputs = {key: digest(path) for key, path in config.items()
+              if key != 'expect_release'}
+    args.out = args.out.parent.resolve(strict=True) / args.out.name
+    if any(c.isspace() or c == ',' for c in str(args.out)):
+        raise ValueError('evidence path contains ambiguous QEMU separators')
+    if shutil.disk_usage(args.out.parent).free < 2 * 1024**3:
+        raise ValueError('insufficient host space for bounded owned images')
+    args.out.mkdir(mode=0o700)
+    owned = args.out.stat()
+    args.owned_out_ids = (owned.st_dev, owned.st_ino)
+    config_path = args.out / 'config.json'
+    config_path.write_text(json.dumps(config, indent=2) + '\n')
+    identity = dict(inputs=inputs, harness=harness,
+                    kernel=args.kernel, expect_release=args.expect_release,
+                    source=subprocess.check_output(
+                        ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'],
+                        text=True).strip())
+    (args.out / 'identity.json').write_text(json.dumps(identity, indent=2)
+                                            + '\n')
+    lock_path = ROOT / 'build/vm/suite.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    receipts = []
+    with lock_path.open('a+') as lease:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        for scenario in SCENARIOS:
+            case = args.out / scenario
+            case.mkdir(mode=0o700)
+            export = case / 'export'
+            export.mkdir(mode=0o700)
+            nonce = uuid.uuid4().hex
+            child = boot(vng, config_path, args.kernel, scenario, nonce,
+                         export, case)
+            try:
+                child.wait(timeout=GUEST_TIMEOUT)
+                if child.returncode != 0:
+                    raise ValueError('guest failure, exit %s'
+                                     % child.returncode)
+                receipts.append(host_verify(case, export, nonce, scenario,
+                                            inputs))
+            finally:
+                stop_owned(child)
+    (args.out / 'result.json').write_text(json.dumps(
+        dict(status='PASS', scenarios=list(SCENARIOS), identity=identity,
+             receipts=receipts), indent=2) + '\n')
+
+
+def retain_owned_failure(path, identity, reason):
+    if identity is None:
+        return
+    directory = -1
+    try:
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        actual = os.fstat(directory)
+        if (actual.st_dev, actual.st_ino) != identity:
+            raise ValueError('evidence directory was replaced')
+        fd = os.open('failure.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(json.dumps(dict(status='FAIL', reason=reason)) + '\n')
+    except (OSError, ValueError) as exc:
+        print('collector-sigkill: failure evidence not replaced: ' + str(exc),
+              file=sys.stderr)
+    finally:
+        if directory >= 0:
+            os.close(directory)
+
+
+# --- Offline self-test: the exact guest flow against mock binaries. ---
+
+MOCK_FAULT = {'readiness': 'readiness', 'checkpoint': 'checkpoint-2',
+              'finalization': 'final-stop'}
+
+
+def mock_identity(inputs):
+    return dict(kernel_config_sha256=None, kernel='mock-release',
+                release='mock-release', banner='mock banner',
+                boot_id='mock-boot-id', btf_sha256='mock-btf',
+                inputs=dict(inputs))
+
+
+def mock_spawn(work, mode_flags=None):
+    mode_flags = mode_flags or []
+
+    def spawn(capture, marker):
+        err = open(Path(work) / 'record.stderr', 'wb')
+        proc = subprocess.Popen(
+            [sys.executable, str(HERE / 'sigkill_mock.py'), 'collector',
+             str(capture), str(marker), MOCK_FAULT[current[0]]] + mode_flags,
+            stdout=subprocess.PIPE, stderr=err)
+        err.close()
+        return proc
+    current = [None]
+    return spawn, current
+
+
+def mock_report(report_flags=None):
+    report_flags = report_flags or []
+
+    def run(capture, flags):
+        return subprocess.run(
+            [sys.executable, str(HERE / 'sigkill_mock.py'), 'report']
+            + report_flags + flags + [str(capture)], capture_output=True)
+    return run
+
+
+def run_mock_scenario(scenario, tmp, collect_flags=None, report_flags=None,
+                      stimulus=False):
+    tmp = Path(tmp)
+    work = tmp / 'work'
+    work.mkdir(mode=0o700)
+    export = tmp / 'export'
+    export.mkdir(mode=0o700)
+    inputs = {'binary': 'a' * 64, 'object': 'b' * 64, 'bridge': 'c' * 64,
+              'profile': 'd' * 64, 'shim': 'e' * 64}
+    nonce = 'f' * 32
+    spawn, current = mock_spawn(work, collect_flags)
+    current[0] = scenario
+    barrier, result = sigkill_guest.run_scenario(
+        scenario, nonce, work, export, inputs, mock_identity(inputs), spawn,
+        mock_report(report_flags), 'sigkill_mock.py', stimulus=stimulus)
+    return barrier, result, export, inputs, nonce
+
+
+class SigkillSelfTests(unittest.TestCase):
+    def test_all_three_boundaries_pass_offline(self):
+        for scenario in SCENARIOS:
+            with self.subTest(scenario=scenario), \
+                    tempfile.TemporaryDirectory() as tmp:
+                barrier, result, export, inputs, nonce = run_mock_scenario(
+                    scenario, tmp)
+                validate_barrier(barrier, nonce, scenario, inputs)
+                validate_result(result, barrier, inputs)
+                names = sorted(p.name for p in Path(export).iterdir())
+                validate_export_inventory(names, scenario)
+                checkpoint_doc = load_json(Path(export) / 'checkpoint.json')
+                prefix_bytes = (Path(export)
+                                / 'prefix-events.ndjson').read_bytes()
+                recomputed = recompute_prefix(prefix_bytes, checkpoint_doc)
+                self.assertEqual(recomputed, barrier['integrity'])
+                self.assertEqual(result['collector_returncode'], -9)
+                if scenario == 'readiness':
+                    self.assertEqual(barrier['integrity']['line_count'], '0')
+                    self.assertEqual(prefix_bytes, b'')
+                else:
+                    self.assertGreater(
+                        int(barrier['integrity']['line_count']), 0)
+
+    def test_host_verify_accepts_mock_evidence(self):
+        for scenario in SCENARIOS:
+            with self.subTest(scenario=scenario), \
+                    tempfile.TemporaryDirectory() as tmp:
+                _, _, export, inputs, nonce = run_mock_scenario(scenario, tmp)
+                receipt = host_verify(Path(tmp), Path(export), nonce,
+                                      scenario, inputs)
+                self.assertEqual(receipt['status'], 'PASS')
+
+    def test_recompute_agrees_with_independent_oracle(self):
+        from test_checkpoint_writer import independent
+        for scenario in SCENARIOS:
+            with self.subTest(scenario=scenario), \
+                    tempfile.TemporaryDirectory() as tmp:
+                _, _, export, _, _ = run_mock_scenario(scenario, tmp)
+                checkpoint_doc = load_json(Path(export) / 'checkpoint.json')
+                prefix_bytes = (Path(export)
+                                / 'prefix-events.ndjson').read_bytes()
+                with tempfile.TemporaryDirectory() as other:
+                    capture = Path(other) / 'capture'
+                    capture.mkdir()
+                    (capture / 'events.ndjson').write_bytes(prefix_bytes)
+                    (capture / 'checkpoint.json').write_text(
+                        json.dumps(checkpoint_doc))
+                    doc = independent(capture)
+                self.assertEqual(doc['capture']['integrity'],
+                                 recompute_prefix(prefix_bytes,
+                                                  checkpoint_doc))
+
+    def test_lying_books_fail_the_barrier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, 'prefix'):
+                run_mock_scenario('checkpoint', tmp, collect_flags=['--lie'])
+
+    def test_missing_boundary_never_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            work = tmp / 'work'
+            work.mkdir(mode=0o700)
+            export = tmp / 'export'
+            export.mkdir(mode=0o700)
+            inputs = {'binary': 'a' * 64}
+            nonce = 'f' * 32
+
+            def spawn(capture, marker):
+                del marker
+                err = open(work / 'record.stderr', 'wb')
+                proc = subprocess.Popen(
+                    [sys.executable, str(HERE / 'sigkill_mock.py'),
+                     'collector', str(capture), str(tmp / 'unused'), 'none'],
+                    stdout=subprocess.PIPE, stderr=err)
+                err.close()
+                return proc
+
+            with self.assertRaisesRegex(ValueError, 'boundary'):
+                sigkill_guest.run_scenario(
+                    'checkpoint', nonce, work, export, inputs,
+                    mock_identity(inputs), spawn, mock_report(),
+                    'sigkill_mock.py', stimulus=False)
+
+    def test_tampered_prefix_fails_stability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            work = tmp / 'work'
+            work.mkdir(mode=0o700)
+            export = tmp / 'export'
+            export.mkdir(mode=0o700)
+            inputs = {'binary': 'a' * 64}
+            nonce = 'f' * 32
+            real_kill = sigkill_guest.kill_and_prove
+
+            def tampering_kill(child):
+                code = real_kill(child)
+                events = work / 'capture' / 'events.ndjson'
+                raw = bytearray(events.read_bytes())
+                raw[5] ^= 0xff
+                events.write_bytes(bytes(raw))
+                return code
+
+            spawn, current = mock_spawn(work)
+            current[0] = 'checkpoint'
+            sigkill_guest.kill_and_prove = tampering_kill
+            try:
+                with self.assertRaisesRegex(ValueError, 'across the kill'):
+                    sigkill_guest.run_scenario(
+                        'checkpoint', nonce, work, export, inputs,
+                        mock_identity(inputs), spawn, mock_report(),
+                        'sigkill_mock.py', stimulus=False)
+            finally:
+                sigkill_guest.kill_and_prove = real_kill
+
+    def test_wrong_report_exit_fails_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, 'report'):
+                run_mock_scenario('readiness', tmp,
+                                  report_flags=['--wrong-exit'])
+
+    def test_wrong_recovered_count_fails_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, 'count'):
+                run_mock_scenario('checkpoint', tmp,
+                                  report_flags=['--wrong-count'])
+
+    def test_stray_capture_file_fails_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            work = tmp / 'work'
+            work.mkdir(mode=0o700)
+            export = tmp / 'export'
+            export.mkdir(mode=0o700)
+            inputs = {'binary': 'a' * 64}
+            nonce = 'f' * 32
+            spawn, current = mock_spawn(work)
+            current[0] = 'readiness'
+            real_cleanup = sigkill_guest.check_cleanup
+
+            def littering_cleanup(scenario, capture, binary_name):
+                (Path(capture) / 'stray.tmp').write_bytes(b'litter')
+                return real_cleanup(scenario, capture, binary_name)
+
+            sigkill_guest.check_cleanup = littering_cleanup
+            try:
+                with self.assertRaisesRegex(ValueError, 'inventory'):
+                    sigkill_guest.run_scenario(
+                        'readiness', nonce, work, export, inputs,
+                        mock_identity(inputs), spawn, mock_report(),
+                        'sigkill_mock.py', stimulus=False)
+            finally:
+                sigkill_guest.check_cleanup = real_cleanup
+
+    def test_held_lock_fails_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = Path(tmp) / 'capture'
+            capture.mkdir()
+            fd = os.open(capture, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertFalse(sigkill_guest.dir_lock_released(str(capture)))
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertTrue(sigkill_guest.dir_lock_released(str(capture)))
+
+    def test_non_sigkill_death_fails_kill_proof(self):
+        child = subprocess.Popen([sys.executable, '-c',
+                                  'import time; time.sleep(30)'])
+        try:
+            child.terminate()
+            with self.assertRaisesRegex(ValueError, 'SIGKILL'):
+                sigkill_guest.kill_and_prove(child)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate(timeout=5)
+
+    def test_barrier_negatives(self):
+        inputs = {'binary': 'a' * 64}
+        good = dict(nonce='b' * 32, scenario='readiness', stopped=True,
+                    marker='readiness-announced', ready_observed=True,
+                    reserve_allocated=17 * 1048576,
+                    integrity={'events_bytes': '0', 'line_count': '0',
+                               'events_sha256': hashlib.sha256(b'').hexdigest(),
+                               'kinds': {}},
+                    checkpoint_sha256='c' * 64,
+                    identity=dict(inputs=inputs, boot_id='boot',
+                                  release='7.0.14', banner='banner',
+                                  btf_sha256='btf'))
+        validate_barrier(good, 'b' * 32, 'readiness', inputs)
+        for key, value in [('nonce', 'other'), ('scenario', 'checkpoint'),
+                           ('stopped', False), ('marker', 'attach-refused'),
+                           ('ready_observed', False), ('reserve_allocated', 0),
+                           ('integrity', {}), ('identity', {}),
+                           ('checkpoint_sha256', None)]:
+            bad = copy.deepcopy(good)
+            bad[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_barrier(bad, 'b' * 32, 'readiness', inputs)
+        with self.assertRaises(ValueError):
+            validate_barrier({}, 'b' * 32, 'readiness', inputs)
+
+    def test_result_negatives(self):
+        inputs = {'binary': 'a' * 64}
+        integrity = {'events_bytes': '0', 'line_count': '0',
+                     'events_sha256': hashlib.sha256(b'').hexdigest(),
+                     'kinds': {}}
+        barrier = dict(nonce='b' * 32, scenario='readiness',
+                       integrity=integrity, checkpoint_sha256='c' * 64)
+        good = dict(nonce='b' * 32, scenario='readiness',
+                    killed_by_sigkill=True, collector_returncode=-9,
+                    integrity=dict(integrity), checkpoint_sha256='c' * 64,
+                    report=dict(plain_exit=2, partial_exit=4,
+                                partial_strict_exit=4, verified_events='0'),
+                    cleanup=dict(session_json_absent=True, stray_processes=[],
+                                 dir_lock_released=True,
+                                 capture_inventory=['.finalization-reserve',
+                                                    'checkpoint.json',
+                                                    'events.ndjson']),
+                    identity=dict(inputs=inputs))
+        validate_result(good, barrier, inputs)
+        bads = [dict(good, nonce='other'),
+                dict(good, killed_by_sigkill=False),
+                dict(good, collector_returncode=-15),
+                dict(good, integrity=dict(integrity, line_count='1')),
+                dict(good, report=dict(plain_exit=0, partial_exit=4,
+                                       partial_strict_exit=4,
+                                       verified_events='0')),
+                dict(good, report=dict(plain_exit=2, partial_exit=0,
+                                       partial_strict_exit=4,
+                                       verified_events='0')),
+                dict(good, cleanup=dict(session_json_absent=False,
+                                         stray_processes=[],
+                                         dir_lock_released=True,
+                                         capture_inventory=[]))]
+        for bad in bads:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                validate_result(bad, barrier, inputs)
+
+    def test_export_tamper_fails_host_verify(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, export, inputs, nonce = run_mock_scenario('checkpoint', tmp)
+            prefix = Path(export) / 'prefix-events.ndjson'
+            raw = bytearray(prefix.read_bytes())
+            # Flip a byte inside the declared extent; the host
+            # recomputation must catch the digest mismatch.
+            raw[5] ^= 0xff
+            prefix.write_bytes(bytes(raw))
+            with self.assertRaises(ValueError):
+                host_verify(Path(tmp), Path(export), nonce, 'checkpoint',
+                            inputs)
+
+    def test_boot_rejects_kernel_paths(self):
+        with self.assertRaises(ValueError):
+            boot('vng', Path('/tmp/config'), '../evil', 'readiness',
+                 'f' * 32, Path('/tmp/export'), Path('/tmp/logs'))
+
+
+def main():
+    if os.environ.get(ARMED_VAR) != '1':
+        unittest.main(argv=[sys.argv[0]] + sys.argv[1:], verbosity=2)
+        return 0
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ('binary', 'object', 'bridge', 'profile', 'out'):
+        parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--kernel', required=True,
+                        help='vng release token for the pinned guest')
+    parser.add_argument('--expect-release', required=True,
+                        help='uname -r the guest must boot')
+    parser.add_argument('--binary-sha256', required=True)
+    parser.add_argument('--shim', type=Path, required=False,
+                        help='capture fault shim (default: build tree)')
+    args = parser.parse_args()
+    args.owned_out_ids = None
+    try:
+        execute(args)
+    except Exception as exc:
+        print('collector-sigkill: FAIL: ' + str(exc), file=sys.stderr)
+        retain_owned_failure(args.out, args.owned_out_ids, str(exc))
+        return 1
+    print('collector-sigkill: PASS: live kills at readiness, durable '
+          'checkpoint and finalization')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
