@@ -47,8 +47,16 @@ ORACLE_KO = os.path.join(REPO, "build", "vm", "oracle", "memveil_dma_oracle.ko")
 BIN = os.path.join(REPO, "build", "memveil")
 
 
-def require_lifecycle_env(*probes):
-    """Preflight one lifecycle gate. Skips or fails honestly."""
+def require_lifecycle_env(*probes, memveil=None, objects=None):
+    """Preflight one lifecycle gate. Skips or fails honestly.
+
+    Legs that run a verified candidate name its engine
+    (memveil) and BPF objects (objects) instead of the dev
+    probe paths: the binary check and the gate-kernel
+    selection/doctor check then run against those inputs
+    and never consult the dev tree. Without them the dev
+    tree inputs apply.
+    """
     armed = os.environ.get("MEMVEIL_VM_LIFECYCLE") == "1"
     missing = [p for p in probes if not os.path.isfile(p)]
     if not armed:
@@ -58,8 +66,9 @@ def require_lifecycle_env(*probes):
     if missing:
         pytest.fail("armed but missing probes: %s"
                     % ", ".join(missing))
-    if not os.path.isfile(BIN):
-        pytest.fail("armed but missing build/memveil")
+    binary = memveil if memveil is not None else BIN
+    if not os.path.isfile(binary):
+        pytest.fail("armed but missing engine: %s" % binary)
     vng = shutil.which("vng") or os.path.expanduser("~/.venv/vng/bin/vng")
     if not (shutil.which("vng") or os.path.isfile(vng)):
         pytest.fail("armed but vng not available")
@@ -70,13 +79,14 @@ def require_lifecycle_env(*probes):
     probe = subprocess.run(["sudo", "-n", "true"], capture_output=True)
     if probe.returncode != 0:
         pytest.fail("armed but no passwordless sudo for vng")
-    prepare_gate_kernel()
+    prepare_gate_kernel(memveil=memveil, objects=objects)
 
 
-def prepare_gate_kernel():
+def prepare_gate_kernel(memveil=None, objects=None):
     """Select and live-verify the gate kernel, or fail the gate."""
     try:
-        return gate_kernel.prepare()
+        return gate_kernel.prepare(memveil=memveil,
+                                   objects=objects)
     except gate_kernel.GateKernelError as exc:
         pytest.fail("armed but %s" % exc)
 

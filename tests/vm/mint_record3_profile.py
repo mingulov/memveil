@@ -5,7 +5,8 @@
 Derives from an explicit --base doc: keeps its base
 bindings (config/btf/format/object/image build the same
 kernel the attempt lane qualifies), appends lc/cp object and
-ring bindings from the current builds, adds the frozen
+ring bindings from the current builds (or the --lc/--cp
+objects a sealed leg names), adds the frozen
 tracing hook sets, and flips both extra caps to supported.
 Ring sizes are parsed from object BTF (VAR -> STRUCT member
 max_entries -> PTR -> ARRAY nr_elems), never hardcoded.
@@ -263,22 +264,31 @@ def apply_tracing(doc, lc_obj, cp_obj, lc_reason,
     return doc
 
 
+USAGE = ("usage: mint_record3_profile.py --base DOC "
+         "[--out PATH] [--lc OBJ --cp OBJ]")
+
+
 def main():
     out = OUT
     base = None
+    lc_obj = LC_OBJ
+    cp_obj = CP_OBJ
     args = sys.argv[1:]
     while args:
-        if args[0] not in ("--out", "--base") or len(args) < 2:
-            fail("usage: mint_record3_profile.py --base DOC "
-                 "[--out PATH]")
+        if args[0] not in ("--out", "--base", "--lc", "--cp") \
+                or len(args) < 2:
+            fail(USAGE)
         if args[0] == "--out":
             out = Path(args[1])
-        else:
+        elif args[0] == "--base":
             base = Path(args[1])
+        elif args[0] == "--lc":
+            lc_obj = Path(args[1])
+        else:
+            cp_obj = Path(args[1])
         args = args[2:]
     if base is None:
-        fail("usage: mint_record3_profile.py --base DOC "
-             "[--out PATH]")
+        fail(USAGE)
     doc = json.loads(base.read_text())
     if doc.get("schema_version") not in ("0.1.1", "0.1.2"):
         fail("shipped doc is not profile 0.1.1")
@@ -287,7 +297,7 @@ def main():
     if len(attempt) != 1 or attempt[0]["status"] != "supported":
         fail("shipped doc lacks supported attempt-trace")
     apply_tracing(
-        doc, LC_OBJ, CP_OBJ,
+        doc, lc_obj, cp_obj,
         "Record3 lane only: ephemeral 3-channel wiring proof.",
         "Record3 lane only: ephemeral 3-channel wiring proof.",
         "Record3 test hook.")

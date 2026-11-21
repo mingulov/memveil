@@ -36,15 +36,20 @@ SPEC = os.path.join(REPO, "tests", "vm", "fixtures",
                     "canonical-expectations.json")
 
 
-def _mint_profile():
+def _mint_profile(lc_obj=None, cp_obj=None):
+    if (lc_obj is None) != (cp_obj is None):
+        raise ValueError(
+            "mint needs both lc and cp objects or neither")
     out = os.path.join(REPO, "build", "vm",
                        "record3-profile.json")
+    argv = [sys.executable,
+           os.path.join(REPO, "tests", "vm",
+                        "mint_record3_profile.py"),
+           "--base", str(gate_kernel.SELECTED), "--out", out]
+    if lc_obj is not None:
+        argv += ["--lc", str(lc_obj), "--cp", str(cp_obj)]
     proc = subprocess.run(
-        [sys.executable,
-         os.path.join(REPO, "tests", "vm",
-                      "mint_record3_profile.py"),
-         "--base", str(gate_kernel.SELECTED), "--out", out],
-        capture_output=True, text=True, timeout=180)
+        argv, capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0, proc.stderr[-2000:]
     with open(out) as handle:
         profile = json.load(handle)

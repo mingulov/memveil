@@ -14,7 +14,10 @@ effective-copy totals sum every executed copy event per
 direction, paired or not; attribution stays a separate scope.
 """
 
+import builtins
 import hashlib
+import inspect
+import io
 import json
 import os
 import pytest
@@ -35,7 +38,8 @@ from test_record3 import (ATTEMPT_PROBE, SPEC, _events,
                           check_lifetimes, check_oracle_slice)
 from evidence_retention import (expected_from_verified,
                                 retain_failure)
-from vm_boot import cleanup, run_guest, verify_exports
+from vm_boot import (cleanup, guest_artifact_paths, run_guest,
+                     verify_exports)
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -97,6 +101,43 @@ def _sha(path):
         for chunk in iter(lambda: handle.read(1048576), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+UNARMED_SKIP = ("lifecycle VM gates need MEMVEIL_VM_LIFECYCLE=1 "
+                "with qualified probes")
+
+
+def _sealed_inputs_requested(env=None):
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import requested
+    return requested(env)
+
+
+def require_bundle_env(selected):
+    """Arming, harness, and gate kernel for the bundle leg.
+
+    The caller resolves and validates the candidate first;
+    the sealed leg then preflights against the candidate
+    engine and objects only, while the dev leg keeps the
+    dev probes. Unarmed runs skip here, from this file, so
+    the offline selection accounts the skip to this leg.
+    """
+    if os.environ.get("MEMVEIL_VM_LIFECYCLE") != "1":
+        pytest.skip(UNARMED_SKIP)
+    if selected is None:
+        require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE,
+                              ATTEMPT_PROBE, BRIDGE)
+        return
+    attempt = str(selected.path("bpf/swiotlb_attempt.bpf.o"))
+    lc_obj = str(selected.path(
+        "bpf/swiotlb_lifecycle.bpf.o"))
+    cp_obj = str(selected.path("bpf/swiotlb_copy.bpf.o"))
+    engine = str(selected.path("bin/memveil"))
+    require_lifecycle_env(attempt, lc_obj, cp_obj, engine,
+                          memveil=engine,
+                          objects={"object": attempt,
+                                   "lc_object": lc_obj,
+                                   "cp_object": cp_obj})
 
 
 def _slice(events, window):
@@ -301,13 +342,23 @@ def check_report(report, events, bundle, tag, drained=True):
 
 
 def test_bundle_three_phase_capture():
-    require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE,
-                          ATTEMPT_PROBE, BRIDGE)
-    tarball, files, manifest_sha, _selected = \
+    if os.environ.get("MEMVEIL_VM_LIFECYCLE") != "1" \
+            and not _sealed_inputs_requested():
+        # Nothing armed and nothing offered: skip without
+        # resolving any bundle inputs (the unarmed offline
+        # run carries no dev bundle).
+        pytest.skip(UNARMED_SKIP)
+    tarball, files, manifest_sha, selected = \
         host_bundle_inputs()
+    require_bundle_env(selected)
     assert os.path.isfile(tarball), "missing %s" % tarball
     ensure_oracle_module()
-    _mint_profile()
+    if selected is None:
+        _mint_profile()
+    else:
+        _mint_profile(
+            selected.path("bpf/swiotlb_lifecycle.bpf.o"),
+            selected.path("bpf/swiotlb_copy.bpf.o"))
     with open(SPEC) as handle:
         frozen = json.load(handle)
     assert frozen["frozen_for_module"] == "0.4.0", frozen
@@ -505,8 +556,9 @@ def test_bundle_sealed_inputs_wiring(tmp_path):
     Host and guest resolvers agree on the sealed tarball
     identity; the guest record line carries no --bridge and no
     dev-tree path, every resolved byte matches its sealed pin,
-    and the dev defaults name 0.1.1 on both sides. Pure
-    resolution: no VM boots.
+    the guest bridge slot and the host identity table agree
+    on the sealed runtime member, and the dev defaults name
+    0.1.1 on both sides. Pure resolution: no VM boots.
     """
     assert os.path.basename(TARBALL) == \
         "memveil-0.1.1.tar.gz", TARBALL
@@ -567,6 +619,16 @@ def test_bundle_sealed_inputs_wiring(tmp_path):
         assert run["tarball_sha"] == _sha(tarball), run
         assert run["manifest_sha"] == manifest_sha, run
         assert run["files_verified"] == len(files), run
+        bridge = guest_lifecycle.guest_bridge_input(
+            "/nonexistent-repo", "bundle", selected)
+        assert bridge == run["libgcc"], bridge
+        assert _sha(bridge) == files[
+            "lib/memveil/libgcc_s.so.1"], bridge
+        table = guest_artifact_paths(
+            "bundle", "/nonexistent-repo", selected)
+        assert table["bridge_sha"] == bridge, table
+        assert table["lc_sha"] == run["lc"], table
+        assert table["cp_sha"] == run["cp"], table
     finally:
         selected.close()
         host_selected.close()
@@ -592,5 +654,196 @@ def test_bundle_sealed_inputs_refuse_dev_fallback(tmp_path):
             guest_lifecycle.bundle_run_inputs(REPO, selected)
         with pytest.raises(ValueError):
             host_bundle_inputs(env)
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_armed_leg_resolves_inputs_first():
+    """The armed leg resolves inputs before any preflight call."""
+    source = inspect.getsource(test_bundle_three_phase_capture)
+    assert source.index("host_bundle_inputs()") < \
+        source.index("require_bundle_env(")
+
+
+@pytest.mark.dev_fixture
+def test_bundle_unarmed_skip_matches_shared_preflight(
+        monkeypatch):
+    """This leg's unarmed skip stays worded like the shared one.
+
+    The leg skips from this file so the offline selection
+    accounts the skip here; the wording still matches the
+    shared preflight every other leg raises.
+    """
+    monkeypatch.delenv("MEMVEIL_VM_LIFECYCLE", raising=False)
+    with pytest.raises(pytest.skip.Exception) as shared:
+        require_lifecycle_env("/nonexistent-probe")
+    with pytest.raises(pytest.skip.Exception) as leg:
+        require_bundle_env(None)
+    assert leg.value.msg == shared.value.msg == UNARMED_SKIP
+
+
+@pytest.mark.dev_fixture
+def test_bundle_unarmed_skips_without_bundle_inputs(
+        monkeypatch):
+    """Unarmed with no sealed inputs, the leg skips cleanly.
+
+    Nothing armed and nothing offered: the leg skips from
+    this file without resolving any bundle inputs (even a
+    missing dev bundle cannot fail the skip).
+    """
+    monkeypatch.delenv("MEMVEIL_VM_LIFECYCLE", raising=False)
+    monkeypatch.delenv("MV_BUNDLE_TARBALL", raising=False)
+    monkeypatch.delenv("MV_CANDIDATE_MANIFEST", raising=False)
+    monkeypatch.delenv("MV_CANDIDATE_DIGEST", raising=False)
+    this = sys.modules[__name__]
+    monkeypatch.setattr(this, "MANIFEST",
+                        "/nonexistent-manifest.json")
+    monkeypatch.setattr(this, "TARBALL",
+                        "/nonexistent-bundle.tar.gz")
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        test_bundle_three_phase_capture()
+    assert skipped.value.msg == UNARMED_SKIP
+
+
+@pytest.mark.dev_fixture
+def test_bundle_validates_candidate_before_preflight(
+        tmp_path, monkeypatch):
+    """A bad candidate fails validation before any preflight skip.
+
+    Unarmed runs skip, but candidate validation runs first:
+    sealed inputs that fail verification raise instead of
+    skipping quietly.
+    """
+    monkeypatch.delenv("MEMVEIL_VM_LIFECYCLE", raising=False)
+    sealed = _seal_wire_bundle(tmp_path, "bundleorder",
+                               libgcc=True)
+    bad = dict(_wire_env(sealed), MV_CANDIDATE_DIGEST="f" * 64)
+    with pytest.raises(ValueError):
+        host_bundle_inputs(bad)
+
+
+DEV_INPUT_DIRS = tuple(os.path.join(REPO, name) + os.sep
+                       for name in ("build", "dist"))
+
+
+def _refuse_dev_consult(monkeypatch, real, target):
+    """Fail the test if sealed work consults dev inputs."""
+    def guard(path, *args, **kwargs):
+        if isinstance(path, (str, os.PathLike)):
+            text = os.fspath(path)
+            if text.startswith(DEV_INPUT_DIRS):
+                raise AssertionError(
+                    "sealed leg consulted dev input: %s"
+                    % text)
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(target[0], target[1], guard)
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_path_consults_no_dev_tree(
+        tmp_path, monkeypatch):
+    """Sealed resolve-plus-preflight never consults dev inputs.
+
+    With guards refusing any build/ or dist/ file consult,
+    the sealed inputs resolve, the guest and host resolvers
+    agree under the verified root, and the unarmed leg
+    skips from this file. Pure resolution: no VM boots.
+    """
+    monkeypatch.delenv("MEMVEIL_VM_LIFECYCLE", raising=False)
+    sealed = _seal_wire_bundle(tmp_path, "bundledevfree",
+                               libgcc=True)
+    env = _wire_env(sealed)
+    _refuse_dev_consult(monkeypatch, os.path.isfile,
+                        (os.path, "isfile"))
+    _refuse_dev_consult(monkeypatch, os.path.exists,
+                        (os.path, "exists"))
+    _refuse_dev_consult(monkeypatch, builtins.open,
+                        (builtins, "open"))
+    _refuse_dev_consult(monkeypatch, io.open, (io, "open"))
+    _refuse_dev_consult(monkeypatch, os.stat, (os, "stat"))
+    tarball, files, manifest_sha, selected = \
+        host_bundle_inputs(env)
+    try:
+        assert tarball == str(sealed["bundle"]), tarball
+        assert not tarball.startswith(DEV_INPUT_DIRS), \
+            tarball
+        run = guest_lifecycle.bundle_run_inputs(
+            "/nonexistent-repo", selected)
+        assert run["tarball"] == tarball, run
+        for key in ("bin", "attempt", "lc", "cp", "libgcc"):
+            assert run[key].startswith(
+                str(selected.root)), (key, run[key])
+        bridge = guest_lifecycle.guest_bridge_input(
+            "/nonexistent-repo", "bundle", selected)
+        assert bridge == run["libgcc"], bridge
+        table = guest_artifact_paths(
+            "bundle", "/nonexistent-repo", selected)
+        assert table["bridge_sha"] == bridge, table
+        with pytest.raises(pytest.skip.Exception) as skipped:
+            require_bundle_env(selected)
+        assert skipped.value.msg == UNARMED_SKIP
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_preflight_names_candidate_inputs(
+        tmp_path, monkeypatch):
+    """Armed sealed preflight checks candidate inputs only.
+
+    The harness and gate-kernel selection are stubbed; the
+    test records every probed path plus the engine and
+    objects handed to selection, and refuses any dev-tree
+    entry. No VM boots and no doctor runs.
+    """
+    sealed = _seal_wire_bundle(tmp_path, "bundlepreflight",
+                               libgcc=True)
+    env = _wire_env(sealed)
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    import lifecycle_env as preflight
+    selected = load(env=env, required=True)
+    try:
+        monkeypatch.setenv("MEMVEIL_VM_LIFECYCLE", "1")
+        seen = []
+        real_isfile = os.path.isfile
+
+        def record_isfile(path):
+            seen.append(os.fspath(path))
+            return real_isfile(path)
+
+        monkeypatch.setattr(os.path, "isfile", record_isfile)
+        real_exists = os.path.exists
+        monkeypatch.setattr(
+            os.path, "exists",
+            lambda p: True if p == "/dev/kvm"
+            else real_exists(p))
+        monkeypatch.setattr(
+            shutil, "which", lambda name: "/fake/" + name)
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(
+                args[0] if args else [], 0))
+        recorded = {}
+
+        def record_prepare(**kwargs):
+            recorded.update(kwargs)
+
+        monkeypatch.setattr(preflight, "prepare_gate_kernel",
+                            record_prepare)
+        require_bundle_env(selected)
+        engine = str(selected.path("bin/memveil"))
+        assert recorded["memveil"] == engine, recorded
+        assert recorded["objects"] == {
+            "object": str(selected.path(
+                "bpf/swiotlb_attempt.bpf.o")),
+            "lc_object": str(selected.path(
+                "bpf/swiotlb_lifecycle.bpf.o")),
+            "cp_object": str(selected.path(
+                "bpf/swiotlb_copy.bpf.o"))}, recorded
+        assert seen, "sealed preflight probed no inputs"
+        for path in seen:
+            assert path.startswith(str(selected.root)), path
     finally:
         selected.close()

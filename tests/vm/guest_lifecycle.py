@@ -129,6 +129,21 @@ def guest_bpf_objects(repo, candidate=None):
                 repo, "build", "bpf", "swiotlb_copy.bpf.o")}
 
 
+def guest_bridge_input(repo, sub, candidate):
+    """Bridge-path input for guest setup.
+
+    The bundle leg loads no bridge, so its sealed run pins
+    the candidate runtime member the sealed engine loads
+    instead of the dev bridge fixture; every other leg
+    keeps the dev bridge its consumers load.
+    """
+    if sub == "bundle" and candidate is not None:
+        return str(candidate.path(
+            "lib/memveil/libgcc_s.so.1"))
+    return os.path.join(
+        repo, "build", "deps", "lmb", "lib", "libbpf_mojo.so.1")
+
+
 def topwalk_product_paths(repo, candidate=None):
     """(memveil, attempt object) for a topwalk leg.
 
@@ -180,20 +195,19 @@ class Gate:
     """One subcommand run: paths, checks, consumer control."""
 
     def __init__(self, sub, work, export, repo):
+        self.candidate = load_guest_candidate(repo)
         self.sub = sub
         self.work = work
         self.export_dir = export
         self.repo = repo
         self.consume = os.path.join(repo, "build", "vm", "mv_consume")
-        self.bridge = os.path.join(
-            repo, "build", "deps", "lmb", "lib", "libbpf_mojo.so.1")
+        self.bridge = guest_bridge_input(repo, sub, self.candidate)
         self.lc_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle.bpf.o")
         self.cp_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_copy.bpf.o")
         self.lc_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle-test.bpf.o")
-        self.candidate = load_guest_candidate(repo)
         if self.candidate is not None:
             resolved = guest_bpf_objects(repo, self.candidate)
             self.lc_obj = resolved["lc_obj"]

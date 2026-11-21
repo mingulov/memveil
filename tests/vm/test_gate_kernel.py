@@ -9,6 +9,7 @@ and a foreign guest release with no shipped claim fails closed.
 import gzip
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -334,6 +335,49 @@ def test_live_gaps_require_available_and_live_verified():
         "mapping-lifecycle-stale "
         "(live-verified under reference profile x)",
         "absent-cap (absent)"]
+
+
+def test_prepare_threads_candidate_engine_and_objects(
+        tmp_path, monkeypatch):
+    gate_doc = tmp_path / "gate.json"
+    gate_doc.write_text('{"profile_id": "gate-test"}')
+    sel = gate_kernel.GateKernel(
+        "minted", os.uname().release,
+        gate_doc, tmp_path / "sat.json")
+    calls = {}
+
+    def fake_select(**kwargs):
+        calls["select"] = kwargs
+        return sel
+
+    def fake_live(caps, memveil):
+        calls["live"] = (tuple(caps), str(memveil))
+
+    monkeypatch.setattr(gate_kernel, "select", fake_select)
+    monkeypatch.setattr(gate_kernel, "require_live_interfaces",
+                        fake_live)
+    monkeypatch.setattr(gate_kernel, "SELECTED",
+                        tmp_path / "selected.json")
+    monkeypatch.setattr(gate_kernel, "_SELECTED", None)
+    engine = tmp_path / "engine"
+    engine.write_bytes(b"engine")
+    objects = {"object": str(tmp_path / "a.o"),
+               "lc_object": str(tmp_path / "lc.o"),
+               "cp_object": str(tmp_path / "cp.o")}
+    assert gate_kernel.prepare(memveil=str(engine),
+                               objects=objects) is sel
+    assert calls["select"] == {"objects": objects}
+    assert calls["live"] == (
+        ("attempt-trace", "mapping-lifecycle", "copy-actual"),
+        str(engine))
+    assert gate_kernel.selected() is sel
+    assert json.loads(
+        (tmp_path / "selected.json").read_text()) == \
+        json.loads(gate_doc.read_text())
+    calls.clear()
+    assert gate_kernel.prepare() is sel
+    assert calls["select"] == {"objects": None}
+    assert calls["live"][1] == str(gate_kernel.MEMVEIL)
 
 
 def test_emit_gate_profiles_requires_explicit_out(monkeypatch):

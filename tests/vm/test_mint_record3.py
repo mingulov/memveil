@@ -170,3 +170,29 @@ def test_main_requires_explicit_base(monkeypatch, capsys):
         m.main()
     assert exc.value.code == 1
     assert "--base DOC" in capsys.readouterr().err
+
+
+def test_main_object_flags_override_dev_defaults(
+        tmp_path, monkeypatch):
+    out = tmp_path / "profile.json"
+    monkeypatch.setattr(sys, "argv", [
+        "mint_record3_profile.py", "--base", NARROW_TEST,
+        "--out", str(out), "--lc", "/nonexistent-lc.o",
+        "--cp", "/nonexistent-cp.o"])
+    with pytest.raises(FileNotFoundError) as exc:
+        m.main()
+    assert "nonexistent-lc" in str(exc.value)
+
+
+@NEED_BUILDS
+def test_main_object_flags_mint_from_named_objects(
+        tmp_path, monkeypatch):
+    out = tmp_path / "profile.json"
+    monkeypatch.setattr(sys, "argv", [
+        "mint_record3_profile.py", "--base", NARROW_TEST,
+        "--out", str(out), "--lc", str(m.LC_OBJ),
+        "--cp", str(m.CP_OBJ)])
+    m.main()
+    doc = json.loads(out.read_text())
+    assert doc["profile_id"] == "record3-ephemeral"
+    assert doc["status"] == "reference-unvalidated"

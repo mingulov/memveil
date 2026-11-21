@@ -55,8 +55,11 @@ def guest_artifact_paths(sub, repo, selected=None):
     under the verified root for every subcommand; a
     saturation guest still runs the dev test objects, so
     its identity refuses here instead of passing mixed
-    bytes as qualified. Consume/bridge keep dev paths
-    (the candidate carries no bridge).
+    bytes as qualified. Consume keeps its dev path (a
+    fixture the candidate never carries); bridge keeps
+    its dev path too, except the sealed bundle leg, which
+    loads no bridge and pins the candidate runtime
+    member under the verified root instead.
     """
     repo = str(repo)
     table = {
@@ -77,6 +80,9 @@ def guest_artifact_paths(sub, repo, selected=None):
             "bpf/swiotlb_lifecycle.bpf.o"))
         table["cp_sha"] = str(selected.path(
             "bpf/swiotlb_copy.bpf.o"))
+        if sub == "bundle":
+            table["bridge_sha"] = str(selected.path(
+                "lib/memveil/libgcc_s.so.1"))
     return table
 
 

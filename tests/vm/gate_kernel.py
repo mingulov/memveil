@@ -308,12 +308,20 @@ def live_gaps(doc, caps):
     return gaps
 
 
-def prepare(caps=("attempt-trace", "mapping-lifecycle", "copy-actual")):
-    """Select the gate kernel, verify its interfaces, publish it."""
+def prepare(caps=("attempt-trace", "mapping-lifecycle", "copy-actual"),
+            memveil=None, objects=None):
+    """Select the gate kernel, verify its interfaces, publish it.
+
+    Legs that run a verified candidate pass its engine and
+    BPF objects: selection bindings and the live doctor
+    check then run against those inputs instead of the dev
+    tree. Without them the dev tree inputs apply.
+    """
     global _SELECTED
-    sel = select()
+    sel = select(objects=objects)
     if sel.release == os.uname().release:
-        require_live_interfaces(caps)
+        require_live_interfaces(
+            caps, memveil=Path(memveil) if memveil else MEMVEIL)
     SELECTED.parent.mkdir(parents=True, exist_ok=True)
     SELECTED.write_text(Path(sel.gate_doc).read_text())
     _SELECTED = sel
