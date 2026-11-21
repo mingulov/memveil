@@ -1,46 +1,515 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""F2-7: multi-channel faults through shipped record.
+"""F2-7: multi-channel faults through the sealed record.
 
-SUPERSEDED by tests/vm/test_battery.py case `faults`
-(battery port: the sealed C9 record runs directly
-under the bound reference profile with no bridge, plus
-per-channel loss reconcile); kept until the reviewed
-removal step.
+Seven scenarios in one pinned guest: truncated lc/cp objects
+refuse with exit 3 and zero BPF residue; SIGTERM mid-capture
+(1ch f3a and 3ch f3b) stops bounded with a signal end reason;
+a full output filesystem fails honestly without a
+masquerading session; paced 300-op floods compare 1ch against
+3ch capture exactly; a burst flood reconciles recorded plus
+omitted against the scripted prediction; background flood
+during attach leaves no pre-window records. Helper tests do
+not substitute: every scenario drives the real binary, real
+attach, and real rings.
 
-Seven scenarios in one guest: truncated lc/cp objects refuse
-with exit 3 and zero BPF residue; SIGTERM mid-capture (1ch and
-3ch) stops bounded with a signal end reason; a full output
-filesystem fails honestly without a masquerading session;
-paced 300-op floods compare 1ch against 3ch capture exactly;
-a burst flood reconciles recorded plus omitted against the
-scripted prediction; background flood during attach leaves no
-pre-window records. Helper tests do not substitute: every
-scenario drives the real binary, real attach, and real rings.
+The guest runs the verified record binary directly with the
+guest-matched profile and no bridge; it never invokes the
+dev consumer. The host binds the retained seal (binary plus
+three channel objects plus profile), the locked guest
+kernel, and the pinned-guest oracle fixture before boot,
+and the guest re-verifies the bytes it actually uses.
 """
 
+import fcntl
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import tarfile
+import tempfile
+from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "stress-consumer"))
 
 from consume import parse_oracle_log, scripted_expectation
-import gate_kernel  # noqa: E402
-from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
-                           ensure_oracle_module,
-                           require_lifecycle_env)
-from evidence_retention import (expected_from_verified,
-                                retain_failure)
+from evidence_retention import (VerifiedExports, expected_from_verified,
+                                retain_failure, snapshot_exports)
+from export_validation import validate_lifecycle_exports
+import guest_oracle  # noqa: E402
 from test_bundle import check_report
-from test_record3 import (ATTEMPT_PROBE, _events, _mint_profile,
-                          check_capture_session, check_lifetimes,
-                          check_oracle_slice)
-from vm_boot import cleanup, run_guest, verify_exports
+from test_record3 import (_events, check_capture_session,
+                          check_lifetimes, check_oracle_slice)
+from vm_boot import cleanup, guest_exec_command
+
+REPO = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+TESTS = os.path.join(REPO, "tests")
+ARM_ENV = "MEMVEIL_VM_LIFECYCLE"
+FAULTS_TIMEOUT = 1500
+
+# Retained seal this gate binds: every digest is re-checked
+# against the named files before boot; drift refuses. The
+# object and profile pins also match the committed fixtures,
+# cross-checked by the unarmed suite.
+SEAL_CANDIDATE_SHA = "ac2503a3ef4269826ae3f9512ca2402d45e767" \
+    "be2601c2893e812ebb6df929a7"
+SEAL_SCHEMA = "memveil-candidate/2"
+SEAL_SOURCE_COMMIT = "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
+SEAL_SOURCE_TREE = "ac316ebc57a7b9d1aaf91bfcac8b1de410a6f614"
+SEAL_BUNDLE_MANIFEST_SHA = "b2ba73f2d2ad02c8957171c08e4fbf4a9e689" \
+    "5bec0a7d3074ad5c687e07ad820"
+SEAL_BUNDLE_SHA = "389f1d358e9eb8896c6033ec9ce18f74a1adda10d" \
+    "2502f4a9e2d7f2943cb05ea"
+SEAL_BUNDLE_SIZE = 1797674
+SEAL_MEMBERS = {
+    "bin/memveil": "df6b37665220adf72ccc5dd29a36bcd9e91165d0"
+                   "d814de13c6ce5008c5532d7f",
+    "bpf/swiotlb_attempt.bpf.o": "ded931289c83713f62cdb5479fbf8a"
+                                 "ab03fe344d91a91bdeeee7e76f106979eb",
+    "bpf/swiotlb_copy.bpf.o": "526a6726e24f7725a0e88e28d6994f0"
+                              "475a1589c3de10c7ebef703a03dfa73e8",
+    "bpf/swiotlb_lifecycle.bpf.o": "32f6a353779778981e727f311fe5d1"
+                                   "b2c21fc92ae9918765f86bc4f81f58df34",
+    "profiles/linux-x86_64-7.0-reference.json":
+        "9cce54cd23d6310bf617cc3689045f134748e9806d9c397cad"
+        "5c5cc0a2523a27",
+}
+
+# Locked guest kernel, mirrored from the frozen
+# tests/vm/kernels.lock.json row "7.0": the vng version tag
+# boots it, the vmlinuz sha and the modules manifest sha
+# verify its cache before any boot.
+EXPECT_RELEASE = "7.0.14-070014-generic"
+VNG_TAG = "v7.0.14"
+VMLINUZ_SHA256 = "3d3d50d77364ff616ddeae0508c68f74501afdee9" \
+    "679682ce3bf59edba5b4aca"
+MODULES_MANIFEST_SHA256 = "921ffc5864bff7d52b128f907d8f439" \
+    "9e422f773f4f66e7798297b6f9bf5ffdb"
+
+# Guest-matched profile for the record legs: the shipped
+# 7.0-reference doc, digest-pinned. Record admits all three
+# channels under it through live-interface verification on
+# the pinned guest; the decision string below is what the
+# faults judge expects.
+PROFILE_REL = os.path.join(
+    "profiles", "linux-x86_64-7.0-reference.json")
+PROFILE_ID = "linux-x86_64-7.0-reference"
+PROFILE_SHA256 = SEAL_MEMBERS[
+    "profiles/linux-x86_64-7.0-reference.json"]
+PROFILE_DECISION = ("candidate linux-x86_64-7.0-reference: "
+                    "live interfaces verified "
+                    "(profile unvalidated)")
 
 CAPTURES = ("f3a", "f3b", "f5a", "f5b", "f5c", "f6")
 FLOOD_OPS = 300
+
+
+def sha_file(path):
+    """SHA-256 of a file, streamed."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1048576), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def seal_pins():
+    """The retained seal this gate binds, as a pins dict."""
+    return {
+        "candidate_sha256": SEAL_CANDIDATE_SHA,
+        "schema": SEAL_SCHEMA,
+        "source_commit": SEAL_SOURCE_COMMIT,
+        "source_tree": SEAL_SOURCE_TREE,
+        "bundle_manifest_sha256": SEAL_BUNDLE_MANIFEST_SHA,
+        "files": dict(SEAL_MEMBERS),
+        "bundle_sha256": SEAL_BUNDLE_SHA,
+        "bundle_size": SEAL_BUNDLE_SIZE,
+    }
+
+
+def verify_seal(candidate_path, bundle_path, pins=None):
+    """Verify one retained seal from explicit paths, fully.
+
+    Checks the manifest digest, schema, source and tree,
+    the bundle size and hash, then opens the tarball and
+    checks the inner manifest plus the five member hashes
+    this gate runs (binary, three channel objects, bound
+    profile). Returns the binding dict the run carries. Any
+    absence, drift, or mix refuses with a precise reason.
+    """
+    pins = pins or seal_pins()
+    if not candidate_path or not os.path.isfile(candidate_path):
+        raise ValueError("candidate manifest missing: %r"
+                         % (candidate_path,))
+    if sha_file(candidate_path) != pins["candidate_sha256"]:
+        raise ValueError("candidate manifest digest drift: %s"
+                         % candidate_path)
+    try:
+        with open(candidate_path) as handle:
+            manifest = json.load(handle)
+    except ValueError as exc:
+        raise ValueError("candidate manifest unparsable: %s (%s)"
+                         % (candidate_path, exc))
+    if manifest.get("schema") != pins["schema"]:
+        raise ValueError("candidate schema drift: %r"
+                         % manifest.get("schema"))
+    source = manifest.get("source", {})
+    if source.get("commit") != pins["source_commit"] \
+            or source.get("tree") != pins["source_tree"]:
+        raise ValueError("candidate source drift: %r" % (source,))
+    if manifest.get("bundle_manifest_sha256") \
+            != pins["bundle_manifest_sha256"]:
+        raise ValueError("candidate bundle manifest drift")
+    files = manifest.get("files", {})
+    for name, want in pins["files"].items():
+        if files.get(name) != want:
+            raise ValueError("candidate file drift: %s" % name)
+    bundle = None
+    for entry in manifest.get("artifacts", []):
+        if entry.get("name") == "bundle.tar.gz":
+            bundle = entry
+    if bundle is None:
+        raise ValueError("candidate bundle entry missing")
+    if bundle.get("sha256") != pins["bundle_sha256"] \
+            or str(bundle.get("size")) != str(pins["bundle_size"]):
+        raise ValueError("candidate bundle entry drift")
+    if not bundle_path or not os.path.isfile(bundle_path):
+        raise ValueError("candidate bundle missing: %r" % (bundle_path,))
+    if sha_file(bundle_path) != pins["bundle_sha256"]:
+        raise ValueError("candidate bundle bytes drift")
+    if os.path.getsize(bundle_path) != pins["bundle_size"]:
+        raise ValueError("candidate bundle size drift")
+    try:
+        archive = tarfile.open(bundle_path, "r:gz")
+    except (tarfile.TarError, OSError) as exc:
+        raise ValueError("candidate bundle unreadable: %s" % exc)
+    try:
+        members = {m.name: m for m in archive.getmembers()
+                   if m.isfile()}
+        inner = members.get("bundle/MANIFEST.json")
+        if inner is None:
+            raise ValueError("candidate bundle lacks inner manifest")
+        got = hashlib.sha256(
+            archive.extractfile(inner).read()).hexdigest()
+        if got != pins["bundle_manifest_sha256"]:
+            raise ValueError("candidate inner manifest drift")
+        for name, want in pins["files"].items():
+            member = members.get("bundle/" + name)
+            if member is None:
+                raise ValueError("candidate bundle lacks %s" % name)
+            got = hashlib.sha256(
+                archive.extractfile(member).read()).hexdigest()
+            if got != want:
+                raise ValueError("candidate bundle member drift: %s"
+                                 % name)
+    except (tarfile.TarError, OSError, KeyError) as exc:
+        raise ValueError("candidate bundle member unreadable: %s" % exc)
+    finally:
+        archive.close()
+    return {
+        "manifest_sha256": pins["candidate_sha256"],
+        "schema": manifest["schema"],
+        "source": {"commit": pins["source_commit"],
+                   "tree": pins["source_tree"]},
+        "bundle_manifest_sha256": pins["bundle_manifest_sha256"],
+        "files": dict(pins["files"]),
+        "bundle": {"sha256": pins["bundle_sha256"],
+                   "size": pins["bundle_size"]},
+    }
+
+
+def pinned_lock_entry(repo):
+    """The frozen kernel-lock row this gate boots."""
+    path = os.path.join(repo, "tests", "vm", "kernels.lock.json")
+    try:
+        with open(path) as handle:
+            lock = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("kernel lock unreadable: %s" % exc)
+    for entry in lock.get("kernels", []):
+        if entry.get("id") == "7.0":
+            return entry
+    raise ValueError("kernel lock lacks row 7.0")
+
+
+def verify_kernel_lock(repo):
+    """Guest-kernel binding cross-checked against the lock."""
+    entry = pinned_lock_entry(repo)
+    source = entry.get("source", {})
+    binding = {
+        "row": "7.0",
+        "vng_tag": source.get("vng_version"),
+        "release": entry.get("release"),
+        "vmlinuz_sha256": source.get("vmlinuz_sha256"),
+        "modules_manifest_sha256": source.get(
+            "modules_manifest_sha256"),
+    }
+    if binding["vng_tag"] != VNG_TAG:
+        raise ValueError("guest vng tag drift: %r"
+                         % binding["vng_tag"])
+    if binding["release"] != EXPECT_RELEASE:
+        raise ValueError("guest release drift: %r"
+                         % binding["release"])
+    if binding["vmlinuz_sha256"] != VMLINUZ_SHA256:
+        raise ValueError("guest vmlinuz pin drift")
+    if binding["modules_manifest_sha256"] \
+            != MODULES_MANIFEST_SHA256:
+        raise ValueError("guest modules pin drift")
+    return binding
+
+
+def verify_oracle(ko_path=None, provenance_path=None):
+    """Verify the pinned-guest oracle fixture; return its binding.
+
+    Re-verifies the fixture bytes (digest, size, receipt,
+    exact vermagic parsed from the bytes) and stamps the
+    digest, the vermagic, and the live-BTF identity pin. The
+    guest enforces the digest before a normal load, never
+    forced; drift refuses before boot.
+    """
+    guest_oracle.verify_fixture(ko_path, provenance_path)
+    return {
+        "ko": ko_path or guest_oracle.FIXTURE_KO,
+        "ko_sha256": guest_oracle.KO_SHA256,
+        "ko_vermagic": guest_oracle.GUEST_VERMAGIC,
+        "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
+        "guest_release": guest_oracle.GUEST_RELEASE,
+        "ko_provenance_sha256": sha_file(
+            provenance_path or guest_oracle.FIXTURE_PROVENANCE),
+    }
+
+
+def verify_profile(repo, bundle_path):
+    """Verify the bound profile member plus its reviewed doc.
+
+    The seal member must parse and name the bound profile
+    id, and its bytes must equal the reviewed checkout doc
+    byte for byte; the doc itself must carry the pinned id
+    and digest. Returns the profile binding.
+    """
+    doc_path = os.path.join(repo, PROFILE_REL)
+    try:
+        with open(doc_path) as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("bound profile unreadable: %s" % exc)
+    if doc.get("profile_id") != PROFILE_ID:
+        raise ValueError("bound profile id drift: %r"
+                         % doc.get("profile_id"))
+    if sha_file(doc_path) != PROFILE_SHA256:
+        raise ValueError("bound profile digest drift")
+    try:
+        archive = tarfile.open(bundle_path, "r:gz")
+    except (tarfile.TarError, OSError) as exc:
+        raise ValueError("candidate bundle unreadable: %s" % exc)
+    try:
+        member = archive.getmember(
+            "bundle/profiles/linux-x86_64-7.0-reference.json")
+        if not member.isfile():
+            raise ValueError("bound profile member not a file")
+        member_bytes = archive.extractfile(member).read()
+    except (KeyError, tarfile.TarError, OSError) as exc:
+        raise ValueError("bound profile member unreadable: %s" % exc)
+    finally:
+        archive.close()
+    try:
+        member_doc = json.loads(member_bytes.decode("utf-8"))
+    except ValueError as exc:
+        raise ValueError("bound profile member unparsable: %s" % exc)
+    if member_doc.get("profile_id") != PROFILE_ID:
+        raise ValueError("bound profile member id drift: %r"
+                         % member_doc.get("profile_id"))
+    with open(doc_path, "rb") as handle:
+        if handle.read() != member_bytes:
+            raise ValueError("bound profile member differs from "
+                             "the reviewed profile doc")
+    return {"sha256": PROFILE_SHA256, "profile_id": PROFILE_ID}
+
+
+def verify_faults_inputs(repo, candidate_path, bundle_path):
+    """Verify every sealed faults input; return the binding.
+
+    The retained seal (binary, three channel objects, bound
+    profile), the locked guest kernel, and the pinned-guest
+    oracle fixture are each re-hashed against their pins;
+    any drift refuses before boot.
+    """
+    seal = verify_seal(candidate_path, bundle_path)
+    files = seal["files"]
+    return {
+        "candidate": seal,
+        "objects": {
+            "lc": {"sha256": files[
+                "bpf/swiotlb_lifecycle.bpf.o"]},
+            "cp": {"sha256": files[
+                "bpf/swiotlb_copy.bpf.o"]},
+            "attempt": {"sha256": files[
+                "bpf/swiotlb_attempt.bpf.o"]},
+        },
+        "binary": {"sha256": files["bin/memveil"]},
+        "profile": verify_profile(repo, bundle_path),
+        "oracle": verify_oracle(),
+        "guest": verify_kernel_lock(repo),
+    }
+
+
+def check_faults_identity(ident, binding, files):
+    """Recheck the exported guest identity host-side.
+
+    Returns a reason list (empty ok): the booted release
+    and the live BTF bytes must equal the pinned
+    expectations, every measured input digest must equal
+    the manifest-bound bytes, and the exported profile must
+    name the bound id with the bound bytes. Independent of
+    the guest's own gate.
+    """
+    bad = []
+    if ident.get("release") != binding["guest"]["release"]:
+        bad.append("guest booted release %r, expected %r"
+                   % (ident.get("release"),
+                      binding["guest"]["release"]))
+    if ident.get("btf_sha256") != \
+            binding["oracle"]["btf_sha256"]:
+        bad.append("guest live BTF differs from the pinned bytes")
+    digests = ident.get("digests", {})
+    oracle = binding.get("oracle", {})
+    if digests.get("ko") != oracle.get("ko_sha256"):
+        bad.append("guest measured oracle bytes differ from "
+                   "the pinned fixture")
+    objects = binding.get("objects", {})
+    for channel in ("lc", "cp", "attempt"):
+        if digests.get(channel) != objects.get(
+                channel, {}).get("sha256"):
+            bad.append("guest measured %s bytes differ from "
+                       "the seal" % channel)
+    if digests.get("binary") != binding.get(
+            "binary", {}).get("sha256"):
+        bad.append("guest measured binary bytes differ from "
+                   "the seal")
+    profile = binding.get("profile", {})
+    if digests.get("profile") != profile.get("sha256"):
+        bad.append("guest measured profile bytes differ from "
+                   "the bound profile")
+    try:
+        exported = json.loads(
+            files["profile.json"].read_text())
+    except (KeyError, ValueError, OSError) as exc:
+        return bad + ["profile export unreadable: %s" % exc]
+    if exported.get("profile_id") != profile.get("profile_id"):
+        bad.append("exported profile id %r"
+                   % exported.get("profile_id"))
+    try:
+        if sha_file(str(files["profile.json"])) != \
+                profile.get("sha256"):
+            bad.append("exported profile bytes differ from "
+                       "the bound profile")
+    except OSError as exc:
+        bad.append("exported profile unreadable: %s" % exc)
+    return bad
+
+
+def snapshot_faults_exports(tmp, names):
+    """Snapshot the exact export inventory with sidecar hashes."""
+    export = Path(tmp) / "export"
+    try:
+        have = {p.name for p in export.iterdir()}
+    except OSError as exc:
+        raise ValueError("export unreadable: %s" % exc)
+    want = {"faults-%s" % n for n in names}
+    want |= {"faults-%s.sha256" % n for n in names}
+    assert have == want, \
+        "export inventory drift: %s" % sorted(have ^ want)
+    return snapshot_exports(tmp, "faults", names)
+
+
+def verify_faults_exports(tmp, names, binding):
+    """Check the exact exports plus schemas plus identity."""
+    got, verified = snapshot_faults_exports(tmp, names)
+    # Identity and the exported profile carry
+    # faults-specific checks below; the shared validator
+    # predates both shapes.
+    validate_lifecycle_exports(
+        {name: path for name, path in got.items()
+         if name not in ("identity.json", "profile.json")},
+        "faults")
+    ident = json.loads(got["identity.json"].read_text())
+    bad = check_faults_identity(ident, binding, got)
+    assert not bad, "; ".join(bad)
+    return VerifiedExports(got, verified)
+
+
+def boot_faults_guest(binding, candidate_path, bundle_path):
+    """Boot the pinned guest once for the sealed faults flow."""
+    from test_attempt_capture import gate_prefix
+    from harness_env import check_harness_versions
+    from kernel_matrix import verify_entry_cache
+    from vm_process import run_owned_guest
+    sys.path.insert(0, TESTS)
+    from support.candidate_input import load
+    prefix, env = gate_prefix()
+    harness = check_harness_versions(prefix[-1])
+    lock_dir = Path(REPO) / "build" / "vm"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lease = (lock_dir / "suite.lock").open("a+")
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lease.close()
+        raise ValueError("VM suite lease already owned")
+    try:
+        entry = pinned_lock_entry(REPO)
+        live = verify_kernel_lock(REPO)
+        if live != binding["guest"]:
+            raise ValueError("kernel lock changed after binding")
+        home = os.path.expanduser("~")
+        ok, why, ref = verify_entry_cache(home, entry)
+        if not ok:
+            raise ValueError("pinned guest cache not ready: %s" % why)
+        selected = load()
+        if selected is None:
+            raise ValueError("candidate env missing for the guest")
+        if selected.manifest_path \
+                != Path(candidate_path).absolute() \
+                or selected.bundle \
+                != Path(bundle_path).absolute():
+            raise ValueError("candidate env names files outside "
+                             "the verified binding")
+    except BaseException:
+        lease.close()
+        raise
+    tmp = Path(tempfile.mkdtemp(prefix="vmgate-faults-"))
+    work = "/tmp/vmgate-work"
+    export = tmp / "export"
+    export.mkdir()
+    cmd = prefix + ["--run", VNG_TAG, "-m", "6G",
+                    "--append", "swiotlb=force",
+                    "--disable-microvm", "--network", "user",
+                    "--qemu-opts=-cpu host",
+                    "--qemu-opts=-device pcnet,netdev=pcnet0"
+                    " -netdev user,id=pcnet0,net=10.0.3.0/24",
+                    "--rwdir=/tmp/export=%s" % (export,),
+                    "--exec",
+                    guest_exec_command("faults", work, REPO,
+                                       selected)]
+    try:
+        proc = run_owned_guest(cmd, timeout=FAULTS_TIMEOUT)
+        (tmp / "harness.json").write_text(json.dumps(
+            harness, sort_keys=True) + "\n")
+    except subprocess.TimeoutExpired as exc:
+        (tmp / "timeout.json").write_text(json.dumps(
+            dict(timeout=FAULTS_TIMEOUT, status="FAIL")) + "\n")
+        print("timed-out gate artifacts kept at %s" % tmp)
+        raise
+    finally:
+        lease.close()
+    return tmp, proc
 
 
 def _slice(events, window):
@@ -328,26 +797,36 @@ def judge_faults_capture(got, expect_decision=None):
 
 
 def test_faults_multi_channel():
-    require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE,
-                          ATTEMPT_PROBE, BRIDGE)
-    ensure_oracle_module()
-    _mint_profile()
+    if os.environ.get(ARM_ENV) != "1":
+        pytest.skip(
+            "sealed faults gate needs %s=1 with the retained "
+            "seal named" % ARM_ENV)
+    candidate_path = os.environ.get("MV_CANDIDATE_MANIFEST", "")
+    bundle_path = os.environ.get("MV_BUNDLE_TARBALL", "")
+    if not candidate_path or not bundle_path:
+        pytest.fail("armed but the retained seal is unnamed: set "
+                    "MV_CANDIDATE_MANIFEST and MV_BUNDLE_TARBALL")
+    try:
+        binding = verify_faults_inputs(
+            REPO, candidate_path, bundle_path)
+    except (ValueError, OSError) as exc:
+        pytest.fail("armed but %s" % exc)
     tmp = None
     try:
-        tmp, proc = run_guest("faults", timeout=1200, network=True)
+        tmp, proc = boot_faults_guest(
+            binding, candidate_path, bundle_path)
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
-        names = ["identity.json", "faults.json",
+        names = ["identity.json", "profile.json", "faults.json",
                  "f4-oracle.log", "f3b-report.json",
                  "f3a-cut-oracle.log", "f3b-cut-oracle.log"]
         for tag in CAPTURES:
             names += [f"{tag}-record.json", f"{tag}-session.json",
                       f"{tag}-events.ndjson", f"{tag}-oracle.log"]
-        got = verify_exports(tmp, "faults", names)
+        got = verify_faults_exports(tmp, names, binding)
         expected = expected_from_verified(got, "faults")
-        ident = json.loads(got["identity.json"].read_text())
-        assert ident["release"] == gate_kernel.selected().release, ident
-        bad = judge_faults_capture(got)
+        bad = judge_faults_capture(
+            got, expect_decision=PROFILE_DECISION)
         assert not bad, "\n".join(bad)
     except Exception:
         retain_failure(tmp, "faults")

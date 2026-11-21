@@ -191,6 +191,23 @@ def assert_topwalk_memveil_binding(ledger, selected):
             "candidate binary")
 
 
+# Sealed faults binding: the only guest release, oracle
+# bytes, live BTF, and profile the faults flow admits.
+# The host re-hashes every pin against its source before
+# boot; this guest re-hashes the bytes it actually loads
+# before use, so only the exact qualified guest reaches
+# the first scenario.
+FAULTS_RELEASE = "7.0.14-070014-generic"
+FAULTS_KO_SHA256 = "923c708278a8dc0ad96a897bb2d3ed75ef35a521" \
+    "428a87fdb07d58d30cd58cfc"
+FAULTS_BTF_SHA256 = "ec3aa895be1da974a3116c24cd31adccc5e49fef" \
+    "1b4b089dc588aa9e32419a05"
+FAULTS_PROFILE_MEMBER = \
+    "profiles/linux-x86_64-7.0-reference.json"
+FAULTS_KO_FIXTURE = ("tests", "vm", "fixtures", "ko",
+                     "memveil_dma_oracle-7.0.14-070014-generic.ko")
+
+
 class Gate:
     """One subcommand run: paths, checks, consumer control."""
 
@@ -200,11 +217,16 @@ class Gate:
         self.work = work
         self.export_dir = export
         self.repo = repo
-        # The bundle leg runs the packaged record, never the
-        # dev consumer, so it carries no consumer prerequisite.
-        self.consume = None if sub == "bundle" else os.path.join(
-            repo, "build", "vm", "mv_consume")
-        self.bridge = guest_bridge_input(repo, sub, self.candidate)
+        # The bundle and faults legs run the packaged
+        # record directly, never the dev consumer, so they
+        # carry no consumer prerequisite.
+        self.consume = None if sub in ("bundle", "faults") \
+            else os.path.join(repo, "build", "vm", "mv_consume")
+        # The faults leg loads through the statically linked
+        # record loader, so it carries no bridge prerequisite
+        # either; every other leg keeps its bridge input.
+        self.bridge = None if sub == "faults" \
+            else guest_bridge_input(repo, sub, self.candidate)
         self.lc_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle.bpf.o")
         self.cp_obj = os.path.join(
@@ -219,16 +241,21 @@ class Gate:
         self.oracle_loaded = False
         self.cp_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_copy-test.bpf.o")
-        self.ko = os.path.join(
-            repo, "build", "vm", "oracle", "memveil_dma_oracle.ko")
+        # The faults leg loads the reviewed pinned-guest
+        # fixture, never a host-built module; every other leg
+        # keeps its built module path.
+        self.ko = os.path.join(repo, *FAULTS_KO_FIXTURE) \
+            if sub == "faults" else os.path.join(
+                repo, "build", "vm", "oracle",
+                "memveil_dma_oracle.ko")
         if os.geteuid() != 0:
             fail("guest flow requires root")
         os.makedirs(work, exist_ok=True)
         os.makedirs(export, exist_ok=True)
-        required = [self.bridge, self.lc_obj, self.cp_obj,
-                    self.ko]
-        if self.consume is not None:
-            required = [self.consume] + required
+        required = [path for path in
+                    (self.consume, self.bridge, self.lc_obj,
+                     self.cp_obj, self.ko)
+                    if path is not None]
         for path in required:
             if not os.path.isfile(path):
                 fail(f"missing {path}")
@@ -237,11 +264,66 @@ class Gate:
         with open("/proc/cmdline") as fh:
             if "swiotlb=force" not in fh.read():
                 fail("guest lacks swiotlb=force")
+        if sub == "faults":
+            self._faults_preflight()
+
+    def _faults_preflight(self):
+        """Bind the sealed faults inputs before any guest work.
+
+        The candidate carries the verified record binary,
+        the three channel objects, and the guest-matched
+        profile; without it the leg fails closed instead of
+        running dev-tree bytes. The oracle fixture is
+        re-hashed here and the release plus live BTF pinned,
+        so only the exact qualified guest reaches the first
+        scenario.
+        """
+        if self.candidate is None:
+            fail("faults needs the verified candidate inputs")
+        if os.uname().release != FAULTS_RELEASE:
+            fail("guest booted release %r, expected %r"
+                 % (os.uname().release, FAULTS_RELEASE))
+        self.faults_bin = str(self.candidate.path("bin/memveil"))
+        self.faults_attempt = str(self.candidate.path(
+            "bpf/swiotlb_attempt.bpf.o"))
+        self.faults_profile = str(self.candidate.path(
+            FAULTS_PROFILE_MEMBER))
+        profiles_dir = self.candidate.path(
+            "profiles/manifest.txt").parent
+        try:
+            listed = profiles_dir.joinpath(
+                "manifest.txt").read_text().split()
+        except OSError:
+            fail("sealed profiles manifest unreadable")
+        if os.path.basename(self.faults_profile) not in listed:
+            fail("bound profile not listed by its sealed manifest")
+        self.faults_profiles_dir = str(profiles_dir)
+        if sha_file(self.ko) != FAULTS_KO_SHA256:
+            fail("faults oracle bytes differ from the fixture")
+        try:
+            with open("/sys/kernel/btf/vmlinux", "rb") as handle:
+                btf = hashlib.sha256(handle.read()).hexdigest()
+        except OSError as exc:
+            fail("faults live BTF unreadable: %s" % exc)
+        if btf != FAULTS_BTF_SHA256:
+            fail("faults live BTF differs from the pinned bytes")
 
     def identity(self):
         release = os.uname().release
         with open("/proc/cmdline") as fh:
             cmdline = fh.read().strip()
+        if self.sub == "faults":
+            with open("/sys/kernel/btf/vmlinux", "rb") as fh:
+                btf = hashlib.sha256(fh.read()).hexdigest()
+            return {"release": release, "cmdline": cmdline,
+                    "btf_sha256": btf,
+                    "digests": {
+                        "binary": sha_file(self.faults_bin),
+                        "attempt": sha_file(self.faults_attempt),
+                        "lc": sha_file(self.lc_obj),
+                        "cp": sha_file(self.cp_obj),
+                        "profile": sha_file(self.faults_profile),
+                        "ko": sha_file(self.ko)}}
         from lifecycle_env import module_build_identity
         config_btf = module_build_identity()
         doc = {"release": release, "swiotlb_force": "swiotlb=force" in cmdline,
@@ -1599,17 +1681,19 @@ def run_faults(gate):
     every scenario's exit, stderr tail, BPF inventory pair, and
     the seconds waited for kernel-deferred map IDs to settle.
     """
-    memveil = os.path.join(gate.repo, "build", "memveil")
-    attempt_obj = os.path.join(
-        gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
-    profile = os.path.join(
-        gate.repo, "build", "vm", "record3-profile.json")
-    for path in (memveil, attempt_obj, profile):
-        if not os.path.isfile(path):
-            fail(f"missing {path}")
+    # Sealed inputs, bound and re-hashed by the faults
+    # preflight: the verified record binary, the attempt
+    # object, and the guest-matched profile. The lifecycle
+    # and copy objects ride on the gate (sealed there too).
+    memveil = gate.faults_bin
+    attempt_obj = gate.faults_attempt
+    profile = gate.faults_profile
+    profiles_dir = gate.faults_profiles_dir
     gate.write_json("identity.json", gate.identity())
+    shutil.copyfile(profile,
+                    os.path.join(gate.work, "profile.json"))
     ledger = []
-    names = ["identity.json"]
+    names = ["identity.json", "profile.json"]
 
     def trunc(src, tag):
         with open(src, "rb") as fh:
@@ -1629,8 +1713,8 @@ def run_faults(gate):
                     "--object", attempt_obj,
                     "--lc-object", lc_obj,
                     "--cp-object", cp_obj,
-                    "--bridge", gate.bridge,
                     "--profile", profile,
+                    "--profiles-dir", profiles_dir,
                     "--capability",
                     "attempt-trace,mapping-lifecycle,copy-actual"],
                    timeout=60)
@@ -1658,8 +1742,8 @@ def run_faults(gate):
                 "--duration", str(duration),
                 "--output", cap,
                 "--object", attempt_obj,
-                "--bridge", gate.bridge,
-                "--profile", profile]
+                "--profile", profile,
+                "--profiles-dir", profiles_dir]
         if caps != ("attempt-trace",):
             args += ["--lc-object", gate.lc_obj,
                      "--cp-object", gate.cp_obj,
@@ -1799,8 +1883,8 @@ def run_faults(gate):
              "--object", attempt_obj,
              "--lc-object", gate.lc_obj,
              "--cp-object", gate.cp_obj,
-             "--bridge", gate.bridge,
              "--profile", profile,
+             "--profiles-dir", profiles_dir,
              "--capability",
              "attempt-trace,mapping-lifecycle,copy-actual"],
             stdout=subprocess.PIPE,
