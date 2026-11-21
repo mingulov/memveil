@@ -15,7 +15,9 @@ counts, hashes, and timestamps leave the guest.
 Every setup, workload, oracle-parse, or capture refusal
 aborts FAIL (exit 1), never skip. Semantic attribution
 (orphans, still-open, agreement) is exported as data; the
-host judges it.
+host judges it. The product record logs (stdout/stderr)
+are exported to the rwdir on every path, so a capture
+refusal stays diagnosable after the guest is gone.
 """
 
 import argparse
@@ -65,6 +67,43 @@ def export_file(export_dir, name, data):
                            "peer-" + name + ".sha256"),
               "w") as fh:
         fh.write("%s  %s\n" % (sha_bytes(raw), "peer-" + name))
+
+
+def export_record_logs(work, export_dir):
+    """Best-effort copy of the record logs to the rwdir.
+
+    Copies ``record.out``/``record.stderr`` from the
+    guest-local work dir to ``peer-``-prefixed exports
+    with hash sidecars. Missing sources, a missing work
+    dir, or an unwritable export dir skip quietly: this
+    runs on failure paths where raising would mask the
+    real error, and the host reports absent logs
+    explicitly. Never raises.
+    """
+    if not work or not export_dir:
+        return
+    try:
+        os.makedirs(export_dir, exist_ok=True)
+    except OSError:
+        return
+    for name in oracle.RECORD_LOGS:
+        try:
+            with open(os.path.join(work, name), "rb") as handle:
+                data = handle.read()
+        except OSError:
+            continue
+        try:
+            export_file(export_dir, name,
+                        data.decode("utf-8", "replace"))
+        except OSError:
+            continue
+
+
+def record_argv(memveil, args, dest):
+    """Exact product record argv for the window capture."""
+    return [memveil, "record", "--output", dest,
+            "--duration", str(args.duration),
+            "--capability", args.caps]
 
 
 def find_pcnet():
@@ -282,9 +321,7 @@ def start_record(args, work):
     memveil = sealed_record_binary()
     binary_sha = oracle.sha_file(memveil)
     dest = os.path.join(work, "cap")
-    argv = [memveil, "record", "--output", dest,
-           "--duration", str(args.duration),
-           "--capability", args.caps]
+    argv = record_argv(memveil, args, dest)
     out_path = os.path.join(work, "record.out")
     err_path = os.path.join(work, "record.stderr")
     with open(out_path, "w") as out:
@@ -310,15 +347,18 @@ def start_record(args, work):
         if ready is not None:
             break
         if proc.poll() is not None:
-            fail("record exited %d before ready"
-                 % (proc.returncode,))
+            fail("record exited %d before ready; see "
+                 "peer-record.stderr" % (proc.returncode,))
         time.sleep(0.2)
     if ready is None:
         proc.kill()
-        fail("record not ready in 120s")
+        fail("record not ready in 120s; see "
+             "peer-record.stderr")
     print("peer_oracle_guest: record ready session=%s"
           % (ready[0],), flush=True)
-    return {"proc": proc, "dest": dest, "binary_sha": binary_sha,
+    export_record_logs(work, args.export)
+    return {"proc": proc, "dest": dest, "work": work,
+            "binary_sha": binary_sha,
             "ready_session": ready[0],
             "ready_start_ns": ready[1]}
 
@@ -332,7 +372,8 @@ def stop_record(handle, args):
         proc.kill()
         fail("record did not stop after its duration")
     if proc.returncode != 0:
-        fail("record exited %d" % (proc.returncode,))
+        fail("record exited %d; see peer-record.stderr"
+             % (proc.returncode,))
     session_path = os.path.join(handle["dest"], "session.json")
     events_path = os.path.join(handle["dest"], "events.ndjson")
     if not os.path.isfile(session_path) \
@@ -353,6 +394,7 @@ def stop_record(handle, args):
         fail("record events carry no profile")
     print("peer_oracle_guest: record done profile=%s"
           % (profile,), flush=True)
+    export_record_logs(handle["work"], args.export)
     return {"session_path": session_path,
             "events_path": events_path, "profile": profile}
 
@@ -536,7 +578,8 @@ def parse_argv(argv):
     parser.add_argument("--buffer-kb", type=int, default=4096,
                         help="per-CPU trace buffer KiB")
     parser.add_argument("--caps",
-                        default="mapping-lifecycle,copy-actual",
+                        default="attempt-trace,mapping-lifecycle,"
+                                "copy-actual",
                         help="record capabilities")
     parser.add_argument("--duration", type=int, default=60,
                         help="record duration seconds")
@@ -549,8 +592,8 @@ def parse_argv(argv):
     return args
 
 
-def main(argv):
-    args = parse_argv(argv)
+def run(args):
+    """Guest flow body; main() exports record logs around it."""
     os.makedirs(args.work, exist_ok=True)
     os.makedirs(args.export, exist_ok=True)
     nic = setup_nic(args)
@@ -605,6 +648,14 @@ def main(argv):
     print("peer_oracle_guest: exported peer PASS-ready",
           flush=True)
     return 0
+
+
+def main(argv):
+    args = parse_argv(argv)
+    try:
+        return run(args)
+    finally:
+        export_record_logs(args.work, args.export)
 
 
 if __name__ == "__main__":

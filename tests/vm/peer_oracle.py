@@ -48,7 +48,8 @@ Battery adoption contract: case id ``peer`` (``CASE_ID``),
 900 s timeout (``CASE_TIMEOUT``), full-machine network boot
 (``CASE_NETWORK``), armed by ``MEMVEIL_VM_PEER=1``
 (``PEER_ENV``), export prefix ``peer`` with inventory
-``peer.json``, ``cap-session.json``, ``cap-events.ndjson``.
+``peer.json``, ``cap-session.json``, ``cap-events.ndjson``,
+``record.out``, ``record.stderr``.
 """
 
 import hashlib
@@ -61,8 +62,12 @@ CASE_ID = "peer"
 CASE_TIMEOUT = 900
 CASE_NETWORK = True
 PEER_ENV = "MEMVEIL_VM_PEER"
+# Product record stdout/stderr, exported from the guest on
+# every path (success plus every failure) so a capture
+# refusal stays diagnosable after the guest is gone.
+RECORD_LOGS = ("record.out", "record.stderr")
 EXPORT_NAMES = ("peer.json", "cap-session.json",
-                "cap-events.ndjson")
+                "cap-events.ndjson") + RECORD_LOGS
 
 MAP_EVENT = "dma_map_phys"
 UNMAP_EVENT = "dma_unmap_phys"
@@ -93,6 +98,7 @@ LOSS_BUCKETS = ("submit_fail", "malformed", "dropped",
 
 PEER_SCHEMA = "memveil-peer-oracle/1"
 RECEIPT_SCHEMA = "memveil-peer-leg-receipt/1"
+RECORD_LOG_NOTE_SCHEMA = "memveil-peer-record-logs/1"
 MONO_CLOCK = "CLOCK_MONOTONIC"
 
 BDF_RE = re.compile(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:"
@@ -605,11 +611,21 @@ def parse_c9_stream(lines):
     first; this fold reads only kind/data counters, the
     profile set, and the session set. Returns counters plus
     ``profiles`` and ``sessions`` sets for binding checks.
+
+    Attempt-channel records (``bounce_attempt``) are
+    counted explicitly under ``attempts`` and deliberately
+    excluded from the lifecycle counters: an attempt
+    describes a requested bounce, not a completed mapping
+    lifetime, so it can never agree with (or cover a gap
+    in) the oracle's proven map-to-release pairs. The
+    count proves the channel was observed, never silently
+    dropped.
     """
     maps_by_size = Counter()
     copies_by_dir = Counter()
     copy_bytes_by_dir = Counter()
     unmaps = 0
+    attempts = 0
     profiles = set()
     sessions = set()
     kinds = Counter()
@@ -628,12 +644,14 @@ def parse_c9_stream(lines):
             copies_by_dir[data["direction"]] += 1
             copy_bytes_by_dir[data["direction"]] += int(
                 data["bytes"])
+        elif event["kind"] == "bounce_attempt":
+            attempts += 1
     return {"maps_by_size": maps_by_size,
             "copies_by_dir": copies_by_dir,
             "copy_bytes_by_dir": copy_bytes_by_dir,
-            "unmaps": unmaps, "profiles": profiles,
-            "sessions": sessions, "kinds": kinds,
-            "events": len(lines)}
+            "unmaps": unmaps, "attempts": attempts,
+            "profiles": profiles, "sessions": sessions,
+            "kinds": kinds, "events": len(lines)}
 
 
 def agree_oracle_c9(proven, c9, declared):
@@ -651,11 +669,19 @@ def agree_oracle_c9(proven, c9, declared):
     declared loss does. Bounce coverage needs nonzero
     observed copy bytes in a consistent direction per
     oracle direction class present.
+
+    Attempt-channel records (``c9["attempts"]``) are
+    explicitly excluded from the gap comparison: attempts
+    and effective mappings are distinct measurements, so
+    any number of attempt records neither covers a
+    lifecycle gap nor creates one. The count is reported
+    through, proving the exclusion was deliberate.
     """
     bad = []
     total = sum(proven.values())
     if total <= 0:
         return ["no proven bounced pairs to agree on"], {}
+    attempts = c9["attempts"]
     map_gap = sum(max(0, proven[size] - c9["maps_by_size"].get(
         size, 0)) for size in proven)
     unmap_gap = max(0, total - c9["unmaps"])
@@ -672,7 +698,8 @@ def agree_oracle_c9(proven, c9, declared):
     return bad, {"pairs": total, "map_gap": map_gap,
                  "unmap_gap": unmap_gap, "gap": gap,
                  "declared": declared["total"],
-                 "copy_bytes": copy_bytes}
+                 "copy_bytes": copy_bytes,
+                 "attempt_events": attempts}
 
 
 def agree_bounce_dirs(pair_dirs, c9):
@@ -1035,7 +1062,9 @@ def emit_receipt(peer, c9, summary, declared, agreement,
                "end_reason": summary.get("end_reason"),
                "declared_loss": declared["total"],
                "gap": agreement.get("gap"),
-               "copy_bytes": agreement.get("copy_bytes")},
+               "copy_bytes": agreement.get("copy_bytes"),
+               "attempt_events":
+                   agreement.get("attempt_events")},
         "guest": {"release": guest["release"],
                   "btf_sha": guest["btf_sha"],
                   "swiotlb_force": guest["swiotlb_force"],
@@ -1351,6 +1380,109 @@ def verify_peer_exports(tmp, sub, names):
     return VerifiedExports(got, verified)
 
 
+def read_record_logs(export_dir, prefix="peer"):
+    """Surface the guest-exported record logs, never raising.
+
+    Reads ``record.out``/``record.stderr`` from a run
+    export dir (live rwdir contents, usable on dead-guest
+    and timeout paths where the snapshotter cannot run),
+    hashing each against its ``.sha256`` sidecar. Returns
+    a note dict with ``schema``, ``status`` (``present``
+    when at least one log survived, ``absent`` when the
+    guest exported neither, ``no-run-dir`` when there is
+    no run dir at all), and a per-log ``logs`` mapping of
+    ``present``, ``sha256``, ``bytes``, ``tail`` (last
+    500 characters of diagnostic text), ``verified``
+    (sidecar digest matches), and ``error``. Absent logs
+    are an explicit marker, never silence. This is a
+    forensics surface only: success-path strictness stays
+    with the snapshotter, which fails closed on any
+    missing or mismatched sidecar.
+    """
+    logs = {}
+    if export_dir is None:
+        for name in RECORD_LOGS:
+            logs[name] = {"present": False, "sha256": None,
+                          "bytes": None, "tail": "",
+                          "verified": False,
+                          "error": "no run dir"}
+        return {"schema": RECORD_LOG_NOTE_SCHEMA,
+                "status": "no-run-dir", "logs": logs}
+    for name in RECORD_LOGS:
+        entry = {"present": False, "sha256": None,
+                 "bytes": None, "tail": "",
+                 "verified": False, "error": None}
+        live = os.path.join(str(export_dir),
+                            "%s-%s" % (prefix, name))
+        try:
+            with open(live, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            if os.path.isfile(live):
+                entry["present"] = True
+                entry["error"] = "unreadable export"
+            logs[name] = entry
+            continue
+        entry["present"] = True
+        entry["sha256"] = hashlib.sha256(data).hexdigest()
+        entry["bytes"] = len(data)
+        entry["tail"] = data.decode("utf-8",
+                                    "replace")[-500:]
+        try:
+            with open(live + ".sha256", "r",
+                      encoding="utf-8") as handle:
+                sidecar = handle.read()
+        except OSError:
+            entry["error"] = "missing sidecar"
+            logs[name] = entry
+            continue
+        want = sidecar.split()
+        if len(want) >= 1 and SHA_RE.fullmatch(want[0]) \
+                and want[0] == entry["sha256"]:
+            entry["verified"] = True
+        else:
+            entry["error"] = "hash mismatch"
+        logs[name] = entry
+    status = "present" if any(entry["present"]
+                              for entry in logs.values()) \
+        else "absent"
+    return {"schema": RECORD_LOG_NOTE_SCHEMA,
+            "status": status, "logs": logs}
+
+
+def format_record_log_note(note):
+    """Console lines for a record-log note, never silent.
+
+    One status line plus one line per log: digest and
+    byte count when present, the explicit absent marker
+    otherwise, and the stderr tail so the product
+    diagnostic reaches the host log even when the guest
+    is dead.
+    """
+    lines = ["peer: record logs: %s"
+             % (note.get("status", "absent"),)]
+    for name in RECORD_LOGS:
+        entry = note.get("logs", {}).get(name, {})
+        if not entry.get("present"):
+            lines.append("peer: %s: absent (%s)"
+                         % (name,
+                            entry.get("error")
+                            or "no guest export"))
+            continue
+        lines.append("peer: %s: sha256=%s bytes=%s "
+                     "verified=%s%s"
+                     % (name, entry.get("sha256"),
+                        entry.get("bytes"),
+                        entry.get("verified"),
+                        "" if not entry.get("error")
+                        else " error=%s"
+                        % (entry.get("error"),)))
+        if name == "record.stderr" and entry.get("tail"):
+            lines.append("peer: record.stderr tail: %s"
+                         % (entry["tail"].strip()[-300:],))
+    return lines
+
+
 def require_peer_env():
     """Armed preflight for the peer leg.
 
@@ -1404,10 +1536,12 @@ def sha_file(path):
 
 
 __all__ = ["CASE_ID", "CASE_TIMEOUT", "CASE_NETWORK",
-           "PEER_ENV", "EXPORT_NAMES", "MAP_EVENT",
+           "PEER_ENV", "EXPORT_NAMES", "RECORD_LOGS",
+           "MAP_EVENT",
            "UNMAP_EVENT", "MARK_EVENT", "ORACLE_EVENTS",
            "MARKERS", "TRAFFIC_BEGIN", "TRAFFIC_END", "DIRS",
            "LOSS_BUCKETS", "PEER_SCHEMA", "RECEIPT_SCHEMA",
+           "RECORD_LOG_NOTE_SCHEMA",
            "MONO_CLOCK", "OracleError", "parse_ts_us",
            "parse_trace_line", "read_trace_window",
            "check_ordering", "assign_key_ids", "pair_fifo",
@@ -1421,5 +1555,6 @@ __all__ = ["CASE_ID", "CASE_TIMEOUT", "CASE_NETWORK",
            "strict_json", "validate_peer_doc",
            "validate_peer_exports", "load_schema_validator",
            "validate_c9_capture",
-           "verify_peer_exports", "require_peer_env",
+           "verify_peer_exports", "read_record_logs",
+           "format_record_log_note", "require_peer_env",
            "resolve_peer_kernel", "sha_file"]

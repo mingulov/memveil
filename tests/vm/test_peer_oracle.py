@@ -158,7 +158,8 @@ def peer_doc(traffic, bracket):
                    "format_tokens_ok": True,
                    "buffer_kb": 4096},
         "c9": {"binary_sha": jam, "profile": PROFILE,
-               "caps": "mapping-lifecycle,copy-actual",
+               "caps": "attempt-trace,mapping-lifecycle,"
+                       "copy-actual",
                "duration_s": 60, "record_exit": 0,
                "ready_session": "cap-1-1",
                "ready_start_ns": 10000000000,
@@ -220,21 +221,25 @@ def traffic_fixture_doc(pairs=((98, "TO_DEVICE"),)):
 
 
 def c9_fold(maps_by_size, unmaps, copies, events=0,
-            profile=PROFILE, session="cap-1-1"):
+            profile=PROFILE, session="cap-1-1", attempts=0):
     """Hand-built ``parse_c9_stream``-shaped fold."""
     by_dir = Counter()
     bytes_by_dir = Counter()
     for direction, count, total in copies:
         by_dir[direction] += count
         bytes_by_dir[direction] += total
+    kinds = Counter({"map_result": sum(maps_by_size.values())})
+    if attempts:
+        kinds["bounce_attempt"] = attempts
     return {"maps_by_size": Counter(maps_by_size),
             "copies_by_dir": by_dir,
             "copy_bytes_by_dir": bytes_by_dir,
-            "unmaps": unmaps, "profiles": {profile},
+            "unmaps": unmaps, "attempts": attempts,
+            "profiles": {profile},
             "sessions": {session},
-            "kinds": Counter({"map_result": sum(
-                maps_by_size.values())}),
-            "events": events or sum(maps_by_size.values())}
+            "kinds": kinds,
+            "events": events
+            or (sum(maps_by_size.values()) + attempts)}
 
 
 def live_summary(session="cap-1-1", start=10000000000,
@@ -963,6 +968,8 @@ def test_c9_fixture_passes_schema_validator(tmp_path):
     assert summary["synthetic"] is True
     assert fold["maps_by_size"] == Counter({98: 1, 1544: 1})
     assert fold["unmaps"] == 2
+    assert fold["attempts"] == 1
+    assert fold["kinds"]["bounce_attempt"] == 1
     assert fold["copy_bytes_by_dir"] == Counter(
         {"original_to_bounce": 98,
          "bounce_to_original": 1544})
@@ -1000,6 +1007,7 @@ def test_wiring_chain_blocks_only_on_provenance(tmp_path):
     assert verdict is False
     assert findings == ["C9 capture is not live"]
     assert agreement["gap"] == 0
+    assert agreement["attempt_events"] == 1
 
 
 def test_judge_pass_on_clean_leg():
@@ -1009,12 +1017,13 @@ def test_judge_pass_on_clean_leg():
     fold = c9_fold({98: 1, 1544: 1}, 2,
                    [("original_to_bounce", 1, 98),
                     ("bounce_to_original", 1, 1544)],
-                   events=7)
+                   events=10, attempts=3)
     verdict, findings, agreement = peer_oracle.judge_peer_leg(
         doc, fold, live_summary(), zero_loss())
     assert (verdict, findings) == (True, [])
     assert agreement["gap"] == 0
     assert agreement["copy_bytes"] == 1642
+    assert agreement["attempt_events"] == 3
 
 
 def test_judge_failure_classes():
@@ -1094,7 +1103,7 @@ def test_receipt_binds_leg_inputs():
     fold = c9_fold({98: 1, 1544: 1}, 2,
                    [("original_to_bounce", 1, 98),
                     ("bounce_to_original", 1, 1544)],
-                   events=7)
+                   events=9, attempts=2)
     verdict, findings, agreement = peer_oracle.judge_peer_leg(
         doc, fold, live_summary(), zero_loss())
     harness = {"commit": "abc123", "dirty": False,
@@ -1103,7 +1112,9 @@ def test_receipt_binds_leg_inputs():
                            "bundle_sha": "3" * 64}}
     exports = {"peer.json": "4" * 64,
                "cap-session.json": "5" * 64,
-               "cap-events.ndjson": "6" * 64}
+               "cap-events.ndjson": "6" * 64,
+               "record.out": "7" * 64,
+               "record.stderr": "8" * 64}
     receipt = peer_oracle.emit_receipt(
         doc, fold, live_summary(), zero_loss(), agreement,
         verdict, findings, harness, exports)
@@ -1115,6 +1126,8 @@ def test_receipt_binds_leg_inputs():
         "3" * 64
     assert receipt["c9"]["profile_id"] == [PROFILE]
     assert receipt["c9"]["declared_loss"] == 0
+    assert receipt["c9"]["attempt_events"] == 2
+    assert receipt["exports"]["record.stderr"] == "8" * 64
     assert receipt["guest"]["pci"] == BDF
     assert receipt["oracle"]["traffic_pairs"] == 2
     assert receipt["oracle"]["bracket_pre_existing"] == 1
@@ -1128,12 +1141,17 @@ def test_receipt_binds_leg_inputs():
 
 
 def write_export_tree(tmp_path, peer_text, cap_session="{}",
-                      cap_events=""):
+                      cap_events="",
+                      record_out="ready session=cap-1-1 "
+                                 "start_ns=10000000000\n",
+                      record_stderr=""):
     export = tmp_path / "export"
     export.mkdir()
     for name, body in (("peer-peer.json", peer_text),
                        ("peer-cap-session.json", cap_session),
-                       ("peer-cap-events.ndjson", cap_events)):
+                       ("peer-cap-events.ndjson", cap_events),
+                       ("peer-record.out", record_out),
+                       ("peer-record.stderr", record_stderr)):
         path = export / name
         path.write_text(body)
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -1150,7 +1168,8 @@ def test_verify_peer_exports_roundtrip(tmp_path):
     assert set(got) == set(peer_oracle.EXPORT_NAMES)
     assert set(got.verified_hashes) == {
         "peer-peer.json", "peer-cap-session.json",
-        "peer-cap-events.ndjson"}
+        "peer-cap-events.ndjson", "peer-record.out",
+        "peer-record.stderr"}
     # A swapped sidecar fails the snapshot.
     sidecar = tmp_path / "export" / "peer-peer.json.sha256"
     sidecar.write_text("%s  peer-peer.json\n" % ("0" * 64,))
@@ -1190,6 +1209,13 @@ def test_guest_argv_parsing():
     assert args.pings == 500
     assert args.duration == 60
     assert args.addr == "10.0.3.15/24"
+    assert args.caps == "attempt-trace,mapping-lifecycle," \
+        "copy-actual"
+    override = guest.parse_argv(
+        ["/tmp/work", "/tmp/export", "--release",
+         "7.0.14-070014-generic", "--pci", BDF, "--caps",
+         "attempt-trace,mapping-lifecycle"])
+    assert override.caps == "attempt-trace,mapping-lifecycle"
     with pytest.raises(SystemExit):
         guest.parse_argv(["/tmp/work", "/tmp/export",
                           "--release", "7.0.14-070014-generic",
@@ -1198,6 +1224,177 @@ def test_guest_argv_parsing():
         guest.parse_argv(["/tmp/work", "/tmp/export",
                           "--release", "7.0.14-070014-generic",
                           "--pci", BDF, "--pings", "0"])
+
+
+def test_record_argv_carries_attempt_trace():
+    import peer_oracle_guest as guest
+    args = guest.parse_argv(["/tmp/work", "/tmp/export",
+                             "--release",
+                             "7.0.14-070014-generic",
+                             "--pci", BDF])
+    argv = guest.record_argv("/opt/c9/bin/memveil", args,
+                            "/tmp/work/cap")
+    assert argv == ["/opt/c9/bin/memveil", "record",
+                   "--output", "/tmp/work/cap",
+                   "--duration", "60", "--capability",
+                   "attempt-trace,mapping-lifecycle,"
+                   "copy-actual"]
+    caps = argv[argv.index("--capability") + 1].split(",")
+    assert "attempt-trace" in caps
+
+
+def test_attempts_excluded_from_bounced_subset():
+    proven = Counter({98: 1})
+    # Attempts present alongside exact lifecycle cover:
+    # PASS, count reported through.
+    exact = c9_fold({98: 1}, 1,
+                    [("original_to_bounce", 1, 98)],
+                    attempts=50)
+    bad, report = peer_oracle.agree_oracle_c9(
+        proven, exact, zero_loss())
+    assert bad == []
+    assert report["gap"] == 0
+    assert report["attempt_events"] == 50
+    # Attempts never cover a lifecycle gap: one proven
+    # lifetime with no lifecycle records fails even with
+    # attempt records present.
+    attempt_only = c9_fold({}, 0, [], attempts=5)
+    bad, report = peer_oracle.agree_oracle_c9(
+        proven, attempt_only, zero_loss())
+    assert any("exceeds declared loss" in finding
+               for finding in bad)
+    assert report["gap"] == 2
+    assert report["attempt_events"] == 5
+    # The same gap charged to declared loss clears the
+    # gap finding (bounce coverage still correctly
+    # missing: an attempt-only capture observed no
+    # copies).
+    declared = {"total": 2,
+                "buckets": dict(zero_loss()["buckets"])}
+    bad, report = peer_oracle.agree_oracle_c9(
+        proven, attempt_only, declared)
+    assert bad == ["no exercised bounce coverage in C9 "
+                   "copies"]
+    assert report["gap"] == 2
+
+
+def test_fold_counts_attempt_channel_explicitly(tmp_path):
+    _, events_path = write_c9_fixture(tmp_path)
+    lines = events_path.read_text().splitlines()
+    lines.append(json.dumps(c9_event(
+        7, 11000000007, "bounce_attempt",
+        {"device_id": "d000001",
+         "requested_bytes": "1544", "forced": True,
+         "operation_id": "op1"},
+        "synth-peer-1", "swiotlb:swiotlb_bounced",
+        "tracepoint"), sort_keys=True))
+    fold = peer_oracle.parse_c9_stream(lines)
+    assert fold["attempts"] == 2
+    assert fold["kinds"]["bounce_attempt"] == 2
+    assert fold["maps_by_size"] == Counter({98: 1, 1544: 1})
+    assert fold["unmaps"] == 2
+    assert fold["events"] == 8
+
+
+def test_guest_exports_record_logs(tmp_path):
+    import peer_oracle_guest as guest
+    work = tmp_path / "work"
+    export = tmp_path / "export"
+    work.mkdir()
+    (work / "record.out").write_text(
+        "ready session=cap-1-1 start_ns=5\n")
+    refused = "memveil record: attempt-trace is required\n"
+    (work / "record.stderr").write_text(refused)
+    guest.export_record_logs(str(work), str(export))
+    for name, body in (("peer-record.out",
+                       "ready session=cap-1-1 start_ns=5\n"),
+                      ("peer-record.stderr", refused)):
+        path = export / name
+        assert path.read_text() == body
+        sidecar = export / (name + ".sha256")
+        assert sidecar.read_text() == \
+            "%s  %s\n" % (sha_text(body), name)
+    # Missing sources skip quietly, never raise.
+    guest.export_record_logs(str(tmp_path / "nowhere"),
+                             str(tmp_path / "export2"))
+    assert list((tmp_path / "export2").iterdir()) == []
+    guest.export_record_logs(None, None)
+
+
+def test_record_logs_survive_dead_guest(tmp_path):
+    # Mocked dead guest: only the record logs reached the
+    # rwdir before the guest died; no peer.json, no judge.
+    export = tmp_path / "export"
+    export.mkdir()
+    refused = "memveil record: attempt-trace is required\n"
+    (export / "peer-record.stderr").write_text(refused)
+    digest = hashlib.sha256(refused.encode("utf-8")).hexdigest()
+    (export / "peer-record.stderr.sha256").write_text(
+        "%s  peer-record.stderr\n" % (digest,))
+    note = peer_oracle.read_record_logs(export)
+    assert note["schema"] == \
+        peer_oracle.RECORD_LOG_NOTE_SCHEMA
+    assert note["status"] == "present"
+    entry = note["logs"]["record.stderr"]
+    assert entry["present"] is True
+    assert entry["sha256"] == digest
+    assert entry["verified"] is True
+    assert entry["error"] is None
+    assert "attempt-trace is required" in entry["tail"]
+    assert note["logs"]["record.out"]["present"] is False
+    lines = peer_oracle.format_record_log_note(note)
+    assert any(digest in line for line in lines)
+    assert any("attempt-trace is required" in line
+               for line in lines)
+    assert any("record.out: absent" in line for line in lines)
+
+
+def test_record_logs_absent_marker(tmp_path):
+    export = tmp_path / "export"
+    export.mkdir()
+    note = peer_oracle.read_record_logs(export)
+    assert note["status"] == "absent"
+    for name in peer_oracle.RECORD_LOGS:
+        assert note["logs"][name]["present"] is False
+    lines = peer_oracle.format_record_log_note(note)
+    assert lines[0] == "peer: record logs: absent"
+    assert any("record.stderr: absent" in line
+               for line in lines)
+    note = peer_oracle.read_record_logs(None)
+    assert note["status"] == "no-run-dir"
+    lines = peer_oracle.format_record_log_note(note)
+    assert lines[0] == "peer: record logs: no-run-dir"
+
+
+def test_record_logs_sidecar_problems_reported(tmp_path):
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "peer-record.stderr").write_text("boom\n")
+    (export / "peer-record.stderr.sha256").write_text(
+        "%s  peer-record.stderr\n" % ("0" * 64,))
+    (export / "peer-record.out").write_text("ready\n")
+    note = peer_oracle.read_record_logs(export)
+    assert note["status"] == "present"
+    assert note["logs"]["record.stderr"]["verified"] is False
+    assert note["logs"]["record.stderr"]["error"] == \
+        "hash mismatch"
+    assert note["logs"]["record.out"]["error"] == \
+        "missing sidecar"
+    lines = peer_oracle.format_record_log_note(note)
+    assert any("hash mismatch" in line for line in lines)
+    assert any("missing sidecar" in line for line in lines)
+
+
+def test_record_log_note_stash(tmp_path):
+    note = peer_oracle.read_record_logs(None)
+    path = stash_record_log_note(tmp_path, note)
+    assert path == tmp_path / "record-logs.json"
+    saved = json.loads(path.read_text())
+    assert saved["status"] == "no-run-dir"
+    assert saved["schema"] == \
+        peer_oracle.RECORD_LOG_NOTE_SCHEMA
+    # Never raises, even without a run dir.
+    assert stash_record_log_note(None, note) is None
 
 
 GUEST_HIDDEN_PREFIXES = ("/tmp/", "/dev/", "/proc/", "/sys/")
@@ -1253,6 +1450,25 @@ def harness_identity():
         capture_output=True, text=True)
     return {"commit": head.stdout.strip(),
             "dirty": bool(dirty.stdout.strip())}
+
+
+def stash_record_log_note(tmp, note):
+    """Write the record-log note into the run dir.
+
+    Best-effort forensics copy for failure paths: the
+    note (present digests or the explicit absent marker)
+    stays with the run dir next to harness.json. Never
+    raises; returns the path or None.
+    """
+    if tmp is None:
+        return None
+    try:
+        path = Path(tmp) / "record-logs.json"
+        path.write_text(json.dumps(note, indent=1,
+                                   sort_keys=True) + "\n")
+        return path
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def run_peer_guest(kver, release, pci, cand_env):
@@ -1336,6 +1552,9 @@ def test_peer_leg():
             "guest failed: %s" % (proc.stderr[-2000:],)
         got = peer_oracle.verify_peer_exports(
             tmp, "peer", peer_oracle.EXPORT_NAMES)
+        print("peer: record logs verified out=%s stderr=%s"
+              % (got.verified_hashes["peer-record.out"],
+                 got.verified_hashes["peer-record.stderr"]))
         expected = expected_from_verified(got, "peer")
         peer = peer_oracle.validate_peer_exports(got)
         validator = peer_oracle.load_schema_validator()
@@ -1366,6 +1585,17 @@ def test_peer_leg():
                  summary["id"], agreement["gap"],
                  declared["total"]))
     except Exception:
+        try:
+            export = Path(tmp) / "export" \
+                if tmp is not None else None
+            note = peer_oracle.read_record_logs(export)
+            for line in peer_oracle.format_record_log_note(
+                    note):
+                print(line)
+            stash_record_log_note(tmp, note)
+        except Exception as exc:
+            print("peer: record-log surface failed: %s"
+                  % (exc,))
         retain_failure(tmp, "peer")
         print("gate artifacts kept at %s" % (tmp,))
         raise
