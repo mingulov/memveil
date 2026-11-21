@@ -1253,6 +1253,7 @@ suite_reader_adversarial() {
             "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
+    python3 "$ROOT/tests/cli/prepare_capture_failures.py" || return 1
     python3 "$ROOT/tests/cli/test_adversarial_cli.py" || return 1
     python3 "$ROOT/tests/cli/test_checkpoint_recovery.py"
 }
