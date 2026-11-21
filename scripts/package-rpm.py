@@ -423,6 +423,10 @@ def main(argv):
          # (the seal pins it to C) instead of wall clock,
          # so one source regenerates one .rpm.
          "--define", "use_source_date_epoch_as_buildtime 1",
+         # Pin the build-host header to a fixed placeholder
+         # instead of the builder's hostname, so one source
+         # regenerates one .rpm on any host.
+         "--define", "_buildhost build.invalid",
          work_spec],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env=env)

@@ -270,3 +270,8 @@ inputs before constructing Source0 or invoking rpmbuild.
 File timestamps may differ across identical exports.
 Foreign or changed source inputs refuse; no build
 fallback or qualification inference is permitted.
+The finished .rpm names the fixed placeholder
+`build.invalid` as its build host instead of the
+builder's hostname, so one source regenerates one .rpm
+on any host; `rpm -qp --queryformat '%{BUILDHOST}'` on
+the artifact must print the placeholder.
