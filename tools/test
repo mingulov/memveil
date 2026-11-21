@@ -1340,7 +1340,7 @@ suite_reader_adversarial() {
             "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
-    # R82: the knob contract first — the blessed binary must be
+    # The knob contract first — the blessed binary must be
     # the executed binary before the reader drivers run.
     python3 "$ROOT/tests/cli/test_memveil_bin.py" || return 1
     python3 "$ROOT/tests/cli/prepare_capture_failures.py" || return 1

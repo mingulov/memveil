@@ -73,7 +73,7 @@ that resolves to nothing on PATH. The CLI Python drivers
 resolve the same knob through
 `tests/cli/memveil_bin.py`, so the blessed binary is the
 executed binary by construction — no manual
-`build/memveil` pre-pointing (retired with R82).
+`build/memveil` pre-pointing.
 
 ```sh
 export ASAN_OPTIONS=detect_leaks=0
@@ -94,13 +94,11 @@ nm "$LANE_BIN" | grep -c __asan   # nonzero (__asan symbols linked into the lane
 knob bypasses the link entirely), so there is no link to
 restore afterwards.
 
-An earlier revision of this section bypassed `tools/test`
-entirely; the `MEMVEIL_BIN` knob supersedes that bypass by
-routing the leg through the real dispatch without
-resetting the link. A later revision pre-pointed
-`build/memveil` at the lane binary because the drivers
-still read the link; R82 retired that step by teaching
-the drivers the knob.
+Do not bypass `tools/test` for this leg, and do not
+pre-point `build/memveil` at the lane binary: the
+`MEMVEIL_BIN` knob routes the leg through the real
+dispatch, and the drivers resolve the same knob, so the
+link stays untouched.
 
 `detect_leaks=0` applies to the reader leg only: one of its cases
 drives the binary under `strace`, and LeakSanitizer cannot run
