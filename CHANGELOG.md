@@ -35,9 +35,6 @@ the rest.
   lifecycle/copy 6.11, ceiling 7.3, BTF
   required) and the evolution and support
   policy.
-
-## v0.1.1 -- 2026-11-21
-
 - Rust userspace: collection, CLI, and
   reporting now build from the Cargo
   workspace, with the BPF loader statically
