@@ -6465,6 +6465,278 @@ def test_row_receipt_scenarios_roundtrip(tmp_path):
     assert ok, detail
 
 
+# Scenario-rootfs evidence (MV31-12 R104): the runner-written
+# rootfs.json plus the single-file ro-deb expose record are
+# allowlisted in scenarios mode only, with strict shape checks.
+# Matrix rows keep the historical set exactly.
+
+_DEB_BYTES = b"staged-deb-bytes"
+
+
+def _rootfs_record():
+    return {
+        "image": "/work/debian-rootfs-v2.img",
+        "sha256": "ab" * 32,
+        "mount": "/work/scenarios-rerun-rootfs-mnt",
+        "privilege": "sudo",
+        "runner_commit": "c" * 40,
+        "runner_dirty": False,
+        "staging": {
+            "reference": "sealed-fixture",
+            "manifest_digest": "dd" * 32,
+            "manifest_commit": "1a" * 20,
+            "copy_sha256": "ee" * 32,
+            "bpf_set": None,
+        },
+    }
+
+
+def _scenarios_rootfs_row(tmp_path, rootfs=None,
+                          deb_name="memveil-test.deb",
+                          deb_bytes=_DEB_BYTES,
+                          extra=None):
+    neg_sha = hashlib.sha256(b"obj").hexdigest()
+    files = {
+        "job.json": json.dumps(dict(
+            _row_job(),
+            negatives={"renamed_field": neg_sha})),
+        "cache.txt": "hit /cache\n",
+        "vng.exit": "0",
+        "artifacts.json": json.dumps(_row_artifacts()),
+        "configid.txt": "1" * 64 + "\n",
+        "btf-sha.txt": "2" * 64 + "\n",
+        "uname.txt": "Linux guest 6.6.160\n",
+        "mods.txt": "6.6.160\nguest\n",
+        "version.txt": "#1 SMP\n",
+        "lockdown.txt": "none\n",
+        "hooks.json": json.dumps({"present": {"tp": True},
+                                  "omitted": [],
+                                  "btf": True}),
+        "neg/swiotlb_copy-renamed_field.bpf.o": "obj",
+        "scn-base/precondition.json": json.dumps(
+            {"verdict": "ready"}),
+        "scn-base/record.stdout": "",
+        "scn-base/record.stderr": "",
+    }
+    if rootfs is not None:
+        files["rootfs.json"] = rootfs \
+            if isinstance(rootfs, str) else json.dumps(rootfs)
+    row = _write_row(tmp_path, files)
+    if deb_name is not None:
+        dest = row / "ro-deb" / deb_name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(deb_bytes)
+    if extra:
+        for name, text in extra.items():
+            path = row / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+    return row, neg_sha
+
+
+def _scenarios_rootfs_rec(neg_sha):
+    return {"id": "6.6", "mode": "scenarios", "ok": True,
+            "detail": "all ok", "run_id": "20261030T000000Z",
+            "vng_version": "v6.6.160",
+            "release": "6.6.160-0606160-generic",
+            "elapsed": 1.0, "binary_sha256": "b" * 64,
+            "negatives": {"renamed_field": neg_sha},
+            "scenarios": [{"name": "base", "status": "ok",
+                           "checks": []}]}
+
+
+def _scenarios_rootfs_ctx():
+    return _row_ctx(
+        mode="scenarios",
+        source_sha256=hashlib.sha256(_DEB_BYTES).hexdigest())
+
+
+def test_row_receipt_scenarios_rootfs_roundtrip(tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    names = [entry["name"] for entry in doc["files"]]
+    assert "rootfs.json" in names
+    assert "ro-deb/memveil-test.deb" in names
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_matrix_refuses_rootfs(tmp_path):
+    row = _admitted_row(tmp_path,
+                        **{"rootfs.json": json.dumps(
+                            _rootfs_record())})
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def test_row_receipt_matrix_refuses_staged_deb(tmp_path):
+    row = _admitted_row(tmp_path)
+    dest = row / "ro-deb" / "memveil-test.deb"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_DEB_BYTES)
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def _inventory_names(row, mode):
+    return [entry["name"]
+            for entry in km.row_receipt_files(row, mode)]
+
+
+def test_row_receipt_files_scenarios_only(tmp_path):
+    row = _write_row(tmp_path, {
+        "job.json": "{}",
+        "rootfs.json": "{}",
+        "ro-deb/m.deb": "deb",
+    })
+    names = _inventory_names(row, "scenarios")
+    assert "rootfs.json" in names
+    assert "ro-deb/m.deb" in names
+    with pytest.raises(ValueError):
+        km.row_receipt_files(row, "matrix")
+    with pytest.raises(ValueError):
+        km.row_receipt_files(row)
+
+
+@pytest.mark.parametrize("bad", [
+    "ro-deb/sub/m.deb", "ro-deb/m.txt", "ro-deb/m .deb",
+    "ro-deb/.deb", "xrootfs.json", "rootfs.json2",
+    "rootfs.json/x"])
+def test_row_receipt_files_scenarios_name_shape(tmp_path,
+                                               bad):
+    row = _write_row(tmp_path, {"job.json": "{}",
+                                bad: "x"})
+    with pytest.raises(ValueError):
+        km.row_receipt_files(row, "scenarios")
+
+
+def _damaged_rootfs(kind):
+    doc = _rootfs_record()
+    if kind == "extra-key":
+        doc["umount"] = "ok"
+    elif kind == "missing-key":
+        del doc["mount"]
+    elif kind == "bad-digest":
+        doc["sha256"] = "zz" * 32
+    elif kind == "short-digest":
+        doc["sha256"] = "ab" * 31
+    elif kind == "relative-image":
+        doc["image"] = "rel/r.img"
+    elif kind == "empty-mount":
+        doc["mount"] = ""
+    elif kind == "bad-privilege":
+        doc["privilege"] = "user"
+    elif kind == "bad-commit":
+        doc["runner_commit"] = "zz" * 20
+    elif kind == "short-commit":
+        doc["runner_commit"] = "c" * 39
+    elif kind == "dirty-string":
+        doc["runner_dirty"] = "no"
+    elif kind == "staging-extra":
+        doc["staging"]["extra"] = 1
+    elif kind == "staging-reference":
+        doc["staging"]["reference"] = "tarball"
+    elif kind == "staging-digest":
+        doc["staging"]["copy_sha256"] = "00" * 31
+    elif kind == "staging-commit":
+        doc["staging"]["manifest_commit"] = "1a" * 19
+    elif kind == "staging-bpf-set":
+        doc["staging"]["bpf_set"] = "rel/bpf"
+    elif kind == "staging-list":
+        doc["staging"] = []
+    elif kind == "not-a-dict":
+        return ["rootfs.json"]
+    elif kind == "garbage":
+        return "{nope"
+    else:
+        raise AssertionError(kind)
+    return doc
+
+
+@pytest.mark.parametrize("kind", [
+    "extra-key", "missing-key", "bad-digest",
+    "short-digest", "relative-image", "empty-mount",
+    "bad-privilege", "bad-commit", "short-commit",
+    "dirty-string", "staging-extra", "staging-reference",
+    "staging-digest", "staging-commit", "staging-bpf-set",
+    "staging-list", "not-a-dict", "garbage"])
+def test_row_receipt_rootfs_damage_refuses(tmp_path, kind):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _damaged_rootfs(kind))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_staged_deb_without_rootfs(tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(tmp_path, None)
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    assert "rootfs.json" not in [
+        entry["name"] for entry in doc["files"]]
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_rootfs_unknown_commit_roundtrip(
+        tmp_path):
+    record = _rootfs_record()
+    record["runner_commit"] = "unknown"
+    row, neg_sha = _scenarios_rootfs_row(tmp_path, record)
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_staged_deb_bytes_must_match(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record(), deb_bytes=b"other")
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_rootfs_tamper_breaks_rederive(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    record = _rootfs_record()
+    record["sha256"] = "00" * 32
+    (row / "rootfs.json").write_text(json.dumps(record))
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
+def test_row_receipt_staged_deb_tamper_breaks_rederive(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    (row / "ro-deb" / "memveil-test.deb").write_bytes(
+        b"tampered")
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
 # Row source/toolchain identity reads the Rust tree: the git
 # revision, both Cargo lock digests, the rust-toolchain
 # channel, and probed cargo/rustc/bpf-linker versions.

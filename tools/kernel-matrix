@@ -26,6 +26,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -637,7 +638,7 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
             return stage_fail(name, "path-rejected",
                               str(exc), t0)
     if rootfs is not None:
-        guest_cmd = scenario_guest_cmd()
+        guest_cmd = scenario_guest_cmd(job.get("deb"))
     else:
         script = guest_script or str(
             ROOT / "tests" / "vm" / "kernel_matrix_guest.py")
@@ -989,8 +990,19 @@ def stage_scenario_files(export, job, neg_shas, deb=None,
 # all recorded per row). They count toward a frozen gate only via a
 # reviewed amendment or next-seal integration plus an affected-gate
 # rerun.
-SCENARIO_GUEST_REPO = "/mv/repo"
-SCENARIO_GUEST_DEBDIR = "/mv/deb"
+#
+# MV31-12 R104 repair identity: the guest shares moved from /mv/*
+# (outside every vng overlay, so their mountpoints could never be
+# created on the read-only root: EROFS, shares absent, vng.exit 2)
+# to /tmp/mv/* (/tmp is in vng's default overlay set in both its rw
+# and non-rw branches, so mkdir -p lands on the overlay upper), and
+# the guest command grew a mount guard that fails fast with the
+# exact missing share (exit 42) instead of a bare python ENOENT.
+SCENARIO_GUEST_REPO = "/tmp/mv/repo"
+SCENARIO_GUEST_DEBDIR = "/tmp/mv/deb"
+SCENARIO_GUEST_EXPORT = "/tmp/export"
+SCENARIO_GUEST_SCRIPT = "tests/vm/kernel_scenarios_guest.py"
+SCENARIO_MOUNT_GUARD_EXIT = 42
 STAGE_DEB_DIRNAME = "ro-deb"
 
 
@@ -1112,18 +1124,83 @@ def umount_scenario_rootfs(mnt_dir, use_sudo):
     return None
 
 
-def scenario_guest_cmd():
+def scenario_mount_guard(deb_marker=None):
+    """POSIX shell guard proving the scenario 9p shares.
+
+    Always prints the mount table (captured into the row
+    console.txt, which is the live mount probe's evidence),
+    then requires each share dir to exist and to be listed
+    in the table, the repo marker script to be a file, and
+    the staged deb marker when one is given. On any miss it
+    records "scenario mounts missing: ..." in the export
+    FAIL.txt (already surfaced into the row detail by the
+    collector) and exits SCENARIO_MOUNT_GUARD_EXIT; the
+    table itself stays on stdout (console.txt) to keep the
+    command short. On success the guard falls through
+    with status 0 so the caller chains the real command
+    after a ";". SCENARIO_REPO, SCENARIO_DEBDIR,
+    SCENARIO_EXPORT, and SCENARIO_MOUNTS_FILE override the
+    baked guest paths (unset in the guest) so unarmed tests
+    execute this exact text under sh with mocked mounts.
+    Keep it short: vng base64-encodes the whole guest
+    command onto the 2048-byte kernel command line.
+    """
+    parts = [
+        "r=${SCENARIO_REPO:-%s}" % SCENARIO_GUEST_REPO,
+        "b=${SCENARIO_DEBDIR:-%s}" % SCENARIO_GUEST_DEBDIR,
+        "e=${SCENARIO_EXPORT:-%s}" % SCENARIO_GUEST_EXPORT,
+        "m=${SCENARIO_MOUNTS_FILE:-/proc/mounts}",
+        "t=$(cat \"$m\" 2>/dev/null||true)",
+        "printf '%s\\n' \"$t\"",
+        "s=''",
+        "for d in \"$r\" \"$b\";do "
+        "[ -d \"$d\" ]||{ s=\"$s $d\";continue; };"
+        "case \"$t\" in *\" $d \"*);;"
+        "*)s=\"$s $d(unmounted)\";;esac;done",
+        "[ -f \"$r/%s\" ]||s=\"$s $r/%s\""
+        % (SCENARIO_GUEST_SCRIPT, SCENARIO_GUEST_SCRIPT),
+    ]
+    if deb_marker is not None:
+        parts.append("[ -f \"$b/%s\" ]||s=\"$s $b/%s\""
+                     % (deb_marker, deb_marker))
+    parts.append(
+        "[ -z \"$s\" ]||{ g=\"scenario mounts missing:$s\";"
+        "echo \"$g\";echo \"$g\">\"$e/FAIL.txt\""
+        " 2>/dev/null||true;exit %d;}"
+        % SCENARIO_MOUNT_GUARD_EXIT)
+    return ";".join(parts)
+
+
+# Deb basenames the mount guard embeds raw in its marker
+# check; mirrors the row-receipt staged-deb name shape, so a
+# name the receipt would refuse never reaches the shell.
+_DEB_MARKER_RE = "[A-Za-z0-9][A-Za-z0-9+_~.-]*\\.deb"
+
+
+def scenario_guest_cmd(deb=None):
     """Guest-side scenario command under the selected rootfs.
 
     The repo reaches the guest through a read-only --rodir at
     SCENARIO_GUEST_REPO, so the guest-visible layout mirrors the
     shared-host-rootfs shape exactly (script plus REPO), with no
-    host absolute path left for the guest to resolve.
+    host absolute path left for the guest to resolve. A mount
+    guard runs first and fails fast with the exact missing
+    share; deb, when it names a staged guest deb path, adds
+    its basename as a second marker file check.
     """
-    return "python3 %s /tmp/export %s" % (
-        shlex.quote("%s/tests/vm/kernel_scenarios_guest.py"
-                    % SCENARIO_GUEST_REPO),
+    marker = None
+    if isinstance(deb, str) \
+            and deb.startswith(SCENARIO_GUEST_DEBDIR + "/"):
+        base = deb[len(SCENARIO_GUEST_DEBDIR) + 1:]
+        if "/" not in base and re.fullmatch(_DEB_MARKER_RE,
+                                            base):
+            marker = base
+    tail = "python3 %s %s %s" % (
+        shlex.quote("%s/%s" % (SCENARIO_GUEST_REPO,
+                               SCENARIO_GUEST_SCRIPT)),
+        shlex.quote(SCENARIO_GUEST_EXPORT),
         shlex.quote(SCENARIO_GUEST_REPO))
+    return "%s;%s" % (scenario_mount_guard(marker), tail)
 
 
 def scenario_rootfs_vng_args(mount, deb_stage_dir):
@@ -1137,6 +1214,9 @@ def scenario_rootfs_vng_args(mount, deb_stage_dir):
     each arrive through an explicit read-only --rodir; the
     bpftrace/bpftool host paths in job.json stay recorded but
     unresolved, since the scenario guest never reads them.
+    Both guest share points must sit under a vng overlay
+    (/tmp here): the guest root is read-only, so a share
+    outside every overlay never gets its mountpoint.
     """
     return ["--root", mount,
             "--cwd", mount,
@@ -1144,6 +1224,55 @@ def scenario_rootfs_vng_args(mount, deb_stage_dir):
                                str(ROOT)),
             "--rodir=%s=%s" % (SCENARIO_GUEST_DEBDIR,
                                deb_stage_dir)]
+
+
+def scenario_rootfs_mnt_dir(out):
+    """Sibling scratch dir for the scenario rootfs mount.
+
+    The mountpoint sits BESIDE --out, never under it: the
+    row enumerator scans --out subdirs as rows, so a mount
+    dir inside --out would read as a row without evidence.
+    Stale reuse still refuses (see mount_scenario_rootfs).
+    """
+    base = os.path.abspath(out)
+    return os.path.join(os.path.dirname(base),
+                        os.path.basename(base)
+                        + "-rootfs-mnt")
+
+
+def remove_scenario_mountpoint(mnt):
+    """Best-effort removal of the emptied mountpoint.
+
+    Returns None on success (or when already gone), else a
+    short note; never raises. A live mount is always kept:
+    only call after a successful umount, and let the next
+    run's stale detection refuse if cleanup failed.
+    """
+    if os.path.ismount(mnt):
+        return "still mounted: %s" % mnt
+    try:
+        os.rmdir(mnt)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return "cannot remove mount point %s: %s" % (mnt,
+                                                     exc)
+    return None
+
+
+def teardown_scenario_rootfs_mount(mnt, use_sudo,
+                                   umount=umount_scenario_rootfs):
+    """Umount then remove the scenario rootfs mountpoint.
+
+    Returns (umount_note, remove_note), each None on its
+    success. Removal runs only after a clean umount, so a
+    failed umount keeps the live mount for the next run's
+    stale detection to refuse; never raises.
+    """
+    note = umount(mnt, use_sudo)
+    if note is not None:
+        return note, None
+    return None, remove_scenario_mountpoint(mnt)
 
 
 def run_check_doctor(path):
@@ -1388,7 +1517,10 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description="Boot matrix kernels and prove the generations "
                     "table. MV_HOST_CPUS pins the host CPU set "
-                    "through taskset; unset runs without taskset.")
+                    "through taskset; unset runs without taskset. "
+                    "Qualification runs need both MV_BUNDLE_TARBALL "
+                    "and MV_CANDIDATE_MANIFEST set; either one "
+                    "alone refuses before booting.")
     parser.add_argument("--out", required=True,
                         help="evidence parent dir (per-kernel subdirs)")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -1697,8 +1829,7 @@ def main(argv=None):
     }
     rootfs = None
     if args.scenarios and rootfs_spec is not None:
-        mnt = os.path.join(os.path.abspath(args.out),
-                           "rootfs-mnt")
+        mnt = scenario_rootfs_mnt_dir(args.out)
         use_sudo = os.geteuid() != 0
         try:
             km.validate_shell_path(mnt, "rootfs mount point")
@@ -1749,9 +1880,13 @@ def main(argv=None):
                 entry["id"], status, rec.get("elapsed", 0)))
     finally:
         if rootfs is not None:
-            note = umount_scenario_rootfs(
+            note, rm_note = teardown_scenario_rootfs_mount(
                 rootfs["mount"],
                 rootfs["privilege"] == "sudo")
+            if rm_note is not None:
+                print("kernel-matrix: rootfs mount "
+                      "point left: %s" % rm_note,
+                      file=sys.stderr)
             try:
                 doc = json.loads(Path(
                     args.out, "rootfs.json").read_text())

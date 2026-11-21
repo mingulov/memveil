@@ -5,8 +5,10 @@
 No boot, no mount, no network, no privileged calls. The guest spawn
 is always stopped before exec (a mocked build_vng_cmd raises, or a
 mocked run_owned_guest records the call); mount/umount helpers run
-only against bogus inputs whose failure is the assertion. Every case
-runs from controlled fixture bytes.
+only against bogus inputs whose failure is the assertion. The guest
+mount guard runs locally under sh with mocked mounts and fixture
+dirs, never against the live guest paths. Every case runs from
+controlled fixture bytes.
 """
 
 import hashlib
@@ -168,9 +170,10 @@ def test_verify_mismatch_refuses(tmp_path):
 # --- guest command + vng argv builders ---
 
 def test_scenario_guest_cmd_exact():
+    tail = "python3 /tmp/mv/repo/tests/vm/" \
+        "kernel_scenarios_guest.py /tmp/export /tmp/mv/repo"
     assert kmt.scenario_guest_cmd() == \
-        "python3 /mv/repo/tests/vm/kernel_scenarios_guest.py " \
-        "/tmp/export /mv/repo"
+        kmt.scenario_mount_guard() + ";" + tail
 
 
 def test_rootfs_vng_args_exact(tmp_path):
@@ -179,8 +182,21 @@ def test_rootfs_vng_args_exact(tmp_path):
     assert kmt.scenario_rootfs_vng_args(mount, stage) == [
         "--root", mount,
         "--cwd", mount,
-        "--rodir=/mv/repo=%s" % kmt.ROOT,
-        "--rodir=/mv/deb=%s" % stage]
+        "--rodir=/tmp/mv/repo=%s" % kmt.ROOT,
+        "--rodir=/tmp/mv/deb=%s" % stage]
+
+
+def test_rootfs_vng_guest_paths_under_overlay(tmp_path):
+    mount = str(tmp_path / "mnt")
+    stage = str(tmp_path / "out" / "7.0" / "ro-deb")
+    guests = [
+        arg.split("=", 1)[1].split("=", 1)[0]
+        for arg in kmt.scenario_rootfs_vng_args(mount,
+                                                stage)
+        if arg.startswith("--rodir=")]
+    assert guests == ["/tmp/mv/repo", "/tmp/mv/deb"]
+    for guest in guests:
+        assert guest.startswith("/tmp/")
 
 
 # --- mount/umount helpers (failures only; never mount live) ---
@@ -534,7 +550,7 @@ def test_stage_rootfs(tmp_path, monkeypatch):
     staged = os.path.join(export, "ro-deb",
                           "memveil-test.deb")
     assert Path(staged).read_bytes() == b"deb-bytes"
-    assert job["deb"] == "/mv/deb/memveil-test.deb"
+    assert job["deb"] == "/tmp/mv/deb/memveil-test.deb"
     assert job["deb_host"] == str(deb)
     assert job["rootfs"] == {"image": "r.img",
                              "sha256": "ab" * 32,
@@ -883,3 +899,261 @@ def test_rootfs_relative_vng_unresolved(tmp_path,
     assert not rec["ok"]
     assert rec["checks"][0]["name"] == "vng_cmd"
     assert rec["checks"][0]["detail"] == "vng-unresolved"
+
+
+# --- mount guard (content + real execution under sh) ---
+
+def test_mount_guard_bakes_guest_paths():
+    guard = kmt.scenario_mount_guard()
+    for baked in ("SCENARIO_REPO:-/tmp/mv/repo",
+                  "SCENARIO_DEBDIR:-/tmp/mv/deb",
+                  "SCENARIO_EXPORT:-/tmp/export",
+                  "SCENARIO_MOUNTS_FILE:-/proc/mounts",
+                  "tests/vm/kernel_scenarios_guest.py",
+                  "FAIL.txt", "exit 42"):
+        assert baked in guard
+
+
+def test_mount_guard_deb_marker_opt_in():
+    plain = kmt.scenario_mount_guard()
+    assert plain.count("$b/") == 0
+    marked = kmt.scenario_mount_guard("m_1-2.deb")
+    assert "[ -f \"$b/m_1-2.deb\" ]" in marked
+
+
+def test_guest_cmd_deb_marker_selection():
+    assert "$b/memveil-test.deb" in kmt.scenario_guest_cmd(
+        "/tmp/mv/deb/memveil-test.deb")
+    for deb in (None, "host.deb", "/tmp/mv/deb/../x.deb",
+                "/tmp/mv/deb/x .deb",
+                "/tmp/mv/deb/x.deb/extra",
+                "/tmp/mv/deb/x.tar.gz"):
+        assert "$b/" not in kmt.scenario_guest_cmd(deb)
+
+
+def test_guest_cmd_stays_within_cmdline_budget():
+    cmd = kmt.scenario_guest_cmd(
+        "/tmp/mv/deb/memveil_0.1.1-1_amd64.deb")
+    assert len(cmd) < 800
+
+
+def _guard_env(tmp_path, mounts=None, export=True):
+    repo = tmp_path / "repo"
+    deb = tmp_path / "deb"
+    (repo / "tests" / "vm").mkdir(parents=True)
+    (repo / "tests" / "vm"
+     / "kernel_scenarios_guest.py").write_text("g")
+    deb.mkdir()
+    (deb / "x.deb").write_bytes(b"d")
+    exp = tmp_path / "exp"
+    if export:
+        exp.mkdir()
+    table = tmp_path / "mounts"
+    if mounts is None:
+        mounts = ("virtme.initmount1 %s 9p rw 0 0\n"
+                  "virtme.initmount2 %s 9p ro 0 0\n"
+                  % (repo, deb))
+    table.write_text(mounts)
+    env = dict(os.environ,
+               SCENARIO_REPO=str(repo),
+               SCENARIO_DEBDIR=str(deb),
+               SCENARIO_EXPORT=str(exp),
+               SCENARIO_MOUNTS_FILE=str(table))
+    return env, exp
+
+
+def _run_guard(guard, env):
+    return subprocess.run(["sh", "-c", guard],
+                          capture_output=True, text=True,
+                          timeout=30, env=env)
+
+
+def test_mount_guard_present_exits_zero(tmp_path):
+    env, exp = _guard_env(tmp_path)
+    proc = _run_guard(kmt.scenario_mount_guard("x.deb"),
+                      env)
+    assert proc.returncode == 0
+    assert "virtme.initmount1" in proc.stdout
+    assert "virtme.initmount2" in proc.stdout
+    assert not (exp / "FAIL.txt").exists()
+
+
+def test_mount_guard_missing_repo_names_it(tmp_path):
+    env, exp = _guard_env(tmp_path)
+    missing = str(tmp_path / "absent")
+    env["SCENARIO_REPO"] = missing
+    proc = _run_guard(kmt.scenario_mount_guard("x.deb"),
+                      env)
+    assert proc.returncode == 42
+    assert "scenario mounts missing:" in proc.stdout
+    assert missing in proc.stdout
+    tail = proc.stdout.split("scenario mounts missing:")[1]
+    assert str(tmp_path / "deb") not in tail
+    fail = (exp / "FAIL.txt").read_text()
+    assert "scenario mounts missing:" in fail
+    assert missing in fail
+
+
+def test_mount_guard_partial_deb_only(tmp_path):
+    env, exp = _guard_env(tmp_path)
+    missing = str(tmp_path / "absent")
+    env["SCENARIO_DEBDIR"] = missing
+    proc = _run_guard(kmt.scenario_mount_guard("x.deb"),
+                      env)
+    assert proc.returncode == 42
+    tail = proc.stdout.split("scenario mounts missing:")[1]
+    assert missing in tail
+    assert str(tmp_path / "repo") not in tail
+
+
+def test_mount_guard_unmounted_names_both(tmp_path):
+    env, exp = _guard_env(tmp_path, mounts="")
+    proc = _run_guard(kmt.scenario_mount_guard("x.deb"),
+                      env)
+    assert proc.returncode == 42
+    tail = proc.stdout.split("scenario mounts missing:")[1]
+    assert tail.count("(unmounted)") == 2
+
+
+def test_mount_guard_missing_marker(tmp_path):
+    env, exp = _guard_env(tmp_path)
+    (tmp_path / "repo" / "tests" / "vm"
+     / "kernel_scenarios_guest.py").unlink()
+    proc = _run_guard(kmt.scenario_mount_guard("x.deb"),
+                      env)
+    assert proc.returncode == 42
+    tail = proc.stdout.split("scenario mounts missing:")[1]
+    assert "kernel_scenarios_guest.py" in tail
+    assert "(unmounted)" not in tail
+
+
+def test_mount_guard_missing_table_fails_closed(tmp_path):
+    env, exp = _guard_env(tmp_path)
+    env["SCENARIO_MOUNTS_FILE"] = str(tmp_path
+                                       / "absent")
+    proc = _run_guard(kmt.scenario_mount_guard("x.deb"),
+                      env)
+    assert proc.returncode == 42
+    assert "(unmounted)" in proc.stdout
+
+
+def test_mount_guard_missing_export_still_reports(
+        tmp_path):
+    env, exp = _guard_env(tmp_path, export=False)
+    (tmp_path / "repo").rename(tmp_path / "repo-gone")
+    proc = _run_guard(kmt.scenario_mount_guard("x.deb"),
+                      env)
+    assert proc.returncode == 42
+    assert "scenario mounts missing:" in proc.stdout
+    assert not exp.exists()
+
+
+# --- mount dir placement + removal (never under --out) ---
+
+def test_rootfs_mnt_dir_is_sibling(tmp_path):
+    out = str(tmp_path / "scenarios-rerun")
+    mnt = kmt.scenario_rootfs_mnt_dir(out)
+    assert mnt == os.path.join(str(tmp_path),
+                               "scenarios-rerun-rootfs-mnt")
+    assert os.path.commonpath([os.path.abspath(out),
+                               mnt]) != os.path.abspath(out)
+
+
+def test_rootfs_mnt_dir_never_under_out(tmp_path):
+    for out in (str(tmp_path / "o"),
+                str(tmp_path / "o") + os.sep,
+                "rel-out",
+                os.path.join("a", "b", "o")):
+        mnt = kmt.scenario_rootfs_mnt_dir(out)
+        assert os.path.commonpath(
+            [os.path.abspath(out), mnt]) \
+            != os.path.abspath(out)
+
+
+def test_remove_mountpoint_roundtrip(tmp_path):
+    mnt = tmp_path / "o-rootfs-mnt"
+    mnt.mkdir()
+    assert kmt.remove_scenario_mountpoint(str(mnt)) is None
+    assert not mnt.exists()
+    assert kmt.remove_scenario_mountpoint(str(mnt)) is None
+
+
+def test_remove_mountpoint_keeps_crowded(tmp_path):
+    mnt = tmp_path / "o-rootfs-mnt"
+    mnt.mkdir()
+    (mnt / "stray").write_text("x")
+    note = kmt.remove_scenario_mountpoint(str(mnt))
+    assert isinstance(note, str) and note
+    assert mnt.is_dir()
+
+
+def test_remove_mountpoint_keeps_non_dir(tmp_path):
+    leaf = tmp_path / "o-rootfs-mnt"
+    leaf.write_text("x")
+    note = kmt.remove_scenario_mountpoint(str(leaf))
+    assert isinstance(note, str) and note
+    assert leaf.is_file()
+
+
+def test_teardown_success_removes(tmp_path):
+    mnt = tmp_path / "o-rootfs-mnt"
+    mnt.mkdir()
+    seen = []
+    note, rm_note = kmt.teardown_scenario_rootfs_mount(
+        str(mnt), False,
+        umount=lambda mnt_dir, sudo: seen.append(
+            (mnt_dir, sudo)) or None)
+    assert note is None
+    assert rm_note is None
+    assert seen == [(str(mnt), False)]
+    assert not mnt.exists()
+
+
+def test_teardown_umount_failure_keeps(tmp_path):
+    mnt = tmp_path / "o-rootfs-mnt"
+    mnt.mkdir()
+    note, rm_note = kmt.teardown_scenario_rootfs_mount(
+        str(mnt), True,
+        umount=lambda mnt_dir, sudo: "busy")
+    assert note == "busy"
+    assert rm_note is None
+    assert mnt.is_dir()
+
+
+# --- qualification bundle pair (documented + fail-closed) ---
+
+def test_help_documents_bundle_pair():
+    text = kmt.build_parser().format_help()
+    assert "MV_BUNDLE_TARBALL" in text
+    assert "MV_CANDIDATE_MANIFEST" in text
+
+
+def test_select_candidate_needs_both(monkeypatch):
+    monkeypatch.delenv("MV_BUNDLE_TARBALL", raising=False)
+    monkeypatch.delenv("MV_CANDIDATE_MANIFEST",
+                       raising=False)
+    assert kmt.select_candidate_inputs(
+        types.SimpleNamespace(deb=None, bundle=None,
+                              scenarios=False)) is None
+    monkeypatch.setenv("MV_CANDIDATE_MANIFEST", "c.json")
+    with pytest.raises(ValueError) as caught:
+        kmt.select_candidate_inputs(
+            types.SimpleNamespace(deb=None, bundle=None,
+                                  scenarios=False))
+    assert "MV_BUNDLE_TARBALL" in str(caught.value)
+    assert "MV_CANDIDATE_MANIFEST" in str(caught.value)
+
+
+def test_main_half_env_refuses_pre_boot(tmp_path,
+                                        monkeypatch,
+                                        capsys):
+    monkeypatch.delenv("MV_BUNDLE_TARBALL", raising=False)
+    monkeypatch.setenv("MV_CANDIDATE_MANIFEST", "c.json")
+    out = tmp_path / "o"
+    assert kmt.main(["--out", str(out), "--kernel",
+                     "7.0"]) == 2
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert "candidate refused" in err
+    assert "MV_BUNDLE_TARBALL" in err
+    assert "MV_CANDIDATE_MANIFEST" in err

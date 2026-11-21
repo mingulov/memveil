@@ -4013,6 +4013,15 @@ _ROW_BUSY_RES = (re.compile(r"progs[0-9]+\.json"),)
 _ROW_NEG_RE = re.compile(
     r"swiotlb_copy-(renamed_field|widened_layout|wrong_shift"
     r"|wrong_argcnt)\.bpf\.o")
+# Scenario-rootfs evidence, admitted only in scenarios mode
+# (MV31-12 R104): the runner-written rootfs record plus the
+# single-file staged-deb expose dir. Matrix rows keep the
+# historical set exactly: neither constant joins the shared
+# top-level allowlist.
+_ROW_ROOTFS_RECORD = "rootfs.json"
+_ROW_STAGE_DEB_DIR = "ro-deb"
+_ROW_STAGE_DEB_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9+_~.-]*\.deb")
 _ROW_SCN_DIR_RE = re.compile(r"scn-[a-z][a-z0-9-]{0,31}")
 _ROW_SCN_FILES = frozenset({
     "doctor-passive.json", "doctor-passive.exit",
@@ -4049,13 +4058,20 @@ _BUSY_EVENTS_TOKEN_SET = frozenset(
 _CHOWN_TOKEN = "busy-chown-failed"
 
 
-def _row_rel_known(rel):
-    """True when a row-relative path is allowlisted evidence."""
+def _row_rel_known(rel, mode="matrix"):
+    """True when a row-relative path is allowlisted evidence.
+
+    Scenarios mode additionally admits the runner-written
+    rootfs record and single-segment staged-deb names; the
+    matrix default keeps the historical set exactly.
+    """
     if rel in _ROW_TOP_FILES:
         return True
     for expr in _ROW_TOP_RES:
         if expr.fullmatch(rel):
             return True
+    if mode == "scenarios" and rel == _ROW_ROOTFS_RECORD:
+        return True
     if "/" not in rel:
         return False
     head, rest = rel.split("/", 1)
@@ -4070,6 +4086,9 @@ def _row_rel_known(rel):
                    for expr in _ROW_BUSY_RES)
     if head == "neg":
         return _ROW_NEG_RE.fullmatch(rest) is not None
+    if mode == "scenarios" and head == _ROW_STAGE_DEB_DIR:
+        return "/" not in rest \
+            and _ROW_STAGE_DEB_RE.fullmatch(rest) is not None
     if _ROW_SCN_DIR_RE.fullmatch(head):
         if rest in _ROW_SCN_FILES:
             return True
@@ -4086,7 +4105,7 @@ def _row_rel_known(rel):
     return False
 
 
-def row_receipt_files(row_dir):
+def row_receipt_files(row_dir, mode="matrix"):
     """Hashed inventory of one row dir, in receipt order.
 
     Every regular file must be allowlisted evidence; the
@@ -4095,6 +4114,8 @@ def row_receipt_files(row_dir):
     lines never cross into receipts, the signed inventory,
     replays, or shipped archives). Raises ValueError on
     symlinks, unreadable files, or unknown evidence.
+    Scenarios mode additionally admits the runner-written
+    rootfs record and staged-deb expose files.
     """
     root = Path(row_dir)
     found = []
@@ -4107,7 +4128,7 @@ def row_receipt_files(row_dir):
             if path.is_symlink() or not path.is_file():
                 raise ValueError(
                     "row receipt refuses non-file %s" % rel)
-            if not _row_rel_known(rel):
+            if not _row_rel_known(rel, mode):
                 raise ValueError(
                     "row receipt refuses unknown file %s"
                     % rel)
@@ -4517,6 +4538,73 @@ def _check_row_ctx(ctx):
     return ctx
 
 
+_ROOTFS_RECORD_KEYS = frozenset({
+    "image", "sha256", "mount", "privilege", "runner_commit",
+    "runner_dirty", "staging"})
+_ROOTFS_STAGING_KEYS = frozenset({
+    "reference", "manifest_digest", "manifest_commit",
+    "copy_sha256", "bpf_set"})
+
+
+def _check_row_rootfs(row):
+    """Validated scenario rootfs record, None when absent.
+
+    The runner-written rootfs.json carries exact keys and no
+    extras: the image and mount are absolute host paths, the
+    image digest is 64 hex, privilege names the mount path,
+    the runner commit is 40 hex (or "unknown", matching the
+    runner identity), the dirty flag is a bool, and staging
+    is None or the exact staging record. Raises ValueError
+    on any shape or field gap.
+    """
+    doc = _row_json(row, _ROW_ROOTFS_RECORD)
+    if doc is None:
+        return None
+    if not isinstance(doc, dict) \
+            or set(doc) != _ROOTFS_RECORD_KEYS:
+        raise ValueError("row receipt rejects rootfs.json")
+    for key in ("image", "mount"):
+        if not isinstance(doc[key], str) or not doc[key] \
+                or not os.path.isabs(doc[key]):
+            raise ValueError(
+                "row receipt rejects rootfs %s" % key)
+    _check_hex(doc["sha256"], 64, "rootfs image digest")
+    if doc["privilege"] not in ("sudo", "direct"):
+        raise ValueError(
+            "row receipt rejects rootfs privilege")
+    if doc["runner_commit"] != "unknown":
+        _check_hex(doc["runner_commit"], 40,
+                   "rootfs runner commit")
+    if doc["runner_dirty"] is not True \
+            and doc["runner_dirty"] is not False:
+        raise ValueError("row receipt rejects rootfs dirt")
+    staging = doc["staging"]
+    if staging is None:
+        return doc
+    if not isinstance(staging, dict) \
+            or set(staging) != _ROOTFS_STAGING_KEYS:
+        raise ValueError(
+            "row receipt rejects rootfs staging")
+    if staging["reference"] not in ("sealed-fixture",
+                                    "bpf-set"):
+        raise ValueError(
+            "row receipt rejects rootfs staging")
+    _check_hex(staging["manifest_digest"], 64,
+               "rootfs manifest digest")
+    _check_hex(staging["manifest_commit"], 40,
+               "rootfs manifest commit")
+    _check_hex(staging["copy_sha256"], 64,
+               "rootfs copy digest")
+    bpf_set = staging["bpf_set"]
+    if bpf_set is not None \
+            and (not isinstance(bpf_set, str)
+                 or not bpf_set
+                 or not os.path.isabs(bpf_set)):
+        raise ValueError(
+            "row receipt rejects rootfs bpf set")
+    return doc
+
+
 def _check_losses_block(block, busy):
     keys = {"overall", "per", "aggregate"} if busy else {
         "channels", "overall", "bounds", "shortfalls",
@@ -4631,7 +4719,7 @@ def write_row_receipt(row_dir, rec, entry, ctx):
             "row receipt exists (refusing overwrite)")
     if not isinstance(rec, dict) or not isinstance(entry, dict):
         raise ValueError("row receipt needs a rec and entry")
-    files = row_receipt_files(row)
+    files = row_receipt_files(row, mode=ctx["mode"])
     job = _row_json(row, "job.json")
     if not isinstance(job, dict):
         raise ValueError("row receipt needs job.json")
@@ -4670,6 +4758,15 @@ def write_row_receipt(row_dir, rec, entry, ctx):
     actual_ok = rec.get("ok")
     if actual_ok is not True and actual_ok is not False:
         raise ValueError("row receipt rejects the verdict")
+    if mode == "scenarios":
+        _check_row_rootfs(row)
+        staged_deb = [
+            entry["sha256"] for entry in files
+            if entry["name"].startswith("ro-deb/")]
+        for digest in staged_deb:
+            if digest != ctx["source_sha256"]:
+                raise ValueError(
+                    "row receipt rejects staged deb bytes")
     guest_ran = (row / "artifacts.json").is_file()
     if actual_ok and not guest_ran:
         raise ValueError(
@@ -5557,7 +5654,7 @@ def rederive_row(row_dir, rec=None, entry=None):
     except ValueError as exc:
         return False, "receipt invalid: %s" % exc
     try:
-        found = row_receipt_files(row)
+        found = row_receipt_files(row, mode=doc["mode"])
     except ValueError as exc:
         return False, "row evidence refused: %s" % exc
     want = {entry["name"]: (entry["sha256"], entry["bytes"])
