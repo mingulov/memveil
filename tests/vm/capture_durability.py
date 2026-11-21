@@ -123,6 +123,11 @@ def image_modules_dir(kernel, expected_release):
             path += '/usr'
             break
         path, _ = os.path.split(path)
+    # Trailing-/usr correction from the launcher resolver: when the walk
+    # stops at .../usr but the sibling ../lib is a symlink, the launcher
+    # steps back to the parent root before deriving lib/modules/<release>.
+    if path.endswith('/usr') and os.path.islink(path + '/../lib'):
+        path, _ = os.path.split(path)
     return os.path.abspath(path) + '/lib/modules/' + expected_release
 
 

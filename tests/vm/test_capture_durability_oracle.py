@@ -549,6 +549,36 @@ class HostBindingTests(unittest.TestCase):
                     capture_durability.execute(args)
             self.assertEqual(launches.call_count, 0)
 
+    def test_usr_staged_layout_with_symlinked_lib_refused(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            # Staged /usr layout: the locked image and modules live under
+            # stage/usr, while stage/lib is a symlink to a foreign lib
+            # tree carrying modules/$release. The launcher resolver steps
+            # back from .../usr to stage when ../lib is a symlink, so it
+            # selects the foreign tree; the harness must refuse instead of
+            # verifying the staged tree and launching into the foreign one.
+            usr = stage.root / 'stage' / 'usr'
+            (usr / 'boot').mkdir(parents=True)
+            (usr / 'lib' / 'modules' / self.APPROVED / 'kernel').mkdir(parents=True)
+            (usr / 'boot' / ('vmlinuz-' + self.APPROVED)).write_bytes(b'genuine kernel image')
+            (usr / 'lib' / 'modules' / self.APPROVED / 'kernel' / 'mod.ko').write_bytes(b'module bytes')
+            (usr / 'lib' / 'modules' / self.APPROVED / 'modules.order').write_bytes(b'order\n')
+            foreign = stage.root / 'foreignlib'
+            (foreign / 'modules' / self.APPROVED / 'kernel').mkdir(parents=True)
+            (foreign / 'modules' / self.APPROVED / 'kernel' / 'mod.ko').write_bytes(b'foreign module bytes')
+            (foreign / 'modules' / self.APPROVED / 'modules.order').write_bytes(b'foreign\n')
+            (stage.root / 'stage' / 'lib').symlink_to(foreign)
+            args = self.make_args(stage,
+                                  kernel=usr / 'boot' / ('vmlinuz-' + self.APPROVED),
+                                  modules=usr / 'lib' / 'modules' / self.APPROVED)
+            launches = Mock(side_effect=AssertionError('unexpected boot'))
+            with self.harness(stage, launches):
+                with self.assertRaisesRegex(ValueError, '^supplied modules are not the image-resolved module tree$'):
+                    capture_durability.execute(args)
+            self.assertEqual(launches.call_count, 0)
+
     def test_kernel_drift_after_first_capture_refused(self):
         import capture_durability
         with tempfile.TemporaryDirectory() as tmp:
