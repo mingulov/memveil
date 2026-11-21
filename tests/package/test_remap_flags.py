@@ -19,6 +19,7 @@ cargo configuration can leak in.
 
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -146,11 +147,49 @@ def test_encoded_empty_segments_preserved(module, isolated):
 
 
 @HELPERS
-def test_unparseable_rustflags_refuses(module, isolated):
+def test_rustflags_quoted_flag_keeps_quotes(module, isolated):
+    """Quotes ride through untouched: words break on spaces alone."""
     env, build = isolated
-    env["RUSTFLAGS"] = 'foo"bar'
-    with pytest.raises(SystemExit):
-        _remap(module, env, build)
+    env["RUSTFLAGS"] = '--cfg mv_cfg="quoted"'
+    assert _remap(module, env, build) == \
+        ["--cfg", 'mv_cfg="quoted"'] + _pair(env, build)
+
+
+@HELPERS
+@pytest.mark.parametrize("text,want", [
+    ('--cfg mv="a b"', ["--cfg", 'mv="a', 'b"']),
+    ("--cfg 'a b'", ["--cfg", "'a", "b'"]),
+    ('"a b" c', ['"a', 'b"', "c"]),
+    ('a"b c"d', ['a"b', 'c"d']),
+    ("a'b c'd", ["a'b", "c'd"]),
+    ("a\\ b", ["a\\", "b"]),
+    ("a\\", ["a\\"]),
+    ("\\", ["\\"]),
+    ('"a', ['"a']),
+    ("'a", ["'a"]),
+    ('""', ['""']),
+    ("''", ["''"]),
+    ('"', ['"']),
+    ('foo"bar', ['foo"bar']),
+    ("a\tb", ["a\tb"]),
+    ("a\nb", ["a\nb"]),
+    ("a\rb", ["a\rb"]),
+    ("a\x0bb", ["a\x0bb"]),
+    ("a\x0cb", ["a\x0cb"]),
+    ("a\xa0", ["a\xa0"]),
+    ("a\xa0b", ["a\xa0b"]),
+    ("a  b", ["a", "b"]),
+    ("  a  ", ["a"]),
+    ("", []),
+    ("   ", []),
+    ("#foo", ["#foo"]),
+])
+def test_rustflags_words_break_on_spaces_alone(
+        module, isolated, text, want):
+    """Only spaces split; quotes, backslashes, and other blanks stay literal."""
+    env, build = isolated
+    env["RUSTFLAGS"] = text
+    assert _remap(module, env, build) == want + _pair(env, build)
 
 
 @HELPERS
@@ -309,3 +348,115 @@ def test_mistyped_config_refuses(module, isolated, body):
     _write(build / ".cargo" / "config.toml", body)
     with pytest.raises(SystemExit):
         _remap(module, env, build)
+
+
+def _pinned_channel():
+    """Repository toolchain pin: the channel the repo builds under."""
+    text = (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("channel"):
+            _, _, value = line.partition("=")
+            value = value.strip().strip('"')
+            assert value, "pin names a channel"
+            return value
+    raise AssertionError("pin names no channel")
+
+
+_QUOTED_MAIN_RS = '''#[cfg(not(mv_cfg = "quoted"))]
+compile_error!("quoted flag did not reach rustc");
+fn main() {}
+'''
+
+
+def _scratch_crate(path, channel):
+    """Scratch crate refusing to compile without the exact quoted flag."""
+    (path / "src").mkdir(parents=True)
+    (path / "Cargo.toml").write_text(
+        '[package]\nname = "quoted"\nversion = "0.1.0"\n'
+        'edition = "2021"\n', encoding="utf-8")
+    (path / "src" / "main.rs").write_text(
+        _QUOTED_MAIN_RS, encoding="utf-8")
+    (path / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "%s"\n' % channel,
+        encoding="utf-8")
+
+
+def _cargo_env(cargo_home, target):
+    """Hermetic cargo environment: no ambient flags, home, or target.
+
+    The ambient home stays: the toolchain resolver reads it,
+    while cargo itself writes only to the scratch home and
+    target given here.
+    """
+    env = {key: value for key, value in os.environ.items()
+           if key not in (
+               "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+               "CARGO_BUILD_RUSTFLAGS", "RUSTUP_TOOLCHAIN",
+               "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+               "RUSTC", "CARGO_HOME", "CARGO_TARGET_DIR",
+               "CARGO_NET_OFFLINE")}
+    env.update(CARGO_HOME=str(cargo_home),
+               CARGO_TARGET_DIR=str(target),
+               CARGO_NET_OFFLINE="true")
+    return env
+
+
+def _assert_pinned(proj, env, channel):
+    """The cargo under test proves it is the repository pin."""
+    probe = subprocess.run(
+        ["cargo", "--version"], capture_output=True, text=True,
+        cwd=proj, env=env, timeout=120)
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.startswith("cargo %s " % channel), \
+        probe.stdout
+
+
+def test_quoted_flag_accepted_by_pinned_cargo(
+        isolated, tmp_path):
+    """Both helpers' quoted output survives a real pinned build.
+
+    Each helper words the quoted flag with its quotes intact;
+    the shared encoded output then drives a pinned cargo build
+    of a crate that refuses to compile without the exact flag.
+    """
+    env, build = isolated
+    channel = _pinned_channel()
+    seen = set()
+    for module in (PACKAGER, DOCS):
+        probe = dict(env)
+        probe["RUSTFLAGS"] = '--cfg mv_cfg="quoted"'
+        flags = _remap(module, probe, build)
+        assert flags[:2] == ["--cfg", 'mv_cfg="quoted"']
+        seen.add(probe["CARGO_ENCODED_RUSTFLAGS"])
+    assert len(seen) == 1
+    proj = tmp_path / "proj"
+    _scratch_crate(proj, channel)
+    cargo_env = _cargo_env(
+        env["CARGO_HOME"], tmp_path / "target")
+    _assert_pinned(proj, cargo_env, channel)
+    built = subprocess.run(
+        ["cargo", "build", "--offline"], capture_output=True,
+        text=True, cwd=proj, timeout=300,
+        env={**cargo_env,
+             "CARGO_ENCODED_RUSTFLAGS": seen.pop()})
+    assert built.returncode == 0, built.stderr[-2000:]
+
+
+def test_unquoted_flag_rejected_by_pinned_cargo(
+        isolated, tmp_path):
+    """The end-to-end harness discriminates: stripped quotes fail."""
+    env, _build = isolated
+    channel = _pinned_channel()
+    proj = tmp_path / "proj"
+    _scratch_crate(proj, channel)
+    cargo_env = _cargo_env(
+        env["CARGO_HOME"], tmp_path / "target")
+    _assert_pinned(proj, cargo_env, channel)
+    built = subprocess.run(
+        ["cargo", "build", "--offline"], capture_output=True,
+        text=True, cwd=proj, timeout=300,
+        env={**cargo_env, "CARGO_ENCODED_RUSTFLAGS":
+             "\x1f".join(["--cfg", "mv_cfg=quoted"])})
+    assert built.returncode != 0
+    assert "invalid" in built.stderr, built.stderr[-2000:]

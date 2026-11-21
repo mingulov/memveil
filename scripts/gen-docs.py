@@ -26,7 +26,6 @@ only when PATH already holds a fresh build.
 """
 
 import os
-import shlex
 import subprocess
 import sys
 import tomllib
@@ -149,6 +148,17 @@ def config_layer_rustflags(build_dir, env):
     return flags
 
 
+def split_rustflags(text):
+    """Split a flag string the way Cargo splits RUSTFLAGS.
+
+    Words break on the space character alone; every other
+    byte stays literal, so quotes and backslashes reach the
+    compiler untouched. Empty words never form: leading,
+    trailing, and repeated spaces vanish.
+    """
+    return [word for word in text.split(" ") if word]
+
+
 def remap_build_paths(env):
     """Append path remaps so the built binary names no build machine.
 
@@ -168,10 +178,7 @@ def remap_build_paths(env):
         encoded = env["CARGO_ENCODED_RUSTFLAGS"]
         flags = encoded.split("\x1f") if encoded else []
     elif "RUSTFLAGS" in env:
-        try:
-            flags = shlex.split(env["RUSTFLAGS"])
-        except ValueError as exc:
-            fail("cannot parse RUSTFLAGS: %s" % exc)
+        flags = split_rustflags(env["RUSTFLAGS"])
     else:
         flags = config_layer_rustflags(ROOT_DIR, env)
     home = env.get("HOME", "")

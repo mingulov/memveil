@@ -79,7 +79,6 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import struct
@@ -871,6 +870,17 @@ def config_layer_rustflags(build_dir, env):
     return flags
 
 
+def split_rustflags(text):
+    """Split a flag string the way Cargo splits RUSTFLAGS.
+
+    Words break on the space character alone; every other
+    byte stays literal, so quotes and backslashes reach the
+    compiler untouched. Empty words never form: leading,
+    trailing, and repeated spaces vanish.
+    """
+    return [word for word in text.split(" ") if word]
+
+
 def remap_build_paths(env, rust_dir):
     """Append path remaps so shipped bytes name no build machine.
 
@@ -889,10 +899,7 @@ def remap_build_paths(env, rust_dir):
         encoded = env["CARGO_ENCODED_RUSTFLAGS"]
         flags = encoded.split("\x1f") if encoded else []
     elif "RUSTFLAGS" in env:
-        try:
-            flags = shlex.split(env["RUSTFLAGS"])
-        except ValueError as exc:
-            fail("cannot parse RUSTFLAGS: %s" % exc)
+        flags = split_rustflags(env["RUSTFLAGS"])
     else:
         flags = config_layer_rustflags(rust_dir, env)
     home = env.get("HOME", "")

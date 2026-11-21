@@ -116,7 +116,7 @@ pub fn effective_rustflags(
     }
     if let Some(rustflags) = env.get("RUSTFLAGS") {
         return Ok(Effective {
-            flags: split_rustflags(rustflags)?,
+            flags: split_rustflags(rustflags),
             config_files: Vec::new(),
         });
     }
@@ -165,90 +165,17 @@ fn abspath(path: &Path) -> PathBuf {
         .join(path)
 }
 
-/// Split space-separated flags the way Cargo words `RUSTFLAGS`.
+/// Split a flag string the way Cargo splits `RUSTFLAGS`.
 ///
-/// Single quotes, double quotes, and backslash escapes form words: inside
-/// single quotes every byte stays literal; inside double quotes a backslash
-/// escapes only `"` and `\` and stays literal before anything else; outside
-/// quotes a backslash escapes any single character (even a newline, which
-/// then stays literal instead of splitting). Only space, tab, newline, and
-/// carriage return split words. An unterminated quote or a trailing
-/// backslash refuses, since Cargo would refuse the same value outright.
-fn split_rustflags(text: &str) -> Result<Vec<String>, String> {
-    const BLANKS: [char; 4] = [' ', '\t', '\n', '\r'];
-    #[derive(PartialEq)]
-    enum Quote {
-        Single,
-        Double,
-    }
-    let refuse = |reason: &str| format!("cannot parse RUSTFLAGS {text:?}: {reason}");
-    let mut words = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut quote: Option<Quote> = None;
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if quote == Some(Quote::Single) {
-            if ch == '\'' {
-                quote = None;
-            } else {
-                word.push(ch);
-            }
-            continue;
-        }
-        if quote == Some(Quote::Double) {
-            if ch == '"' {
-                quote = None;
-            } else if ch == '\\' {
-                let Some(next) = chars.next() else {
-                    return Err(refuse("no escaped character"));
-                };
-                if next == '"' || next == '\\' {
-                    word.push(next);
-                } else {
-                    word.push('\\');
-                    word.push(next);
-                }
-            } else {
-                word.push(ch);
-            }
-            continue;
-        }
-        match ch {
-            '\'' => {
-                quote = Some(Quote::Single);
-                in_word = true;
-            }
-            '"' => {
-                quote = Some(Quote::Double);
-                in_word = true;
-            }
-            '\\' => {
-                let Some(next) = chars.next() else {
-                    return Err(refuse("no escaped character"));
-                };
-                word.push(next);
-                in_word = true;
-            }
-            ch if BLANKS.contains(&ch) => {
-                if in_word {
-                    words.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            _ => {
-                word.push(ch);
-                in_word = true;
-            }
-        }
-    }
-    if quote.is_some() {
-        return Err(refuse("no closing quotation"));
-    }
-    if in_word {
-        words.push(word);
-    }
-    Ok(words)
+/// Words break on the space character alone; every other byte stays
+/// literal, so quotes and backslashes reach the compiler untouched.
+/// Empty words never form: leading, trailing, and repeated spaces
+/// vanish. Splitting never fails.
+fn split_rustflags(text: &str) -> Vec<String> {
+    text.split(' ')
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Config-layer flags for a build with no channel set.
@@ -1266,13 +1193,32 @@ mod tests {
         assert_eq!(fx.remap(), want);
     }
 
+    /// Quotes ride through untouched: Cargo words on spaces alone.
     #[test]
-    fn unparseable_rustflags_refuses() {
-        let mut fx = Fixture::fresh("unparseable");
-        fx.env
-            .insert("RUSTFLAGS".to_string(), "foo\"bar".to_string());
-        let err = remap_build_paths(&mut fx.env, &fx.build).expect_err("must refuse");
-        assert!(err.contains("RUSTFLAGS"), "{err}");
+    fn rustflags_channel_keeps_quotes() {
+        let mut fx = Fixture::fresh("quotes");
+        fx.env.insert(
+            "RUSTFLAGS".to_string(),
+            "--cfg mv_cfg=\"quoted\"".to_string(),
+        );
+        let mut want = vec!["--cfg".to_string(), "mv_cfg=\"quoted\"".to_string()];
+        want.extend(fx.pair());
+        assert_eq!(fx.remap(), want);
+    }
+
+    /// Former refusals pass through: splitting never fails.
+    #[test]
+    fn rustflags_channel_never_refuses() {
+        for (n, text) in ["foo\"bar", "\"a", "'a", "a\\", "\\", "\""]
+            .into_iter()
+            .enumerate()
+        {
+            let mut fx = Fixture::fresh(&format!("passthrough-{n}"));
+            fx.env.insert("RUSTFLAGS".to_string(), text.to_string());
+            let mut want = vec![text.to_string()];
+            want.extend(fx.pair());
+            assert_eq!(fx.remap(), want, "{text:?}");
+        }
     }
 
     /// Config-sourced flags ride along with the remaps.
@@ -1997,69 +1943,174 @@ mod tests {
         }
     }
 
-    fn split(text: &str) -> Vec<String> {
-        split_rustflags(text).expect("splits")
-    }
-
-    fn split_err(text: &str) -> String {
-        split_rustflags(text).expect_err("refuses")
-    }
-
-    /// Inside double quotes a backslash escapes only `"` and `\`.
+    /// Only spaces split; quotes, backslashes, and every other blank
+    /// stay literal, and splitting never fails.
     #[test]
-    fn double_quote_backslash_rules() {
-        assert_eq!(split("\"a\\nb\""), words(&["a\\nb"]));
-        assert_eq!(split("\"a\\\"b\""), words(&["a\"b"]));
-        assert_eq!(split("\"a\\\\b\""), words(&["a\\b"]));
-        assert_eq!(split("\"a\\$b\""), words(&["a\\$b"]));
-        assert_eq!(split("\"a\\ b\""), words(&["a\\ b"]));
-        assert_eq!(split("\"a\\\nb\""), words(&["a\\\nb"]));
+    fn rustflags_words_break_on_spaces_alone() {
+        for (text, want) in [
+            (
+                "--cfg mv_cfg=\"quoted\"",
+                vec!["--cfg", "mv_cfg=\"quoted\""],
+            ),
+            ("--cfg mv=\"a b\"", vec!["--cfg", "mv=\"a", "b\""]),
+            ("--cfg 'a b'", vec!["--cfg", "'a", "b'"]),
+            ("\"a b\" c", vec!["\"a", "b\"", "c"]),
+            ("a\"b c\"d", vec!["a\"b", "c\"d"]),
+            ("a'b c'd", vec!["a'b", "c'd"]),
+            ("a\\ b", vec!["a\\", "b"]),
+            ("a\\", vec!["a\\"]),
+            ("\\", vec!["\\"]),
+            ("\"a", vec!["\"a"]),
+            ("'a", vec!["'a"]),
+            ("\"\"", vec!["\"\""]),
+            ("''", vec!["''"]),
+            ("\"", vec!["\""]),
+            ("foo\"bar", vec!["foo\"bar"]),
+            ("a\tb", vec!["a\tb"]),
+            ("a\nb", vec!["a\nb"]),
+            ("a\rb", vec!["a\rb"]),
+            ("a\x0bb", vec!["a\x0bb"]),
+            ("a\x0cb", vec!["a\x0cb"]),
+            ("a\u{a0}", vec!["a\u{a0}"]),
+            ("a\u{a0}b", vec!["a\u{a0}b"]),
+            ("a  b", vec!["a", "b"]),
+            ("  a  ", vec!["a"]),
+            ("", Vec::<&str>::new()),
+            ("   ", Vec::<&str>::new()),
+            ("#foo", vec!["#foo"]),
+        ] {
+            assert_eq!(split_rustflags(text), words(&want), "{text:?}");
+        }
     }
 
-    /// Outside quotes a backslash escapes any single character, even a
-    /// newline, which then stays literal instead of splitting.
-    #[test]
-    fn backslash_escapes_any_outside_quotes() {
-        assert_eq!(split("a\\ b"), words(&["a b"]));
-        assert_eq!(split("a\\\nb"), words(&["a\nb"]));
-        assert_eq!(split("a\\nb"), words(&["anb"]));
+    /// Repository toolchain pin: the channel named by the nearest
+    /// toolchain file above this crate, the single source of the
+    /// compiler under test.
+    fn pinned_channel() -> String {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let pin = dir.join("rust-toolchain.toml");
+            if pin.is_file() {
+                let text = fs::read_to_string(&pin).expect("pin reads");
+                for line in text.lines() {
+                    let line = line.trim();
+                    if let Some(rest) = line.strip_prefix("channel") {
+                        let channel = rest.trim().trim_start_matches('=').trim().trim_matches('"');
+                        assert!(!channel.is_empty(), "pin names a channel");
+                        return channel.to_string();
+                    }
+                }
+                panic!("pin names no channel: {}", pin.display());
+            }
+            if !dir.pop() {
+                panic!("no toolchain file above {}", env!("CARGO_MANIFEST_DIR"));
+            }
+        }
     }
 
-    #[test]
-    fn single_quotes_stay_literal() {
-        assert_eq!(split("'a\\nb'"), words(&["a\\nb"]));
-        assert_eq!(split("''"), words(&[""]));
-        assert_eq!(split("\"\""), words(&[""]));
-        assert_eq!(split("'' ''"), words(&["", ""]));
+    /// Scratch crate that refuses to compile without the exact quoted
+    /// flag, so a build proves the flag reached the compiler.
+    fn quoted_probe(proj: &Path) {
+        fs::create_dir_all(proj.join("src")).expect("proj dirs");
+        fs::write(
+            proj.join("Cargo.toml"),
+            "[package]\nname = \"quoted\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest write");
+        fs::write(
+            proj.join("src/main.rs"),
+            "#[cfg(not(mv_cfg = \"quoted\"))]\n\
+             compile_error!(\"quoted flag did not reach rustc\");\n\
+             fn main() {}\n",
+        )
+        .expect("source write");
     }
 
-    /// Only space, tab, newline, and carriage return split words.
-    #[test]
-    fn only_ascii_blanks_split() {
-        assert_eq!(split("a\tb\rc"), words(&["a", "b", "c"]));
-        assert_eq!(split("a\rb\x0bc\x0cd"), words(&["a", "b\x0bc\x0cd"]));
-        assert_eq!(split("  a  "), words(&["a"]));
-        assert_eq!(split(""), Vec::<String>::new());
-        assert_eq!(split("   "), Vec::<String>::new());
+    /// Pinned cargo proven by its own version string, then a build of
+    /// the quoted probe driven by exactly `flags`. The build inherits
+    /// the ambient environment minus flag channels and toolchain
+    /// overrides, with the home, target, and offline settings pinned
+    /// to the scratch tree; the probe carries the repository pin so
+    /// the same compiler runs wherever the suite does.
+    fn pinned_build(dir: &TestDir, flags: &[String]) -> std::process::Output {
+        use std::process::Command;
+        let cargo = std::env::var_os("CARGO").expect("CARGO is set by cargo");
+        let probe = Command::new(&cargo)
+            .arg("--version")
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .output()
+            .expect("cargo --version runs");
+        assert!(probe.status.success());
+        let version = String::from_utf8_lossy(&probe.stdout);
+        let pin = pinned_channel();
+        assert!(
+            version.starts_with(&format!("cargo {pin} ")),
+            "pinned cargo, got {version:?}"
+        );
+        let proj = dir.dir.join("proj");
+        quoted_probe(&proj);
+        fs::write(
+            proj.join("rust-toolchain.toml"),
+            format!("[toolchain]\nchannel = \"{pin}\"\n"),
+        )
+        .expect("pin write");
+        let cargo_home = dir.dir.join("cargo-home");
+        fs::create_dir_all(&cargo_home).expect("cargo home dir");
+        Command::new(&cargo)
+            .arg("build")
+            .arg("--offline")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .env_remove("RUSTC")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env("CARGO_HOME", &cargo_home)
+            .env("CARGO_TARGET_DIR", dir.dir.join("target"))
+            .env("CARGO_NET_OFFLINE", "true")
+            .env("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"))
+            .current_dir(&proj)
+            .output()
+            .expect("cargo build runs")
     }
 
+    /// The quoted flag reaches the pinned compiler untouched, end to
+    /// end: the effective tokens drive a real build of a crate that
+    /// refuses to compile without the exact quoted flag.
     #[test]
-    fn quotes_join_words() {
-        assert_eq!(split("a\"b\"c"), words(&["abc"]));
-        assert_eq!(split("a'b'c"), words(&["abc"]));
-        assert_eq!(split("a\"b c\"d"), words(&["ab cd"]));
-        assert_eq!(split("#foo"), words(&["#foo"]));
+    fn quoted_flag_accepted_by_pinned_cargo() {
+        let dir = TestDir::fresh("pinned-e2e");
+        let cargo_home = dir.dir.join("cargo-home");
+        fs::create_dir_all(&cargo_home).expect("cargo home dir");
+        let mut env = BTreeMap::new();
+        env.insert(
+            "RUSTFLAGS".to_string(),
+            "--cfg mv_cfg=\"quoted\"".to_string(),
+        );
+        env.insert(
+            "CARGO_HOME".to_string(),
+            cargo_home.to_str().expect("UTF-8").to_string(),
+        );
+        let proj = dir.dir.join("proj");
+        let effective = effective_rustflags(&env, &proj).expect("splits");
+        assert_eq!(effective.flags, words(&["--cfg", "mv_cfg=\"quoted\""]));
+        let out = pinned_build(&dir, &effective.flags);
+        assert!(
+            out.status.success(),
+            "quoted flag builds: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
+    /// The end-to-end harness discriminates: stripped quotes fail the
+    /// same build, so the acceptance above is not vacuous.
     #[test]
-    fn shell_split_refusals() {
-        split_err("\"a");
-        split_err("'a");
-        split_err("a\\");
-        split_err("\"a\\");
-        let err = split_err("'a\\");
-        assert!(err.contains("no closing quotation"), "{err}");
-        let err = split_err("a\\");
-        assert!(err.contains("no escaped character"), "{err}");
+    fn unquoted_flag_rejected_by_pinned_cargo() {
+        let dir = TestDir::fresh("pinned-negative");
+        let out = pinned_build(&dir, &words(&["--cfg", "mv_cfg=quoted"]));
+        assert!(!out.status.success(), "stripped flag must fail");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("invalid"), "{stderr}");
     }
 }
