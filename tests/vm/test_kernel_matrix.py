@@ -981,6 +981,42 @@ def test_verify_entry_cache_missing_says_build(tmp_path, monkeypatch):
     assert not got
 
 
+def _valid_distro_cache(tmp_path, monkeypatch):
+    entry = _distro_entry()
+    monkeypatch.setenv("MV_KCACHE", str(tmp_path / "kcache"))
+    rowdir = tmp_path / "kcache" / entry["id"]
+    boot = rowdir / "boot"
+    mods = rowdir / "usr" / "lib" / "modules" / entry["release"] \
+        / "kernel"
+    mods.mkdir(parents=True)
+    boot.mkdir(parents=True)
+    vmlinuz = boot / ("vmlinuz-" + entry["release"])
+    vmlinuz.write_bytes(b"fake-distro-vmlinuz")
+    (mods / "nvme.ko").write_bytes(b"fake-module")
+    (rowdir / "config").write_text("CONFIG_X=y\n")
+    src = entry["source"]
+    src["vmlinuz_sha256"] = km.sha_file(str(vmlinuz))
+    mods_root = rowdir / "usr" / "lib" / "modules" \
+        / entry["release"]
+    src["modules_manifest_sha256"], _ = km.modules_manifest_sha(
+        str(mods_root))
+    src["config_sha256"] = km.sha_file(str(rowdir / "config"))
+    return entry, str(vmlinuz)
+
+
+def test_verify_entry_cache_distro_drift_fails(tmp_path,
+                                               monkeypatch):
+    entry, kernel = _valid_distro_cache(tmp_path, monkeypatch)
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert ok, why
+    assert got == kernel
+    entry["source"]["vmlinuz_sha256"] = "7" * 64
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert not ok
+    assert "vmlinuz" in why
+    assert not got
+
+
 def test_verify_entry_cache_archive_checks_hashes(tmp_path, monkeypatch):
     monkeypatch.delenv("MV_KCACHE", raising=False)
     home = tmp_path / "home"
@@ -6680,6 +6716,141 @@ def test_row_receipt_allows_record_streams(tmp_path):
     km.validate_row_receipt(doc)
     ok, detail = km.rederive_row(row)
     assert ok, detail
+
+
+def _distro_row_job():
+    job = _row_job()
+    job.update({"id": "debian13", "vng_version": "debian13",
+                "release": "6.12.57-amd64"})
+    return job
+
+
+def _distro_row_rec(**over):
+    rec = _row_rec(id="debian13", vng_version="debian13",
+                   release="6.12.57-amd64")
+    rec.update(over)
+    return rec
+
+
+def _distro_row_ctx(**over):
+    return _row_ctx(kernel_selector="--kernel debian13", **over)
+
+
+def _distro_admitted_row(tmp_path, **files):
+    base = {
+        "job.json": json.dumps(_distro_row_job()),
+        "configid.txt": "absent\n",
+        "uname.txt": "6.12.57-amd64\nswiotlb=131072,force "
+                     "virtme_link_mods=/cache/usr/lib/modules/"
+                     "6.12.57-amd64\n",
+        "mods.txt": "6.12.57-amd64\n/cache/usr/lib/modules/"
+                    "6.12.57-amd64\n",
+        "version.txt": _distro_source()["banner"] + "\n",
+    }
+    base.update(files)
+    return _admitted_row(tmp_path, **base)
+
+
+def test_row_receipt_distro_roundtrip(tmp_path):
+    entry = _distro_entry()
+    row = _distro_admitted_row(tmp_path)
+    rec = _distro_row_rec()
+    doc = km.write_row_receipt(row, rec, entry,
+                               _distro_row_ctx())
+    assert doc["actual"]["ok"] is True
+    assert doc["kernel"]["lock_source"] == entry["source"]
+    assert doc["kernel"]["boot_label"] == "debian13"
+    assert doc["kernel"]["config_status"] == "absent"
+    assert doc["kernel"]["config_sha256"] is None
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row, rec)
+    assert ok, detail
+
+
+def _tamper_distro_source(source, name):
+    if name == "package-sha":
+        source["packages"][0]["sha256"] = "x" * 64
+    elif name == "vmlinuz-sha":
+        source["vmlinuz_sha256"] = "0" * 63
+    elif name == "banner":
+        source["banner"] = "custom build 6.12.57"
+    elif name == "kind":
+        source["kind"] = "snapshot"
+    elif name == "member":
+        del source["vmlinuz_member"]
+    else:
+        raise AssertionError("unknown tamper " + name)
+
+
+_DISTRO_TAMPERS = ("package-sha", "vmlinuz-sha", "banner",
+                   "kind", "member")
+
+
+@pytest.mark.parametrize("tamper", _DISTRO_TAMPERS)
+def test_row_receipt_distro_writer_refuses_tampered_source(
+        tmp_path, tamper):
+    entry = _distro_entry()
+    _tamper_distro_source(entry["source"], tamper)
+    row = _distro_admitted_row(tmp_path)
+    with pytest.raises(ValueError, match="lock source"):
+        km.write_row_receipt(row, _distro_row_rec(), entry,
+                             _distro_row_ctx())
+
+
+@pytest.mark.parametrize("tamper", _DISTRO_TAMPERS)
+def test_row_receipt_distro_reader_refuses_tampered_source(
+        tmp_path, tamper):
+    row = _distro_admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _distro_row_rec(),
+                               _distro_entry(),
+                               _distro_row_ctx())
+    _tamper_distro_source(doc["kernel"]["lock_source"], tamper)
+    with pytest.raises(ValueError, match="its kernel"):
+        km.validate_row_receipt(doc)
+
+
+def test_row_receipt_distro_writer_refuses_guest_config(
+        tmp_path):
+    row = _distro_admitted_row(
+        tmp_path, **{"configid.txt": "6" * 64 + "\n"})
+    with pytest.raises(ValueError, match="distro config"):
+        km.write_row_receipt(row, _distro_row_rec(),
+                             _distro_entry(),
+                             _distro_row_ctx())
+
+
+def test_row_receipt_distro_reader_refuses_guest_config(
+        tmp_path):
+    row = _distro_admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _distro_row_rec(),
+                               _distro_entry(),
+                               _distro_row_ctx())
+    doc["kernel"]["config_sha256"] = "6" * 64
+    doc["kernel"]["config_status"] = "measured"
+    with pytest.raises(ValueError, match="its kernel"):
+        km.validate_row_receipt(doc)
+
+
+def test_row_receipt_distro_early_failure(tmp_path):
+    row = _write_row(tmp_path, {
+        "job.json": json.dumps(_distro_row_job()),
+        "cache-FAIL.txt": "cache missing vmlinuz; "
+                          "run tools/kernel-fetch\n",
+    })
+    rec = {"id": "debian13", "ok": False,
+           "run_id": "20261030T000000Z", "elapsed": 0.1,
+           "checks": [{"name": "cache", "ok": False,
+                       "detail": "cache-unverified",
+                       "skipped": False}]}
+    doc = km.write_row_receipt(row, rec, _distro_entry(),
+                               _distro_row_ctx())
+    assert doc["actual"]["ok"] is False
+    assert doc["artifacts"]["status"] == "no-guest"
+    assert doc["kernel"]["config_status"] == "missing"
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert detail
 
 
 def test_verify_matrix_out_pass(tmp_path):

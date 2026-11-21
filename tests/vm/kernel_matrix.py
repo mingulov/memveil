@@ -4589,6 +4589,26 @@ def _losses_jsonable(block, busy):
     return clean
 
 
+def _check_row_lock_source_distro(source, what):
+    """Strict distro lock grammar for row receipts.
+
+    The writer and the reader share this check, and both
+    reuse the frozen-lock grammar itself: the receipt binds
+    the full source entry (pinned package URLs and shas,
+    the image member, the cached vmlinuz, modules-manifest
+    and extracted-config shas, and the guest banner), so a
+    source the lock would refuse is refused here too.
+    Raises ValueError with a receipt message.
+    """
+    if not isinstance(source, dict):
+        raise ValueError("row receipt rejects %s" % what)
+    try:
+        _need_distro_source(source, "row")
+    except LockError:
+        raise ValueError("row receipt rejects %s" % what)
+    return source
+
+
 def write_row_receipt(row_dir, rec, entry, ctx):
     """Write receipt.json proving one matrix row, return it.
 
@@ -4759,8 +4779,14 @@ def write_row_receipt(row_dir, rec, entry, ctx):
         raise ValueError("row receipt rejects boot label")
     if not isinstance(kernel["lock_source"], dict) \
             or kernel["lock_source"].get("kind") not in (
-                "archive", "built"):
+                "archive", "built", "distro"):
         raise ValueError("row receipt rejects lock source")
+    if kernel["lock_source"]["kind"] == "distro":
+        _check_row_lock_source_distro(
+            kernel["lock_source"], "lock source")
+        if guest_ran and config_status != "absent":
+            raise ValueError(
+                "row receipt rejects distro config evidence")
     if mode == "matrix":
         checks = _check_row_checks(rec.get("checks"))
         if actual_ok != all(check["ok"] for check in checks):
@@ -5072,8 +5098,12 @@ def validate_row_receipt(doc):
     lock_source = kernel["lock_source"]
     if not isinstance(lock_source, dict) \
             or lock_source.get("kind") not in ("archive",
-                                               "built"):
+                                               "built",
+                                               "distro"):
         raise ValueError("row receipt rejects its kernel")
+    if lock_source["kind"] == "distro":
+        _check_row_lock_source_distro(
+            lock_source, "its kernel")
     if kernel["boot_label"] != row_boot_label(
             {"source": lock_source, "id": doc["id"]}):
         raise ValueError("row receipt rejects its kernel")
@@ -5093,6 +5123,9 @@ def validate_row_receipt(doc):
             _check_hex(kernel[sha_key], 64, "kernel hash")
         elif kernel[sha_key] is not None:
             raise ValueError("row receipt rejects its kernel")
+    if lock_source["kind"] == "distro" and measured \
+            and kernel["config_status"] != "absent":
+        raise ValueError("row receipt rejects its kernel")
     hooks = kernel["hooks"]
     if hooks is not None:
         if not isinstance(hooks, dict) \
