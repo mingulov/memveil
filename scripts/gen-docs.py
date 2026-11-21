@@ -100,13 +100,15 @@ def config_layer_rustflags(build_dir, env):
     then RUSTFLAGS, then the config layer, and a set-but-
     empty channel still shadows everything below it. Merges
     the home config first, then each ancestor config down
-    to the build directory, then CARGO_BUILD_RUSTFLAGS
-    last: a nearer string replaces, arrays join, and a
-    string meeting an array across files refuses like Cargo
-    does. A home directory that overlaps an ancestor loads
-    once at the ancestor; at one directory the extensionless
-    config wins over config.toml wholesale. Fails closed
-    rather than shadowing flags it cannot see.
+    to the build directory: a nearer string replaces,
+    arrays join, and a string meeting an array across files
+    refuses like Cargo does. The dotted environment
+    spelling appends after the merged file flags, and an
+    empty one leaves them standing. A home directory that
+    overlaps an ancestor loads once at the ancestor; at one
+    directory the extensionless config wins over config.toml
+    wholesale. Fails closed rather than shadowing flags it
+    cannot see.
     """
     for name in env:
         if name.startswith("CARGO_TARGET_") \
@@ -157,10 +159,14 @@ def config_layer_rustflags(build_dir, env):
                  "through RUSTFLAGS instead" % path)
     dotted = env.get("CARGO_BUILD_RUSTFLAGS")
     if dotted is not None:
-        if merged is None or isinstance(merged, str):
-            merged = dotted
-        else:
-            merged = merged + dotted.split()
+        extra = dotted.split()
+        if extra:
+            if merged is None:
+                merged = extra
+            elif isinstance(merged, str):
+                merged = merged.split() + extra
+            else:
+                merged = merged + extra
     if merged is None:
         return []
     if isinstance(merged, str):

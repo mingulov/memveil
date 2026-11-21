@@ -383,15 +383,20 @@ def test_home_ancestor_overlap_symlink_loads_once(
 
 
 @HELPERS
+@pytest.mark.parametrize("leaf", ["config", "config.toml"])
 @pytest.mark.parametrize("dotted,want", [
-    ("--cfg dotted", ["--cfg", "dotted"]),
-    ("", []),
+    ("--cfg dotted", ["--cfg", "file", "--cfg", "dotted"]),
+    ("", ["--cfg", "file"]),
 ])
-def test_dotted_env_replaces_file_string(
-        module, isolated, dotted, want):
-    """The dotted spelling replaces a file string, even when empty."""
+def test_dotted_env_appends_after_file_string(
+        module, isolated, leaf, dotted, want):
+    """The dotted spelling appends after a file string.
+
+    An empty value leaves the file flags standing; both
+    config leaves behave alike.
+    """
     env, build = isolated
-    _write(build / ".cargo" / "config.toml",
+    _write(build / ".cargo" / leaf,
            '[build]\nrustflags = "--cfg file"\n')
     env["CARGO_BUILD_RUSTFLAGS"] = dotted
     assert _remap(module, env, build) == want + _pair(env, build)
@@ -608,3 +613,103 @@ def test_unquoted_flag_rejected_by_pinned_cargo(
              "\x1f".join(["--cfg", "mv_cfg=quoted"])})
     assert built.returncode != 0
     assert "invalid" in built.stderr, built.stderr[-2000:]
+
+
+_WRAPPER_SH = (
+    "#!/bin/sh\n"
+    "rustc=\"$1\"\n"
+    "shift\n"
+    "printf '%s\\n' \"$*\" >> \"$MEMVEIL_RUSTC_ARGV_LOG\"\n"
+    "exec \"$rustc\" \"$@\"\n"
+)
+
+
+def _scratch_probe(path, channel, leaf, body):
+    """Scratch crate carrying one config leaf with the given body."""
+    (path / "src").mkdir(parents=True)
+    (path / "Cargo.toml").write_text(
+        '[package]\nname = "flagprobe"\nversion = "0.1.0"\n'
+        'edition = "2021"\n', encoding="utf-8")
+    (path / "src" / "main.rs").write_text(
+        "fn main() {}\n", encoding="utf-8")
+    (path / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "%s"\n' % channel,
+        encoding="utf-8")
+    cargo_dir = path / ".cargo"
+    cargo_dir.mkdir()
+    (cargo_dir / leaf).write_text(body, encoding="utf-8")
+
+
+def _wrapper_argv_log(proj, cargo_home, target, channel,
+                      dotted):
+    """Compiler-argument log from a real pinned build of `proj`.
+
+    A wrapper script sits between cargo and the compiler:
+    it appends each compiler argument vector to the log,
+    then runs the compiler it was given, so the log holds
+    exactly what the compiler saw. The dotted spelling is
+    set to `dotted` (even when empty) for the build.
+    """
+    wrapper = proj.parent / ("wrapper-%s.sh" % proj.name)
+    wrapper.write_text(_WRAPPER_SH, encoding="utf-8")
+    wrapper.chmod(0o755)
+    log = proj.parent / ("argv-%s.log" % proj.name)
+    cargo_env = _cargo_env(cargo_home, target)
+    _assert_pinned(proj, cargo_env, channel)
+    built = subprocess.run(
+        ["cargo", "build", "--offline"], capture_output=True,
+        text=True, cwd=proj, timeout=300,
+        env={**cargo_env,
+             "CARGO_BUILD_RUSTFLAGS": dotted,
+             "RUSTC_WRAPPER": str(wrapper),
+             "MEMVEIL_RUSTC_ARGV_LOG": str(log)})
+    assert built.returncode == 0, built.stderr[-2000:]
+    return log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("leaf", ["config", "config.toml"])
+def test_dotted_env_matches_compiler_invocation(
+        isolated, tmp_path, leaf):
+    """The dotted spelling appends after file flags on the real line.
+
+    A wrapper between pinned cargo and the compiler logs
+    exactly what the compiler saw: file flags first, then
+    the dotted flags; an empty dotted value leaves the file
+    flags standing. Both helpers agree with the log flag
+    for flag, and both config leaves behave alike.
+    """
+    env, build = isolated
+    channel = _pinned_channel()
+    body = '[build]\nrustflags = "--cfg file"\n'
+    _write(build / ".cargo" / leaf, body)
+    for tag, dotted, want in [
+            ("append", "--cfg dotted",
+             ["--cfg", "file", "--cfg", "dotted"]),
+            ("empty", "", ["--cfg", "file"])]:
+        for module in (PACKAGER, DOCS):
+            probe = dict(env)
+            probe["CARGO_BUILD_RUSTFLAGS"] = dotted
+            assert _remap(module, probe, build) == \
+                want + _pair(probe, build)
+        proj = tmp_path / ("probe-%s-%s" % (leaf, tag))
+        _scratch_probe(proj, channel, leaf, body)
+        log = _wrapper_argv_log(
+            proj, env["CARGO_HOME"],
+            tmp_path / ("target-%s" % proj.name),
+            channel, dotted)
+        lines = log.splitlines()
+        if tag == "append":
+            seen = [line for line in lines
+                    if "--cfg file" in line]
+            assert seen, log[-2000:]
+            assert any("--cfg dotted" in line
+                       for line in seen), log[-2000:]
+            for line in seen:
+                if "--cfg dotted" in line:
+                    assert line.index("--cfg file") < \
+                        line.index("--cfg dotted"), line
+        else:
+            assert any("--cfg file" in line
+                       for line in lines), log[-2000:]
+            assert not any("--cfg dotted" in line
+                           for line in lines), log[-2000:]

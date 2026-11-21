@@ -193,13 +193,14 @@ fn split_rustflags(text: &str) -> Vec<String> {
 /// Only consulted when neither `CARGO_ENCODED_RUSTFLAGS` nor `RUSTFLAGS` is
 /// set: Cargo checks the encoded spelling, then `RUSTFLAGS`, then the config
 /// layer. Merges the home config first, then each ancestor config down to
-/// the build directory, then `CARGO_BUILD_RUSTFLAGS` last: a nearer string
-/// replaces, arrays join, and a string meeting an array across files
-/// refuses like Cargo does. A home directory that overlaps an ancestor
-/// loads once at the ancestor; at one directory the extensionless config
-/// wins over config.toml wholesale. Fails closed rather than shadowing
-/// flags it cannot see. Returns the probed config paths alongside, read
-/// or not.
+/// the build directory: a nearer string replaces, arrays join, and a
+/// string meeting an array across files refuses like Cargo does. The
+/// dotted environment spelling appends after the merged file flags, and
+/// an empty one leaves them standing. A home directory that overlaps an
+/// ancestor loads once at the ancestor; at one directory the extensionless
+/// config wins over config.toml wholesale. Fails closed rather than
+/// shadowing flags it cannot see. Returns the probed config paths
+/// alongside, read or not.
 fn config_layer_rustflags(
     build_dir: &Path,
     env: &BTreeMap<String, String>,
@@ -284,13 +285,20 @@ fn config_layer_rustflags(
         }
     }
     if let Some(dotted) = env.get("CARGO_BUILD_RUSTFLAGS") {
-        match merged {
-            None | Some(FlagsValue::Str(_)) => {
-                merged = Some(FlagsValue::Str(dotted.clone()));
-            }
-            Some(FlagsValue::Arr(mut flags)) => {
-                flags.extend(dotted.split_whitespace().map(str::to_string));
-                merged = Some(FlagsValue::Arr(flags));
+        let extra: Vec<String> = dotted.split_whitespace().map(str::to_string).collect();
+        if !extra.is_empty() {
+            match merged {
+                None => merged = Some(FlagsValue::Arr(extra)),
+                Some(FlagsValue::Str(text)) => {
+                    let mut flags: Vec<String> =
+                        text.split_whitespace().map(str::to_string).collect();
+                    flags.extend(extra);
+                    merged = Some(FlagsValue::Arr(flags));
+                }
+                Some(FlagsValue::Arr(mut flags)) => {
+                    flags.extend(extra);
+                    merged = Some(FlagsValue::Arr(flags));
+                }
             }
         }
     }
@@ -1515,29 +1523,36 @@ mod tests {
         );
     }
 
-    /// The dotted spelling replaces a file string, even when empty.
+    /// The dotted spelling appends after a file string; an empty one
+    /// leaves the file flags standing. Both config leaves behave alike.
     #[test]
-    fn dotted_env_replaces_file_string() {
-        let mut fx = Fixture::fresh("dotted-replace");
-        fx.write(
-            ".cargo/config.toml",
-            "[build]\nrustflags = \"--cfg file\"\n",
-        );
-        fx.env.insert(
-            "CARGO_BUILD_RUSTFLAGS".to_string(),
-            "--cfg dotted".to_string(),
-        );
-        let mut want = vec!["--cfg".to_string(), "dotted".to_string()];
-        want.extend(fx.pair());
-        assert_eq!(fx.remap(), want);
-        let mut fx = Fixture::fresh("dotted-empty-replace");
-        fx.write(
-            ".cargo/config.toml",
-            "[build]\nrustflags = \"--cfg file\"\n",
-        );
-        fx.env
-            .insert("CARGO_BUILD_RUSTFLAGS".to_string(), String::new());
-        assert_eq!(fx.remap(), fx.pair());
+    fn dotted_env_appends_after_file_string() {
+        for (n, leaf) in [".cargo/config", ".cargo/config.toml"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut fx = Fixture::fresh(&format!("dotted-append-{n}"));
+            fx.write(leaf, "[build]\nrustflags = \"--cfg file\"\n");
+            fx.env.insert(
+                "CARGO_BUILD_RUSTFLAGS".to_string(),
+                "--cfg dotted".to_string(),
+            );
+            let mut want = vec![
+                "--cfg".to_string(),
+                "file".to_string(),
+                "--cfg".to_string(),
+                "dotted".to_string(),
+            ];
+            want.extend(fx.pair());
+            assert_eq!(fx.remap(), want, "{leaf}");
+            let mut fx = Fixture::fresh(&format!("dotted-append-empty-{n}"));
+            fx.write(leaf, "[build]\nrustflags = \"--cfg file\"\n");
+            fx.env
+                .insert("CARGO_BUILD_RUSTFLAGS".to_string(), String::new());
+            let mut want = vec!["--cfg".to_string(), "file".to_string()];
+            want.extend(fx.pair());
+            assert_eq!(fx.remap(), want, "{leaf}");
+        }
     }
 
     /// A broken link counts as absent: the dotted leaf serves.
@@ -2270,15 +2285,11 @@ mod tests {
         .expect("source write");
     }
 
-    /// Pinned cargo proven by its own version string, then a build of
-    /// the quoted probe driven by exactly `flags`. The build inherits
-    /// the ambient environment minus flag channels and toolchain
-    /// overrides, with the home, target, and offline settings pinned
-    /// to the scratch tree; the probe carries the repository pin so
-    /// the same compiler runs wherever the suite does.
-    fn pinned_build(dir: &TestDir, flags: &[String]) -> std::process::Output {
+    /// Pinned cargo proven by its own version string: the binary under
+    /// test plus the repository pin it must report.
+    fn pinned_cargo() -> (PathBuf, String) {
         use std::process::Command;
-        let cargo = std::env::var_os("CARGO").expect("CARGO is set by cargo");
+        let cargo = PathBuf::from(std::env::var_os("CARGO").expect("CARGO is set by cargo"));
         let probe = Command::new(&cargo)
             .arg("--version")
             .env_remove("RUSTUP_TOOLCHAIN")
@@ -2291,6 +2302,18 @@ mod tests {
             version.starts_with(&format!("cargo {pin} ")),
             "pinned cargo, got {version:?}"
         );
+        (cargo, pin)
+    }
+
+    /// Pinned cargo proven by its own version string, then a build of
+    /// the quoted probe driven by exactly `flags`. The build inherits
+    /// the ambient environment minus flag channels and toolchain
+    /// overrides, with the home, target, and offline settings pinned
+    /// to the scratch tree; the probe carries the repository pin so
+    /// the same compiler runs wherever the suite does.
+    fn pinned_build(dir: &TestDir, flags: &[String]) -> std::process::Output {
+        use std::process::Command;
+        let (cargo, pin) = pinned_cargo();
         let proj = dir.dir.join("proj");
         quoted_probe(&proj);
         fs::write(
@@ -2356,5 +2379,138 @@ mod tests {
         assert!(!out.status.success(), "stripped flag must fail");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("invalid"), "{stderr}");
+    }
+
+    /// Compiler-argument log from a real pinned build of a scratch crate
+    /// carrying `leaf` with `file_body` under `.cargo`, driven with the
+    /// dotted environment spelling set to `dotted` (even when empty). A
+    /// wrapper script sits between cargo and the compiler: it appends
+    /// each compiler argument vector to the log, then runs the compiler
+    /// it was given, so the log holds exactly what the compiler saw.
+    fn wrapper_argv_log(
+        dir: &TestDir,
+        tag: &str,
+        leaf: &str,
+        file_body: &str,
+        dotted: &str,
+    ) -> String {
+        use std::process::Command;
+        let (cargo, pin) = pinned_cargo();
+        let proj = dir.dir.join(format!("proj-{tag}"));
+        fs::create_dir_all(proj.join("src")).expect("proj dirs");
+        fs::write(
+            proj.join("Cargo.toml"),
+            "[package]\nname = \"flagprobe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest write");
+        fs::write(proj.join("src/main.rs"), "fn main() {}\n").expect("source write");
+        fs::write(
+            proj.join("rust-toolchain.toml"),
+            format!("[toolchain]\nchannel = \"{pin}\"\n"),
+        )
+        .expect("pin write");
+        let cargo_dir = proj.join(".cargo");
+        fs::create_dir_all(&cargo_dir).expect("cargo dir");
+        fs::write(cargo_dir.join(leaf), file_body).expect("config write");
+        let wrapper = dir.dir.join(format!("wrapper-{tag}.sh"));
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\n\
+             rustc=\"$1\"\n\
+             shift\n\
+             printf '%s\\n' \"$*\" >> \"$MEMVEIL_RUSTC_ARGV_LOG\"\n\
+             exec \"$rustc\" \"$@\"\n",
+        )
+        .expect("wrapper write");
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&wrapper).expect("wrapper meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&wrapper, perms).expect("wrapper exec");
+        let cargo_home = dir.dir.join(format!("cargo-home-{tag}"));
+        fs::create_dir_all(&cargo_home).expect("cargo home dir");
+        let log = dir.dir.join(format!("argv-{tag}.log"));
+        let out = Command::new(&cargo)
+            .arg("build")
+            .arg("--offline")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .env_remove("RUSTC")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env("CARGO_HOME", &cargo_home)
+            .env("CARGO_TARGET_DIR", dir.dir.join(format!("target-{tag}")))
+            .env("CARGO_NET_OFFLINE", "true")
+            .env("CARGO_BUILD_RUSTFLAGS", dotted)
+            .env("RUSTC_WRAPPER", &wrapper)
+            .env("MEMVEIL_RUSTC_ARGV_LOG", &log)
+            .current_dir(&proj)
+            .output()
+            .expect("cargo build runs");
+        assert!(
+            out.status.success(),
+            "probe build succeeds: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        fs::read_to_string(&log).expect("argv log reads")
+    }
+
+    /// Effective flags for one config leaf plus the dotted spelling, the
+    /// same shape the probe build above drives: the helper must agree
+    /// with the compiler log flag for flag.
+    fn helper_flags_for(leaf: &str, file_body: &str, dotted: &str) -> Vec<String> {
+        let fx = Fixture::fresh("wrapper-helper");
+        fx.write(&format!(".cargo/{leaf}"), file_body);
+        let mut env = fx.env.clone();
+        env.insert("CARGO_BUILD_RUSTFLAGS".to_string(), dotted.to_string());
+        effective_rustflags(&env, &fx.build).expect("reads").flags
+    }
+
+    /// The dotted spelling appends after file flags on the real compiler
+    /// command line, and an empty one leaves them standing: the wrapper
+    /// log holds exactly what the compiler saw, and the helper agrees
+    /// with it flag for flag. Both config leaves behave alike.
+    #[test]
+    fn dotted_env_matches_compiler_invocation() {
+        for (n, leaf) in ["config", "config.toml"].into_iter().enumerate() {
+            let dir = TestDir::fresh(&format!("wrapper-{n}"));
+            let body = "[build]\nrustflags = \"--cfg file\"\n";
+            let log = wrapper_argv_log(&dir, &format!("{n}-append"), leaf, body, "--cfg dotted");
+            let seen: Vec<&str> = log
+                .lines()
+                .filter(|line| line.contains("--cfg file"))
+                .collect();
+            assert!(!seen.is_empty(), "compiler saw the file flag: {log:?}");
+            assert!(
+                seen.iter().any(|line| line.contains("--cfg dotted")),
+                "compiler saw the dotted flag: {log:?}"
+            );
+            for line in &seen {
+                if line.contains("--cfg dotted") {
+                    let file_at = line.find("--cfg file").expect("file flag logged");
+                    let dotted_at = line.find("--cfg dotted").expect("dotted flag logged");
+                    assert!(file_at < dotted_at, "file flags precede dotted: {line:?}");
+                }
+            }
+            assert_eq!(
+                helper_flags_for(leaf, body, "--cfg dotted"),
+                words(&["--cfg", "file", "--cfg", "dotted"]),
+                "{leaf}"
+            );
+            let log = wrapper_argv_log(&dir, &format!("{n}-empty"), leaf, body, "");
+            assert!(
+                log.lines().any(|line| line.contains("--cfg file")),
+                "file flag survives an empty dotted value: {log:?}"
+            );
+            assert!(
+                !log.contains("--cfg dotted"),
+                "empty dotted value adds nothing: {log:?}"
+            );
+            assert_eq!(
+                helper_flags_for(leaf, body, ""),
+                words(&["--cfg", "file"]),
+                "{leaf}"
+            );
+        }
     }
 }
