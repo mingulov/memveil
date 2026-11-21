@@ -15,9 +15,15 @@ def run_owned_guest(cmd,timeout):
         # from before this invocation is addressed by the cleanup.
         os.killpg(proc.pid,signal.SIGTERM)
         try:
-            proc.communicate(timeout=10)
+            out,err=proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid,signal.SIGKILL)
-            proc.communicate()
-        raise
+            out,err=proc.communicate()
+        # The post-kill drain holds the partial console
+        # capture; attach it so a timeout still leaves
+        # forensics instead of discarding everything. The
+        # same TimeoutExpired type propagates, now carrying
+        # output.
+        raise subprocess.TimeoutExpired(cmd,timeout,output=out,
+                                        stderr=err)
     return subprocess.CompletedProcess(cmd,proc.returncode,out,err)

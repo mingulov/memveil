@@ -15,11 +15,15 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from consume import check_conservation, check_identity_closure  # noqa: E402
+import guest_oracle  # noqa: E402
+from stress_guest import EXPECT_RELEASE  # noqa: E402,E401
 
 SCHEMA = "memveil-stress-inputs/1"
 
@@ -36,6 +40,8 @@ BASELINE_CP_SHA = "ae91c9f35676b54ef8b0c5561ebb33bcdd7f6e7c22bc76584c26605b42361
 
 # Current candidate objects, manifest-exact (dist/candidate.json
 # wins over any remembered prefix).
+C9_CANDIDATE_SHA = "ac2503a3ef4269826ae3f9512ca2402d45e767be2601c289" \
+    "3e812ebb6df929a7"
 C9_LC_SHA = "32f6a353779778981e727f311fe5d1b2c21fc92ae9918765f86bc4f81f58df34"
 C9_CP_SHA = "526a6726e24f7725a0e88e28d6994f0475a1589c3de10c7ebef703a03dfa73e8"
 C9_ATTEMPT_SHA = "ded931289c83713f62cdb5479fbf8aab03fe344d91a91bdeeee7e76f106979eb"
@@ -170,31 +176,59 @@ def materialize(repo, work):
     return pairs
 
 
-def load_candidate_binding(repo):
-    """Verify the retained candidate manifest and bundle bytes.
+def candidate_pins():
+    """The pinned seal this runner binds (explicit-path inputs)."""
+    return {
+        "candidate_sha256": C9_CANDIDATE_SHA,
+        "schema": "memveil-candidate/2",
+        "source_commit": C9_SOURCE_COMMIT,
+        "source_tree": C9_SOURCE_TREE,
+        "bundle_manifest_sha256": C9_BUNDLE_MANIFEST_SHA,
+        "files": {
+            "bpf/swiotlb_lifecycle.bpf.o": C9_LC_SHA,
+            "bpf/swiotlb_copy.bpf.o": C9_CP_SHA,
+            "bpf/swiotlb_attempt.bpf.o": C9_ATTEMPT_SHA,
+        },
+        "bundle_sha256": C9_BUNDLE_SHA,
+        "bundle_size": C9_BUNDLE_SIZE,
+    }
 
-    Returns the binding dict the input manifest carries. Every
-    digest is re-checked against the working-tree files; drift
-    refuses.
+
+def verify_candidate_binding(candidate_path, bundle_path, pins=None):
+    """Verify one candidate seal from explicit paths, fully.
+
+    Checks the manifest digest, schema, source and tree,
+    the bundle size and hash, then opens the tarball and
+    checks the inner manifest plus all three BPF member
+    hashes against the pinned seal. Returns the binding
+    dict the input manifest carries. Any absence, drift,
+    or mix refuses with a precise reason.
     """
-    manifest_path = os.path.join(repo, "dist", "candidate.json")
-    with open(manifest_path) as handle:
-        manifest = json.load(handle)
-    if manifest.get("schema") != "memveil-candidate/2":
-        raise ValueError("candidate schema drift: %r" % manifest.get("schema"))
+    pins = pins or candidate_pins()
+    if not candidate_path or not os.path.isfile(candidate_path):
+        raise ValueError("candidate manifest missing: %r"
+                         % (candidate_path,))
+    if sha_file(candidate_path) != pins["candidate_sha256"]:
+        raise ValueError("candidate manifest digest drift: %s"
+                         % candidate_path)
+    try:
+        with open(candidate_path) as handle:
+            manifest = json.load(handle)
+    except ValueError as exc:
+        raise ValueError("candidate manifest unparsable: %s (%s)"
+                         % (candidate_path, exc))
+    if manifest.get("schema") != pins["schema"]:
+        raise ValueError("candidate schema drift: %r"
+                         % manifest.get("schema"))
     source = manifest.get("source", {})
-    if source.get("commit") != C9_SOURCE_COMMIT \
-            or source.get("tree") != C9_SOURCE_TREE:
+    if source.get("commit") != pins["source_commit"] \
+            or source.get("tree") != pins["source_tree"]:
         raise ValueError("candidate source drift: %r" % (source,))
-    if manifest.get("bundle_manifest_sha256") != C9_BUNDLE_MANIFEST_SHA:
+    if manifest.get("bundle_manifest_sha256") \
+            != pins["bundle_manifest_sha256"]:
         raise ValueError("candidate bundle manifest drift")
     files = manifest.get("files", {})
-    want_files = {
-        "bpf/swiotlb_lifecycle.bpf.o": C9_LC_SHA,
-        "bpf/swiotlb_copy.bpf.o": C9_CP_SHA,
-        "bpf/swiotlb_attempt.bpf.o": C9_ATTEMPT_SHA,
-    }
-    for name, want in want_files.items():
+    for name, want in pins["files"].items():
         if files.get(name) != want:
             raise ValueError("candidate file drift: %s" % name)
     bundle = None
@@ -203,21 +237,66 @@ def load_candidate_binding(repo):
             bundle = entry
     if bundle is None:
         raise ValueError("candidate bundle entry missing")
-    if bundle.get("sha256") != C9_BUNDLE_SHA \
-            or str(bundle.get("size")) != str(C9_BUNDLE_SIZE):
+    if bundle.get("sha256") != pins["bundle_sha256"] \
+            or str(bundle.get("size")) != str(pins["bundle_size"]):
         raise ValueError("candidate bundle entry drift")
-    bundle_path = os.path.join(repo, "dist", "bundle.tar.gz")
-    if sha_file(bundle_path) != C9_BUNDLE_SHA:
+    if not bundle_path or not os.path.isfile(bundle_path):
+        raise ValueError("candidate bundle missing: %r" % (bundle_path,))
+    if sha_file(bundle_path) != pins["bundle_sha256"]:
         raise ValueError("candidate bundle bytes drift")
-    if os.path.getsize(bundle_path) != C9_BUNDLE_SIZE:
+    if os.path.getsize(bundle_path) != pins["bundle_size"]:
         raise ValueError("candidate bundle size drift")
+    try:
+        archive = tarfile.open(bundle_path, "r:gz")
+    except (tarfile.TarError, OSError) as exc:
+        raise ValueError("candidate bundle unreadable: %s" % exc)
+    try:
+        members = {m.name: m for m in archive.getmembers()
+                   if m.isfile()}
+        inner = members.get("bundle/MANIFEST.json")
+        if inner is None:
+            raise ValueError("candidate bundle lacks inner manifest")
+        got = hashlib.sha256(
+            archive.extractfile(inner).read()).hexdigest()
+        if got != pins["bundle_manifest_sha256"]:
+            raise ValueError("candidate inner manifest drift")
+        for name, want in pins["files"].items():
+            member = members.get("bundle/" + name)
+            if member is None:
+                raise ValueError("candidate bundle lacks %s" % name)
+            got = hashlib.sha256(
+                archive.extractfile(member).read()).hexdigest()
+            if got != want:
+                raise ValueError("candidate bundle member drift: %s"
+                                 % name)
+    except (tarfile.TarError, OSError, KeyError) as exc:
+        raise ValueError("candidate bundle member unreadable: %s" % exc)
+    finally:
+        archive.close()
     return {
         "schema": manifest["schema"],
-        "source": {"commit": C9_SOURCE_COMMIT, "tree": C9_SOURCE_TREE},
-        "bundle_manifest_sha256": C9_BUNDLE_MANIFEST_SHA,
-        "files": want_files,
-        "bundle": {"sha256": C9_BUNDLE_SHA, "size": C9_BUNDLE_SIZE},
+        "source": {"commit": pins["source_commit"],
+                   "tree": pins["source_tree"]},
+        "bundle_manifest_sha256": pins["bundle_manifest_sha256"],
+        "files": dict(pins["files"]),
+        "bundle": {"sha256": pins["bundle_sha256"],
+                   "size": pins["bundle_size"]},
     }
+
+
+def load_candidate_binding(repo, candidate_path=None, bundle_path=None):
+    """Verify the retained candidate manifest and bundle bytes.
+
+    Explicit paths win; without them the checkout's dist/
+    seal applies. Returns the binding dict the input
+    manifest carries. Every digest is re-checked against
+    the files; drift refuses.
+    """
+    manifest_path = candidate_path or os.path.join(
+        repo, "dist", "candidate.json")
+    tarball_path = bundle_path or os.path.join(
+        repo, "dist", "bundle.tar.gz")
+    return verify_candidate_binding(manifest_path, tarball_path)
 
 
 def oracle_digest(repo):
@@ -227,6 +306,26 @@ def oracle_digest(repo):
     for name in ("memveil_dma_oracle.c", "Makefile"):
         out[name] = sha_file(os.path.join(kernel, name))
     return out
+
+
+def oracle_run_binding(repo):
+    """Bind the guest oracle bytes plus the identity pins.
+
+    Re-verifies the guest-targeted fixture (digest, size,
+    receipt, exact vermagic) and stamps its digest, the
+    vermagic, and the live-BTF identity pin next to the
+    source hashes. The guest enforces the digest and the
+    BTF pin before loading; drift refuses before boot.
+    """
+    binding = oracle_digest(repo)
+    guest_oracle.verify_fixture()
+    binding["ko_sha256"] = guest_oracle.KO_SHA256
+    binding["ko_vermagic"] = guest_oracle.GUEST_VERMAGIC
+    binding["btf_sha256"] = guest_oracle.GUEST_BTF_SHA256
+    binding["ko_provenance_sha256"] = sha_file(
+        guest_oracle.FIXTURE_PROVENANCE)
+    binding["guest_release"] = guest_oracle.GUEST_RELEASE
+    return binding
 
 
 def cargo_env():
@@ -375,6 +474,15 @@ def verify_input_manifest(manifest, consumer_path=None):
         bad.append("candidate lc file drift")
     if files.get("bpf/swiotlb_copy.bpf.o") != C9_CP_SHA:
         bad.append("candidate cp file drift")
+    oracle = manifest.get("oracle", {})
+    if oracle.get("ko_sha256") != guest_oracle.KO_SHA256:
+        bad.append("oracle ko digest drift")
+    if oracle.get("ko_vermagic") != guest_oracle.GUEST_VERMAGIC:
+        bad.append("oracle ko vermagic drift")
+    if oracle.get("btf_sha256") != guest_oracle.GUEST_BTF_SHA256:
+        bad.append("oracle btf pin drift")
+    if oracle.get("guest_release") != guest_oracle.GUEST_RELEASE:
+        bad.append("oracle guest release drift")
     return sorted(bad)
 
 

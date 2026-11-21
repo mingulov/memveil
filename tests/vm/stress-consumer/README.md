@@ -29,9 +29,14 @@ harness only and never weakens the shipping gates.
 - `stress_core.py` — pinned pairs and candidate binding,
   host byte verification, input manifest plus stamps, wire
   test vectors, and the pure leg judge and pair comparison.
+- `guest_oracle.py` — the guest-targeted oracle module
+  fixture for the pinned guest release: digest and
+  vermagic verification plus the rebuild audit.
 - `stress_guest.py` — in-guest flow for one boot: per-leg
-  identity controls, a quiet phase, and a paced overlap
-  phase with per-vCPU flood legs and bpftrace counts.
+  identity controls, a quiet phase, and (full mode) a
+  paced overlap phase with per-vCPU flood legs and
+  bpftrace counts. Every step is bounded, marked, and
+  checkpointed to the shared export as it runs.
 - `../test_stress_consumer.py` — the runner: unarmed
   offline self-test by default; the armed pair run needs
   `MEMVEIL_VM_STRESS=1` and the live-VM lease.
@@ -63,15 +68,28 @@ ring reads, delivery outcomes, and `mv_counts` snapshots.
 ```
 python3 tests/vm/test_stress_consumer.py [--self-test]
 python3 tests/vm/test_stress_consumer.py \
-    --inputs baseline=LC,CP --inputs c9=LC,CP --out DIR
+    --inputs baseline=LC,CP --inputs c9=LC,CP --out DIR \
+    --bundle BUNDLE.TAR.GZ --candidate CANDIDATE.JSON \
+    [--expect-release REL] [--mode full|q3]
 ```
 
 Unarmed (default, no lease): the offline suite — pinned-byte
 verification, consumer build, both layouts, wrong-pair and
 malformed-wire refusals, replay determinism, judge and
-comparison unit cases, manifest checks. Armed (prepared, not
+comparison unit cases, manifest checks, oracle-fixture
+binding, fault-injection forensics, explicit-seal refusals,
+identity gates, and q3-mode selection. Armed (prepared, not
 run here): one pinned boot with both legs, host re-derivation
 of every verdict, stamped receipts under `--out`.
+
+`--bundle`/`--candidate` are required when armed and name
+the retained seal explicitly, so a clean checkout with no
+`dist/` runs the same verification. `--expect-release`
+refuses unless it equals the pinned guest release.
+`--mode q3` runs the adapter gate only (candidate then
+baseline, controls plus the 200-op quiet phase, no
+comparison); `full` keeps controls, quiet, overlap, and
+the pair comparison.
 
 ## Live procedure (scheduled separately)
 
@@ -84,4 +102,6 @@ require identity closure and two-ring conservation per leg,
 both miss rates at or under 0.5, and the candidate ratio at
 or under baseline. A higher candidate ratio is a regression
 even under the ceiling; an empty or incomplete window leaves
-the pair blocked, never passed.
+the pair blocked, never passed. In q3 mode the guest runs
+the candidate leg first with no flood disk and no bpftrace,
+and the host judges legs only.

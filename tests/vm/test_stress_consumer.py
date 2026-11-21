@@ -19,24 +19,34 @@ observations, and writes stamped receipts. The --inputs
 surface is stress-only: it resolves the two named
 lifecycle/copy pairs and passes those paths to the same
 consumer; bytes must equal the pinned pairs either way.
+--bundle/--candidate name the retained seal explicitly and
+are required for every armed run; --expect-release refuses
+when it conflicts with the pinned guest release; --mode q3
+runs the adapter gate only (candidate then baseline,
+controls plus the quiet phase, no comparison).
 """
 
 import ast
 import fcntl
 import hashlib
+import io
 import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "stress-consumer"))
 import stress_core as core
+import stress_guest
+import guest_oracle
 from consume import (check_conservation, check_identity_closure,
                      check_oracle_script, compare_scripted,
                      parse_consume_file, parse_oracle_log)
@@ -45,16 +55,10 @@ REPO = Path(__file__).resolve().parent.parent.parent
 GUEST = REPO / "tests" / "vm" / "stress-consumer" / "stress_guest.py"
 ARM_ENV = "MEMVEIL_VM_STRESS"
 
-EXPORT_NAMES = ["identity.json", "input-verify.json"]
-for _leg in ("baseline", "c9"):
-    EXPORT_NAMES += ["%s-controls.json" % _leg, "%s-c0a-lc.txt" % _leg,
-                     "%s-c0b-lc.txt" % _leg, "%s-c0-oracle.log" % _leg,
-                     "%s-p1-lc.txt" % _leg, "%s-p1-cp.txt" % _leg,
-                     "%s-p1-oracle.log" % _leg, "%s-p2-lc.txt" % _leg,
-                     "%s-p2-cp.txt" % _leg, "%s-p2-oracle.log" % _leg,
-                     "%s-bpftrace.txt" % _leg, "%s-bpftrace.stderr" % _leg,
-                     "%s-dd.json" % _leg, "%s-window.json" % _leg,
-                     "%s-blockstats.json" % _leg]
+# The guest owns the canonical per-mode inventory; the host
+# judges exactly that list, never a private copy.
+EXPORT_NAMES = stress_guest.export_names_for_mode("full")
+EXPORT_NAMES_Q3 = stress_guest.export_names_for_mode("q3")
 
 
 def sha_file(path):
@@ -116,14 +120,22 @@ def self_test_pins():
         got = sha_file(str(REPO / rel))
         ok = check("pins-%s" % rel.rsplit("/", 1)[1].split(".")[0],
                    got == want, got[:16]) and ok
-    try:
-        binding = core.load_candidate_binding(str(REPO))
-        ok = check("pins-candidate",
-                   binding["bundle"]["sha256"] == core.C9_BUNDLE_SHA
-                   and binding["source"]["commit"] == core.C9_SOURCE_COMMIT
-                   and binding["source"]["tree"] == core.C9_SOURCE_TREE) and ok
-    except (ValueError, OSError, KeyError) as exc:
-        ok = check("pins-candidate", False, str(exc)) and ok
+    seal = [REPO / "dist" / "candidate.json",
+            REPO / "dist" / "bundle.tar.gz"]
+    if not all(p.is_file() for p in seal):
+        print("ok pins-candidate SKIP (no dist/ seal in tree; "
+              "explicit-path seals covered by candidate-flags-*)")
+    else:
+        try:
+            binding = core.load_candidate_binding(str(REPO))
+            ok = check("pins-candidate",
+                       binding["bundle"]["sha256"] == core.C9_BUNDLE_SHA
+                       and binding["source"]["commit"]
+                       == core.C9_SOURCE_COMMIT
+                       and binding["source"]["tree"]
+                       == core.C9_SOURCE_TREE) and ok
+        except (ValueError, OSError, KeyError) as exc:
+            ok = check("pins-candidate", False, str(exc)) and ok
     try:
         oracle = core.oracle_digest(str(REPO))
         ok = check("pins-oracle",
@@ -664,10 +676,18 @@ def self_test_compare():
 def self_test_manifest(tmp, pairs):
     """Input manifest checks: exact bytes bind, tamper refuses."""
     ok = True
-    candidate = core.load_candidate_binding(str(REPO))
+    try:
+        candidate = core.load_candidate_binding(str(REPO))
+    except (ValueError, OSError) as exc:
+        print("ok manifest-verify SKIP (no dist/ seal in tree: %s)"
+              % str(exc)[:120])
+        return True
     consumer = {"sha256": sha_file(core.CONSUMER_RELEASE),
                 "build": {"profile": "release"}}
-    oracle = core.oracle_digest(str(REPO))
+    try:
+        oracle = core.oracle_run_binding(str(REPO))
+    except (ValueError, OSError) as exc:
+        return check("manifest-verify", False, str(exc))
     commit = core.git_head(str(REPO))
     path = os.path.join(tmp, "inputs.json")
     manifest = core.write_input_manifest(
@@ -690,6 +710,741 @@ def self_test_manifest(tmp, pairs):
     renamed["pairs"]["other"] = renamed["pairs"].pop("c9")
     ok = check("manifest-names",
                core.verify_input_manifest(renamed) != []) and ok
+    ko_tampered = json.loads(open(path).read())
+    ko_tampered["oracle"]["ko_sha256"] = "0" * 64
+    ok = check("manifest-ko-tamper",
+               core.verify_input_manifest(ko_tampered) != []) and ok
+    btf_dropped = json.loads(open(path).read())
+    del btf_dropped["oracle"]["btf_sha256"]
+    ok = check("manifest-btf-drop",
+               core.verify_input_manifest(btf_dropped) != []) and ok
+    return ok
+
+
+# -- Unarmed self-test: guest oracle --------------------------
+
+def self_test_guest_oracle(tmp, pairs):
+    """Guest-targeted oracle fixture: pinned bytes bind, drift refuses."""
+    ok = True
+    try:
+        receipt = guest_oracle.verify_fixture()
+        ok = check("oracle-fixture",
+                   receipt["ko_sha256"] == guest_oracle.KO_SHA256
+                   and receipt["target_release"]
+                   == guest_oracle.GUEST_RELEASE
+                   and receipt["vermagic"]
+                   == guest_oracle.GUEST_VERMAGIC) and ok
+    except (ValueError, OSError) as exc:
+        ok = check("oracle-fixture", False, str(exc)) and ok
+    magic = None
+    try:
+        magic = guest_oracle.vermagic_from_bytes(guest_oracle.FIXTURE_KO)
+        ok = check("oracle-vermagic",
+                   magic == guest_oracle.GUEST_VERMAGIC,
+                   "%r" % magic) and ok
+    except ValueError as exc:
+        ok = check("oracle-vermagic", False, str(exc)) and ok
+    modinfo = shutil.which("modinfo")
+    if modinfo is None:
+        print("ok oracle-modinfo-agrees SKIP (no modinfo)")
+    elif magic is None:
+        ok = check("oracle-modinfo-agrees", False,
+                   "no parsed vermagic") and ok
+    else:
+        proc = subprocess.run(
+            [modinfo, "-F", "vermagic", guest_oracle.FIXTURE_KO],
+            capture_output=True, text=True, timeout=30)
+        ok = check("oracle-modinfo-agrees",
+                   proc.returncode == 0
+                   and proc.stdout.strip() == magic.strip(),
+                   proc.stdout.strip()[-120:]) and ok
+    # A flipped byte refuses at the digest gate.
+    blob = bytearray(open(guest_oracle.FIXTURE_KO, "rb").read())
+    blob[1000] ^= 1
+    bad_ko = os.path.join(tmp, "bad.ko")
+    open(bad_ko, "wb").write(bytes(blob))
+    try:
+        guest_oracle.verify_fixture(ko_path=bad_ko)
+        ok = check("oracle-tamper", False, "accepted") and ok
+    except ValueError:
+        ok = check("oracle-tamper", True) and ok
+    # Non-ELF and truncated bytes refuse the vermagic parse.
+    bad_elf = os.path.join(tmp, "bad.elf")
+    open(bad_elf, "wb").write(b"not an elf object")
+    try:
+        guest_oracle.vermagic_from_bytes(bad_elf)
+        ok = check("oracle-vermagic-nonelf", False, "accepted") and ok
+    except ValueError:
+        ok = check("oracle-vermagic-nonelf", True) and ok
+    trunc = os.path.join(tmp, "trunc.ko")
+    open(trunc, "wb").write(open(guest_oracle.FIXTURE_KO, "rb").read()[:40])
+    try:
+        guest_oracle.vermagic_from_bytes(trunc)
+        ok = check("oracle-vermagic-trunc", False, "accepted") and ok
+    except ValueError:
+        ok = check("oracle-vermagic-trunc", True) and ok
+    # The manifest binds the fixture digest; drift refuses.
+    candidate = {"schema": "memveil-candidate/2",
+                 "source": {"commit": core.C9_SOURCE_COMMIT,
+                            "tree": core.C9_SOURCE_TREE},
+                 "bundle_manifest_sha256": core.C9_BUNDLE_MANIFEST_SHA,
+                 "files": {
+                     "bpf/swiotlb_lifecycle.bpf.o": core.C9_LC_SHA,
+                     "bpf/swiotlb_copy.bpf.o": core.C9_CP_SHA,
+                     "bpf/swiotlb_attempt.bpf.o": core.C9_ATTEMPT_SHA},
+                 "bundle": {"sha256": core.C9_BUNDLE_SHA,
+                            "size": core.C9_BUNDLE_SIZE}}
+    consumer = {"sha256": sha_file(core.CONSUMER_RELEASE),
+                "build": {"profile": "release"}}
+    try:
+        oracle = core.oracle_run_binding(str(REPO))
+    except (ValueError, OSError) as exc:
+        return check("oracle-manifest-bind", False, str(exc)) and ok
+    commit = core.git_head(str(REPO))
+    manifest = core.write_input_manifest(
+        os.path.join(tmp, "oracle-inputs.json"), pairs, candidate,
+        consumer, oracle, ["self-test"], commit)
+    ok = check("oracle-manifest-bind",
+               core.verify_input_manifest(
+                   manifest, core.CONSUMER_RELEASE) == []
+               and manifest["oracle"]["ko_sha256"]
+               == guest_oracle.KO_SHA256) and ok
+    # Rebuild audit: byte-equality with the fixture when the
+    # headers cache is present, honest skip otherwise.
+    tree = os.path.join(guest_oracle.kbuild_root(), "tree", "usr",
+                        "src", "linux-headers-7.0.14-070014-generic",
+                        "Makefile")
+    if not os.path.isfile(tree):
+        print("ok oracle-rebuild SKIP (no headers cache)")
+        return ok
+    try:
+        made = guest_oracle.rebuild_from_kbuild(
+            os.path.join(tmp, "rebuild"))
+        same = open(made, "rb").read() == open(
+            guest_oracle.FIXTURE_KO, "rb").read()
+        ok = check("oracle-rebuild", same,
+                   "rebuilt bytes differ") and ok
+    except ValueError as exc:
+        ok = check("oracle-rebuild", False, str(exc)[:200]) and ok
+    return ok
+
+
+# -- Unarmed self-test: forensics -----------------------------
+
+def self_test_forensics(tmp):
+    """Fault injection: stalls leave markers, partials, no strays."""
+
+    class ProbeGate(stress_guest.Gate):
+        def __init__(self, work, export):
+            self.work = work
+            self.export_dir = export
+            self.consumers = []
+            self.transients = []
+            self.oracle_loaded = False
+
+    ok = True
+    work = os.path.join(tmp, "fwork")
+    export = os.path.join(tmp, "fexport")
+    os.makedirs(work)
+    os.makedirs(export)
+    gate = ProbeGate(work, export)
+    # A stalled step fails with its last marker, the timeout
+    # status, and the partial output mirrored to the export.
+    try:
+        with gate.step("probe-stall"):
+            stress_guest.sh(["sleep", "30"], timeout=1)
+        ok = check("forensics-stall-fails", False, "no failure") and ok
+    except SystemExit:
+        ok = check("forensics-stall-fails", True) and ok
+    marks = [json.loads(line)
+             for line in open(os.path.join(work, "progress.log"))]
+    kinds = [(m["step"], m["status"]) for m in marks]
+    ok = check("forensics-markers",
+               kinds == [("probe-stall", "start"),
+                         ("probe-stall", "timeout")],
+               "%r" % (kinds,)) and ok
+    mirrored = open(os.path.join(export, "progress.log")).read()
+    ok = check("forensics-mirror",
+               '"status": "timeout"' in mirrored
+               and '"step": "probe-stall"' in mirrored) and ok
+    partial = os.path.join(work, "probe-stall-timeout.txt")
+    ok = check("forensics-partial",
+               os.path.isfile(partial)
+               and "timeout: 1s" in open(partial).read()
+               and os.path.isfile(os.path.join(
+                   export, "probe-stall-timeout.txt"))) and ok
+    # The owned guest wrapper preserves the partial console
+    # capture on timeout and reaps the owned process group.
+    from vm_process import run_owned_guest
+    marker = os.path.join(tmp, "child.pid")
+    script = ("import subprocess,time,pathlib,sys;"
+              "print('hello-partial',flush=True);"
+              "p=subprocess.Popen(['sleep','30']);"
+              "pathlib.Path(%r).write_text(str(p.pid));"
+              "time.sleep(30)" % marker)
+    try:
+        run_owned_guest([sys.executable, "-c", script], timeout=2)
+        ok = check("forensics-owned-timeout", False, "no timeout") and ok
+    except subprocess.TimeoutExpired as exc:
+        ok = check("forensics-owned-timeout",
+                   "hello-partial" in (exc.stdout or ""),
+                   "%r" % (exc.stdout,)) and ok
+    pid = int(open(marker).read())
+    deadline = time.monotonic() + 5
+    alive = True
+    while time.monotonic() < deadline:
+        try:
+            with open("/proc/%d/stat" % pid) as handle:
+                state = handle.read().split()[2]
+            if state == "Z":
+                alive = False
+                break
+        except (FileNotFoundError, ProcessLookupError):
+            alive = False
+            break
+        time.sleep(0.1)
+    ok = check("forensics-owned-reaped", not alive,
+               "stray pid %d" % pid) and ok
+    # Readiness: a partial line then silence fails at the
+    # deadline instead of hanging in the reader.
+    stall = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys,time;sys.stdout.write('ready rin');"
+         "sys.stdout.flush();time.sleep(30)"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    start = time.monotonic()
+    try:
+        gate.wait_ready([stall], timeout=2)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-partial-ready", False, "accepted") and ok
+    except SystemExit:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-partial-ready", elapsed < 10,
+                   "%.1fs" % elapsed) and ok
+    finally:
+        stall.kill()
+        stall.communicate()
+    # A proper ack is still accepted, with its prefix kept
+    # for the later readiness cross-check.
+    good = subprocess.Popen(
+        [sys.executable, "-c",
+         "print('ready ring=mv_lifecycle',flush=True)"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    try:
+        gate.wait_ready([good], timeout=5)
+        gate.wait_consumer(good, "forensics-ready", timeout=5)
+        ok = check("forensics-ready-accept",
+                   getattr(good, "gate_ready", False)
+                   and "ready ring=" in getattr(
+                       good, "gate_prefix", "")) and ok
+    except SystemExit as exc:
+        ok = check("forensics-ready-accept", False, str(exc)) and ok
+    return ok
+
+
+# -- Unarmed self-test: explicit seals ------------------------
+
+def build_fixture_seal(root, name, payload):
+    """Write one synthetic seal; returns (candidate, bundle, pins)."""
+    os.makedirs(root, exist_ok=True)
+    members = {
+        "bundle/MANIFEST.json": b'{"seal": "%s"}' % name.encode(),
+        "bundle/bpf/swiotlb_lifecycle.bpf.o": b"LC:" + payload,
+        "bundle/bpf/swiotlb_copy.bpf.o": b"CP:" + payload,
+        "bundle/bpf/swiotlb_attempt.bpf.o": b"AT:" + payload,
+    }
+    bundle_path = os.path.join(root, "bundle.tar.gz")
+    with tarfile.open(bundle_path, "w:gz") as archive:
+        for mname in sorted(members):
+            info = tarfile.TarInfo(mname)
+            info.size = len(members[mname])
+            info.mtime = 0
+            archive.addfile(info, io.BytesIO(members[mname]))
+    inner = hashlib.sha256(members["bundle/MANIFEST.json"]).hexdigest()
+    files = {"bpf/swiotlb_lifecycle.bpf.o": hashlib.sha256(
+                 members["bundle/bpf/swiotlb_lifecycle.bpf.o"]).hexdigest(),
+             "bpf/swiotlb_copy.bpf.o": hashlib.sha256(
+                 members["bundle/bpf/swiotlb_copy.bpf.o"]).hexdigest(),
+             "bpf/swiotlb_attempt.bpf.o": hashlib.sha256(
+                 members["bundle/bpf/swiotlb_attempt.bpf.o"]).hexdigest()}
+    manifest = {
+        "schema": "memveil-candidate/2",
+        "source": {"commit": "c" * 40, "tree": "t" * 40},
+        "bundle_manifest_sha256": inner,
+        "files": files,
+        "artifacts": [{"name": "bundle.tar.gz",
+                       "sha256": sha_file(bundle_path),
+                       "size": os.path.getsize(bundle_path)}],
+    }
+    candidate_path = os.path.join(root, "candidate.json")
+    with open(candidate_path, "w") as handle:
+        handle.write(json.dumps(manifest, indent=2,
+                                sort_keys=True) + "\n")
+    pins = {"candidate_sha256": sha_file(candidate_path),
+            "schema": "memveil-candidate/2",
+            "source_commit": "c" * 40,
+            "source_tree": "t" * 40,
+            "bundle_manifest_sha256": inner,
+            "files": files,
+            "bundle_sha256": sha_file(bundle_path),
+            "bundle_size": os.path.getsize(bundle_path)}
+    return candidate_path, bundle_path, pins
+
+
+def self_test_candidate_flags(tmp, pairs):
+    """Explicit seals: full verify passes, every mix refuses."""
+    ok = True
+    cand_a, bundle_a, pins_a = build_fixture_seal(
+        os.path.join(tmp, "seal-a"), "a", b"A" * 64)
+    cand_b, bundle_b, _pins_b = build_fixture_seal(
+        os.path.join(tmp, "seal-b"), "b", b"B" * 64)
+    try:
+        binding = core.verify_candidate_binding(
+            cand_a, bundle_a, pins_a)
+        ok = check("candidate-flags-accept",
+                   binding["files"] == pins_a["files"]
+                   and binding["bundle"]["sha256"]
+                   == pins_a["bundle_sha256"]) and ok
+    except ValueError as exc:
+        ok = check("candidate-flags-accept", False, str(exc)) and ok
+    cases = []
+    # Missing inputs refuse.
+    cases.append(("missing-candidate",
+                  os.path.join(tmp, "absent.json"), bundle_a, pins_a))
+    cases.append(("missing-bundle",
+                  cand_a, os.path.join(tmp, "absent.tar.gz"), pins_a))
+    # Altered bytes refuse (flipped copies).
+    alt_cand = os.path.join(tmp, "alt-candidate.json")
+    blob = bytearray(open(cand_a, "rb").read())
+    blob[20] ^= 1
+    open(alt_cand, "wb").write(bytes(blob))
+    cases.append(("altered-candidate", alt_cand, bundle_a, pins_a))
+    alt_bundle = os.path.join(tmp, "alt-bundle.tar.gz")
+    blob = bytearray(open(bundle_a, "rb").read())
+    blob[40] ^= 1
+    open(alt_bundle, "wb").write(bytes(blob))
+    cases.append(("altered-bundle", cand_a, alt_bundle, pins_a))
+    # Mixed seals refuse: B's candidate names B's bundle,
+    # never A's.
+    cases.append(("mixed-manifest", cand_b, bundle_a, pins_a))
+    cases.append(("mixed-bundle", cand_a, bundle_b, pins_a))
+    for case, cand, bundle, pins in cases:
+        try:
+            core.verify_candidate_binding(cand, bundle, pins)
+            ok = check("candidate-flags-%s" % case, False,
+                       "accepted") and ok
+        except ValueError:
+            ok = check("candidate-flags-%s" % case, True) and ok
+    # Inner gates fire on their own layer: the manifest
+    # claims disagree with the tarball content while every
+    # outer check still passes.
+    skew = json.loads(open(cand_a).read())
+    skew["files"]["bpf/swiotlb_copy.bpf.o"] = "1" * 64
+    skew_cand = os.path.join(tmp, "skew-candidate.json")
+    with open(skew_cand, "w") as handle:
+        handle.write(json.dumps(skew, indent=2, sort_keys=True) + "\n")
+    skew_pins = dict(pins_a)
+    skew_pins["candidate_sha256"] = sha_file(skew_cand)
+    skew_pins["files"] = dict(pins_a["files"])
+    skew_pins["files"]["bpf/swiotlb_copy.bpf.o"] = "1" * 64
+    try:
+        core.verify_candidate_binding(skew_cand, bundle_a, skew_pins)
+        ok = check("candidate-flags-inner-member", False,
+                   "accepted") and ok
+    except ValueError as exc:
+        ok = check("candidate-flags-inner-member",
+                   "bundle member drift" in str(exc), str(exc)) and ok
+    skew_inner = json.loads(open(cand_a).read())
+    skew_inner["bundle_manifest_sha256"] = "1" * 64
+    skew_inner_cand = os.path.join(tmp, "skew-inner-candidate.json")
+    with open(skew_inner_cand, "w") as handle:
+        handle.write(json.dumps(skew_inner, indent=2,
+                                sort_keys=True) + "\n")
+    skew_inner_pins = dict(pins_a)
+    skew_inner_pins["candidate_sha256"] = sha_file(skew_inner_cand)
+    skew_inner_pins["bundle_manifest_sha256"] = "1" * 64
+    try:
+        core.verify_candidate_binding(skew_inner_cand, bundle_a,
+                                      skew_inner_pins)
+        ok = check("candidate-flags-inner-manifest", False,
+                   "accepted") and ok
+    except ValueError as exc:
+        ok = check("candidate-flags-inner-manifest",
+                   "inner manifest drift" in str(exc), str(exc)) and ok
+    unpars = os.path.join(tmp, "unparsable.json")
+    open(unpars, "w").write("{oops")
+    unpars_pins = dict(pins_a)
+    unpars_pins["candidate_sha256"] = sha_file(unpars)
+    try:
+        core.verify_candidate_binding(unpars, bundle_a, unpars_pins)
+        ok = check("candidate-flags-unparsable", False,
+                   "accepted") and ok
+    except ValueError as exc:
+        ok = check("candidate-flags-unparsable",
+                   "unparsable" in str(exc), str(exc)) and ok
+    # Wrong-pair --inputs refuse at the manifest gate: the
+    # copy bytes presented as the lifecycle pair are not
+    # the pinned pair bytes.
+    candidate = {"schema": "memveil-candidate/2",
+                 "source": {"commit": core.C9_SOURCE_COMMIT,
+                            "tree": core.C9_SOURCE_TREE},
+                 "bundle_manifest_sha256": core.C9_BUNDLE_MANIFEST_SHA,
+                 "files": {
+                     "bpf/swiotlb_lifecycle.bpf.o": core.C9_LC_SHA,
+                     "bpf/swiotlb_copy.bpf.o": core.C9_CP_SHA,
+                     "bpf/swiotlb_attempt.bpf.o": core.C9_ATTEMPT_SHA},
+                 "bundle": {"sha256": core.C9_BUNDLE_SHA,
+                            "size": core.C9_BUNDLE_SIZE}}
+    consumer = {"sha256": sha_file(core.CONSUMER_RELEASE),
+                "build": {"profile": "release"}}
+    oracle = core.oracle_run_binding(str(REPO))
+    commit = core.git_head(str(REPO))
+    swapped = {"baseline": pairs["baseline"],
+               "c9": {"lc": pairs["c9"]["cp"],
+                      "cp": pairs["c9"]["lc"]}}
+    manifest = core.write_input_manifest(
+        os.path.join(tmp, "swapped-inputs.json"), swapped, candidate,
+        consumer, oracle, ["self-test"], commit)
+    reasons = core.verify_input_manifest(manifest)
+    ok = check("candidate-flags-wrong-pair",
+               any("not the pinned pair bytes" in r for r in reasons),
+               "%r" % (reasons,)) and ok
+    # Armed entry without the explicit seal refuses before
+    # anything boots; a conflicting release refuses too.
+    from types import SimpleNamespace
+    saved = os.environ.get(ARM_ENV)
+    os.environ[ARM_ENV] = "1"
+    try:
+        out_dir = os.path.join(tmp, "never-booted")
+        args = SimpleNamespace(inputs=[], out=out_dir, kver="",
+                               timeout=5, keep=False, bundle="",
+                               candidate="", expect_release="",
+                               mode="full")
+        rc = armed_run(args)
+        ok = check("candidate-flags-armed-refuses",
+                   rc == 2 and not os.path.exists(out_dir),
+                   "exit=%r" % rc) and ok
+        args = SimpleNamespace(inputs=[], out=out_dir, kver="",
+                               timeout=5, keep=False,
+                               bundle=cand_a, candidate=cand_a,
+                               expect_release="1.2.3-nope",
+                               mode="full")
+        ok = check("candidate-flags-release-refuses",
+                   armed_run(args) == 2) and ok
+        args = SimpleNamespace(inputs=[], out=out_dir, kver="",
+                               timeout=5, keep=False,
+                               bundle=cand_a, candidate=cand_a,
+                               expect_release="", mode="q9")
+        ok = check("candidate-flags-mode-refuses",
+                   armed_run(args) == 2) and ok
+    finally:
+        if saved is None:
+            os.environ.pop(ARM_ENV, None)
+        else:
+            os.environ[ARM_ENV] = saved
+    return ok
+
+
+# -- Unarmed self-test: identity ------------------------------
+
+def self_test_identity():
+    """Release + BTF identity: exact pins accept, drift refuses."""
+    ok = True
+    ok = check("identity-pins-agree",
+               stress_guest.EXPECT_RELEASE == core.EXPECT_RELEASE
+               == guest_oracle.GUEST_RELEASE,
+               "%r" % (core.EXPECT_RELEASE,)) and ok
+    oracle = {"ko_sha256": guest_oracle.KO_SHA256,
+              "btf_sha256": guest_oracle.GUEST_BTF_SHA256}
+    ident = {"release": core.EXPECT_RELEASE,
+             "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
+             "digests": {"ko": guest_oracle.KO_SHA256}}
+    try:
+        stress_guest.check_identity(ident, guest_oracle.KO_SHA256,
+                                    oracle, core.EXPECT_RELEASE)
+        ok = check("identity-accept", True) and ok
+    except ValueError as exc:
+        ok = check("identity-accept", False, str(exc)) and ok
+    cases = [
+        ("release", {"release": "7.2.13-200.fc44.x86_64",
+                     "btf_sha256": guest_oracle.GUEST_BTF_SHA256},
+         guest_oracle.KO_SHA256, oracle),
+        ("btf", {"release": core.EXPECT_RELEASE,
+                 "btf_sha256": "0" * 64},
+         guest_oracle.KO_SHA256, oracle),
+        ("ko", ident, "0" * 64, oracle),
+        ("pins-missing", ident, guest_oracle.KO_SHA256, {}),
+    ]
+    for case, who, ko, pins in cases:
+        try:
+            stress_guest.check_identity(who, ko, pins,
+                                        core.EXPECT_RELEASE)
+            ok = check("identity-refuse-%s" % case, False,
+                       "accepted") and ok
+        except ValueError:
+            ok = check("identity-refuse-%s" % case, True) and ok
+    ok = check("identity-host-accept",
+               check_host_identity(ident) == []) and ok
+    ok = check("identity-host-release",
+               check_host_identity({"release": "other",
+                                    "btf_sha256": ident["btf_sha256"],
+                                    "digests": ident["digests"]})
+               != []) and ok
+    ok = check("identity-host-btf",
+               check_host_identity({"release": ident["release"],
+                                    "btf_sha256": "0" * 64,
+                                    "digests": ident["digests"]})
+               != []) and ok
+    ok = check("identity-host-ko",
+               check_host_identity({"release": ident["release"],
+                                    "btf_sha256": ident["btf_sha256"],
+                                    "digests": {"ko": "0" * 64}})
+               != []) and ok
+    # Guest init order: the release gate fires before the
+    # manifest is even read (no traceback on any host).
+    probe = subprocess.run(
+        [sys.executable, str(GUEST), "/tmp/sg-work", "/tmp/sg-export",
+         "--manifest", "/tmp/sg-absent-manifest.json",
+         "--consumer", "/tmp/sg-c", "--consumer-sha", "0" * 64,
+         "--ko", "/tmp/sg-k", "--ko-sha", "0" * 64,
+         "--mode", "q3", "--expect-release", "9.9.9-nope",
+         "--baseline-lc", "/tmp/a", "--baseline-cp", "/tmp/b",
+         "--baseline-lc-sha", "0" * 64, "--baseline-cp-sha", "0" * 64,
+         "--c9-lc", "/tmp/c", "--c9-cp", "/tmp/d",
+         "--c9-lc-sha", "0" * 64, "--c9-cp-sha", "0" * 64],
+        capture_output=True, text=True, timeout=30)
+    ok = check("identity-guest-order",
+               probe.returncode == 1
+               and "FAIL" in probe.stderr
+               and "Traceback" not in probe.stderr,
+               probe.stderr.strip()[-160:]) and ok
+    return ok
+
+
+# -- Unarmed self-test: q3 mode --------------------------------
+
+def replay_window(tmp, tag, wire, ring, total, total_bytes):
+    """Replay one wire window through the real consumer."""
+    wire_path = os.path.join(tmp, "%s.wire" % tag)
+    open(wire_path, "wb").write(wire)
+    out = os.path.join(tmp, "%s.txt" % tag)
+    proc = consumer_run(["--replay", wire_path, ring, out,
+                         "--counts", "%d,%d,%d,%d,0,0"
+                         % (total, total_bytes, total,
+                            total_bytes)])
+    if proc.returncode != 0:
+        raise ValueError("replay %s failed: %s"
+                         % (tag, proc.stdout.strip()[-200:]))
+    return out
+
+
+def synth_q3_leg(tmp, name, miss_unmaps=0):
+    """One coherent synthetic q3 leg, replay-generated.
+
+    miss_unmaps releases report gen 0 (misses): closure,
+    conservation, and the scripted multisets still hold,
+    so the leg passes with M == miss_unmaps.
+    """
+    from consume import LC_SIZES, scripted_expectation
+    ops = core.P1_OPS
+    want = scripted_expectation(ops, -1)
+    # Multiset order for the wire (matches the
+    # expectation exactly); op order for the log.
+    sizes = [size for size, _dir, _ok in want["maps"]]
+    dirs = [direction for _size, direction, _ok in want["maps"]]
+    op_sizes = [LC_SIZES[i % len(LC_SIZES)] for i in range(ops)]
+    op_dirs = [2 if i % 2 else 1 for i in range(ops)]
+    wire = b""
+    seq = 0
+    for i in range(ops):
+        wire += core.encode_lc(core.LC_KIND_MAP, True, False,
+                               dirs[i], seq, 1000 + seq,
+                               sizes[i], i + 1)
+        seq += 1
+    for i in range(ops):
+        gen = 0 if i < miss_unmaps else i + 1
+        wire += core.encode_lc(2, True, True, dirs[i], seq,
+                               3000 + seq, sizes[i], gen,
+                               miss=(gen == 0))
+        seq += 1
+    lc_bytes = 2 * sum(sizes)
+    lc = replay_window(tmp, "%s-p1-lc" % name, wire,
+                       "mv_lifecycle", 2 * ops, lc_bytes)
+    wire = b""
+    seq = 0
+    cp_bytes = 0
+    for req, direction in want["syncs_dev"]:
+        wire += core.encode_cp(1, 1, False, False, False,
+                               direction, 4, seq, 1000 + seq,
+                               req, 0)
+        cp_bytes += req
+        seq += 1
+    for req, direction in want["syncs_cpu"]:
+        wire += core.encode_cp(1, 0, False, False, False,
+                               direction, 4, seq, 1000 + seq,
+                               req, 0)
+        cp_bytes += req
+        seq += 1
+    for todev, req, direction in want["bounces"]:
+        wire += core.encode_cp(2, todev, True, False, False,
+                               direction, 0, seq, 1000 + seq,
+                               req, req)
+        cp_bytes += req
+        seq += 1
+    cp = replay_window(tmp, "%s-p1-cp" % name, wire, "mv_copies",
+                       seq, cp_bytes)
+    lines = []
+    for i in range(ops):
+        size = op_sizes[i]
+        direction = op_dirs[i]
+        lines.append("mv-oracle: op=%d attempt requested=%d forced=0"
+                     % (i, size))
+        lines.append("mv-oracle: op=%d outcome=success mapping=%d "
+                     "mapped=%d" % (i, i, size))
+        syncs = 2 if i == 1 else 1
+        for _ in range(syncs):
+            lines.append("mv-oracle: op=%d mapping=%d sync dir=%d "
+                         "len=%d for=device" % (i, i, direction,
+                                                size))
+    for i in range(ops):
+        lines.append("mv-oracle: mapping=%d release "
+                     "lifetime_ns=%d" % (i, 5000 + i))
+    lines.append("mv-oracle: script complete ops=%d" % ops)
+    # A realistic dmesg prefix: the parser tolerates it.
+    oracle = os.path.join(tmp, "%s-p1-oracle.log" % name)
+    with open(oracle, "w") as handle:
+        for line in lines:
+            handle.write("[    5.123456] %s\n" % line)
+    c0a = replay_window(
+        tmp, "%s-c0a-lc" % name,
+        core.encode_lc(1, True, False, 1, 0, 100, 512, 7)
+        + core.encode_lc(2, True, True, 1, 1, 200, 512, 7),
+        "mv_lifecycle", 2, 1024)
+    c0b = replay_window(
+        tmp, "%s-c0b-lc" % name,
+        core.encode_lc(2, True, True, 1, 0, 100, 1024, 0,
+                       miss=True),
+        "mv_lifecycle", 1, 1024)
+    controls = os.path.join(tmp, "%s-controls.json" % name)
+    with open(controls, "w") as handle:
+        handle.write(json.dumps({"op0_gen": 7, "held_gen_first": 0,
+                                 "held_releases": 1}) + "\n")
+    return {"%s-controls.json" % name: Path(controls),
+            "%s-c0a-lc.txt" % name: Path(c0a),
+            "%s-c0b-lc.txt" % name: Path(c0b),
+            "%s-c0-oracle.log" % name: Path(oracle),
+            "%s-p1-lc.txt" % name: Path(lc),
+            "%s-p1-cp.txt" % name: Path(cp),
+            "%s-p1-oracle.log" % name: Path(oracle)}
+
+
+def self_test_q3_mode(tmp, pairs):
+    """Q3 selection: legs judge without p2 files or comparison."""
+    from types import SimpleNamespace
+    ok = True
+    argv = build_guest_argv(
+        os.path.join(tmp, "inputs.json"),
+        {"path": core.CONSUMER_RELEASE,
+         "sha256": sha_file(core.CONSUMER_RELEASE)},
+        pairs, "q3", core.EXPECT_RELEASE)
+    flags = dict(zip(argv[4::2], argv[5::2]))
+    ok = check("q3-guest-argv",
+               flags.get("--mode") == "q3"
+               and flags.get("--ko-sha") == guest_oracle.KO_SHA256
+               and flags.get("--ko") == guest_oracle.FIXTURE_KO
+               and flags.get("--expect-release") == core.EXPECT_RELEASE
+               and flags.get("--c9-lc-sha") == core.C9_LC_SHA) and ok
+    full = set(EXPORT_NAMES)
+    q3 = set(EXPORT_NAMES_Q3)
+    ok = check("q3-inventory", q3 < full
+               and len(EXPORT_NAMES_Q3) == 17
+               and "progress.log" in q3
+               and not any("-p2-" in n or "bpftrace" in n
+                           or n.endswith(("-dd.json", "-window.json",
+                                          "-blockstats.json"))
+                           for n in q3)) and ok
+    ok = check("q3-full-untouched", len(EXPORT_NAMES) == 33
+               and "progress.log" in full) and ok
+    base = synth_q3_leg(tmp, "baseline")
+    c9 = synth_q3_leg(tmp, "c9", miss_unmaps=50)
+    bad, metrics = judge_q3_leg(base, "baseline", "syn-base")
+    ok = check("q3-leg-pass", bad == []
+               and metrics == {"M": 0, "D": 400},
+               "; ".join(bad)) and ok
+    bad, metrics = judge_q3_leg(c9, "c9", "syn-c9")
+    ok = check("q3-leg-miss-pass", bad == []
+               and metrics == {"M": 50, "D": 400},
+               "; ".join(bad)) and ok
+    # No p2 files exist anywhere above: touching the
+    # overlap phase would raise KeyError, failing loudly.
+    broken = dict(base)
+    corrupt = os.path.join(tmp, "baseline-p1-oracle-broken.log")
+    lines = open(str(base["baseline-p1-oracle.log"])).read().split(
+        "\n")
+    open(corrupt, "w").write("\n".join(
+        line for line in lines if "script complete" not in line))
+    broken["baseline-p1-oracle.log"] = Path(corrupt)
+    bad, _ = judge_q3_leg(broken, "baseline", "syn-broken")
+    ok = check("q3-oracle-tripwire",
+               any("script complete" in r for r in bad),
+               "; ".join(bad)) and ok
+    garbage = dict(base)
+    trash = os.path.join(tmp, "baseline-c0b-trash.txt")
+    open(trash, "w").write("not a consume window\n")
+    garbage["baseline-c0b-lc.txt"] = Path(trash)
+    bad, _ = judge_q3_leg(garbage, "baseline", "syn-trash")
+    ok = check("q3-controls-tripwire", bad != [],
+               "; ".join(bad)) and ok
+    # The q3 receipt passes despite a higher candidate
+    # ratio (50/400 vs 0/400): no comparison runs.
+    export = Path(tmp) / "q3-export"
+    export.mkdir()
+    files = {}
+    files.update(base)
+    files.update(c9)
+    ident = {"release": core.EXPECT_RELEASE,
+             "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
+             "digests": {"ko": guest_oracle.KO_SHA256}}
+    for name, doc in (("identity.json", ident),
+                      ("input-verify.json", {"digests": {}})):
+        path = Path(tmp) / ("q3-%s" % name)
+        path.write_text(json.dumps(doc) + "\n")
+        files[name] = path
+    progress = Path(tmp) / "q3-progress.log"
+    progress.write_text('{"step": "boot", "status": "ok"}\n')
+    files["progress.log"] = progress
+    for name in EXPORT_NAMES_Q3:
+        shutil.copy2(str(files[name]), export / name)
+        digest = sha_file(export / name)
+        (export / ("%s.sha256" % name)).write_text(
+            "%s  %s\n" % (digest, name))
+    verified = {"files": {name: export / name
+                          for name in EXPORT_NAMES_Q3}}
+    manifest = {"runner_commit": "self-test",
+                "consumer": {"binary_sha256": "self-test"},
+                "oracle": {"ko_sha256": guest_oracle.KO_SHA256}}
+    manifest_path = Path(tmp) / "q3-inputs.json"
+    manifest_path.write_text(json.dumps(manifest) + "\n")
+    boot_tmp = Path(tmp) / "q3-boot"
+    boot_tmp.mkdir()
+    for name in ("boot.json", "guest.stdout", "guest.stderr",
+                 "guest.exit"):
+        (boot_tmp / name).write_text("self-test\n")
+    args = SimpleNamespace(out=str(Path(tmp) / "q3-out"),
+                           keep=False)
+    rc = judge_q3_receipt(args, manifest_path, manifest,
+                          verified, ident, EXPORT_NAMES_Q3,
+                          export, boot_tmp)
+    receipt = json.loads(
+        (Path(tmp) / "q3-out" / "host-verdict.json").read_text())
+    ok = check("q3-receipt-no-compare",
+               rc == 0 and receipt["verdict"] == "PASS"
+               and receipt["mode"] == "q3"
+               and receipt["comparison"]["verdict"] == "NOT_RUN"
+               and receipt["c9"]["metrics"] == {"M": 50, "D": 400},
+               "%r" % (receipt,)) and ok
     return ok
 
 
@@ -714,12 +1469,18 @@ def run_self_test(work=None):
             ok = self_test_layouts(tmp, pairs) and ok
             ok = self_test_wrong_pair(pairs) and ok
             ok = self_test_manifest(tmp, pairs) and ok
+            ok = self_test_guest_oracle(tmp, pairs) and ok
+            ok = self_test_candidate_flags(tmp, pairs) and ok
         ok = self_test_replay(tmp) and ok
         ok = self_test_malformed(tmp) and ok
         ok = self_test_cargo_unit() and ok
         ok = self_test_host_btf() and ok
         ok = self_test_judge() and ok
         ok = self_test_compare() and ok
+        ok = self_test_forensics(tmp) and ok
+        ok = self_test_identity() and ok
+        if pairs is not None:
+            ok = self_test_q3_mode(tmp, pairs) and ok
     finally:
         if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -772,20 +1533,21 @@ def armed_preflight():
     return {"vng": vng, "harness": harness, "prefix": prefix}
 
 
-def verify_exports(export):
+def verify_exports(export, names=None):
     """Exact inventory + sidecar check; returns {ok, files, reasons}."""
+    names = EXPORT_NAMES if names is None else names
     result = {"ok": False, "files": {}, "reasons": []}
     try:
         have = {p.name for p in export.iterdir()}
     except OSError as exc:
         result["reasons"].append("export unreadable: %s" % (exc,))
         return result
-    want = set(EXPORT_NAMES) | {"%s.sha256" % n for n in EXPORT_NAMES}
+    want = set(names) | {"%s.sha256" % n for n in names}
     if have != want:
         result["reasons"].append(
             "export inventory drift: %s" % sorted(have ^ want))
         return result
-    for name in EXPORT_NAMES:
+    for name in names:
         path = export / name
         sidecar = export / ("%s.sha256" % name)
         try:
@@ -812,6 +1574,76 @@ def parse_bpftrace(text):
             raise ValueError("bpftrace count %r missing" % name)
         out[name] = int(match.group(1))
     return out
+
+
+def judge_controls(files, name, tag):
+    """Host re-derivation of one leg's controls.
+
+    Re-derived from the raw control windows; guest-side
+    JSON is cross-checked, never trusted.
+    """
+    bad = []
+    try:
+        first, first_sum = parse_consume_file(
+            str(files["%s-c0a-lc.txt" % name]))
+        second, _ = parse_consume_file(
+            str(files["%s-c0b-lc.txt" % name]))
+    except ValueError as exc:
+        return (["%s: control files unparsable: %s" % (tag, exc)], {})
+    bad += check_conservation(first, first_sum, tag + "-c0a")
+    known = [e for e in first if e["kind"] == 1 and e["size"] == 512
+             and e["gen"] != 0]
+    if not known:
+        bad.append("%s: no post-attach known map" % tag)
+    elif not any(e["kind"] == 2 and e["gen"] == known[0]["gen"]
+                 for e in first):
+        bad.append("%s: post-attach release lost gen %d"
+                   % (tag, known[0]["gen"]))
+    held = [e for e in second if e["kind"] == 2 and e["size"] == 1024]
+    if not any(e["gen"] == 0 for e in held):
+        bad.append("%s: held-across-attach release not gen 0" % tag)
+    controls = json.loads(files["%s-controls.json" % name].read_text())
+    if controls.get("op0_gen") != (known[0]["gen"] if known else None):
+        bad.append("%s: guest controls.json disagrees" % tag)
+    return sorted(bad), {}
+
+
+def judge_quiet(files, name, tag):
+    """Host re-derivation of one leg's quiet phase.
+
+    Exact scripted expectations over the 200-op oracle log
+    plus the lifecycle/copy multisets; returns
+    (reasons, metrics) with the retained M/D mix.
+    """
+    bad = []
+    try:
+        lc, lc_sum = parse_consume_file(
+            str(files["%s-p1-lc.txt" % name]))
+        cp, cp_sum = parse_consume_file(
+            str(files["%s-p1-cp.txt" % name]))
+        ops_log, releases, complete = parse_oracle_log(
+            str(files["%s-p1-oracle.log" % name]))
+    except ValueError as exc:
+        return (["%s: p1 files unparsable: %s" % (tag, exc)], {})
+    bad += check_conservation(lc, lc_sum, tag + "-p1-lc")
+    bad += check_conservation(cp, cp_sum, tag + "-p1-cp")
+    bad += check_identity_closure(lc, tag + "-p1-lc")
+    bad += check_oracle_script(ops_log, releases, complete,
+                               core.P1_OPS, -1, tag + "-p1")
+    bad += compare_scripted(lc, cp, core.P1_OPS, -1, tag + "-p1")
+    mix = core.retained_breakdown(lc)
+    return sorted(bad), {"M": mix["M"], "D": mix["D"]}
+
+
+def judge_q3_leg(files, name, tag):
+    """Host re-derivation of one adapter-gate leg.
+
+    Controls plus the quiet phase only; the overlap
+    phase and the pair comparison stay out.
+    """
+    bad, _ = judge_controls(files, name, tag)
+    quiet_bad, metrics = judge_quiet(files, name, tag)
+    return sorted(bad + quiet_bad), metrics
 
 
 def judge_leg(files, name, tag):
@@ -897,6 +1729,25 @@ def judge_leg(files, name, tag):
     return sorted(bad), metrics
 
 
+def check_host_identity(ident):
+    """Recheck the exported guest identity host-side.
+
+    Returns a reason list (empty ok): the booted release
+    and the live BTF bytes must equal the pinned
+    expectations, independent of the guest's own gate.
+    """
+    bad = []
+    if ident.get("release") != core.EXPECT_RELEASE:
+        bad.append("guest booted release %r, expected %r"
+                   % (ident.get("release"), core.EXPECT_RELEASE))
+    if ident.get("btf_sha256") != guest_oracle.GUEST_BTF_SHA256:
+        bad.append("guest live BTF differs from the pinned bytes")
+    if ident.get("digests", {}).get("ko") != guest_oracle.KO_SHA256:
+        bad.append("guest measured oracle bytes differ from "
+                   "the pinned fixture")
+    return bad
+
+
 def armed_run(args):
     """Armed stress pair: one pinned boot, baseline then c9."""
     if os.environ.get(ARM_ENV) != "1":
@@ -904,6 +1755,18 @@ def armed_run(args):
         return 2
     if not args.out:
         print("FAIL vm-stress: armed needs --out")
+        return 2
+    if not getattr(args, "bundle", "") or not getattr(args, "candidate", ""):
+        print("FAIL vm-stress: armed needs --bundle and --candidate")
+        return 2
+    if getattr(args, "expect_release", "") not in (
+            "", core.EXPECT_RELEASE):
+        print("FAIL vm-stress: conflicting --expect-release %r" % (
+            args.expect_release,))
+        return 2
+    if getattr(args, "mode", "full") not in ("full", "q3"):
+        print("FAIL vm-stress: bad --mode %r (want full or q3)" % (
+            args.mode,))
         return 2
     try:
         rebind = parse_inputs(args.inputs)
@@ -913,7 +1776,6 @@ def armed_run(args):
     flight = armed_preflight()
     if flight is None:
         return 1
-    from lifecycle_env import ensure_oracle_module
     work = Path(tempfile.mkdtemp(prefix="vmgate-stress-"))
     try:
         pairs = core.materialize(str(REPO), str(work / "pairs"))
@@ -927,9 +1789,10 @@ def armed_run(args):
         shutil.rmtree(work, ignore_errors=True)
         return 1
     try:
-        candidate = core.load_candidate_binding(str(REPO))
+        candidate = core.load_candidate_binding(
+            str(REPO), args.candidate, args.bundle)
         built = core.build_consumer()
-        oracle = core.oracle_digest(str(REPO))
+        oracle = core.oracle_run_binding(str(REPO))
         commit = core.git_head(str(REPO))
     except (ValueError, OSError) as exc:
         print("FAIL vm-stress: %s" % exc)
@@ -962,10 +1825,16 @@ def armed_run(args):
         shutil.rmtree(work, ignore_errors=True)
         return 1
     try:
-        ensure_oracle_module()
+        # The guest-targeted fixture is already verified by
+        # the run binding above; no host-kernel build runs.
+        guest_oracle.verify_fixture()
+    except (ValueError, OSError) as exc:
+        print("FAIL vm-stress: oracle fixture refused: %s" % (exc,))
+        return 1
+    try:
         return armed_boot(args, pairs, manifest_path, manifest,
                           built, flight, work)
-    except Exception as exc:  # pytest.fail raises here
+    except Exception as exc:
         print("FAIL vm-stress: armed but %s" % (exc,))
         return 1
     finally:
@@ -976,30 +1845,63 @@ def armed_run(args):
             print("vm-stress: work kept at %s" % (work,))
 
 
+def snapshot_partial_export(export, tmp):
+    """Copy whatever the guest checkpointed before dying.
+
+    Progress markers, phase checkpoints, abort records,
+    and timeout partials survive here even when the boot
+    never completes; an empty export snapshots empty.
+    """
+    dst = tmp / "partial-export"
+    dst.mkdir(exist_ok=True)
+    try:
+        names = sorted(p.name for p in export.iterdir())
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            shutil.copy2(export / name, dst / name)
+        except OSError:
+            pass
+    return names
+
+
+def build_guest_argv(manifest_path, built, pairs, mode,
+                     expect_release):
+    """Guest command line for one boot (host-tested wiring)."""
+    return [sys.executable, str(GUEST), "/tmp/vmgate-work",
+            "/tmp/export",
+            "--manifest", str(manifest_path),
+            "--consumer", built["path"],
+            "--consumer-sha", built["sha256"],
+            "--ko", guest_oracle.FIXTURE_KO,
+            "--ko-sha", guest_oracle.KO_SHA256,
+            "--mode", mode,
+            "--expect-release", expect_release,
+            "--baseline-lc", pairs["baseline"]["lc"]["path"],
+            "--baseline-cp", pairs["baseline"]["cp"]["path"],
+            "--baseline-lc-sha",
+            pairs["baseline"]["lc"]["sha256"],
+            "--baseline-cp-sha",
+            pairs["baseline"]["cp"]["sha256"],
+            "--c9-lc", pairs["c9"]["lc"]["path"],
+            "--c9-cp", pairs["c9"]["cp"]["path"],
+            "--c9-lc-sha", pairs["c9"]["lc"]["sha256"],
+            "--c9-cp-sha", pairs["c9"]["cp"]["sha256"]]
+
+
 def armed_boot(args, pairs, manifest_path, manifest, built,
                flight, work):
     """Boot once, run both legs in-guest, judge host-side."""
     from vm_process import run_owned_guest
-    from lifecycle_env import ORACLE_KO
+    mode = getattr(args, "mode", "full")
+    names = EXPORT_NAMES_Q3 if mode == "q3" else EXPORT_NAMES
     tmp = Path(tempfile.mkdtemp(prefix="vmgate-stress-boot-"))
     export = tmp / "export"
     export.mkdir()
-    guest_argv = [sys.executable, str(GUEST), "/tmp/vmgate-work",
-                  "/tmp/export",
-                  "--manifest", str(manifest_path),
-                  "--consumer", built["path"],
-                  "--consumer-sha", built["sha256"],
-                  "--ko", ORACLE_KO,
-                  "--baseline-lc", pairs["baseline"]["lc"]["path"],
-                  "--baseline-cp", pairs["baseline"]["cp"]["path"],
-                  "--baseline-lc-sha",
-                  pairs["baseline"]["lc"]["sha256"],
-                  "--baseline-cp-sha",
-                  pairs["baseline"]["cp"]["sha256"],
-                  "--c9-lc", pairs["c9"]["lc"]["path"],
-                  "--c9-cp", pairs["c9"]["cp"]["path"],
-                  "--c9-lc-sha", pairs["c9"]["lc"]["sha256"],
-                  "--c9-cp-sha", pairs["c9"]["cp"]["sha256"]]
+    guest_argv = build_guest_argv(
+        manifest_path, built, pairs, mode,
+        getattr(args, "expect_release", ""))
     cmd = flight["prefix"] + ["--run"]
     if args.kver:
         cmd += [args.kver]
@@ -1013,23 +1915,42 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
         indent=2, sort_keys=True) + "\n")
     try:
         proc = run_owned_guest(cmd, timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        print("FAIL vm-stress: guest timed out; artifacts kept "
-              "at %s" % (tmp,))
+    except subprocess.TimeoutExpired as exc:
+        (tmp / "guest.stdout").write_text(exc.stdout or "")
+        (tmp / "guest.stderr").write_text(exc.stderr or "")
+        (tmp / "guest.exit").write_text("timeout")
+        kept = snapshot_partial_export(export, tmp)
+        (tmp / "timeout.json").write_text(json.dumps(
+            {"status": "timeout", "after_s": args.timeout,
+             "cleanup": "owned process group terminated",
+             "partial_export": kept},
+            indent=2, sort_keys=True) + "\n")
+        print("FAIL vm-stress: guest timed out after %ds; "
+              "artifacts kept at %s" % (args.timeout, tmp))
         return 1
     (tmp / "guest.stdout").write_text(proc.stdout or "")
     (tmp / "guest.stderr").write_text(proc.stderr or "")
     (tmp / "guest.exit").write_text(str(proc.returncode))
     if proc.returncode != 0:
+        snapshot_partial_export(export, tmp)
         print("FAIL vm-stress: guest exit %d; artifacts kept at %s"
               % (proc.returncode, tmp))
         return 1
-    verified = verify_exports(export)
+    verified = verify_exports(export, names)
     if not verified["ok"]:
+        snapshot_partial_export(export, tmp)
         print("FAIL vm-stress: %s; artifacts kept at %s"
               % ("; ".join(verified["reasons"]), tmp))
         return 1
     ident = json.loads(verified["files"]["identity.json"].read_text())
+    ident_bad = check_host_identity(ident)
+    if ident_bad:
+        print("FAIL vm-stress: %s; artifacts kept at %s"
+              % ("; ".join(ident_bad), tmp))
+        return 1
+    if mode == "q3":
+        return judge_q3_receipt(args, manifest_path, manifest,
+                                verified, ident, names, export, tmp)
     base_bad, base_metrics = judge_leg(verified["files"], "baseline",
                                        "stress-base")
     c9_bad, c9_metrics = judge_leg(verified["files"], "c9", "stress-c9")
@@ -1057,6 +1978,7 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
             shutil.copy2(tmp / name, out / ("host-%s" % name))
         (out / "host-verdict.json").write_text(json.dumps(
             {"verdict": host_verdict, "reasons": reasons,
+             "mode": mode,
              "comparison": {"verdict": verdict, "detail": detail},
              "baseline": {"reasons": base_bad,
                           "metrics": base_metrics},
@@ -1084,6 +2006,61 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
     return 0
 
 
+def judge_q3_receipt(args, manifest_path, manifest, verified,
+                     ident, names, export, tmp):
+    """Judge the adapter gate: both legs, no comparison."""
+    base_bad, base_metrics = judge_q3_leg(
+        verified["files"], "baseline", "stress-base")
+    c9_bad, c9_metrics = judge_q3_leg(
+        verified["files"], "c9", "stress-c9")
+    reasons = (["baseline: %s" % r for r in base_bad]
+               + ["c9: %s" % r for r in c9_bad])
+    host_verdict = "PASS" if not reasons else "FAIL"
+    out = Path(args.out)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            shutil.copy2(verified["files"][name], out / name)
+            shutil.copy2(export / ("%s.sha256" % name),
+                         out / ("%s.sha256" % name))
+        shutil.copy2(manifest_path, out / "inputs.json")
+        for name in ("boot.json", "guest.stdout",
+                     "guest.stderr", "guest.exit"):
+            shutil.copy2(tmp / name, out / ("host-%s" % name))
+        (out / "host-verdict.json").write_text(json.dumps(
+            {"verdict": host_verdict, "reasons": reasons,
+             "mode": "q3",
+             "comparison": {"verdict": "NOT_RUN",
+                            "reason": "q3 mode judges legs only; "
+                                      "the pair comparison is "
+                                      "separately scheduled"},
+             "baseline": {"reasons": base_bad,
+                          "metrics": base_metrics},
+             "c9": {"reasons": c9_bad, "metrics": c9_metrics},
+             "identity": ident,
+             "runner_commit": manifest["runner_commit"],
+             "consumer": manifest["consumer"],
+             "oracle": manifest["oracle"]},
+            indent=2, sort_keys=True) + "\n")
+    except OSError as exc:
+        print("FAIL vm-stress: receipt failed (%s); artifacts kept "
+              "at %s" % (exc, tmp))
+        return 1
+    if not args.keep:
+        shutil.rmtree(tmp, ignore_errors=True)
+    else:
+        print("vm-stress: guest tmp kept at %s" % (tmp,))
+    if host_verdict != "PASS":
+        print("FAIL vm-stress %s: %s"
+              % (host_verdict, "; ".join(reasons)))
+        return 1
+    print("ok vm-stress Q3 PASS (%s)" % (out,))
+    print("ok vm-stress base M/D=%d/%d c9 M/D=%d/%d" % (
+        base_metrics.get("M", 0), base_metrics.get("D", 0),
+        c9_metrics.get("M", 0), c9_metrics.get("D", 0)))
+    return 0
+
+
 # -- pytest entry points ------------------------------------------
 
 def test_self_test_unarmed(tmp_path):
@@ -1106,6 +2083,10 @@ def test_armed_stress_pair():
     args.kver = os.environ.get("MV_STRESS_KVER", "")
     args.timeout = int(os.environ.get("MV_STRESS_TIMEOUT", "1800"))
     args.keep = os.environ.get("MV_STRESS_KEEP", "") == "1"
+    args.bundle = os.environ.get("MV_STRESS_BUNDLE", "")
+    args.candidate = os.environ.get("MV_STRESS_CANDIDATE", "")
+    args.expect_release = os.environ.get("MV_STRESS_EXPECT_RELEASE", "")
+    args.mode = os.environ.get("MV_STRESS_MODE", "full")
     assert armed_run(args) == 0
 
 
@@ -1118,6 +2099,20 @@ def main(argv):
     parser.add_argument("--kver", default="")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--bundle", default="",
+                        help="retained bundle.tar.gz path "
+                             "(required when armed)")
+    parser.add_argument("--candidate", default="",
+                        help="retained candidate.json path "
+                             "(required when armed)")
+    parser.add_argument("--expect-release", default="",
+                        help="refuse unless the guest release "
+                             "matches (must equal the pin)")
+    parser.add_argument("--mode", default="full",
+                        choices=("full", "q3"),
+                        help="full runs controls+quiet+overlap "
+                             "with comparison; q3 runs the "
+                             "adapter gate only")
     args = parser.parse_args(argv)
     if args.self_test or (not args.inputs and not args.out):
         return 0 if run_self_test() else 1

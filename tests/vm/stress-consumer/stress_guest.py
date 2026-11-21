@@ -20,9 +20,22 @@ Exit 0 means the choreography completed (the host judges every
 leg from the exports and never trusts guest verdicts); exit 1
 means guest-side infrastructure or a control failed and the
 host must judge the run failed.
+
+Every step writes flushed start/result markers to the shared
+export as it runs and checkpoints completed phases there, so
+a hang or a forced termination still leaves the last marker,
+partial outputs, and every finished phase host-side. Every
+guest operation carries an explicit timeout; nothing runs
+unbounded.
+
+Two modes: "full" runs baseline then candidate through
+controls, the quiet phase, and the paced overlap phase;
+"q3" runs the candidate then the baseline through controls
+and the quiet phase only (no flood disk, no bpftrace).
 """
 
 import concurrent.futures
+import contextlib
 import hashlib
 import json
 import os
@@ -42,6 +55,35 @@ CP_SITES = ("mv_sync_device:__swiotlb_sync_single_for_device,"
             "mv_bounce_exit:swiotlb_bounce")
 LC_SIZES = (512, 1024, 2048, 4096)
 
+# The only guest release this flow admits, enforced before
+# any fixture setup and re-checked by the host judge.
+EXPECT_RELEASE = "7.0.14-070014-generic"
+
+# Every guest operation is bounded; nothing runs unbounded.
+# insmod covers the 2000-op paced oracle (~20 s paced plus
+# scheduling slack); dd covers one 128 MiB direct read.
+TIMEOUT_MODPROBE = 120
+TIMEOUT_INSMOD = 600
+TIMEOUT_RMMOD = 120
+TIMEOUT_DD = 300
+TIMEOUT_DMESG = 30
+TIMEOUT_CLEANUP = 120
+
+# Readiness stdout without an ack past this is a flood, not
+# a slow attach.
+READY_BUFFER_CAP = 1048576
+
+
+class StepTimeout(Exception):
+    """One bounded guest operation outlived its timeout."""
+
+    def __init__(self, step, timeout, out, err):
+        super().__init__("%s timed out after %ds" % (step, timeout))
+        self.step = step
+        self.timeout = timeout
+        self.out = out or ""
+        self.err = err or ""
+
 
 def fail(msg):
     """Abort the guest flow; the host judges this failed."""
@@ -49,8 +91,58 @@ def fail(msg):
     sys.exit(1)
 
 
-def sh(args, **kw):
-    return subprocess.run(args, capture_output=True, text=True, **kw)
+def sh(args, timeout=TIMEOUT_DMESG, **kw):
+    """Run one guest command, bounded, partials preserved."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout, **kw)
+    except subprocess.TimeoutExpired as exc:
+        raise StepTimeout(" ".join(args), timeout, exc.stdout,
+                          exc.stderr)
+
+
+def check_identity(identity, ko_digest, oracle, expect_release):
+    """Refuse a guest whose identity or oracle bytes drifted.
+
+    Mirrors the collector-SIGKILL identity gate: the booted
+    release and the live BTF bytes must equal the pinned
+    expectations, and the oracle module about to load must
+    equal the manifest-bound digest. Pair and consumer
+    bytes are enforced separately by input verification.
+    Raises ValueError; the gate maps it to the guest abort.
+    """
+    if oracle.get("ko_sha256") is None \
+            or oracle.get("btf_sha256") is None:
+        raise ValueError("run manifest lacks oracle identity pins")
+    if identity.get("release") != expect_release:
+        raise ValueError("guest booted release %r, expected %r"
+                         % (identity.get("release"), expect_release))
+    if identity.get("btf_sha256") != oracle.get("btf_sha256"):
+        raise ValueError("guest live BTF differs from the pinned bytes")
+    if ko_digest != oracle.get("ko_sha256"):
+        raise ValueError("guest oracle module drift")
+
+
+def export_names_for_mode(mode):
+    """Exact export inventory per mode; the host judges this."""
+    # progress.log rides along: the marker choreography is
+    # judged evidence, and the final export covers it with a
+    # sidecar like every other name.
+    names = ["identity.json", "input-verify.json", "progress.log"]
+    legs = ("c9", "baseline") if mode == "q3" else ("baseline", "c9")
+    for leg in legs:
+        names += ["%s-controls.json" % leg, "%s-c0a-lc.txt" % leg,
+                  "%s-c0b-lc.txt" % leg, "%s-c0-oracle.log" % leg,
+                  "%s-p1-lc.txt" % leg, "%s-p1-cp.txt" % leg,
+                  "%s-p1-oracle.log" % leg]
+        if mode != "q3":
+            names += ["%s-p2-lc.txt" % leg, "%s-p2-cp.txt" % leg,
+                      "%s-p2-oracle.log" % leg,
+                      "%s-bpftrace.txt" % leg,
+                      "%s-bpftrace.stderr" % leg,
+                      "%s-dd.json" % leg, "%s-window.json" % leg,
+                      "%s-blockstats.json" % leg]
+    return names
 
 
 def sha_file(path):
@@ -86,7 +178,8 @@ def dd_flood_leg(dev, size_mb):
     count = size_mb * 16
     start = mono_ns()
     rd = sh(["dd", "if=%s" % dev, "of=/dev/null", "bs=64k",
-             "count=%d" % count, "iflag=direct"])
+             "count=%d" % count, "iflag=direct"],
+            timeout=TIMEOUT_DD)
     finish = mono_ns()
     if rd.returncode != 0:
         fail("dd flood leg failed: %s" % rd.stderr.strip()[-200:])
@@ -102,10 +195,19 @@ class Gate:
     """One boot's owned guest state for both legs."""
 
     def __init__(self, work, export, args):
+        # Identity before anything else: no fixture setup,
+        # no bytes executed, until the release is exact.
+        if os.uname().release != EXPECT_RELEASE:
+            fail("guest booted release %r, expected %r"
+                 % (os.uname().release, EXPECT_RELEASE))
+        if args.expect_release not in ("", EXPECT_RELEASE):
+            fail("conflicting --expect-release %r" % args.expect_release)
         self.work = work
         self.export_dir = export
         self.consume = args.consumer
         self.ko = args.ko
+        self.ko_sha = args.ko_sha
+        self.mode = args.mode
         self.pairs = {
             "baseline": {"lc": args.baseline_lc, "cp": args.baseline_cp,
                          "lc_sha": args.baseline_lc_sha,
@@ -114,8 +216,13 @@ class Gate:
                    "lc_sha": args.c9_lc_sha, "cp_sha": args.c9_cp_sha},
         }
         self.consumer_sha = args.consumer_sha
-        self.manifest = json.loads(open(args.manifest).read())
+        try:
+            with open(args.manifest) as handle:
+                self.manifest = json.load(handle)
+        except (OSError, ValueError) as exc:
+            fail("cannot read run manifest: %s" % exc)
         self.consumers = []
+        self.transients = []
         self.oracle_loaded = False
         if os.geteuid() != 0:
             fail("guest flow requires root")
@@ -128,7 +235,19 @@ class Gate:
         with open("/proc/cmdline") as handle:
             if "swiotlb=force" not in handle.read():
                 fail("guest lacks swiotlb=force")
+        self.marker("boot", "ok", {"release": EXPECT_RELEASE,
+                                   "mode": self.mode})
         self.verify_inputs()
+        self.write_json("identity.json", self.identity())
+        try:
+            check_identity(
+                json.loads(open(os.path.join(
+                    self.work, "identity.json")).read()),
+                self.checked["ko"],
+                self.manifest.get("oracle", {}), EXPECT_RELEASE)
+        except ValueError as exc:
+            fail(str(exc))
+        self.checkpoint(["identity.json", "input-verify.json"])
 
     def verify_inputs(self):
         """Re-hash every byte this guest will execute or load."""
@@ -162,12 +281,20 @@ class Gate:
         if not os.path.isfile(self.ko):
             fail("missing oracle module: %s" % self.ko)
         checked["ko"] = sha_file(self.ko)
+        if checked["ko"] != self.ko_sha:
+            fail("oracle module digest mismatch: want %s... got %s..."
+                 % (self.ko_sha[:16], checked["ko"][:16]))
+        oracle = manifest.get("oracle", {})
+        if checked["ko"] != oracle.get("ko_sha256"):
+            fail("oracle module not the manifest-bound bytes")
         self.checked = checked
         self.write_json("input-verify.json", {
             "digests": checked,
             "manifest_schema": manifest.get("schema"),
             "runner_commit": manifest.get("runner_commit"),
         })
+        self.marker("input-verify", "ok",
+                    {"digests": sorted(checked.keys())})
 
     def identity(self):
         release = os.uname().release
@@ -195,6 +322,118 @@ class Gate:
             with open(dst + ".sha256", "w") as handle:
                 handle.write("%s  %s\n" % (sha_file(dst), name))
 
+    def marker(self, step, status, detail=None):
+        """Append a flushed step marker, mirrored to the export.
+
+        The mirror never raises: a failed export write is
+        noted on stderr, and the end-of-run inventory still
+        enforces what the host may judge.
+        """
+        record = {"ts_ns": mono_ns(), "step": step,
+                  "status": status}
+        if detail is not None:
+            record["detail"] = detail
+        line = json.dumps(record, sort_keys=True) + "\n"
+        try:
+            with open(os.path.join(self.work, "progress.log"),
+                      "a") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            print("stress-guest: progress write failed: %s" % exc,
+                  file=sys.stderr)
+            return
+        try:
+            shutil.copyfile(os.path.join(self.work, "progress.log"),
+                            os.path.join(self.export_dir,
+                                         "progress.log"))
+        except OSError as exc:
+            print("stress-guest: progress mirror failed: %s" % exc,
+                  file=sys.stderr)
+
+    def checkpoint(self, names):
+        """Export finished files now, not only at the end."""
+        self.export(names)
+        self.marker("checkpoint", "ok", {"files": list(names)})
+
+    @contextlib.contextmanager
+    def step(self, name):
+        """Mark one step's start and result around its body."""
+        self.marker(name, "start")
+        try:
+            yield
+        except StepTimeout as exc:
+            partial = "%s-timeout.txt" % re.sub(r"[^a-z0-9]+", "-",
+                                                name)
+            with open(os.path.join(self.work, partial), "w") as handle:
+                handle.write("step: %s\ntimeout: %ds\n"
+                             % (exc.step, exc.timeout))
+                handle.write("--- stdout ---\n%s\n" % exc.out[-4000:])
+                handle.write("--- stderr ---\n%s\n" % exc.err[-4000:])
+            self.marker(name, "timeout",
+                        {"after_s": exc.timeout, "partial": partial})
+            try:
+                self.export([partial])
+            except SystemExit:
+                pass
+            fail("%s timed out after %ds" % (exc.step, exc.timeout))
+        except SystemExit:
+            self.marker(name, "fail")
+            raise
+        except BaseException as exc:
+            self.marker(name, "error",
+                        {"reason": str(exc)[:300]})
+            raise
+        else:
+            self.marker(name, "ok")
+
+    def abort(self, reason):
+        """Reap owned processes and leave an abort record."""
+        for proc in list(self.consumers) + list(self.transients):
+            if proc.poll() is None:
+                proc.terminate()
+        end = time.monotonic() + 10
+        for proc in list(self.consumers) + list(self.transients):
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=max(0, end - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        for index, proc in enumerate(self.consumers):
+            if proc.poll() is not None and proc.stdout is not None:
+                try:
+                    rest = proc.stdout.read()
+                except (OSError, ValueError):
+                    rest = ""
+                if rest:
+                    with open(os.path.join(
+                            self.work, "abort-consumer-%d.txt" % index),
+                            "w") as handle:
+                        handle.write(getattr(proc, "gate_prefix", "")
+                                     + rest)
+        if self.oracle_loaded:
+            try:
+                inner = sh(["rmmod", "memveil_dma_oracle"],
+                           timeout=TIMEOUT_CLEANUP)
+                self.marker("abort-rmmod", "ok" if inner.returncode == 0
+                            else "fail",
+                            {"exit": inner.returncode})
+            except StepTimeout:
+                self.marker("abort-rmmod", "timeout")
+            except OSError as exc:
+                self.marker("abort-rmmod", "error",
+                            {"reason": str(exc)[:200]})
+            self.oracle_loaded = False
+        self.write_json("abort.json", {"reason": reason,
+                                       "mode": self.mode})
+        for name in ("abort.json", "progress.log"):
+            try:
+                self.export([name])
+            except SystemExit:
+                pass
+
     def start_consumer(self, obj, ring, sites, seconds, out,
                        expect_family, expect_sha):
         """Start one consumer; return the Popen handle."""
@@ -210,22 +449,55 @@ class Gate:
         return proc
 
     def wait_ready(self, procs, timeout=30):
-        """Consume acknowledgements emitted only after attach+arm."""
+        """Consume acknowledgements emitted only after attach+arm.
+
+        Reads are non-blocking under a hard deadline: select
+        may signal a partial line, and a blocking readline
+        would then wait past the deadline (or forever) for
+        the rest. Only a full "ready ring=" line accepts.
+        """
         end = time.monotonic() + timeout
-        pending = list(procs)
-        while pending and time.monotonic() < end:
-            for proc in list(pending):
-                if proc.poll() is not None:
-                    fail("consumer exited before readiness")
-                ready, _, _ = select.select([proc.stdout], [], [], 0.1)
-                if ready:
-                    line = proc.stdout.readline()
-                    if line.startswith("ready ring="):
-                        proc.gate_ready = True
-                        pending.remove(proc)
-            if not pending:
-                return
-        fail("consumer attachment acknowledgements timed out")
+        buffers = {}
+        for proc in procs:
+            buffers[id(proc)] = b""
+            os.set_blocking(proc.stdout.fileno(), False)
+        try:
+            pending = list(procs)
+            while pending:
+                if time.monotonic() >= end:
+                    fail("consumer attachment acknowledgements "
+                         "timed out")
+                for proc in list(pending):
+                    if proc.poll() is not None:
+                        fail("consumer exited before readiness")
+                    ready, _, _ = select.select([proc.stdout], [],
+                                                [], 0.1)
+                    if not ready:
+                        continue
+                    try:
+                        chunk = os.read(proc.stdout.fileno(), 65536)
+                    except BlockingIOError:
+                        continue
+                    if chunk == b"":
+                        fail("consumer closed stdout before readiness")
+                    buf = buffers[id(proc)] + chunk
+                    if len(buf) > READY_BUFFER_CAP:
+                        fail("consumer flooded stdout without readiness")
+                    buffers[id(proc)] = buf
+                    for line in buf.split(b"\n"):
+                        if line.startswith(b"ready ring="):
+                            break
+                    else:
+                        continue
+                    proc.gate_ready = True
+                    proc.gate_prefix = buf.decode("utf-8", "replace")
+                    pending.remove(proc)
+        finally:
+            for proc in procs:
+                try:
+                    os.set_blocking(proc.stdout.fileno(), True)
+                except OSError:
+                    pass
 
     def wait_consumer(self, proc, tag, timeout=180):
         """Wait for one consumer; fail unless it exits 0."""
@@ -235,10 +507,12 @@ class Gate:
             proc.kill()
             proc.communicate()
             fail("%s: consumer did not exit" % tag)
+        seen = getattr(proc, "gate_prefix", "") + (out or "")
         if proc.returncode != 0:
             fail("%s: consumer exit %d: %s"
-                 % (tag, proc.returncode, out[-500:]))
-        if not getattr(proc, "gate_ready", False) and "ready ring=" not in out:
+                 % (tag, proc.returncode, seen[-500:]))
+        if not getattr(proc, "gate_ready", False) \
+                and "ready ring=" not in seen:
             fail("%s: consumer never ready" % tag)
         return out
 
@@ -261,7 +535,8 @@ class Gate:
 
     def insmod(self, params):
         start = mono_ns()
-        inner = sh(["insmod", self.ko, "mv_oracle_arm=1"] + params)
+        inner = sh(["insmod", self.ko, "mv_oracle_arm=1"] + params,
+                   timeout=TIMEOUT_INSMOD)
         finish = mono_ns()
         if inner.returncode != 0:
             fail("insmod failed: %s" % inner.stderr.strip())
@@ -269,7 +544,8 @@ class Gate:
         return {"start_ns": start, "finish_ns": finish}
 
     def rmmod(self):
-        inner = sh(["rmmod", "memveil_dma_oracle"])
+        inner = sh(["rmmod", "memveil_dma_oracle"],
+                   timeout=TIMEOUT_RMMOD)
         if inner.returncode != 0:
             fail("rmmod failed: %s" % inner.stderr.strip())
         self.oracle_loaded = False
@@ -306,124 +582,146 @@ def run_controls(gate, name, pair, family):
     known gen there would be fabricated).
     """
     tag = "%s-controls" % name
-    gate.clear_dmesg()
-    first = os.path.join(gate.work, "%s-c0a-lc.txt" % name)
-    proc_a = gate.start_consumer(pair["lc"], "mv_lifecycle",
-                                 LC_SITES, 8, first, family,
-                                 pair["lc_sha"])
-    gate.wait_ready([proc_a])
-    gate.insmod(["mv_oracle_ops=2"])
-    gate.wait_consumer(proc_a, tag + "-a", timeout=60)
-    maps, unmaps = parse_lc_file(first)
-    op0_maps = [m for m in maps if m["size"] == LC_SIZES[0] and m["gen"] != 0]
-    if not op0_maps:
-        fail("%s: no post-attach known map for op 0" % tag)
-    gen0 = op0_maps[0]["gen"]
-    if not any(u["gen"] == gen0 for u in unmaps):
-        fail("%s: op 0 release lost gen %d" % (tag, gen0))
-    held = [m for m in maps if m["size"] == LC_SIZES[1]]
-    held_gen = held[0]["gen"] if held else 0
-    second = os.path.join(gate.work, "%s-c0b-lc.txt" % name)
-    proc_b = gate.start_consumer(pair["lc"], "mv_lifecycle",
-                                 LC_SITES, 20, second, family,
-                                 pair["lc_sha"])
-    gate.wait_ready([proc_b])
-    gate.rmmod()
-    gate.wait_consumer(proc_b, tag + "-b", timeout=60)
-    _, unmaps_b = parse_lc_file(second)
-    held_releases = [u for u in unmaps_b if u["size"] == LC_SIZES[1]]
-    if not any(u["gen"] == 0 for u in held_releases):
-        fail("%s: held-across-attach release not gen 0" % tag)
-    if held_gen != 0 and any(u["gen"] == held_gen for u in unmaps_b):
-        fail("%s: held gen %d leaked across attach" % (tag, held_gen))
-    gate.oracle_log("%s-c0-oracle.log" % name)
-    gate.write_json("%s-controls.json" % name, {
-        "op0_gen": gen0, "held_gen_first": held_gen,
-        "held_releases": len(held_releases),
-    })
+    with gate.step(tag):
+        gate.clear_dmesg()
+        first = os.path.join(gate.work, "%s-c0a-lc.txt" % name)
+        proc_a = gate.start_consumer(pair["lc"], "mv_lifecycle",
+                                     LC_SITES, 8, first, family,
+                                     pair["lc_sha"])
+        gate.wait_ready([proc_a])
+        gate.insmod(["mv_oracle_ops=2"])
+        gate.wait_consumer(proc_a, tag + "-a", timeout=60)
+        maps, unmaps = parse_lc_file(first)
+        op0_maps = [m for m in maps
+                    if m["size"] == LC_SIZES[0] and m["gen"] != 0]
+        if not op0_maps:
+            fail("%s: no post-attach known map for op 0" % tag)
+        gen0 = op0_maps[0]["gen"]
+        if not any(u["gen"] == gen0 for u in unmaps):
+            fail("%s: op 0 release lost gen %d" % (tag, gen0))
+        held = [m for m in maps if m["size"] == LC_SIZES[1]]
+        held_gen = held[0]["gen"] if held else 0
+        second = os.path.join(gate.work, "%s-c0b-lc.txt" % name)
+        proc_b = gate.start_consumer(pair["lc"], "mv_lifecycle",
+                                     LC_SITES, 20, second, family,
+                                     pair["lc_sha"])
+        gate.wait_ready([proc_b])
+        gate.rmmod()
+        gate.wait_consumer(proc_b, tag + "-b", timeout=60)
+        _, unmaps_b = parse_lc_file(second)
+        held_releases = [u for u in unmaps_b
+                         if u["size"] == LC_SIZES[1]]
+        if not any(u["gen"] == 0 for u in held_releases):
+            fail("%s: held-across-attach release not gen 0" % tag)
+        if held_gen != 0 and any(u["gen"] == held_gen for u in unmaps_b):
+            fail("%s: held gen %d leaked across attach" % (tag, held_gen))
+        gate.oracle_log("%s-c0-oracle.log" % name)
+        gate.write_json("%s-controls.json" % name, {
+            "op0_gen": gen0, "held_gen_first": held_gen,
+            "held_releases": len(held_releases),
+        })
+    gate.checkpoint(["%s-controls.json" % name,
+                     "%s-c0a-lc.txt" % name,
+                     "%s-c0b-lc.txt" % name,
+                     "%s-c0-oracle.log" % name])
 
 
 def run_phase1(gate, name, pair, family):
     """200 scripted oracle ops alone (exact host expectations)."""
-    gate.clear_dmesg()
-    lc = os.path.join(gate.work, "%s-p1-lc.txt" % name)
-    cp = os.path.join(gate.work, "%s-p1-cp.txt" % name)
-    plc = gate.start_consumer(pair["lc"], "mv_lifecycle",
-                              LC_SITES, 120, lc, family,
-                              pair["lc_sha"])
-    pcp = gate.start_consumer(pair["cp"], "mv_copies",
-                              CP_SITES, 120, cp, family,
-                              pair["cp_sha"])
-    gate.wait_ready([plc, pcp])
-    gate.insmod(["mv_oracle_ops=200"])
-    time.sleep(5)
-    gate.rmmod()
-    gate.wait_consumer(plc, "%s-p1-lc" % name)
-    gate.wait_consumer(pcp, "%s-p1-cp" % name)
-    gate.oracle_log("%s-p1-oracle.log" % name)
+    with gate.step("%s-quiet" % name):
+        gate.clear_dmesg()
+        lc = os.path.join(gate.work, "%s-p1-lc.txt" % name)
+        cp = os.path.join(gate.work, "%s-p1-cp.txt" % name)
+        plc = gate.start_consumer(pair["lc"], "mv_lifecycle",
+                                  LC_SITES, 120, lc, family,
+                                  pair["lc_sha"])
+        pcp = gate.start_consumer(pair["cp"], "mv_copies",
+                                  CP_SITES, 120, cp, family,
+                                  pair["cp_sha"])
+        gate.wait_ready([plc, pcp])
+        gate.insmod(["mv_oracle_ops=200"])
+        time.sleep(5)
+        gate.rmmod()
+        gate.wait_consumer(plc, "%s-p1-lc" % name)
+        gate.wait_consumer(pcp, "%s-p1-cp" % name)
+        gate.oracle_log("%s-p1-oracle.log" % name)
+    gate.checkpoint(["%s-p1-lc.txt" % name,
+                     "%s-p1-cp.txt" % name,
+                     "%s-p1-oracle.log" % name])
 
 
 def run_phase2(gate, name, pair, family, disk, short):
     """2000 paced ops overlapped with the per-vCPU flood legs."""
-    ncpu = os.cpu_count() or 0
-    gate.clear_dmesg()
-    lc = os.path.join(gate.work, "%s-p2-lc.txt" % name)
-    cp = os.path.join(gate.work, "%s-p2-cp.txt" % name)
-    plc = gate.start_consumer(pair["lc"], "mv_lifecycle",
-                              LC_SITES, 300, lc, family,
-                              pair["lc_sha"])
-    pcp = gate.start_consumer(pair["cp"], "mv_copies",
-                              CP_SITES, 300, cp, family,
-                              pair["cp_sha"])
-    gate.wait_ready([plc, pcp])
-    bpf_out = open(os.path.join(gate.work, "%s-bpftrace.txt" % name), "w")
-    bpf_err = open(os.path.join(gate.work, "%s-bpftrace.stderr" % name), "w")
-    bprog = ("fentry:swiotlb_tbl_map_single "
-             "{ @maps = count(); } "
-             "fentry:__swiotlb_tbl_unmap_single "
-             "{ @unmaps = count(); } "
-             "fentry:swiotlb_bounce { @bounces = count(); }")
-    bpf = subprocess.Popen(
-        ["bpftrace", "-q", "-e", bprog],
-        stdout=bpf_out, stderr=bpf_err, start_new_session=True)
-    time.sleep(3)
-    if bpf.poll() is not None:
+    with gate.step("%s-overlap" % name):
+        ncpu = os.cpu_count() or 0
+        gate.clear_dmesg()
+        lc = os.path.join(gate.work, "%s-p2-lc.txt" % name)
+        cp = os.path.join(gate.work, "%s-p2-cp.txt" % name)
+        plc = gate.start_consumer(pair["lc"], "mv_lifecycle",
+                                  LC_SITES, 300, lc, family,
+                                  pair["lc_sha"])
+        pcp = gate.start_consumer(pair["cp"], "mv_copies",
+                                  CP_SITES, 300, cp, family,
+                                  pair["cp_sha"])
+        gate.wait_ready([plc, pcp])
+        bpf_out = open(os.path.join(gate.work, "%s-bpftrace.txt" % name),
+                       "w")
+        bpf_err = open(os.path.join(gate.work, "%s-bpftrace.stderr" % name),
+                       "w")
+        bprog = ("fentry:swiotlb_tbl_map_single "
+                 "{ @maps = count(); } "
+                 "fentry:__swiotlb_tbl_unmap_single "
+                 "{ @unmaps = count(); } "
+                 "fentry:swiotlb_bounce { @bounces = count(); }")
+        bpf = subprocess.Popen(
+            ["bpftrace", "-q", "-e", bprog],
+            stdout=bpf_out, stderr=bpf_err, start_new_session=True)
+        gate.transients.append(bpf)
+        time.sleep(3)
+        if bpf.poll() is not None:
+            bpf_out.close()
+            bpf_err.close()
+            fail("bpftrace exited early; attach points unavailable?")
+        stats0 = block_stat(short)
+        # Legs first: insmod blocks for its paced ops, so the flood
+        # is already in flight when oracle traffic starts.
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=ncpu) as pool:
+            futs = {pool.submit(dd_flood_leg, disk, 128): i
+                    for i in range(ncpu)}
+            window = gate.insmod(["mv_oracle_ops=2000",
+                                  "mv_oracle_delay_ms=10"])
+            legs = {}
+            for fut in concurrent.futures.as_completed(futs):
+                legs["cpu%d" % futs[fut]] = fut.result()
+        stats1 = block_stat(short)
+        # The tracer stays up through the final release: the held
+        # mapping's unmap must be counted, not cut off.
+        gate.rmmod()
+        bpf.send_signal(signal.SIGINT)
+        try:
+            bpf.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            bpf.kill()
+            bpf.wait()
+        gate.transients.remove(bpf)
         bpf_out.close()
         bpf_err.close()
-        fail("bpftrace exited early; attach points unavailable?")
-    stats0 = block_stat(short)
-    # Legs first: insmod blocks for its paced ops, so the flood
-    # is already in flight when oracle traffic starts.
-    with concurrent.futures.ThreadPoolExecutor(
-            max_workers=ncpu) as pool:
-        futs = {pool.submit(dd_flood_leg, disk, 128): i
-                for i in range(ncpu)}
-        window = gate.insmod(["mv_oracle_ops=2000",
-                              "mv_oracle_delay_ms=10"])
-        legs = {}
-        for fut in concurrent.futures.as_completed(futs):
-            legs["cpu%d" % futs[fut]] = fut.result()
-    stats1 = block_stat(short)
-    # The tracer stays up through the final release: the held
-    # mapping's unmap must be counted, not cut off.
-    gate.rmmod()
-    bpf.send_signal(signal.SIGINT)
-    try:
-        bpf.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        bpf.kill()
-        bpf.wait()
-    bpf_out.close()
-    bpf_err.close()
-    if stats1["read_ios"] <= stats0["read_ios"]:
-        fail("flood produced no block reads")
-    gate.wait_consumer(plc, "%s-p2-lc" % name, timeout=300)
-    gate.wait_consumer(pcp, "%s-p2-cp" % name, timeout=300)
-    gate.oracle_log("%s-p2-oracle.log" % name)
-    gate.write_json("%s-dd.json" % name, legs)
-    gate.write_json("%s-window.json" % name, window)
-    gate.write_json("%s-blockstats.json" % name,
-                    {"before": stats0, "after": stats1})
+        if stats1["read_ios"] <= stats0["read_ios"]:
+            fail("flood produced no block reads")
+        gate.wait_consumer(plc, "%s-p2-lc" % name, timeout=300)
+        gate.wait_consumer(pcp, "%s-p2-cp" % name, timeout=300)
+        gate.oracle_log("%s-p2-oracle.log" % name)
+        gate.write_json("%s-dd.json" % name, legs)
+        gate.write_json("%s-window.json" % name, window)
+        gate.write_json("%s-blockstats.json" % name,
+                        {"before": stats0, "after": stats1})
+    gate.checkpoint(["%s-p2-lc.txt" % name, "%s-p2-cp.txt" % name,
+                     "%s-p2-oracle.log" % name,
+                     "%s-bpftrace.txt" % name,
+                     "%s-bpftrace.stderr" % name,
+                     "%s-dd.json" % name, "%s-window.json" % name,
+                     "%s-blockstats.json" % name])
 
 
 def main(argv):
@@ -435,6 +733,10 @@ def main(argv):
     parser.add_argument("--consumer", required=True)
     parser.add_argument("--consumer-sha", required=True)
     parser.add_argument("--ko", required=True)
+    parser.add_argument("--ko-sha", required=True)
+    parser.add_argument("--mode", default="full",
+                        choices=("full", "q3"))
+    parser.add_argument("--expect-release", default="")
     parser.add_argument("--baseline-lc", required=True)
     parser.add_argument("--baseline-cp", required=True)
     parser.add_argument("--baseline-lc-sha", required=True)
@@ -445,16 +747,64 @@ def main(argv):
     parser.add_argument("--c9-cp-sha", required=True)
     args = parser.parse_args(argv)
     gate = Gate(args.work, args.export, args)
+    try:
+        run_flow(gate)
+    except SystemExit:
+        gate.abort("guest exit")
+        raise
+    except BaseException as exc:
+        gate.abort("guest error: %s" % str(exc)[:300])
+        raise
+
+
+def run_flow(gate):
+    """One boot's legs for the requested mode."""
     ncpu = os.cpu_count() or 0
     if ncpu < 2:
         fail("stress gate needs 2+ vCPUs, have %d" % ncpu)
-    if shutil.which("bpftrace") is None:
-        fail("bpftrace not available")
-    gate.write_json("identity.json", gate.identity())
+    if gate.mode == "q3":
+        # Adapter gate: candidate first, then baseline;
+        # controls plus the quiet phase only.
+        run_controls(gate, "c9", gate.pairs["c9"], "aya")
+        run_phase1(gate, "c9", gate.pairs["c9"], "aya")
+        run_controls(gate, "baseline", gate.pairs["baseline"], "c")
+        run_phase1(gate, "baseline", gate.pairs["baseline"], "c")
+    else:
+        if shutil.which("bpftrace") is None:
+            fail("bpftrace not available")
+        with gate.step("fixture-setup"):
+            disk, short = fixture_disk(gate)
+        try:
+            # Baseline first, then the candidate; every leg loads
+            # fresh objects (fresh maps), owns a phase-local dmesg,
+            # and leaves the oracle unloaded behind it.
+            run_controls(gate, "baseline", gate.pairs["baseline"], "c")
+            run_phase1(gate, "baseline", gate.pairs["baseline"], "c")
+            run_phase2(gate, "baseline", gate.pairs["baseline"], "c",
+                       disk, short)
+            run_controls(gate, "c9", gate.pairs["c9"], "aya")
+            run_phase1(gate, "c9", gate.pairs["c9"], "aya")
+            run_phase2(gate, "c9", gate.pairs["c9"], "aya",
+                       disk, short)
+        finally:
+            with gate.step("fixture-cleanup"):
+                inner = sh(["rmmod", "scsi_debug"],
+                           timeout=TIMEOUT_CLEANUP)
+                if inner.returncode != 0:
+                    fail("scsi_debug cleanup failed: %s"
+                         % inner.stderr.strip())
+    gate.export(export_names_for_mode(gate.mode))
+    print("stress-guest: legs exported (mode %s)" % gate.mode)
+
+
+def fixture_disk(gate):
+    """Load scsi_debug and identify the owned disk, bounded."""
     before_disks = scsi_disks()
-    inner = sh(["modprobe", "scsi_debug", "dev_size_mb=256"])
+    inner = sh(["modprobe", "scsi_debug", "dev_size_mb=256"],
+               timeout=TIMEOUT_MODPROBE)
     if inner.returncode != 0:
         fail("scsi_debug failed: %s" % inner.stderr.strip())
+    gate.marker("modprobe", "ok")
     disk = None
     for _ in range(30):
         extra = scsi_disks() - before_disks
@@ -468,33 +818,8 @@ def main(argv):
     with open(os.path.join("/sys/block", short, "device", "model")) as handle:
         if "scsi_debug" not in handle.read():
             fail("new stress disk is not owned scsi_debug")
-    try:
-        # Baseline first, then the candidate; every leg loads
-        # fresh objects (fresh maps), owns a phase-local dmesg,
-        # and leaves the oracle unloaded behind it.
-        run_controls(gate, "baseline", gate.pairs["baseline"], "c")
-        run_phase1(gate, "baseline", gate.pairs["baseline"], "c")
-        run_phase2(gate, "baseline", gate.pairs["baseline"], "c",
-                   disk, short)
-        run_controls(gate, "c9", gate.pairs["c9"], "aya")
-        run_phase1(gate, "c9", gate.pairs["c9"], "aya")
-        run_phase2(gate, "c9", gate.pairs["c9"], "aya", disk, short)
-    finally:
-        inner = sh(["rmmod", "scsi_debug"])
-        if inner.returncode != 0:
-            fail("scsi_debug cleanup failed: %s" % inner.stderr.strip())
-    names = ["identity.json", "input-verify.json"]
-    for leg in ("baseline", "c9"):
-        names += ["%s-controls.json" % leg, "%s-c0a-lc.txt" % leg,
-                  "%s-c0b-lc.txt" % leg, "%s-c0-oracle.log" % leg,
-                  "%s-p1-lc.txt" % leg, "%s-p1-cp.txt" % leg,
-                  "%s-p1-oracle.log" % leg, "%s-p2-lc.txt" % leg,
-                  "%s-p2-cp.txt" % leg, "%s-p2-oracle.log" % leg,
-                  "%s-bpftrace.txt" % leg, "%s-bpftrace.stderr" % leg,
-                  "%s-dd.json" % leg, "%s-window.json" % leg,
-                  "%s-blockstats.json" % leg]
-    gate.export(names)
-    print("stress-guest: both legs exported")
+    gate.marker("fixture-disk", "ok", {"disk": short})
+    return disk, short
 
 
 if __name__ == "__main__":
