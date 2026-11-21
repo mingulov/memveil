@@ -535,7 +535,42 @@ pub fn candidate_stage(rels: &[&str]) -> PathBuf {
     staged
 }
 
+/// `cargo build` with build-machine paths remapped out of the output.
+///
+/// Appends the home/checkout `--remap-path-prefix` pair (home first,
+/// checkout last, so checkout paths land under /build-root — the same pair
+/// the BPF build script applies to the objects it compiles). Starts from
+/// the flag set Cargo itself would use: the encoded spelling when set, else
+/// RUSTFLAGS when set (a set-but-empty channel still shadows the rest),
+/// else the config layer carried forward so this export shadows nothing.
+/// The remap pair lands exactly once at the end and leaves through the
+/// encoded channel alone. A missing or empty HOME contributes no remap.
+fn cargo_build_remapped(args: &[&str]) -> Output {
+    let root = rust_dir();
+    let mut env =
+        memveil_remap_flags::process_env().unwrap_or_else(|err| panic!("remap flags: {err}"));
+    memveil_remap_flags::remap_build_paths(&mut env, &root)
+        .unwrap_or_else(|err| panic!("remap flags: {err}"));
+    let encoded = env
+        .get("CARGO_ENCODED_RUSTFLAGS")
+        .expect("remap exports the encoded channel");
+    let mut command = Command::new("cargo");
+    command.args(args);
+    command.env_remove("RUSTUP_TOOLCHAIN");
+    command.env("CARGO_ENCODED_RUSTFLAGS", encoded);
+    command.env_remove("RUSTFLAGS");
+    command.current_dir(&root);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    spawn_output(&mut command, "cargo")
+}
+
 /// Ensure the release binary exists (builds it when missing).
+///
+/// A build here carries the build-machine path remap, so the packaged
+/// binary names no checkout, home, user, or host path; a prebuilt
+/// binary from a plain `cargo build --release` is reused as-is and
+/// stays dirty, so a stale one must go before the packaging suites
+/// (a clean target dir is the reliable remedy).
 pub fn ensure_release_binary() -> PathBuf {
     let binary = release_binary();
     let stale = !binary.is_file() || (rebuild_requested() && !BINARY_READY.load(Ordering::SeqCst));
@@ -544,11 +579,7 @@ pub fn ensure_release_binary() -> PathBuf {
         let stale =
             !binary.is_file() || (rebuild_requested() && !BINARY_READY.load(Ordering::SeqCst));
         if stale {
-            let out = run_unpinned(
-                "cargo",
-                &["build", "--release", "--locked", "--offline"],
-                Some(&rust_dir()),
-            );
+            let out = cargo_build_remapped(&["build", "--release", "--locked", "--offline"]);
             assert!(
                 out.status.success(),
                 "cargo build --release failed: {}",
@@ -563,7 +594,7 @@ pub fn ensure_release_binary() -> PathBuf {
     binary
 }
 
-/// Engine version from the release binary (`0.1.0`).
+/// Engine version from the release binary (`0.1.1`).
 ///
 /// Candidate mode returns the manifest-bound version instead:
 /// no build may run behind a sealed qualification.

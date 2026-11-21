@@ -10,8 +10,6 @@ the rest.
 
 ## Unreleased
 
-- Pinned toolchain moves to pixi 0.83.0 and
-  Mojo 1.2.0; libbpf-mojo 0.2.2.
 - `record`, `report`, and `top` exit 0 for
   valid captures and carry a `verdict` field;
   `--strict` restores a nonzero exit on
@@ -35,6 +33,11 @@ the rest.
   lifecycle/copy 6.11, ceiling 7.3, BTF
   required) and the evolution and support
   policy.
+- Rust userspace: collection, CLI, and
+  reporting now build from the Cargo
+  workspace, with the BPF loader statically
+  linked and the inspection objects embedded
+  in the binary.
 
 ## v0.1.0 -- 2026-10-24
 

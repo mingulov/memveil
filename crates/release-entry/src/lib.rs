@@ -92,7 +92,7 @@ pub struct CratePin {
 /// Manifest facts the closure and SPDX builder consume.
 #[derive(Debug)]
 pub struct ManifestFacts {
-    /// Engine version (`0.1.0`).
+    /// Engine version (`0.1.1`).
     pub engine: String,
     /// Source revision or `export`.
     pub revision: String,
@@ -1243,8 +1243,8 @@ mod tests {
     #[test]
     fn manifest_facts_reads_files_and_crates() {
         let text = r#"{
-            "engine_version": "0.1.0", "memveil_revision": "abc",
-            "bundle": "memveil-0.1.0",
+            "engine_version": "0.1.1", "memveil_revision": "abc",
+            "bundle": "memveil-0.1.1",
             "toolchain": {"cargo": {"version": "1.0.0"},
                           "rustc": {"version": "1.0.0"}},
             "cargo": {"lock_sha256": "1", "ebpf_lock_sha256": "2",
@@ -1256,7 +1256,7 @@ mod tests {
             "files": {"bin/memveil": "ff"}
         }"#;
         let facts = manifest_facts(text).expect("facts");
-        assert_eq!(facts.engine, "0.1.0");
+        assert_eq!(facts.engine, "0.1.1");
         assert_eq!(facts.revision, "abc");
         assert_eq!(facts.crates.len(), 1);
         assert_eq!(facts.crates[0].name, "aya");

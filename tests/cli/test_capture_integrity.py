@@ -16,9 +16,11 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from preload_env import preload_env
+sys.path.insert(0, str(ROOT / 'tests' / 'cli'))
+from memveil_bin import resolve_memveil_bin
 
 FIXTURES = ROOT / 'tests/fixtures/reader'
-BIN = ROOT / 'build/memveil'
+BIN = Path(resolve_memveil_bin())
 VALIDATOR = runpy.run_path(str(ROOT / 'tools/validate-schemas'))
 
 

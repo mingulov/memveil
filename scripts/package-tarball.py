@@ -86,6 +86,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN_ROOT_DIR = os.path.dirname(HERE)
@@ -766,6 +767,176 @@ def select_built_binary(stdout, bin_name, target_dir):
     return binary
 
 
+def config_file_rustflags(path):
+    """build.rustflags from one Cargo config file, else None.
+
+    Returns the raw string or array: merging across files
+    needs the type, since a nearer string replaces while
+    arrays join. Fails closed on anything this reader cannot
+    reproduce exactly: an include list, target-specific
+    rustflags (those shadow build.rustflags), or a mistyped
+    value.
+    """
+    try:
+        with open(path, "rb") as handle:
+            doc = tomllib.load(handle)
+    except OSError as exc:
+        fail("cannot read cargo config %s: %s" % (path, exc))
+    except tomllib.TOMLDecodeError as exc:
+        fail("cannot parse cargo config %s: %s" % (path, exc))
+    if "include" in doc:
+        fail("cargo config %s uses include: pass its flags "
+             "through RUSTFLAGS instead" % path)
+    target = doc.get("target")
+    if target is not None:
+        if not isinstance(target, dict):
+            fail("cargo config %s has a non-table target"
+                 % path)
+        for table in target.values():
+            if isinstance(table, dict) and "rustflags" in table:
+                fail("cargo config %s sets target rustflags: "
+                     "pass its flags through RUSTFLAGS instead"
+                     % path)
+    build = doc.get("build")
+    if build is None:
+        return None
+    if not isinstance(build, dict):
+        fail("cargo config %s has a non-table build" % path)
+    if "rustflags" not in build:
+        return None
+    value = build["rustflags"]
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) \
+            and all(isinstance(item, str) for item in value):
+        return list(value)
+    fail("cargo config %s has a non-string build.rustflags"
+         % path)
+
+
+def config_layer_rustflags(build_dir, env):
+    """Config-layer flags for a build with no channel set.
+
+    Only consulted when neither CARGO_ENCODED_RUSTFLAGS nor
+    RUSTFLAGS is set: Cargo checks the encoded spelling,
+    then RUSTFLAGS, then the config layer, and a set-but-
+    empty channel still shadows everything below it. Merges
+    the home config first, then each ancestor config down
+    to the build directory: a nearer string replaces,
+    arrays join, and a string meeting an array across files
+    refuses like Cargo does. The dotted environment
+    spelling appends after the merged file flags, and an
+    empty one leaves them standing. A home directory that
+    overlaps an ancestor loads once at the ancestor; at one
+    directory the extensionless config wins over config.toml
+    wholesale. Fails closed rather than shadowing flags it
+    cannot see.
+    """
+    for name in env:
+        if name.startswith("CARGO_TARGET_") \
+                and name.endswith("_RUSTFLAGS") \
+                and len(name) > len("CARGO_TARGET__RUSTFLAGS"):
+            fail("%s sets target rustflags: pass its flags "
+                 "through RUSTFLAGS instead" % name)
+    home = env.get("CARGO_HOME")
+    if home is None:
+        parent = env.get("HOME", "")
+        home = os.path.join(parent, ".cargo") if parent else ""
+    build_dir = os.path.abspath(build_dir)
+    if home and not os.path.isabs(home):
+        home = os.path.join(build_dir, home)
+    chain = [build_dir]
+    while True:
+        parent = os.path.dirname(chain[-1])
+        if parent == chain[-1]:
+            break
+        chain.append(parent)
+    flag_dirs = [os.path.join(ancestor, ".cargo")
+                 for ancestor in reversed(chain)]
+    if home and os.path.realpath(home) not in set(
+            os.path.realpath(flag) for flag in flag_dirs):
+        flag_dirs.insert(0, home)
+    merged = None
+    for flag_dir in flag_dirs:
+        plain = os.path.join(flag_dir, "config")
+        dotted = os.path.join(flag_dir, "config.toml")
+        if os.path.exists(plain):
+            path = plain
+        elif os.path.exists(dotted):
+            path = dotted
+        else:
+            continue
+        value = config_file_rustflags(path)
+        if value is None:
+            continue
+        if merged is None:
+            merged = value
+        elif isinstance(merged, str) and isinstance(value, str):
+            merged = value
+        elif isinstance(merged, list) and isinstance(value, list):
+            merged = merged + value
+        else:
+            fail("cargo config %s mixes string and array "
+                 "build.rustflags across files: pass its flags "
+                 "through RUSTFLAGS instead" % path)
+    dotted = env.get("CARGO_BUILD_RUSTFLAGS")
+    if dotted is not None:
+        extra = dotted.split()
+        if extra:
+            if merged is None:
+                merged = extra
+            elif isinstance(merged, str):
+                merged = merged.split() + extra
+            else:
+                merged = merged + extra
+    if merged is None:
+        return []
+    if isinstance(merged, str):
+        return merged.split()
+    return merged
+
+
+def split_rustflags(text):
+    """Split a flag string the way Cargo splits RUSTFLAGS.
+
+    Words break on the space character alone; every other
+    byte stays literal, so quotes and backslashes reach the
+    compiler untouched. Empty words never form: leading,
+    trailing, and repeated spaces vanish.
+    """
+    return [word for word in text.split(" ") if word]
+
+
+def remap_build_paths(env, rust_dir):
+    """Append path remaps so shipped bytes name no build machine.
+
+    Home directory first, then the checkout root last, so
+    checkout paths land under /build-root (the BPF build
+    script applies the same pair to the objects it compiles).
+    Starts from the flag set Cargo itself would use: the
+    encoded spelling when set, else RUSTFLAGS when set (a
+    set-but-empty channel still shadows the rest), else the
+    config layer carried forward so this export shadows
+    nothing. The remap pair lands exactly once at the end
+    and leaves through the encoded channel alone. A missing
+    or empty HOME contributes no remap.
+    """
+    if "CARGO_ENCODED_RUSTFLAGS" in env:
+        encoded = env["CARGO_ENCODED_RUSTFLAGS"]
+        flags = encoded.split("\x1f") if encoded else []
+    elif "RUSTFLAGS" in env:
+        flags = split_rustflags(env["RUSTFLAGS"])
+    else:
+        flags = config_layer_rustflags(rust_dir, env)
+    home = env.get("HOME", "")
+    if home:
+        flags.append("--remap-path-prefix=%s=/build-prefix" % home)
+    flags.append("--remap-path-prefix=%s=/build-root"
+                 % os.path.abspath(rust_dir))
+    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
+    env.pop("RUSTFLAGS", None)
+
+
 def build_release_binary(rust_dir, target_dir,
                          bin_name="memveil"):
     """Build release in-flow, return cargo's own binary path.
@@ -773,7 +944,8 @@ def build_release_binary(rust_dir, target_dir,
     The caller passes a fresh per-build target dir; the
     build pins --target-dir plus a CLI build.build-dir
     override (both beat environment and config files),
-    scrubs every redirect variable, and consumes only the
+    scrubs every redirect variable, remaps build-machine
+    paths out of the shipped bytes, and consumes only the
     JSON artifact paths, so exactly this invocation's bytes
     are packaged. Fails closed on any build error or path
     surprise.
@@ -786,6 +958,7 @@ def build_release_binary(rust_dir, target_dir,
     env.pop("RUSTUP_TOOLCHAIN", None)
     for name in BUILD_REDIRECT_ENV:
         env.pop(name, None)
+    remap_build_paths(env, rust_dir)
     try:
         proc = subprocess.run(
             ["cargo",
@@ -1994,18 +2167,25 @@ def main(argv):
             if needed(path) != before:
                 fail("canonical normalization changed dependencies: "
                      + relative)
-            transformations[relative] = {
+            # No source_path on the engine record: the in-flow
+            # build compiles into a fresh temporary target dir,
+            # so any path would name disposable build state.
+            # The input digest plus the build receipt below
+            # already bind the engine bytes and source commit.
+            # Shipped libs keep their repo-relative provider
+            # path, which names a pinned vendored input.
+            record = {
                 "source_sha256": original,
                 "output_sha256": sha256_file(path),
                 "operations": operations,
                 "working_directory": "bundle-root",
                 "source_root": "input-tree",
-                "source_path": (os.path.abspath(binary_input)
-                                if relative == "bin/memveil"
-                                else os.path.join(
-                                    LIBGCC_DIR, LIBGCC_DEB_NAME)),
                 "staged_input_path": source_relative,
             }
+            if relative != "bin/memveil":
+                record["source_path"] = os.path.join(
+                    LIBGCC_DIR, LIBGCC_DEB_NAME)
+            transformations[relative] = record
         for relative in list(observed):
             if relative.startswith("lib/"):
                 observed["lib/memveil/" + relative[4:]] = \

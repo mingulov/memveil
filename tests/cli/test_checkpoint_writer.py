@@ -7,14 +7,17 @@ import os
 import stat
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests' / 'cli'))
+from memveil_bin import resolve_memveil_bin
 PROBE = ROOT / 'build/probe/checkpoint_probe'
 SHIM = ROOT / 'build/shim/checkpoint_faults.so'
 FIXTURE = ROOT / 'tests/fixtures/reader/sealed-complete'
-BIN = ROOT / 'build/memveil'
+BIN = Path(resolve_memveil_bin())
 
 
 def independent(path):

@@ -9,7 +9,7 @@ Recorded live in a disposable guest (kernel 7.0.0-34-generic)
 with the packaged `record` verb and all three channels selected
 (`attempt-trace,mapping-lifecycle,copy-actual`). The recorded
 profile decision names the narrow profile that kernel was
-captured under; the 0.1.0 bundle ships reference profiles
+captured under; the 0.1.1 bundle ships reference profiles
 only, and this historical capture qualifies no rebuilt
 package. The capture ran three workload phases: a 2-operation
 oracle phase

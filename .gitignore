@@ -21,6 +21,9 @@ modules.order
 !tests/fixtures/runtime/bpf/*.bpf.o
 # CO-RE kind fixture (regenerate with tools/emit-core-fixtures).
 !tests/fixtures/core/*.bpf.o
+# Toolchain BPF objects for the offline suites (rebuild per
+# tests/vm/fixtures/aya/README.md; debug paths remapped).
+!tests/vm/fixtures/aya/*.bpf.o
 # Direct eBPF-crate builds (the workspace build uses target/).
 crates/ebpf/target/
 # Journey fixture-prep outputs: records, stages, and

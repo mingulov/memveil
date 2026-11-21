@@ -1,0 +1,8 @@
+[package]
+name = "memveil-remap-flags"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.100"
+license = "GPL-3.0-or-later"
+description = "MemVeil Cargo flag selection for builds that append path remaps"
+publish = false

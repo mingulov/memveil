@@ -33,6 +33,20 @@
 # mode routes before this check and never touches the
 # build tree, so qualification works with an empty dev
 # build tree.
+# MEMVEIL_BIN overrides the binary under test: an absolute
+# slash path must name an executable file, used verbatim
+# (no rebuild, no relink of build/memveil); a relative
+# slash path first requires every leading directory of the
+# spelled path to exist, so a later dot-dot cannot hide a
+# file or a missing directory, and only then resolves
+# against the caller's directory to an absolute canonical
+# path before dispatch, so a later directory change cannot
+# lose it; a bare name is looked up
+# on PATH and resolves to an absolute path. A
+# set-but-unusable value (missing, not executable, or
+# unresolvable on PATH) fails closed with exit 1. The CLI
+# Python drivers resolve the same knob through
+# tests/cli/memveil_bin.py (docs/sanitizer-lane.md).
 # LMB_SANITIZE=1 exports fail-fast UBSan options for
 # sanitizer-instrumented runs (plain binaries ignore this).
 #
@@ -116,8 +130,110 @@ asan_preload() {
     fi
 }
 
+memveil_knob_resolved() {
+    # Resolve a MEMVEIL_BIN value to the binary to run: an
+    # absolute slash path prints verbatim (the caller
+    # checks it names an executable file); a relative
+    # slash path first requires every leading directory of
+    # the spelled path to exist, so a later dot-dot cannot
+    # hide a file or a missing directory, and only then
+    # prints as an absolute canonical path resolved
+    # against the caller's directory, so the blessed path
+    # survives a directory change before dispatch; a bare
+    # name is looked up on PATH, left to right, and prints
+    # as an absolute canonical path.
+    # The lookup is explicit so validation and dispatch
+    # cannot disagree about which file a bare name means:
+    # an executed bare name would otherwise search PATH
+    # while a plain file test checks the current
+    # directory. An empty PATH entry means the current
+    # directory; an unset or empty PATH refuses every bare
+    # name. Prints nothing and returns 1 when a bare name
+    # resolves to nothing usable or a relative slash path
+    # resolves to nothing at all.
+    knob=$1
+    case $knob in
+        /*)
+            printf '%s\n' "$knob"
+            return 0
+            ;;
+        */*)
+            # Every leading directory of the spelled path
+            # must exist, checked on the original spelling
+            # before canonicalizing, so a later dot-dot
+            # cannot hide a file or a missing directory.
+            head=${knob%/*}
+            rest=$head
+            prefix=
+            while [ -n "$rest" ]; do
+                case $rest in
+                    */*)
+                        comp=${rest%%/*}
+                        rest=${rest#*/}
+                        ;;
+                    *)
+                        comp=$rest
+                        rest=
+                        ;;
+                esac
+                if [ -z "$prefix" ]; then
+                    prefix=$comp
+                    if [ -z "$prefix" ]; then
+                        prefix=/
+                    fi
+                else
+                    prefix=$prefix/$comp
+                fi
+                if [ ! -d "$prefix" ]; then
+                    return 1
+                fi
+            done
+            resolved=$(command -p readlink -f -- "$knob" \
+                2>/dev/null) || return 1
+            if [ -z "$resolved" ]; then
+                return 1
+            fi
+            printf '%s\n' "$resolved"
+            return 0
+            ;;
+    esac
+    search=${PATH-}
+    if [ -z "$search" ]; then
+        return 1
+    fi
+    search=$search:
+    while [ -n "$search" ]; do
+        dir=${search%%:*}
+        search=${search#*:}
+        if [ -z "$dir" ]; then
+            dir=.
+        fi
+        cand=$dir/$knob
+        if [ -f "$cand" ] && [ -x "$cand" ]; then
+            # command -p: canonicalize with the default utility
+            # path, since PATH itself is the search input here
+            # and may not cover coreutils.
+            resolved=$(command -p readlink -f "$cand" \
+                2>/dev/null) || return 1
+            if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+                printf '%s\n' "$resolved"
+                return 0
+            fi
+            return 1
+        fi
+    done
+    return 1
+}
+
 memveil_bin() {
-    # Binary under test: the Rust release build.
+    # Binary under test: the Rust release build, or the
+    # $MEMVEIL_BIN resolution (sanitizer-lane override;
+    # rust_bin_setup refuses an unusable value before any
+    # suite runs, so dispatch always sees a resolved path).
+    if [ "${MEMVEIL_BIN+x}" = x ]; then
+        memveil_knob_resolved "$MEMVEIL_BIN"
+        return
+    fi
     printf '%s\n' "$ROOT/target/release/memveil"
 }
 
@@ -127,10 +243,41 @@ memveil_build_hint() {
 }
 
 rust_bin_setup() {
-    # The release binary must exist, and the Python suites
-    # (which hardcode build/memveil) must reach it: link
-    # build/memveil at the Rust binary, replacing any stale
-    # file from before the cutover.
+    # MEMVEIL_BIN override: use the named binary (no
+    # rebuild, no relink of build/memveil), failing
+    # closed unless it names an executable file — a
+    # relative slash path first requires every leading
+    # directory of the spelled path, then resolves
+    # against the caller's directory, a bare name must
+    # resolve on PATH.
+    # The slash check runs against the resolved path, so
+    # setup blesses exactly what dispatch executes.
+    if [ "${MEMVEIL_BIN+x}" = x ]; then
+        case $MEMVEIL_BIN in
+            */*)
+                resolved=$(memveil_knob_resolved "$MEMVEIL_BIN" \
+                    2>/dev/null) || resolved=
+                if [ -z "$resolved" ] || \
+                   [ ! -f "$resolved" ] || \
+                   [ ! -x "$resolved" ]; then
+                    echo "test: MEMVEIL_BIN=$MEMVEIL_BIN missing or not executable" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                if ! memveil_knob_resolved "$MEMVEIL_BIN" \
+                        >/dev/null 2>&1; then
+                    echo "test: MEMVEIL_BIN=$MEMVEIL_BIN missing or not executable" >&2
+                    return 1
+                fi
+                ;;
+        esac
+        return 0
+    fi
+    # The release binary must exist, and the build/memveil
+    # default (used by the CLI drivers when MEMVEIL_BIN is
+    # unset) must reach it: link build/memveil at the Rust
+    # binary, replacing any stale file from before the cutover.
     rust="$ROOT/target/release/memveil"
     if [ ! -x "$rust" ]; then
         echo "test: missing $rust" \
@@ -1012,10 +1159,10 @@ PYEOF
     "$BIN" --version >"$TMP/out" 2>"$TMP/err"
     if [ "$?" -ne 0 ]; then
         report_bad "version: must exit 0"
-    elif [ "$(cat "$TMP/out")" != "memveil-0.1.0" ]; then
+    elif [ "$(cat "$TMP/out")" != "memveil-0.1.1" ]; then
         report_bad "version: unexpected output '$(cat "$TMP/out")'"
     else
-        report_ok "version (memveil-0.1.0)"
+        report_ok "version (memveil-0.1.1)"
     fi
 
     # Match sonames only: resolved paths inherit the checkout directory, so a path containing "bpf" is not linkage.
@@ -1253,6 +1400,10 @@ suite_reader_adversarial() {
             "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
+    # The knob contract first — the blessed binary must be
+    # the executed binary before the reader drivers run.
+    python3 "$ROOT/tests/cli/test_memveil_bin.py" || return 1
+    python3 "$ROOT/tests/cli/prepare_capture_failures.py" || return 1
     python3 "$ROOT/tests/cli/test_adversarial_cli.py" || return 1
     python3 "$ROOT/tests/cli/test_checkpoint_recovery.py"
 }

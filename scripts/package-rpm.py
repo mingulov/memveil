@@ -420,9 +420,13 @@ def main(argv):
          "--define", "_topdir %s" % rtop,
          "--define", "debug_package %{nil}",
          # Pin the buildtime header to SOURCE_DATE_EPOCH
-         # (the seal pins it to C) instead of wall clock,
-         # so one source regenerates one .rpm.
+         # (the seal pins it to C) instead of wall clock.
          "--define", "use_source_date_epoch_as_buildtime 1",
+         # Pin the build-host header to a fixed placeholder
+         # instead of the builder's hostname. That is the
+         # only cross-host pin here: Release keeps %{?dist},
+         # so distro builds still differ.
+         "--define", "_buildhost build.invalid",
          work_spec],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env=env)

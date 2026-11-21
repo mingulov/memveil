@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# Third-party notices (memveil 0.1.0)
+# Third-party notices (memveil 0.1.1)
 
 Third-party inputs to this source tree. Per-artifact
 notices are generated at package time and enumerate the

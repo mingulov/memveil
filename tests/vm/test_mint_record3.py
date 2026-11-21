@@ -5,12 +5,15 @@
 apply_tracing is shared by the record3 lane and the gate
 emitter: pre-flip docs gain the frozen tracing set, post-flip
 docs verify their base and rebuild tracing from current
-builds, and drift warns. Needs the built BPF objects for BTF
-parsing; skips honestly without them.
+builds, and drift warns. Classic-lane tests need the built
+BPF objects and skip honestly without them; the flat-lane
+tests use committed toolchain objects and always run.
 """
 import copy
+import hashlib
 import json
 import os
+import struct
 import sys
 
 import pytest
@@ -21,6 +24,16 @@ import mint_record3_profile as m
 NEED_BUILDS = pytest.mark.skipif(
     not (os.path.isfile(m.LC_OBJ) and os.path.isfile(m.CP_OBJ)),
     reason="needs built lifecycle/copy objects")
+
+# Committed toolchain objects: real compiler output with
+# remapped debug paths, so the flat lane is covered without
+# a build tree.
+AYA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "fixtures", "aya")
+AYA_ATTEMPT = os.path.join(AYA_DIR, "swiotlb_attempt.bpf.o")
+AYA_LC = os.path.join(AYA_DIR, "swiotlb_lifecycle.bpf.o")
+AYA_CP = os.path.join(AYA_DIR, "swiotlb_copy.bpf.o")
+AYA_RING = 33554432
 
 
 NARROW_TEST = os.path.join(
@@ -170,3 +183,216 @@ def test_main_requires_explicit_base(monkeypatch, capsys):
         m.main()
     assert exc.value.code == 1
     assert "--base DOC" in capsys.readouterr().err
+
+
+def test_main_object_flags_override_dev_defaults(
+        tmp_path, monkeypatch):
+    out = tmp_path / "profile.json"
+    monkeypatch.setattr(sys, "argv", [
+        "mint_record3_profile.py", "--base", NARROW_TEST,
+        "--out", str(out), "--lc", "/nonexistent-lc.o",
+        "--cp", "/nonexistent-cp.o"])
+    with pytest.raises(FileNotFoundError) as exc:
+        m.main()
+    assert "nonexistent-lc" in str(exc.value)
+
+
+@NEED_BUILDS
+def test_main_object_flags_mint_from_named_objects(
+        tmp_path, monkeypatch):
+    out = tmp_path / "profile.json"
+    monkeypatch.setattr(sys, "argv", [
+        "mint_record3_profile.py", "--base", NARROW_TEST,
+        "--out", str(out), "--lc", str(m.LC_OBJ),
+        "--cp", str(m.CP_OBJ)])
+    m.main()
+    doc = json.loads(out.read_text())
+    assert doc["profile_id"] == "record3-ephemeral"
+    assert doc["status"] == "reference-unvalidated"
+
+
+def test_committed_toolchain_objects_cover_the_flat_lane():
+    """The committed objects parse on the flat lane.
+
+    No build tree: both ring VARs are listed in DATASEC
+    `maps` and parse to the same 32 MiB the loading path
+    admits, so this test runs wherever the checkout runs.
+    """
+    for obj, var in ((AYA_LC, "mv_lifecycle"),
+                     (AYA_CP, "mv_copies")):
+        data = open(obj, "rb").read()
+        recs, strings = m.btf_records(obj, data)
+        var_id = [i for i, r in enumerate(recs)
+                  if r[1] == m.KIND_VAR
+                  and m.btf_name(obj, strings, r[0]) == var]
+        assert len(var_id) == 1
+        members = m.maps_datasec_members(obj, recs, strings)
+        assert members is not None
+        assert var_id[0] + 1 in [
+            tid for tid, _off, _size in members]
+        assert m.btf_ring_bytes(obj, var) == AYA_RING
+
+
+def test_main_mints_from_committed_toolchain_objects(
+        tmp_path, monkeypatch):
+    """A full mint off committed objects, without a build tree."""
+    out = tmp_path / "profile.json"
+    monkeypatch.setattr(sys, "argv", [
+        "mint_record3_profile.py", "--base", NARROW_TEST,
+        "--out", str(out), "--lc", AYA_LC, "--cp", AYA_CP])
+    m.main()
+    doc = json.loads(out.read_text())
+    assert doc["profile_id"] == "record3-ephemeral"
+    assert doc["status"] == "reference-unvalidated"
+    note = dict(part.split("=", 1) for part in
+                doc["identity"]["source"]["note"].split())
+    assert note["lc_ring_bytes"] == str(AYA_RING)
+    assert note["cp_ring_bytes"] == str(AYA_RING)
+    assert note["lc_object"] == "sha256:" + hashlib.sha256(
+        open(AYA_LC, "rb").read()).hexdigest()
+    assert note["cp_object"] == "sha256:" + hashlib.sha256(
+        open(AYA_CP, "rb").read()).hexdigest()
+
+
+def _section_headers(data):
+    shoff, = struct.unpack("<Q", data[0x28:0x30])
+    shnum, = struct.unpack("<H", data[0x3C:0x3E])
+    shstrndx, = struct.unpack("<H", data[0x3E:0x40])
+    head = struct.unpack(
+        "<IIQQQQIIQQ",
+        data[shoff + shstrndx * 64:shoff + (shstrndx + 1)
+             * 64])
+    strings = data[head[4]:head[4] + head[5]]
+    out = {}
+    for i in range(shnum):
+        head = struct.unpack(
+            "<IIQQQQIIQQ",
+            data[shoff + i * 64:shoff + (i + 1) * 64])
+        name = strings[head[0]:].split(b"\0")[0].decode()
+        out[name] = (shoff + i * 64, head[4], head[5])
+    return out
+
+
+def _copy_with(obj, tmp_path, name, edits):
+    """Committed object bytes with (offset, patch) edits applied."""
+    data = bytearray(open(obj, "rb").read())
+    for at, patch in edits:
+        data[at:at + len(patch)] = patch
+    out = tmp_path / name
+    out.write_bytes(bytes(data))
+    return str(out)
+
+
+def _ring_entry_offset(obj, var):
+    """File offset of one flat ring definition entry."""
+    data = open(obj, "rb").read()
+    recs, strings = m.btf_records(obj, data)
+    var_id = [i for i, r in enumerate(recs)
+              if r[1] == m.KIND_VAR
+              and m.btf_name(obj, strings, r[0]) == var][0]
+    members = m.maps_datasec_members(obj, recs, strings)
+    index = [tid for tid, _off, _size in members].index(
+        var_id + 1)
+    _head, at, _size = _section_headers(data)["maps"]
+    return at + index * m.AYA_MAP_DEF_BYTES
+
+
+def _btf_record_offset(obj, index):
+    """File offset of one BTF type record header."""
+    data = open(obj, "rb").read()
+    _head, at, _size = _section_headers(data)[".BTF"]
+    sec = data[at:]
+    _magic, _ver, _flags, hdr_len = struct.unpack(
+        "<HBBI", sec[:8])
+    type_off, _type_len, _str_off, _str_len = struct.unpack(
+        "<IIII", sec[8:24])
+    base = at + hdr_len + type_off
+    recs = []
+    pos = 0
+    while True:
+        _name_off, info, _size = struct.unpack(
+            "<III", sec[hdr_len + type_off + pos:
+                        hdr_len + type_off + pos + 12])
+        recs.append(base + pos)
+        if len(recs) > index:
+            return recs[index]
+        kind = (info >> 24) & 0x1F
+        vlen = info & 0xFFFF
+        if kind in (1, m.KIND_VAR, 17):
+            pos += 12 + 4
+        elif kind in (m.KIND_STRUCT, 5, m.KIND_DATASEC, 19):
+            pos += 12 + vlen * 12
+        elif kind in (6, 13):
+            pos += 12 + vlen * 8
+        elif kind == m.KIND_ARRAY:
+            pos += 12 + 12
+        else:
+            pos += 12
+
+
+def test_flat_lane_refuses_foreign_map_type(tmp_path, capsys):
+    entry = _ring_entry_offset(AYA_LC, "mv_lifecycle")
+    obj = _copy_with(AYA_LC, tmp_path, "lc.o",
+                     [(entry, struct.pack("<I", 2))])
+    with pytest.raises(SystemExit) as exc:
+        m.btf_ring_bytes(obj, "mv_lifecycle")
+    assert exc.value.code == 1
+    assert "mv_lifecycle type 2, want 27" in \
+        capsys.readouterr().err
+
+
+def test_flat_lane_refuses_unsized_ring(tmp_path, capsys):
+    entry = _ring_entry_offset(AYA_CP, "mv_copies")
+    obj = _copy_with(AYA_CP, tmp_path, "cp.o",
+                     [(entry + 12, struct.pack("<I", 1000))])
+    with pytest.raises(SystemExit) as exc:
+        m.btf_ring_bytes(obj, "mv_copies")
+    assert exc.value.code == 1
+    assert "mv_copies ring size 1000 rejected" in \
+        capsys.readouterr().err
+
+
+def test_flat_lane_refuses_truncated_definitions(
+        tmp_path, capsys):
+    data = open(AYA_LC, "rb").read()
+    head, _at, _size = _section_headers(data)["maps"]
+    obj = _copy_with(AYA_LC, tmp_path, "lc.o",
+                     [(head + 32, struct.pack("<Q", 0))])
+    with pytest.raises(SystemExit) as exc:
+        m.btf_ring_bytes(obj, "mv_lifecycle")
+    assert exc.value.code == 1
+    assert "mv_lifecycle bad aya map shape" in \
+        capsys.readouterr().err
+
+
+def test_flat_lane_refuses_ragged_member_list(
+        tmp_path, capsys):
+    data = open(AYA_CP, "rb").read()
+    recs, strings = m.btf_records(AYA_CP, data)
+    datasec = [i for i, r in enumerate(recs)
+               if r[1] == m.KIND_DATASEC
+               and m.btf_name(AYA_CP, strings, r[0])
+               == "maps"][0]
+    at = _btf_record_offset(AYA_CP, datasec)
+    obj = _copy_with(AYA_CP, tmp_path, "cp.o",
+                     [(at + 12 + 8, struct.pack("<I", 16))])
+    with pytest.raises(SystemExit) as exc:
+        m.btf_ring_bytes(obj, "mv_copies")
+    assert exc.value.code == 1
+    assert "bad maps DATASEC" in capsys.readouterr().err
+
+
+def test_flat_lane_refuses_foreign_linkage(tmp_path, capsys):
+    data = open(AYA_LC, "rb").read()
+    recs, strings = m.btf_records(AYA_LC, data)
+    var = [i for i, r in enumerate(recs)
+           if r[1] == m.KIND_VAR
+           and m.btf_name(AYA_LC, strings, r[0])
+           == "mv_lifecycle"][0]
+    at = _btf_record_offset(AYA_LC, var)
+    obj = _copy_with(AYA_LC, tmp_path, "lc.o",
+                     [(at + 12, struct.pack("<I", 5))])
+    with pytest.raises(SystemExit) as exc:
+        m.btf_ring_bytes(obj, "mv_lifecycle")
+    assert exc.value.code == 1
+    assert "mv_lifecycle linkage 5" in capsys.readouterr().err

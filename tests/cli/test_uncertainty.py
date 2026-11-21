@@ -4,10 +4,14 @@ import copy
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tests' / 'cli'))
+from memveil_bin import resolve_memveil_bin
+BIN = resolve_memveil_bin()
 
 
 class Uncertainty(unittest.TestCase):
@@ -39,7 +43,7 @@ class Uncertainty(unittest.TestCase):
 
     def report(self, want=0, fmt='json'):
         self.write()
-        proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', fmt, str(self.cap)],
+        proc = subprocess.run([BIN, 'report', '--format', fmt, str(self.cap)],
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, want, proc.stderr + proc.stdout[:400])
         if want != 2:
@@ -324,7 +328,7 @@ class Uncertainty(unittest.TestCase):
 
     def report_json(self, cap):
         proc = subprocess.run(
-            [str(ROOT / 'build/memveil'), 'report', '--format', 'json', str(cap)],
+            [BIN, 'report', '--format', 'json', str(cap)],
             capture_output=True, text=True)
         return proc.returncode, json.loads(proc.stdout) if proc.stdout else None
 
@@ -461,7 +465,7 @@ class Uncertainty(unittest.TestCase):
                     with (self.cap / 'events.ndjson').open('a') as stream:
                         stream.write(prefix)
                     for partial in (False, True):
-                        cmd = [str(ROOT / 'build/memveil'), 'report', '--format', 'json']
+                        cmd = [BIN, 'report', '--format', 'json']
                         if partial:
                             cmd.append('--allow-partial')
                         cmd.append(str(self.cap))
@@ -485,7 +489,7 @@ class Uncertainty(unittest.TestCase):
                 self.write()
                 with (self.cap / 'events.ndjson').open('a') as stream:
                     stream.write(prefix)
-                proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                proc = subprocess.run([BIN, 'report', '--format', 'json',
                                        '--allow-partial', str(self.cap)], capture_output=True, text=True)
                 want = 0 if strength == 'observed' else 2
                 self.assertEqual(proc.returncode, want, proc.stderr)
@@ -505,7 +509,7 @@ class Uncertainty(unittest.TestCase):
                 self.events = []
                 self.write()
                 (self.cap / 'events.ndjson').write_text(prefix)
-                proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                proc = subprocess.run([BIN, 'report', '--format', 'json',
                                        '--allow-partial', str(self.cap)], capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.incomplete(json.loads(proc.stdout))
@@ -527,7 +531,7 @@ class Uncertainty(unittest.TestCase):
                 self.write()
                 with (self.cap / 'events.ndjson').open('a') as stream:
                     stream.write(prefix)
-                proc = subprocess.run([str(ROOT / 'build/memveil'), 'report', '--format', 'json',
+                proc = subprocess.run([BIN, 'report', '--format', 'json',
                                        '--allow-partial', str(self.cap)], capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.incomplete(json.loads(proc.stdout))

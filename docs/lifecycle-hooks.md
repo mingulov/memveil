@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# Lifecycle hook freeze (development bundle 0.1.0)
+# Lifecycle hook freeze (development bundle 0.1.1)
 
 Frozen attach points and source semantics for swiotlb mapping
 lifetimes and executed copies. A profile admits these capabilities

@@ -152,7 +152,7 @@ fn rpm_header() {
         &[
             "-qp",
             "--queryformat",
-            "%{NAME} %{VERSION} %{RELEASE} %{ARCH}\\n",
+            "%{NAME} %{VERSION} %{RELEASE} %{ARCH} %{BUILDHOST}\\n",
         ],
     );
     assert!(
@@ -162,9 +162,14 @@ fn rpm_header() {
     );
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let fields: Vec<&str> = text.split_whitespace().collect();
-    assert_eq!(fields.len(), 4, "{text}");
+    assert_eq!(fields.len(), 5, "{text}");
     assert_eq!(fields[0], "memveil");
     assert_eq!(fields[3], "x86_64");
+    // The build host is a fixed placeholder, never the
+    // builder's hostname. That is the only cross-host pin:
+    // Release keeps the distro expansion, so distro builds
+    // still differ in tag and file name.
+    assert_eq!(fields[4], "build.invalid", "{text}");
     let version = h::engine_version();
     assert_eq!(fields[1], version, "rpm Version vs engine");
     // Sealed artifact names come from the manifest (the loader

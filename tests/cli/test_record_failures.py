@@ -25,7 +25,9 @@ TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 sys.path.insert(0, TESTS)
 from preload_env import preload_env
-BIN = os.path.join(REPO, "build", "memveil")
+sys.path.insert(0, os.path.join(REPO, "tests", "cli"))
+from memveil_bin import resolve_memveil_bin
+BIN = resolve_memveil_bin()
 SHIM = os.path.join(REPO, "build", "shim", "mvshim.so")
 # Explicit probe inputs for the eaccess comparison. The Mojo-built
 # files they prefer retired with the C/Mojo tree; the committed

@@ -601,7 +601,7 @@ smoke checks still apply, layout pins do not.
 Extra channels need --lc-object and --cp-object
 together.
 "#;
-    const VERSION_OUT: &str = r#"memveil-0.1.0
+    const VERSION_OUT: &str = r#"memveil-0.1.1
 "#;
     let cases: &[(&[&str], &str, i32)] = &[
         (&["--help"], TOP_HELP, 0),

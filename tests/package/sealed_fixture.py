@@ -46,7 +46,7 @@ SHAPED_TOOLS = ("rustc", "readelf", "rpm", "rpm2cpio",
 
 # Engine version the stub sources implement; the shaped seal
 # refuses a workshop bundle that drifts from it.
-STUB_VERSION = "0.1.0"
+STUB_VERSION = "0.1.1"
 
 # Full-shape bundle members the shaped seal adds over the
 # workshop payload: exact names the real packagers and the

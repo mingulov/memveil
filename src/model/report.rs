@@ -168,7 +168,7 @@ pub struct Verdict {
 ///
 /// Division-first form: the exact floor without multiplying the
 /// full count by 10000.
-/// Deviation: Mojo traps on u64 overflow here; Rust computes the exact ratio in u128 per R14.
+/// Deviation: Mojo traps on u64 overflow here; Rust computes the exact ratio in u128.
 fn loss_ratio_bps(known_lost: u128, delivered: u64) -> i64 {
     let total = known_lost + delivered as u128;
     if total == 0 {
@@ -191,7 +191,7 @@ pub fn verdict_for_counts(
     terminal_lost: u64,
     delivered: u64,
 ) -> Verdict {
-    // Deviation: Mojo traps when loss legs sum past u64::MAX; Rust accumulates exactly in u128 per R14.
+    // Deviation: Mojo traps when loss legs sum past u64::MAX; Rust accumulates exactly in u128.
     let mut known_lost = 0u128;
     if detail_loss_known {
         known_lost += detail_lost as u128;
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn verdict_huge_counts_exact() {
-        // R14: u128 intermediates report the exact ratio where Mojo
+        // u128 intermediates report the exact ratio where Mojo
         // traps. Expected values are floor(known*10000/total).
         let v = counts(true, true, u64::MAX, true, false, true, 0, 1);
         assert_eq!(v.name, "partial_known_loss");

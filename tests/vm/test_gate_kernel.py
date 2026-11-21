@@ -9,6 +9,7 @@ and a foreign guest release with no shipped claim fails closed.
 import gzip
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -334,6 +335,83 @@ def test_live_gaps_require_available_and_live_verified():
         "mapping-lifecycle-stale "
         "(live-verified under reference profile x)",
         "absent-cap (absent)"]
+
+
+def test_prepare_threads_sealed_inputs(
+        tmp_path, monkeypatch):
+    gate_doc = tmp_path / "gate.json"
+    gate_doc.write_text('{"profile_id": "gate-test"}')
+    sel = gate_kernel.GateKernel(
+        "minted", os.uname().release,
+        gate_doc, tmp_path / "sat.json")
+    calls = {}
+
+    def fake_select(**kwargs):
+        calls["select"] = kwargs
+        return sel
+
+    def fake_live(caps, memveil):
+        calls["live"] = (tuple(caps), str(memveil))
+
+    monkeypatch.setattr(gate_kernel, "select", fake_select)
+    monkeypatch.setattr(gate_kernel, "require_live_interfaces",
+                        fake_live)
+    monkeypatch.setattr(gate_kernel, "SELECTED",
+                        tmp_path / "selected.json")
+    monkeypatch.setattr(gate_kernel, "_SELECTED", None)
+    engine = tmp_path / "engine"
+    engine.write_bytes(b"engine")
+    objects = {"object": str(tmp_path / "a.o"),
+               "lc_object": str(tmp_path / "lc.o"),
+               "cp_object": str(tmp_path / "cp.o")}
+    profiles = tmp_path / "profiles"
+    sat = tmp_path / "sat.o"
+    assert gate_kernel.prepare(memveil=str(engine),
+                               objects=objects,
+                               profiles=profiles,
+                               sat_object=sat) is sel
+    assert calls["select"] == {"objects": objects,
+                               "profiles": profiles,
+                               "sat_object": sat}
+    assert calls["live"] == (
+        ("attempt-trace", "mapping-lifecycle", "copy-actual"),
+        str(engine))
+    assert gate_kernel.selected() is sel
+    assert json.loads(
+        (tmp_path / "selected.json").read_text()) == \
+        json.loads(gate_doc.read_text())
+    calls.clear()
+    assert gate_kernel.prepare() is sel
+    assert calls["select"] == {"objects": None, "profiles": None,
+                               "sat_object": None}
+    assert calls["live"][1] == str(gate_kernel.MEMVEIL)
+
+
+def test_emit_objects_refuses_partial_inputs(tmp_path):
+    assert gate_kernel.emit_objects(None, None) is None
+    objects = {"object": tmp_path / "a.o",
+               "lc_object": tmp_path / "lc.o",
+               "cp_object": tmp_path / "cp.o"}
+    sat = tmp_path / "sat.o"
+    assert gate_kernel.emit_objects(objects, sat) == {
+        "attempt": objects["object"], "saturation": sat,
+        "lc": objects["lc_object"], "cp": objects["cp_object"]}
+    with pytest.raises(gate_kernel.GateKernelError,
+                       match="saturation input"):
+        gate_kernel.emit_objects(objects, None)
+    with pytest.raises(gate_kernel.GateKernelError,
+                       match="saturation input"):
+        gate_kernel.emit_objects(None, sat)
+    with pytest.raises(gate_kernel.GateKernelError,
+                       match="lack"):
+        gate_kernel.emit_objects({"object": sat}, sat)
+
+
+def test_gate_docs_refuses_partial_channels(tmp_path):
+    emit = gate_kernel.emitter()
+    assert emit.resolve_objects(None) == emit.DEV_OBJECTS
+    with pytest.raises(ValueError, match="lack channels"):
+        emit.resolve_objects({"attempt": tmp_path / "a.o"})
 
 
 def test_emit_gate_profiles_requires_explicit_out(monkeypatch):

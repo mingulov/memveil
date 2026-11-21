@@ -300,7 +300,7 @@ def test_owned_directory_holds_lane_and_gate_receipts(tmp_path):
     identity = dict(
         release='7.0.0-34-generic', swiotlb_force=True,
         **{key: 'a' * 64 for key in (
-            'config_sha', 'btf_sha', 'bridge_sha', 'consume_sha',
+            'config_sha', 'btf_sha', 'bridge_sha',
             'lc_sha', 'cp_sha', 'ko_sha')})
     body = json.dumps(identity)
     (export / 'bundle-identity.json').write_text(body)

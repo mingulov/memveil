@@ -22,7 +22,9 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
-BIN = os.path.join(REPO, "build", "memveil")
+sys.path.insert(0, os.path.join(REPO, "tests", "cli"))
+from memveil_bin import resolve_memveil_bin
+BIN = resolve_memveil_bin()
 NESTED = os.path.join(REPO, "tests", "fixtures", "lifecycle",
                       "lifecycle-nested")
 LONG = os.path.join(REPO, "tests", "fixtures", "lifecycle",

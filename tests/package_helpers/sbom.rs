@@ -37,7 +37,7 @@ pub struct CratePin {
 /// Manifest facts the SPDX builder consumes.
 #[derive(Debug)]
 pub struct ManifestFacts {
-    /// Engine version (`0.1.0`).
+    /// Engine version (`0.1.1`).
     pub engine: String,
     /// Source revision or `export`.
     pub revision: String,
@@ -204,6 +204,8 @@ fn parse_crate(value: &str) -> CratePin {
 /// subset), reconciled with the full-closure verifier. Delegates
 /// to the release-entry harness library so the custody flow and
 /// the test suite share one emitter. Refuses to overwrite.
+// The signature intentionally parallels the harness arity.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_frozen(
     manifest_path: &Path,
     bundle: &Path,

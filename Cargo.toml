@@ -1,6 +1,6 @@
 [package]
 name = "memveil"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.100"
 license = "GPL-3.0-or-later"
@@ -18,10 +18,14 @@ libc = "0.2"
 memveil-ebpf-common = { version = "0.0.0", path = "crates/ebpf-common", features = ["user"] }
 
 [dev-dependencies]
-memveil-release-entry = { version = "0.1.0", path = "crates/release-entry" }
+memveil-release-entry = { version = "0.1.1", path = "crates/release-entry" }
+memveil-remap-flags = { version = "0.1.1", path = "crates/remap-flags" }
+
+[build-dependencies]
+memveil-remap-flags = { version = "0.1.1", path = "crates/remap-flags" }
 
 [workspace]
-members = ["crates/ebpf-common", "crates/release-entry"]
+members = ["crates/ebpf-common", "crates/release-entry", "crates/remap-flags"]
 
 [profile.release]
 lto = true

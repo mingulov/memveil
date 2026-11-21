@@ -55,12 +55,16 @@ def guest_artifact_paths(sub, repo, selected=None):
     under the verified root for every subcommand; a
     saturation guest still runs the dev test objects, so
     its identity refuses here instead of passing mixed
-    bytes as qualified. Consume/bridge keep dev paths
-    (the candidate carries no bridge).
+    bytes as qualified. The bundle leg runs the packaged
+    record, never the dev consumer, so its table carries
+    no consumer entry. Otherwise consume keeps its dev
+    path (a fixture the candidate never carries); bridge
+    keeps its dev path too, except the sealed bundle leg,
+    which loads no bridge and pins the candidate runtime
+    member under the verified root instead.
     """
     repo = str(repo)
     table = {
-        "consume_sha": os.path.join(repo, "build", "vm", "mv_consume"),
         "lc_sha": os.path.join(repo, "build", "bpf",
                                "swiotlb_lifecycle-test.bpf.o"
                                if sub == "saturation"
@@ -72,11 +76,17 @@ def guest_artifact_paths(sub, repo, selected=None):
         "bridge_sha": os.path.join(repo, "build", "deps", "lmb",
                                    "lib", "libbpf_mojo.so.1"),
     }
+    if sub != "bundle":
+        table["consume_sha"] = os.path.join(
+            repo, "build", "vm", "mv_consume")
     if selected is not None:
         table["lc_sha"] = str(selected.path(
             "bpf/swiotlb_lifecycle.bpf.o"))
         table["cp_sha"] = str(selected.path(
             "bpf/swiotlb_copy.bpf.o"))
+        if sub == "bundle":
+            table["bridge_sha"] = str(selected.path(
+                "lib/memveil/libgcc_s.so.1"))
     return table
 
 
@@ -86,7 +96,8 @@ def run_guest(sub, timeout=900, network=False):
     from support.candidate_input import load
     selected = load()
     prefix, env = gate_prefix()
-    from lifecycle_env import ensure_oracle_module
+    from lifecycle_env import (ensure_oracle_module,
+                               sealed_profiles_dir)
     from harness_env import check_harness_versions
     harness = check_harness_versions(prefix[-1])
     lock_dir = REPO / "build" / "vm"
@@ -98,7 +109,11 @@ def run_guest(sub, timeout=900, network=False):
         lease.close()
         raise ValueError("VM suite lease already owned")
     try:
-        ensure_oracle_module()
+        if selected is None:
+            ensure_oracle_module()
+        else:
+            ensure_oracle_module(
+                profiles=sealed_profiles_dir(selected))
     except BaseException:
         lease.close()
         raise
@@ -164,17 +179,20 @@ def verify_exports(tmp, sub, names):
         sys.path.insert(0, str(TESTS))
         from support.candidate_input import load
         selected = load()
-        from lifecycle_env import ORACLE_KO, module_build_identity
-        expected = module_build_identity()
+        from lifecycle_env import (ORACLE_KO, module_build_identity,
+                                   sealed_profiles_dir)
+        if selected is None:
+            expected = module_build_identity()
+        else:
+            expected = module_build_identity(
+                profiles_dir=sealed_profiles_dir(selected))
         identity = json.loads(got["identity.json"].read_text())
         for key in ("release", "config_sha", "btf_sha"):
             assert identity[key] == expected[key], "guest kernel identity drift: " + key
         paths = guest_artifact_paths(sub, REPO, selected)
-        for key, path in (("consume_sha", paths["consume_sha"]),
-                          ("lc_sha", paths["lc_sha"]),
-                          ("cp_sha", paths["cp_sha"]),
-                          ("bridge_sha", paths["bridge_sha"]),
-                          ("ko_sha", Path(ORACLE_KO))):
+        checks = dict(paths)
+        checks["ko_sha"] = Path(ORACLE_KO)
+        for key, path in checks.items():
             assert identity[key] == sha_file(path), "guest artifact mismatch: " + key
     return VerifiedExports(got, verified)
 

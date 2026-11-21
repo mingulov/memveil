@@ -15,8 +15,10 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tests'))
 from preload_env import preload_env
+sys.path.insert(0, str(ROOT / 'tests' / 'cli'))
+from memveil_bin import resolve_memveil_bin
 
-BIN = ROOT / 'build/memveil'
+BIN = Path(resolve_memveil_bin())
 FIXTURE = ROOT / 'tests/fixtures/reader/sealed-complete'
 
 

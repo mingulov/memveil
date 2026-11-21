@@ -8,6 +8,11 @@
 //! the bridge/toolchain lock pins, and no committed byte-pin
 //! manifest (the collected manifest's shape stands in until
 //! requalification pins release bytes).
+//!
+//! A build-path cleanliness gate additionally proves the 12
+//! runtime members name no build checkout or home path (both
+//! remapped to fixed prefixes) and carry the remap marker
+//! instead.
 
 #[path = "package_helpers/mod.rs"]
 mod package_helpers;
@@ -190,6 +195,82 @@ fn bundle_missing_member_fails_collect() {
     assert!(out.status.success());
     let err = h::payload::collect(&deb, &rpm, &hollow).expect_err("hollow must fail");
     assert!(err.contains("lacks payload member"), "{err}");
+}
+
+/// Build-machine paths that must not appear in packaged runtime bytes.
+///
+/// The checkout the packages were built from, plus the building
+/// HOME: every identifying absolute path a local build can bake in
+/// (crate sources, the cargo registry, toolchain sources) sits
+/// under one of them.
+fn forbidden_path_needles() -> Vec<Vec<u8>> {
+    let mut needles = vec![env!("CARGO_MANIFEST_DIR").as_bytes().to_vec()];
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        needles.push(home.into_bytes());
+    }
+    needles
+}
+
+/// First offset of `needle` in `bytes`, if any.
+fn find_subslice(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > bytes.len() {
+        return None;
+    }
+    bytes
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Printable excerpt around a match, for failure reports.
+fn excerpt(bytes: &[u8], at: usize, len: usize) -> String {
+    let from = at.saturating_sub(48);
+    let to = (at + len + 48).min(bytes.len());
+    bytes[from..to]
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                *byte as char
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn packaged_runtime_bytes_name_no_build_machine() {
+    // Every runtime-format payload member — the engine binary with
+    // its embedded BPF objects plus the three inspection objects,
+    // in each of the three packages — must carry no build-checkout
+    // or build-home path: debug info and panic locations are
+    // remapped to fixed prefixes at build time. The /build-root
+    // marker must be present instead, proving the remap applied
+    // rather than debug info silently dropped. The remedy on
+    // failure is a clean rebuild: a plain `cargo build --release`
+    // binary or stale build-script outputs reused from before the
+    // remap keep the old bytes.
+    let (deb, rpm, bundle) = packages();
+    let members = h::payload::member_bytes(&deb, &rpm, &bundle).expect("member bytes");
+    assert_eq!(members.len(), 12);
+    let needles = forbidden_path_needles();
+    for (logical, bytes) in &members {
+        for needle in &needles {
+            if let Some(at) = find_subslice(bytes, needle) {
+                panic!(
+                    "{logical} embeds a build-machine path at offset {at}: ...{}... \
+                     (rebuild from a clean target dir so every unit carries the path remap)",
+                    excerpt(bytes, at, needle.len())
+                );
+            }
+        }
+        assert!(
+            find_subslice(bytes, b"/build-root").is_some(),
+            "{logical} lacks the /build-root remap marker: the objects were \
+             built without the path remap (rebuild from a clean target dir)"
+        );
+    }
 }
 
 #[test]

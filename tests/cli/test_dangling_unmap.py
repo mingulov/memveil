@@ -4,11 +4,14 @@
 
 import json
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "build/memveil"
+sys.path.insert(0, str(ROOT / "tests" / "cli"))
+from memveil_bin import resolve_memveil_bin
+BIN = Path(resolve_memveil_bin())
 OK = "tests/fixtures/reader/f2-dangling-split-mapping-ok"
 DENY = "tests/fixtures/reader/f2-dangling-split-mapping-deny"
 

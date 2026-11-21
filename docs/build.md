@@ -204,9 +204,9 @@ pass its directory to both package adapters:
 ```sh
 cargo build --release --locked
 python3 scripts/package-tarball.py --out dist
-python3 scripts/package-deb.py --bundle "$PWD/dist/memveil-0.1.0" --out dist
+python3 scripts/package-deb.py --bundle "$PWD/dist/memveil-0.1.1" --out dist
 python3 scripts/package-rpm.py --work build/rpm --out dist \
-    --bundle "$PWD/dist/memveil-0.1.0"
+    --bundle "$PWD/dist/memveil-0.1.1"
 ```
 
 These commands prepare local, unqualified artifacts and
@@ -270,3 +270,12 @@ inputs before constructing Source0 or invoking rpmbuild.
 File timestamps may differ across identical exports.
 Foreign or changed source inputs refuse; no build
 fallback or qualification inference is permitted.
+The finished .rpm names the fixed placeholder
+`build.invalid` as its build host instead of the
+builder's hostname; `rpm -qp --queryformat
+'%{BUILDHOST}'` on the artifact must print the
+placeholder on any host. No wider reproducibility is
+claimed: the Release tag still carries the distro
+`%{?dist}` expansion, so the same source built on
+different distributions yields different Release tags
+and file names.

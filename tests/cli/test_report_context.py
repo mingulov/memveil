@@ -5,11 +5,14 @@
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "build/memveil"
+sys.path.insert(0, str(ROOT / "tests" / "cli"))
+from memveil_bin import resolve_memveil_bin
+BIN = Path(resolve_memveil_bin())
 SOURCES = ("kernel.release", "profile.decision", "measurement_scope")
 
 

@@ -17,6 +17,15 @@ on:
   push:
   pull_request:
 
+# Hermetic rustup: nested cargo resolves rustc next to its own shim,
+# so parallel rustc shims resolve per package directory; a dependency
+# shipping rust-toolchain.toml with components (proc-macro2 pins
+# rust-src) makes concurrent shims race component downloads onto the
+# default toolchain and break the build. RUSTC below bypasses all
+# shim resolution (the eBPF child clears it before selecting its
+# pinned nightly in build.rs). Toolchains come only from the pinned
+# install steps.
+
 jobs:
   deny:
     runs-on: ubuntu-26.04
@@ -107,6 +116,7 @@ jobs:
           test "$REMAIN" -eq 0 || echo "WARNING: default ACLs remain"
       - name: Run Rust test suite
         run: |
+          export RUSTC="$(rustup which --toolchain 1.100.0 rustc)"
           cargo test --workspace --locked
       - name: Diagnose package verify failures
         if: failure()

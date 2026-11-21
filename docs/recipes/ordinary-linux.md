@@ -83,7 +83,7 @@ wrapper:
 Point `VNG` at the wrapper; the module in step 1 still
 builds against the guest kernel's headers through `KDIR`.
 A cross-release `MEMVEIL_ORACLE_KVER` override needs a
-validated profile pin for that release, which the 0.1.0
+validated profile pin for that release, which the 0.1.1
 bundle does not ship, so cross-release runs fail closed.
 The guest kernel identity (image, config, BTF, format,
 build-id) still verifies inside the guest on every run;

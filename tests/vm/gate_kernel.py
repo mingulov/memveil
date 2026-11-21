@@ -199,16 +199,47 @@ def shipped_profile(release, profiles=PROFILES):
     return None
 
 
+def emit_objects(objects, sat_object):
+    """Emitter inputs for a mint, or None for the build tree.
+
+    Explicit object inputs must name every channel: a mint
+    that forgot the saturation input would otherwise bind a
+    build-tree object.
+    """
+    if objects is None and sat_object is None:
+        return None
+    if objects is None or sat_object is None:
+        raise GateKernelError(
+            "explicit gate objects need the saturation input too")
+    try:
+        return {"attempt": objects["object"],
+                "saturation": sat_object,
+                "lc": objects["lc_object"],
+                "cp": objects["cp_object"]}
+    except KeyError as exc:
+        raise GateKernelError(
+            "explicit gate objects lack %s" % exc)
+
+
 def select(release=None, root="/", out_root=OUT_ROOT,
-           objects=None, require_shipped=None, profiles=PROFILES,
-           host_release=None):
-    """Pick or mint the gate profiles for the kernel under test."""
+           objects=None, require_shipped=None, profiles=None,
+           host_release=None, sat_object=None):
+    """Pick or mint the gate profiles for the kernel under test.
+
+    objects/sat_object/profiles name the bindings, the
+    saturation input, and the shipped profile dir; without
+    them the build tree inputs apply. A leg that runs
+    verified inputs names all three, so selection never
+    consults the build tree on its behalf.
+    """
     release = release or gate_release()
     if require_shipped is None:
         require_shipped = (
             os.environ.get("MEMVEIL_VM_REQUIRE_SHIPPED") == "1")
-    objects = objects or {"object": PROD_OBJ, "lc_object": LC_OBJ,
-                          "cp_object": CP_OBJ}
+    if profiles is None:
+        profiles = PROFILES
+    check = objects or {"object": PROD_OBJ, "lc_object": LC_OBJ,
+                        "cp_object": CP_OBJ}
     host = host_release or os.uname().release
     if release != host:
         # Foreign guest kernel: only its shipped claim can admit it.
@@ -219,13 +250,15 @@ def select(release=None, root="/", out_root=OUT_ROOT,
                 + release)
         # The host cannot measure a foreign kernel; its shipped claim names it.
         doc = json.loads(path.read_text())
-        drift = binding_drift(doc, shipped_identity(doc), objects)
+        drift = binding_drift(doc, shipped_identity(doc), check)
         if drift:
             raise GateKernelError("shipped %s bindings drift: %s"
                                   % (path.name, ", ".join(drift)))
-        _, sat_doc = emitter().gate_docs(shipped_identity(doc),
-                                         doc["hooks"][0]["format_text"],
-                                         doc["profile_id"])
+        _, sat_doc = emitter().gate_docs(
+            shipped_identity(doc),
+            doc["hooks"][0]["format_text"],
+            doc["profile_id"],
+            emit_objects(objects, sat_object))
         out = Path(out_root) / release
         out.mkdir(parents=True, exist_ok=True)
         sat = out / "saturation-candidate.json"
@@ -235,13 +268,14 @@ def select(release=None, root="/", out_root=OUT_ROOT,
     out = Path(out_root) / release
     out.mkdir(parents=True, exist_ok=True)
     gate_doc, sat_doc = emitter().gate_docs(
-        ident, fmt_text, "gate-" + release)
+        ident, fmt_text, "gate-" + release,
+        emit_objects(objects, sat_object))
     sat = out / "saturation-candidate.json"
     sat.write_text(json.dumps(sat_doc, indent=2) + "\n")
     path = shipped_profile(release, profiles)
     if path is not None:
         drift = binding_drift(json.loads(path.read_text()), ident,
-                              objects)
+                              check)
         if not drift:
             return GateKernel("shipped", release, path, sat)
         reason = ("shipped %s bindings drift: %s"
@@ -308,12 +342,23 @@ def live_gaps(doc, caps):
     return gaps
 
 
-def prepare(caps=("attempt-trace", "mapping-lifecycle", "copy-actual")):
-    """Select the gate kernel, verify its interfaces, publish it."""
+def prepare(caps=("attempt-trace", "mapping-lifecycle", "copy-actual"),
+            memveil=None, objects=None, profiles=None,
+            sat_object=None):
+    """Select the gate kernel, verify its interfaces, publish it.
+
+    Legs that run verified inputs pass the engine, the BPF
+    objects, the saturation input, and the shipped profile
+    dir: selection, its bindings, and the live doctor check
+    then run against those inputs instead of the build tree.
+    Without them the build tree inputs apply.
+    """
     global _SELECTED
-    sel = select()
+    sel = select(objects=objects, profiles=profiles,
+                 sat_object=sat_object)
     if sel.release == os.uname().release:
-        require_live_interfaces(caps)
+        require_live_interfaces(
+            caps, memveil=Path(memveil) if memveil else MEMVEIL)
     SELECTED.parent.mkdir(parents=True, exist_ok=True)
     SELECTED.write_text(Path(sel.gate_doc).read_text())
     _SELECTED = sel

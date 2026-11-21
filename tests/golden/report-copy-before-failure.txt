@@ -1,6 +1,6 @@
 verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld
-memveil report copy-before-failure-session (synthetic, engine memveil-0.1.0)
+memveil report copy-before-failure-session (synthetic, engine memveil-0.1.1)
 window: [1000000000,2000000000)
 duration: 1.000000000 s (1000000000 ns)
 environment: mode=unknown detection=unverified attestation=not_performed evidence=0

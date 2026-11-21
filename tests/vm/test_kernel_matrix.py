@@ -4338,7 +4338,7 @@ def _miss_snaps_text():
 
 def _session_text(recovered=0):
     return json.dumps({
-        "product": {"name": "memveil", "version": "memveil-0.1.0"},
+        "product": {"name": "memveil", "version": "memveil-0.1.1"},
         "capture": {"window": {"start_ns": "1000",
                                "end_ns": "2000"}},
         "quality": {"detail": {"status": "partial",
