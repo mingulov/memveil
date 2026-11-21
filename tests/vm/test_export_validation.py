@@ -1591,3 +1591,49 @@ def test_empty_live_output_failure_retention_writes_failed_receipt(
          'error': 'no verified exports'}]
     assert not (owned / 'gates' / 'topwalk' /
                 'topwalk-live.txt').exists()
+
+
+def bundle_producer_keys():
+    import ast
+    tree = ast.parse(
+        (REPO / 'tests/vm/guest_lifecycle.py').read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) \
+                and getattr(node.func, 'attr', '') == 'write_json' \
+                and node.args \
+                and isinstance(node.args[0], ast.Constant) \
+                and node.args[0].value == 'bundle.json' \
+                and isinstance(node.args[1], ast.Dict):
+            return [key.value for key in node.args[1].keys]
+    raise AssertionError('bundle.json producer not found')
+
+
+def bundle_doc(**over):
+    doc = dict(
+        tarball='memveil-0.1.1.tar.gz', tarball_sha='a' * 64,
+        manifest_sha='b' * 64, files_verified=5, verified=True,
+        bin_sha='c' * 64, attempt_sha='d' * 64,
+        lc_sha='e' * 64, cp_sha='f' * 64,
+        libgcc_sha='0' * 64, report_exit=0,
+        phases={'oracle': [1, 2], 'fail': [2, 3], 'io': [3, 4]},
+        console_tail='ready session=x')
+    doc.update(over)
+    return doc
+
+
+def test_bundle_export_matches_producer_key_inventory(tmp_path):
+    from export_validation import validate_lifecycle_exports
+    assert set(bundle_doc()) == set(bundle_producer_keys())
+    path = tmp_path / 'bundle.json'
+    path.write_text(json.dumps(bundle_doc()))
+    validate_lifecycle_exports({'bundle.json': path}, 'bundle')
+
+
+def test_bundle_export_refuses_retired_bridge_key(tmp_path):
+    from export_validation import validate_lifecycle_exports
+    doc = bundle_doc()
+    doc['bridge_sha'] = doc.pop('libgcc_sha')
+    path = tmp_path / 'bundle.json'
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match='export key inventory drift'):
+        validate_lifecycle_exports({'bundle.json': path}, 'bundle')

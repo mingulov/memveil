@@ -13,6 +13,11 @@
     },
     {
       "count": 1,
+      "id": "tests/vm/test_bundle.py",
+      "reason": "lifecycle VM gates need MEMVEIL_VM_LIFECYCLE=1 with qualified probes"
+    },
+    {
+      "count": 1,
       "id": "tests/vm/test_capture_durability_oracle.py",
       "reason": "checkpoint_probe retired with the Mojo tree (cutover); durability oracle needs a Rust probe binary"
     },

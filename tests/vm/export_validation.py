@@ -510,11 +510,11 @@ def validate_lifecycle_exports(got,sub):
         elif name=='bundle.json':
             doc=strict_json(path.read_text())
             keys(doc,('tarball','tarball_sha','manifest_sha','files_verified','verified',
-                      'bin_sha','attempt_sha','lc_sha','cp_sha','bridge_sha',
+                      'bin_sha','attempt_sha','lc_sha','cp_sha','libgcc_sha',
                       'report_exit','phases','console_tail'))
             if type(doc['tarball']) is not str or not doc['tarball'].endswith('.tar.gz'):
                 raise ValueError('invalid bundle tarball name')
-            for k in ('tarball_sha','manifest_sha','bin_sha','attempt_sha','lc_sha','cp_sha','bridge_sha'):
+            for k in ('tarball_sha','manifest_sha','bin_sha','attempt_sha','lc_sha','cp_sha','libgcc_sha'):
                 sha(doc[k])
             integer(doc['files_verified'])
             if doc['verified'] is not True: raise ValueError('bundle verification failed')
