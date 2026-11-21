@@ -1,0 +1,15 @@
+[package]
+name = "negative-oracle"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# Same pinned parser the product loader uses (aya-obj =0.3.0 in the
+# workspace root): the oracle judges negative objects with the exact
+# parse the load path applies, unarmed (pure ELF/BTF parse, no
+# syscalls, no loads, no attach).
+aya-obj = "=0.3.0"
+
+[workspace]
