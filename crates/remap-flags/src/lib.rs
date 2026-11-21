@@ -24,9 +24,16 @@
 //! every value stays on one logical line.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
-/// Process environment as UTF-8 pairs for flag selection.
+/// Process environment as UTF-8 pairs for flag selection: the live
+/// process environment through `process_env_from`.
+pub fn process_env() -> Result<BTreeMap<String, String>, String> {
+    process_env_from(std::env::vars_os())
+}
+
+/// Process raw environment pairs as UTF-8 for flag selection.
 ///
 /// Entries that are not valid UTF-8 are dropped, except a non-UTF-8 name
 /// matching the target-flags pattern byte-for-byte, which refuses like its
@@ -34,9 +41,12 @@ use std::path::{Component, Path, PathBuf};
 /// must too. A set-but-unreadable value refuses as well when the name feeds
 /// selection (the flag channels, the home lookups, or the target pattern):
 /// treating it as unset would silently fall through to a lower layer.
-pub fn process_env() -> Result<BTreeMap<String, String>, String> {
+fn process_env_from<I>(pairs: I) -> Result<BTreeMap<String, String>, String>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
     let mut env = BTreeMap::new();
-    for (key, value) in std::env::vars_os() {
+    for (key, value) in pairs {
         let name = match key.into_string() {
             Ok(name) => name,
             Err(raw) => {
@@ -1903,22 +1913,13 @@ mod tests {
     }
 
     /// A set-but-unreadable significant name refuses instead of reading as
-    /// unset; anything else unreadable stays dropped. Serial by
-    /// construction: the only test that mutates the process environment,
-    /// and every name is restored afterwards.
+    /// unset; anything else unreadable stays dropped. Raw pairs feed the
+    /// parser directly, so the test never touches the live process
+    /// environment.
     #[test]
     fn non_utf8_significant_env_refuses() {
         use std::os::unix::ffi::OsStrExt;
-        // SAFETY: this is the only test that mutates the process
-        // environment, no other thread reads these names, and every
-        // name is restored before the test returns.
         let raw = std::ffi::OsStr::from_bytes(b"\xff\xfe");
-        let restore = |name: &str, saved: Option<std::ffi::OsString>| unsafe {
-            match saved {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        };
         for name in [
             "RUSTFLAGS",
             "CARGO_ENCODED_RUSTFLAGS",
@@ -1926,41 +1927,36 @@ mod tests {
             "CARGO_HOME",
             "HOME",
         ] {
-            let saved = std::env::var_os(name);
-            unsafe { std::env::set_var(name, raw) };
-            let err = process_env().expect_err("must refuse");
+            let err = process_env_from([(OsString::from(name), raw.to_os_string())])
+                .expect_err("must refuse");
             assert!(err.contains("not valid UTF-8"), "{name}: {err}");
-            restore(name, saved);
         }
         // Presence alone refuses on the target pattern, readable or not.
-        let saved = std::env::var_os("CARGO_TARGET_X_RUSTFLAGS");
-        unsafe { std::env::set_var("CARGO_TARGET_X_RUSTFLAGS", raw) };
-        let err = process_env().expect_err("must refuse");
+        let err = process_env_from([(
+            OsString::from("CARGO_TARGET_X_RUSTFLAGS"),
+            raw.to_os_string(),
+        )])
+        .expect_err("must refuse");
         assert!(err.contains("target rustflags"), "{err}");
-        restore("CARGO_TARGET_X_RUSTFLAGS", saved);
         let raw_name = std::ffi::OsStr::from_bytes(b"CARGO_TARGET_\xff_RUSTFLAGS");
-        let saved = std::env::var_os(raw_name);
-        unsafe { std::env::set_var(raw_name, "x") };
-        let err = process_env().expect_err("must refuse");
+        let err = process_env_from([(raw_name.to_os_string(), OsString::from("x"))])
+            .expect_err("must refuse");
         assert!(err.contains("target rustflags"), "{err}");
-        unsafe {
-            match saved {
-                Some(value) => std::env::set_var(raw_name, value),
-                None => std::env::remove_var(raw_name),
-            }
-        }
         // Unrelated unreadable entries stay dropped, not refused.
-        let probe = std::ffi::OsStr::from_bytes(b"MEMVEIL_REMAP_FLAGS_PROBE");
-        let saved = std::env::var_os(probe);
-        unsafe { std::env::set_var(probe, raw) };
-        let env = process_env().expect("unrelated stays dropped");
+        let env = process_env_from([(
+            OsString::from("MEMVEIL_REMAP_FLAGS_PROBE"),
+            raw.to_os_string(),
+        )])
+        .expect("unrelated stays dropped");
         assert!(!env.keys().any(|key| key == "MEMVEIL_REMAP_FLAGS_PROBE"));
-        unsafe {
-            match saved {
-                Some(value) => std::env::set_var(probe, value),
-                None => std::env::remove_var(probe),
-            }
-        }
+        // Readable pairs pass through untouched.
+        let env = process_env_from([
+            (OsString::from("RUSTFLAGS"), OsString::from("--cfg x")),
+            (OsString::from("ELSEWHERE"), OsString::from("y")),
+        ])
+        .expect("readable pairs pass");
+        assert_eq!(env.get("RUSTFLAGS").map(String::as_str), Some("--cfg x"));
+        assert_eq!(env.get("ELSEWHERE").map(String::as_str), Some("y"));
     }
 
     #[test]
