@@ -371,6 +371,16 @@ def main(argv):
         if os.path.isfile(path):
             digest = core.sha_file(path)
             write(path + ".sha256", digest + "  " + name + "\n")
+    # The producer side of the canonical inventory: refuse
+    # loudly here if the out dir ever stops matching
+    # core.expected_exports, instead of shipping a shape the
+    # host gate must refuse.
+    have = {n for n in os.listdir(out)
+            if not n.endswith(".sha256")}
+    want = set(core.expected_exports(args["stimulus"]))
+    if have != want:
+        fail(out, export, "export inventory drift: %s"
+             % sorted(have ^ want))
     copy_out(out, export)
     print("guest: output-stall %s" % verdict["verdict"])
     return 0

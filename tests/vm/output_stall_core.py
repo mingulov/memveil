@@ -60,6 +60,27 @@ FILLER_CHUNK = FILLER_UNIT * (65536 // len(FILLER_UNIT))
 FINALIZE_LEFT_OVERS = ("checkpoint.json", ".finalization-reserve",
                        "session.finalizing")
 
+# Canonical output-stall export inventory, shared by the guest
+# producer (output_stall_guest.py) and the host gate
+# (test_output_stall.py) so the two cannot drift apart. The
+# guest writes exactly expected_exports(stimulus) data files
+# into its out dir (plus one .sha256 sidecar each) and the
+# host refuses anything else. stimulus.cmd exists only with
+# stimulus on: the guest writes it next to the flood launch.
+EXPORT_ALWAYS = ("verdict.json", "stall.json", "capture.json",
+                 "cleanup.json", "attach.json",
+                 "artifacts.json", "report.json",
+                 "stimulus.json", "record.stdout",
+                 "record.stderr", "stimulus.log", "job.json")
+EXPORT_STIMULUS_ONLY = ("stimulus.cmd",)
+
+
+def expected_exports(stimulus_enabled=True):
+    """Export data-file names for one stimulus mode, in order."""
+    if stimulus_enabled:
+        return EXPORT_ALWAYS + EXPORT_STIMULUS_ONLY
+    return tuple(EXPORT_ALWAYS)
+
 
 def sha_bytes(data):
     return hashlib.sha256(data).hexdigest()

@@ -34,11 +34,9 @@ REPO = Path(__file__).resolve().parent.parent.parent
 GUEST = REPO / "tests" / "vm" / "output_stall_guest.py"
 ARM_ENV = "MEMVEIL_VM_OUTPUT_STALL"
 
-EXPORT_NAMES = ("verdict.json", "stall.json", "capture.json",
-                "cleanup.json", "attach.json",
-                "artifacts.json", "report.json",
-                "stimulus.json", "record.stdout",
-                "record.stderr", "stimulus.log", "job.json")
+# The export inventory is single-sourced from
+# output_stall_core.expected_exports (shared with the guest
+# producer); this module never lists export names itself.
 
 
 def sha_file(path):
@@ -268,22 +266,29 @@ def armed_preflight():
     return {"vng": vng, "harness": harness, "prefix": prefix}
 
 
-def verify_exports(export):
-    """Exact inventory + sidecar check; returns {ok, files, reasons}."""
+def verify_exports(export, stimulus_enabled=True):
+    """Exact inventory + sidecar check; returns {ok, files, reasons}.
+
+    The expected set comes from the canonical inventory shared
+    with the guest producer; stimulus.cmd is expected only
+    with stimulus on. Unknown, missing, or sidecar-tampered
+    files still refuse.
+    """
     result = {"ok": False, "files": {}, "reasons": []}
+    names = core.expected_exports(stimulus_enabled)
     try:
         have = {p.name for p in export.iterdir()}
     except OSError as exc:
         result["reasons"].append("export unreadable: %s" % (exc,))
         return result
-    want = set(EXPORT_NAMES) | \
-        {"%s.sha256" % n for n in EXPORT_NAMES}
+    want = set(names) | \
+        {"%s.sha256" % n for n in names}
     if have != want:
         result["reasons"].append(
             "export inventory drift: %s"
             % sorted(have ^ want))
         return result
-    for name in EXPORT_NAMES:
+    for name in names:
         path = export / name
         sidecar = export / ("%s.sha256" % name)
         try:
@@ -392,7 +397,8 @@ def armed_boot(args, binary, flight):
               "artifacts kept at %s"
               % (proc.returncode, tmp))
         return 1
-    verified = verify_exports(export)
+    stimulus_on = not args.no_stimulus
+    verified = verify_exports(export, stimulus_on)
     if not verified["ok"]:
         print("FAIL vm-output-stall: %s; artifacts kept at %s"
               % ("; ".join(verified["reasons"]), tmp))
@@ -437,7 +443,7 @@ def armed_boot(args, binary, flight):
     out = Path(args.out)
     try:
         out.mkdir(parents=True, exist_ok=True)
-        for name in EXPORT_NAMES:
+        for name in core.expected_exports(stimulus_on):
             shutil.copy2(verified["files"][name], out / name)
             shutil.copy2(export / ("%s.sha256" % name),
                          out / ("%s.sha256" % name))
@@ -475,6 +481,84 @@ def armed_boot(args, binary, flight):
 
 def test_self_test_unarmed(tmp_path):
     assert run_self_test(work=str(tmp_path / "self"))
+
+
+def _write_export_shape(export, names):
+    """Build a well-formed export dir: names + valid sidecars."""
+    export.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        path = export / name
+        path.write_bytes(b"pinned-%s\n" % name.encode())
+        (export / ("%s.sha256" % name)).write_text(
+            "%s  %s\n" % (sha_file(path), name))
+
+
+def test_verify_exports_matches_armed_guest_shape(tmp_path):
+    """The gate accepts the REAL armed export shape (stimulus on).
+
+    Literal pin of every data file output_stall_guest.py writes
+    to its out dir with stimulus on (job.json, artifacts.json,
+    the verdict/stall/capture/cleanup/attach/report/
+    stimulus.json dict, record.stdout, record.stderr,
+    stimulus.log, plus stimulus.cmd written next to the flood
+    launch); the whole dir is then copied out with sidecars.
+    The unarmed self-test never ran this gate, so the missing
+    stimulus.cmd entry hid until the armed run refused with
+    "export inventory drift". The gate derives its expectation
+    from output_stall_core.expected_exports, so this literal
+    pin locks that definition too: any drift either way
+    refuses the pinned shape. Extra, missing, and
+    sidecar-tampered exports must still refuse.
+    """
+    armed_shape = ("verdict.json", "stall.json", "capture.json",
+                   "cleanup.json", "attach.json",
+                   "artifacts.json", "report.json",
+                   "stimulus.json", "record.stdout",
+                   "record.stderr", "stimulus.log", "job.json",
+                   "stimulus.cmd")
+    off_shape = tuple(n for n in armed_shape
+                      if n != "stimulus.cmd")
+    # The armed shape passes (this refused pre-fix with the
+    # exact armed "export inventory drift" failure).
+    export = tmp_path / "export"
+    _write_export_shape(export, armed_shape)
+    verified = verify_exports(export)
+    assert verified["ok"], verified["reasons"]
+    assert sorted(verified["files"]) == sorted(armed_shape)
+    # Stimulus-off runs export the 12-file shape, in both
+    # directions: accepted with the flag off, refused with it
+    # on (missing stimulus.cmd), and the 13-file shape is
+    # refused with the flag off (extra stimulus.cmd).
+    off = tmp_path / "off"
+    _write_export_shape(off, off_shape)
+    assert verify_exports(off, False)["ok"]
+    refused = verify_exports(off)
+    assert not refused["ok"] and any(
+        "stimulus.cmd" in r for r in refused["reasons"])
+    refused = verify_exports(export, False)
+    assert not refused["ok"] and any(
+        "stimulus.cmd" in r for r in refused["reasons"])
+    # Unknown/extra files still refuse.
+    extra = tmp_path / "extra"
+    _write_export_shape(extra, armed_shape + ("evil.json",))
+    refused = verify_exports(extra)
+    assert not refused["ok"] and any(
+        "drift" in r for r in refused["reasons"])
+    # Missing files still refuse.
+    missing = tmp_path / "missing"
+    _write_export_shape(missing, off_shape)
+    (missing / "job.json").unlink()
+    (missing / "job.json.sha256").unlink()
+    refused = verify_exports(missing, False)
+    assert not refused["ok"] and any(
+        "drift" in r for r in refused["reasons"])
+    # Sidecar tamper still refuses.
+    tampered = tmp_path / "tampered"
+    _write_export_shape(tampered, armed_shape)
+    (tampered / "job.json").write_bytes(b"tampered\n")
+    refused = verify_exports(tampered)
+    assert not refused["ok"] and any(
+        "sidecar mismatch" in r for r in refused["reasons"])
 
 
 def test_armed_output_stall():
