@@ -20,6 +20,11 @@ retained seal explicitly and are required for every armed
 run; --expect-release refuses when it conflicts with the
 pinned guest release. The `saturation` case refuses until
 the 4 KiB test objects plus the loader test layout land.
+The guest command line carries only the staged inputs
+filename: the full inputs doc travels through the shared
+export dir, and any guest argv projecting past the kernel
+command-line budget refuses before booting. Every boot
+captures the guest console to the case transcript.
 """
 
 import argparse
@@ -63,6 +68,43 @@ SPEC = REPO / "tests" / "vm" / "fixtures" / "canonical-expectations.json"
 # judges exactly that list, never a private copy.
 EXPORT_NAMES = {case: battery_guest.export_names_for_case(case)
                 for case in core.CASES}
+
+# Guest command-line budget. vng base64-encodes the whole
+# --exec payload into virtme.exec= on the guest kernel
+# command line, so the projected total is the fixed vng
+# overhead plus 4*ceil(exec_chars/3), bounded by the x86
+# COMMAND_LINE_SIZE of 2048. Past that the kernel
+# truncates the exec and the guest hangs silently, so the
+# runner refuses pre-boot instead. Dry-run measurements
+# (vng 1.41, pinned guest row, --rwdir export shape) put
+# the fixed overhead at 654 chars on microvm and 694 on
+# the full-machine faults shape without verbose console
+# capture, 626 and 666 with it; the constant below covers
+# the worst measured shape plus host-path variance (the
+# fixed part embeds host paths, so it shifts with the
+# user and install locations). The exec budget is the
+# largest payload with 768 + 4*ceil(n/3) <= 2048.
+COMMAND_LINE_SIZE = 2048
+VNG_CMDLINE_OVERHEAD = 768
+GUEST_EXEC_BUDGET = 960
+# Real-case guest argvs must project this far under the
+# ceiling, so ordinary argv growth trips the offline test
+# before it trips the kernel.
+CMDLINE_HEADROOM = 400
+
+
+def project_cmdline_total(exec_chars):
+    """Projected kernel cmdline chars for an --exec payload.
+
+    exec_chars is the length of the joined --exec string;
+    vng base64-encodes those exact bytes into virtme.exec=.
+    """
+    return VNG_CMDLINE_OVERHEAD + 4 * ((exec_chars + 2) // 3)
+
+
+def cmdline_over_budget(exec_chars):
+    """True when a payload length must refuse pre-boot."""
+    return project_cmdline_total(exec_chars) > COMMAND_LINE_SIZE
 
 
 def sha_file(path):
@@ -2116,15 +2158,29 @@ def self_test_manifest(tmp):
                      str(exc)[:200])
     commit = core.git_head(str(REPO))
     cases = [c for c in core.CASES if c != "saturation"]
+    try:
+        staged = write_guest_inputs_docs(
+            tmp, cases, os.path.join(tmp, "inputs.json"),
+            built, inputs, None, "")
+    except (ValueError, OSError) as exc:
+        return check("manifest-inputs-stage", False,
+                     str(exc)[:200])
     manifest = core.write_input_manifest(
         os.path.join(tmp, "inputs.json"), inputs,
         {"sha256": built["sha256"], "build": built["build"]},
-        cases, ["test_battery", "--case", "matrix"], commit)
+        cases, ["test_battery", "--case", "matrix"], commit,
+        guest_inputs=staged)
     ok = check("manifest-verify",
                core.verify_input_manifest(
                    manifest, built["path"]) == [],
                "; ".join(core.verify_input_manifest(
                    manifest, built["path"])[:2])) and ok
+    ok = check("manifest-guest-inputs",
+               sorted(manifest["guest_inputs"])
+               == sorted(cases)
+               and manifest["guest_inputs"][
+                   "matrix"]["file"]
+               == core.GUEST_INPUTS_FILE) and ok
     ok = check("manifest-cases",
                manifest["cases"] == cases
                and manifest["schema"] == core.SCHEMA
@@ -2170,6 +2226,9 @@ def self_test_manifest(tmp):
     tampers.append(("candidate",
                     tampered(["candidate", "source",
                               "commit"], "0" * 64)))
+    tampers.append(("guest-inputs",
+                    tampered(["guest_inputs", "matrix",
+                              "sha256"], "0" * 64)))
     for name, other in tampers:
         reasons = core.verify_input_manifest(
             other, built["path"])
@@ -2197,6 +2256,19 @@ def self_test_manifest(tmp):
     # needs the real objects (the loader's exact layout
     # allowlist plus the induced-loss judgment refuse
     # anything else).
+    sat_pair = {"bound": True,
+                "lc": {"path": inputs["lc"]["path"],
+                       "sha256": inputs["lc"]["sha256"]},
+                "cp": {"path": inputs["cp"]["path"],
+                       "sha256": inputs["cp"]["sha256"]}}
+    try:
+        sat_staged = write_guest_inputs_docs(
+            tmp, ["saturation"],
+            os.path.join(tmp, "inputs-bound.json"), built,
+            inputs, sat_pair, "")
+    except (ValueError, OSError) as exc:
+        return check("manifest-saturation-stage", False,
+                     str(exc)[:200])
     bound = core.write_input_manifest(
         os.path.join(tmp, "inputs-bound.json"), inputs,
         {"sha256": built["sha256"], "build": built["build"]},
@@ -2204,7 +2276,8 @@ def self_test_manifest(tmp):
                          "saturation"], commit,
         test_objects={
             "lc": {"path": inputs["lc"]["path"]},
-            "cp": {"path": inputs["cp"]["path"]}})
+            "cp": {"path": inputs["cp"]["path"]}},
+        guest_inputs=sat_staged)
     reasons = core.verify_input_manifest(bound, built["path"])
     ok = check("manifest-saturation-bound",
                reasons == [], "; ".join(reasons[:2])) and ok
@@ -2274,50 +2347,126 @@ def self_test_selection():
     return ok
 
 
-def build_guest_argv(manifest_path, built, inputs, case,
-                     test_objects=None):
-    """Guest command line for one case (host-tested wiring)."""
+def build_guest_inputs(case, manifest_path, built, inputs,
+                       test_objects, expect_release):
+    """Staged inputs doc bytes for one case (host-tested).
+
+    Carries every path and digest the guest flow verifies;
+    the host writes these exact bytes to the shared export
+    dir and binds their digest in the run manifest, while
+    the guest command line carries only the pointer
+    filename. Refuses the saturation case until its test
+    objects bind. test_objects is the manifest test-object
+    entry (or None when unbound).
+    """
     if case not in core.CASES:
         raise ValueError("bad case %r" % (case,))
-    argv = [sys.executable, str(GUEST), "/tmp/vmgate-work",
-           "/tmp/export",
-           "--manifest", str(manifest_path),
-           "--consumer", built["path"],
-           "--consumer-sha", built["sha256"],
-           "--ko", guest_oracle.FIXTURE_KO,
-           "--ko-sha", guest_oracle.KO_SHA256,
-           "--lc", inputs["lc"]["path"],
-           "--lc-sha", inputs["lc"]["sha256"],
-           "--cp", inputs["cp"]["path"],
-           "--cp-sha", inputs["cp"]["sha256"],
-           "--attempt", inputs["attempt"]["path"],
-           "--attempt-sha", inputs["attempt"]["sha256"],
-           "--binary", inputs["binary"]["path"],
-           "--binary-sha", inputs["binary"]["sha256"],
-           "--profile", inputs["profile"]["path"],
-           "--profile-sha", inputs["profile"]["sha256"],
-           "--profiles-dir", os.path.dirname(
-               inputs["profile"]["path"]),
-           "--case", case]
     if case == "saturation":
         if not test_objects or not test_objects.get("bound"):
             raise ValueError(
                 "saturation needs bound 4 KiB test objects")
-        argv += ["--test-lc",
-                test_objects["lc"]["path"],
-                "--test-lc-sha",
-                test_objects["lc"]["sha256"],
-                "--test-cp",
-                test_objects["cp"]["path"],
-                "--test-cp-sha",
-                test_objects["cp"]["sha256"]]
-    return argv
+        test_lc = {"path": test_objects["lc"]["path"],
+                   "sha256": test_objects["lc"]["sha256"]}
+        test_cp = {"path": test_objects["cp"]["path"],
+                   "sha256": test_objects["cp"]["sha256"]}
+    else:
+        test_lc = {"path": "", "sha256": ""}
+        test_cp = {"path": "", "sha256": ""}
+    doc = {
+        "schema": core.GUEST_INPUTS_SCHEMA,
+        "case": case,
+        "expect_release": expect_release,
+        "manifest": str(manifest_path),
+        "consumer": {"path": built["path"],
+                     "sha256": built["sha256"]},
+        "ko": {"path": guest_oracle.FIXTURE_KO,
+               "sha256": guest_oracle.KO_SHA256},
+        "lc": {"path": inputs["lc"]["path"],
+               "sha256": inputs["lc"]["sha256"]},
+        "cp": {"path": inputs["cp"]["path"],
+               "sha256": inputs["cp"]["sha256"]},
+        "attempt": {"path": inputs["attempt"]["path"],
+                    "sha256": inputs["attempt"]["sha256"]},
+        "binary": {"path": inputs["binary"]["path"],
+                   "sha256": inputs["binary"]["sha256"]},
+        "profile": {"path": inputs["profile"]["path"],
+                    "sha256": inputs["profile"]["sha256"]},
+        "profiles_dir": os.path.dirname(
+            inputs["profile"]["path"]),
+        "test_lc": test_lc,
+        "test_cp": test_cp,
+    }
+    return (json.dumps(doc, indent=2, sort_keys=True)
+            + "\n").encode("utf-8")
+
+
+def write_guest_inputs_docs(work, cases, manifest_path, built,
+                            inputs, test_objects,
+                            expect_release):
+    """Stage one inputs doc per case; return {case: path}."""
+    staged = {}
+    for case in cases:
+        blob = build_guest_inputs(
+            case, manifest_path, built, inputs,
+            test_objects, expect_release)
+        doc_path = os.path.join(work, "guest-inputs-%s.json"
+                                % case)
+        with open(doc_path, "wb") as handle:
+            handle.write(blob)
+        staged[case] = doc_path
+    return staged
+
+
+def build_guest_argv(case):
+    """Guest command line for one case (host-tested wiring).
+
+    Carries only the staged inputs filename: the full
+    inputs doc travels through the shared export dir, so
+    the joined payload stays far under GUEST_EXEC_BUDGET
+    however long the host paths grow.
+    """
+    if case not in core.CASES:
+        raise ValueError("bad case %r" % (case,))
+    return [sys.executable, str(GUEST), "/tmp/vmgate-work",
+            "/tmp/export",
+            "--inputs", core.GUEST_INPUTS_FILE]
 
 
 def self_test_guest_argv(tmp):
-    """Guest argv carries every pinned input, explicitly."""
+    """Guest argv carries only the staged inputs pointer."""
     ok = True
-    inputs = {
+    try:
+        argv = build_guest_argv("matrix")
+        joined = " ".join(argv)
+        ok = check("argv-pointer",
+                   argv[-2:] == ["--inputs",
+                                core.GUEST_INPUTS_FILE]
+                   and "--bridge" not in joined
+                   and not re.search(r"[0-9a-f]{64}",
+                                     joined),
+                   joined[-160:]) and ok
+    except ValueError as exc:
+        ok = check("argv-pointer", False, str(exc)) and ok
+    try:
+        argv = build_guest_argv("saturation")
+        ok = check("argv-saturation-shape",
+                   argv[-2:] == ["--inputs",
+                                core.GUEST_INPUTS_FILE],
+                   " ".join(argv)[-160:]) and ok
+    except ValueError as exc:
+        ok = check("argv-saturation-shape", False,
+                   str(exc)) and ok
+    try:
+        build_guest_argv("bogus")
+        ok = check("argv-bogus", False, "accepted") and ok
+    except ValueError:
+        ok = check("argv-bogus", True) and ok
+    return ok
+
+
+def synth_inputs():
+    """Self-consistent inputs dict for offline doc tests."""
+    return {
         "lc": {"path": "/w/lc.o", "sha256": score.C9_LC_SHA},
         "cp": {"path": "/w/cp.o", "sha256": score.C9_CP_SHA},
         "attempt": {"path": "/w/at.o",
@@ -2326,66 +2475,165 @@ def self_test_guest_argv(tmp):
         "profile": {"path": "/w/prof.json",
                     "sha256": core.PROFILE_SHA256},
     }
+
+
+def self_test_cmdline_budget(tmp):
+    """Cmdline projection refuses over budget, frees real argvs."""
+    ok = True
+    ok = check("budget-arithmetic",
+               project_cmdline_total(GUEST_EXEC_BUDGET)
+               == COMMAND_LINE_SIZE
+               and project_cmdline_total(
+                   GUEST_EXEC_BUDGET + 1)
+               == COMMAND_LINE_SIZE + 4) and ok
+    for length, want in ((0, False),
+                         (GUEST_EXEC_BUDGET - 1, False),
+                         (GUEST_EXEC_BUDGET, False),
+                         (GUEST_EXEC_BUDGET + 1, True),
+                         (1939, True)):
+        try:
+            over = cmdline_over_budget(length)
+            ok = check("budget-%d" % length, over == want,
+                       "over=%s want=%s" % (over, want)) \
+                and ok
+        except ValueError as exc:
+            ok = check("budget-%d" % length, False,
+                       str(exc)) and ok
+    worst = 0
+    worst_case = ""
+    all_ok = True
+    for case in core.CASES:
+        argv = build_guest_argv(case)
+        total = project_cmdline_total(
+            len(shlex.join(argv)))
+        if total > worst:
+            worst = total
+            worst_case = case
+        if total > COMMAND_LINE_SIZE - CMDLINE_HEADROOM:
+            all_ok = False
+    ok = check("budget-real-argvs", all_ok,
+               "worst %s projects %d (ceiling %d, "
+               "headroom floor %d)"
+               % (worst_case, worst, COMMAND_LINE_SIZE,
+                  COMMAND_LINE_SIZE - CMDLINE_HEADROOM)) \
+        and ok
+    return ok
+
+
+def self_test_guest_inputs(tmp):
+    """Inputs docs stage, parse, bind, and refuse tampering."""
+    ok = True
     built = {"path": "/w/stress-consume",
              "sha256": "c" * 64}
+    inputs = synth_inputs()
     try:
-        argv = build_guest_argv("/w/inputs.json", built,
-                               inputs, "matrix")
-        joined = " ".join(argv)
-        ok = check("argv-matrix",
-                   "--case matrix" in joined
-                   and score.C9_LC_SHA in joined
-                   and score.C9_CP_SHA in joined
-                   and guest_oracle.KO_SHA256 in joined
-                   and "--bridge" not in joined,
-                   joined[-200:]) and ok
-    except ValueError as exc:
-        ok = check("argv-matrix", False, str(exc)) and ok
+        staged = write_guest_inputs_docs(
+            tmp, ["matrix", "record3"], "/w/inputs.json",
+            built, inputs, None, "")
+    except (ValueError, OSError) as exc:
+        return check("inputs-stage", False, str(exc)[:160])
+    ok = check("inputs-stage",
+               sorted(staged) == ["matrix", "record3"],
+               "%r" % (sorted(staged),)) and ok
     try:
-        argv = build_guest_argv("/w/inputs.json", built,
-                               inputs, "record3")
-        joined = " ".join(argv)
-        ok = check("argv-record3",
-                   "--profile /w/prof.json" in joined
-                   and core.PROFILE_SHA256 in joined
-                   and "--profiles-dir /w" in joined
-                   and "/w/memveil" in joined
-                   and "--bridge" not in joined,
-                   joined[-200:]) and ok
-    except ValueError as exc:
-        ok = check("argv-record3", False, str(exc)) and ok
+        blob = open(staged["matrix"], "rb").read()
+        doc = json.loads(blob.decode("utf-8"))
+        ok = check("inputs-doc",
+                   doc["schema"]
+                   == core.GUEST_INPUTS_SCHEMA
+                   and doc["case"] == "matrix"
+                   and doc["lc"]["sha256"]
+                   == score.C9_LC_SHA
+                   and doc["ko"]["sha256"]
+                   == guest_oracle.KO_SHA256
+                   and doc["test_lc"] == {"path": "",
+                                          "sha256": ""},
+                   blob[:120].decode("utf-8",
+                                     "replace")) and ok
+    except (OSError, ValueError) as exc:
+        ok = check("inputs-doc", False, str(exc)[:160]) \
+            and ok
     try:
-        build_guest_argv("/w/inputs.json", built, inputs,
-                         "saturation")
-        ok = check("argv-saturation-unbound", False,
+        build_guest_inputs("saturation", "/w/inputs.json",
+                           built, inputs, None, "")
+        ok = check("inputs-saturation-unbound", False,
                    "accepted") and ok
     except ValueError as exc:
-        ok = check("argv-saturation-unbound",
+        ok = check("inputs-saturation-unbound",
                    "test objects" in str(exc),
                    str(exc)[:160]) and ok
-    test_objects = {"bound": True,
-                    "lc": {"path": "/w/tlc.o",
-                           "sha256": "d" * 64},
-                    "cp": {"path": "/w/tcp.o",
-                           "sha256": "e" * 64}}
+    bound = {"bound": True,
+             "lc": {"path": "/w/tlc.o", "sha256": "d" * 64},
+             "cp": {"path": "/w/tcp.o", "sha256": "e" * 64}}
     try:
-        argv = build_guest_argv("/w/inputs.json", built,
-                               inputs, "saturation",
-                               test_objects)
-        joined = " ".join(argv)
-        ok = check("argv-saturation-bound",
-                   "--test-lc /w/tlc.o" in joined
-                   and "--test-cp /w/tcp.o" in joined,
-                   joined[-200:]) and ok
+        blob = build_guest_inputs(
+            "saturation", "/w/inputs.json", built, inputs,
+            bound, "")
+        doc = json.loads(blob.decode("utf-8"))
+        ok = check("inputs-saturation-bound",
+                   doc["test_lc"]["path"] == "/w/tlc.o"
+                   and doc["test_cp"]["sha256"]
+                   == "e" * 64,
+                   blob[:120].decode("utf-8",
+                                     "replace")) and ok
     except ValueError as exc:
-        ok = check("argv-saturation-bound", False,
-                   str(exc)) and ok
+        ok = check("inputs-saturation-bound", False,
+                   str(exc)[:160]) and ok
+    export = os.path.join(tmp, "export")
+    os.makedirs(export, exist_ok=True)
+    staged_copy = os.path.join(export, core.GUEST_INPUTS_FILE)
+    shutil.copyfile(staged["matrix"], staged_copy)
+    manifest_path = os.path.join(tmp, "manifest.json")
+    with open(staged_copy, "r+b") as handle:
+        raw = handle.read().replace(b"/w/inputs.json",
+                                    manifest_path.encode())
+        handle.seek(0)
+        handle.write(raw)
+        handle.truncate()
+    with open(manifest_path, "w") as handle:
+        handle.write(json.dumps({
+            "guest_inputs": {
+                "matrix": {
+                    "file": core.GUEST_INPUTS_FILE,
+                    "sha256": sha_file(staged_copy),
+                },
+            },
+        }))
     try:
-        build_guest_argv("/w/inputs.json", built, inputs,
-                         "bogus")
-        ok = check("argv-bogus", False, "accepted") and ok
-    except ValueError:
-        ok = check("argv-bogus", True) and ok
+        fields, observed = battery_guest.parse_guest_inputs(
+            export, core.GUEST_INPUTS_FILE)
+        ok = check("inputs-parse",
+                   fields["case"] == "matrix"
+                   and fields["lc_sha"] == score.C9_LC_SHA
+                   and fields["manifest"] == manifest_path
+                   and observed == sha_file(staged_copy),
+                   observed[:16]) and ok
+    except ValueError as exc:
+        ok = check("inputs-parse", False,
+                   str(exc)[:160]) and ok
+    with open(staged_copy, "ab") as handle:
+        handle.write(b" ")
+    try:
+        battery_guest.parse_guest_inputs(
+            export, core.GUEST_INPUTS_FILE)
+        ok = check("inputs-tamper", False, "accepted") \
+            and ok
+    except ValueError as exc:
+        ok = check("inputs-tamper",
+                   "differ from the manifest binding"
+                   in str(exc),
+                   str(exc)[:160]) and ok
+    for label, name in (("absolute", "/etc/hostname"),
+                        ("escape", "../inputs.json"),
+                        ("empty", "")):
+        try:
+            battery_guest.parse_guest_inputs(export, name)
+            ok = check("inputs-pointer-%s" % label, False,
+                       "accepted") and ok
+        except ValueError as exc:
+            ok = check("inputs-pointer-%s" % label,
+                       "bare filename" in str(exc),
+                       str(exc)[:160]) and ok
     return ok
 
 
@@ -2426,6 +2674,233 @@ def self_test_identity():
     return ok
 
 
+def self_test_inputs_binding(tmp):
+    """Guest-observed inputs digest must match the binding."""
+    ok = True
+    export = os.path.join(tmp, "bound-export")
+    os.makedirs(export, exist_ok=True)
+    staged = os.path.join(export, core.GUEST_INPUTS_FILE)
+    with open(staged, "wb") as handle:
+        handle.write(b'{"case": "matrix"}\n')
+    digest = sha_file(staged)
+    manifest = {"guest_inputs": {
+        "matrix": {"file": core.GUEST_INPUTS_FILE,
+                   "sha256": digest}}}
+    verify_path = os.path.join(tmp, "input-verify.json")
+
+    def files_for(doc):
+        with open(verify_path, "w") as handle:
+            handle.write(json.dumps(doc))
+        return {"input-verify.json": Path(verify_path)}
+
+    good = {"case": "matrix",
+            "guest_inputs_file": core.GUEST_INPUTS_FILE,
+            "guest_inputs_sha256": digest}
+    ok = check("binding-clean",
+               check_guest_inputs_binding(
+                   files_for(good), "matrix", manifest,
+                   export) == []) and ok
+    drifted = dict(good, guest_inputs_sha256="0" * 64)
+    ok = check("binding-drift",
+               check_guest_inputs_binding(
+                   files_for(drifted), "matrix", manifest,
+                   export) != [],
+               "drift passed") and ok
+    renamed = dict(good, case="copy")
+    ok = check("binding-case",
+               check_guest_inputs_binding(
+                   files_for(renamed), "matrix", manifest,
+                   export) != [],
+               "case swap passed") and ok
+    with open(staged, "ab") as handle:
+        handle.write(b" ")
+    ok = check("binding-staged",
+               check_guest_inputs_binding(
+                   files_for(good), "matrix", manifest,
+                   export) != [],
+               "staged tamper passed") and ok
+    os.unlink(verify_path)
+    ok = check("binding-missing",
+               check_guest_inputs_binding(
+                   {}, "matrix", manifest, export) != [],
+               "missing verify passed") and ok
+    return ok
+
+
+def self_test_inputs_manifest(tmp):
+    """Manifest guest-inputs round-trip without the dist seal."""
+    ok = True
+    consumer_path = os.path.join(tmp, "consumer")
+    with open(consumer_path, "wb") as handle:
+        handle.write(b"synthetic consumer")
+    consumer_sha = sha_file(consumer_path)
+    binary_path = os.path.join(tmp, "memveil")
+    with open(binary_path, "wb") as handle:
+        handle.write(b"synthetic binary")
+    binary_sha = sha_file(binary_path)
+    aya = REPO / "tests" / "vm" / "fixtures" / "aya"
+    inputs = {
+        "binary": {"path": binary_path,
+                   "sha256": binary_sha},
+        "attempt": {"path": str(
+            aya / "swiotlb_attempt.bpf.o"),
+            "sha256": score.C9_ATTEMPT_SHA},
+        "lc": {"path": str(
+            aya / "swiotlb_lifecycle.bpf.o"),
+            "sha256": score.C9_LC_SHA},
+        "cp": {"path": str(
+            aya / "swiotlb_copy.bpf.o"),
+            "sha256": score.C9_CP_SHA},
+        "profile": {"path": str(REPO / core.PROFILE_REL),
+                    "sha256": core.PROFILE_SHA256,
+                    "profile_id": core.PROFILE_ID},
+        "candidate": {
+            "source": {"commit": score.C9_SOURCE_COMMIT},
+            "bundle_manifest_sha256":
+                score.C9_BUNDLE_MANIFEST_SHA,
+            "bundle": {"sha256": score.C9_BUNDLE_SHA},
+            "files": {
+                "bin/memveil": binary_sha,
+                "bpf/swiotlb_attempt.bpf.o":
+                    score.C9_ATTEMPT_SHA,
+                "bpf/swiotlb_lifecycle.bpf.o":
+                    score.C9_LC_SHA,
+                "bpf/swiotlb_copy.bpf.o": score.C9_CP_SHA,
+            },
+        },
+        "oracle": {
+            "ko": guest_oracle.FIXTURE_KO,
+            "ko_sha256": guest_oracle.KO_SHA256,
+            "ko_vermagic": guest_oracle.GUEST_VERMAGIC,
+            "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
+            "guest_release": guest_oracle.GUEST_RELEASE,
+        },
+        "guest": {
+            "row": "7.0",
+            "vng_tag": core.VNG_TAG,
+            "release": core.EXPECT_RELEASE,
+            "vmlinuz_sha256": core.VMLINUZ_SHA256,
+            "modules_manifest_sha256":
+                core.MODULES_MANIFEST_SHA256,
+        },
+    }
+    built = {"path": consumer_path, "sha256": consumer_sha,
+             "build": "synthetic"}
+    cases = ["matrix", "record3"]
+    try:
+        staged = write_guest_inputs_docs(
+            tmp, cases, os.path.join(tmp, "syn-inputs.json"),
+            built, inputs, None, "")
+    except (ValueError, OSError) as exc:
+        return check("syn-inputs-stage", False,
+                     str(exc)[:160])
+    try:
+        manifest = core.write_input_manifest(
+            os.path.join(tmp, "syn-inputs.json"), inputs,
+            {"sha256": consumer_sha, "build": "synthetic"},
+            cases, ["synthetic"], "syn-commit",
+            guest_inputs=staged)
+    except (ValueError, OSError) as exc:
+        return check("syn-inputs-write", False,
+                     str(exc)[:160])
+    reasons = core.verify_input_manifest(
+        manifest, consumer_path)
+    ok = check("syn-inputs-verify", reasons == [],
+               "; ".join(reasons[:2])) and ok
+    import copy
+    drifted = copy.deepcopy(manifest)
+    drifted["guest_inputs"]["matrix"]["sha256"] = "0" * 64
+    ok = check("syn-inputs-tamper",
+               core.verify_input_manifest(
+                   drifted, consumer_path) != [],
+               "tamper passed") and ok
+    dropped = copy.deepcopy(manifest)
+    del dropped["guest_inputs"]["record3"]
+    ok = check("syn-inputs-dropped",
+               any("record3" in reason for reason in
+                   core.verify_input_manifest(
+                       dropped, consumer_path)),
+               "dropped entry passed") and ok
+    with open(staged["matrix"], "ab") as handle:
+        handle.write(b" ")
+    ok = check("syn-inputs-bytes",
+               any("bytes differ" in reason
+                   for reason in core.verify_input_manifest(
+                       manifest, consumer_path)),
+               "rewritten bytes passed") and ok
+    return ok
+
+
+def self_test_console_capture(tmp):
+    """Boots stay verbose and transcripts land in receipts."""
+    ok = True
+    flight = {"prefix": ["vng"], "harness": {}}
+    micro = build_vng_argv("matrix", flight, "/tmp/x",
+                           "exec payload")
+    full = build_vng_argv("faults", flight, "/tmp/x",
+                          "exec payload")
+    ok = check("console-verbose",
+               "--verbose" in micro and "--verbose" in full
+               and micro[-2:] == ["--exec", "exec payload"]
+               and "--disable-microvm" not in micro
+               and "--disable-microvm" in full,
+               " ".join(micro[-6:])) and ok
+    boot = os.path.join(tmp, "mock-boot")
+    export = os.path.join(boot, "export")
+    os.makedirs(export, exist_ok=True)
+    transcript = ("[boot] console line\n"
+                  "battery-guest: matrix exported\n")
+    for name, blob in (
+            ("boot.json", b'{"case": "matrix"}\n'),
+            ("guest.stdout", b"guest out\n"),
+            ("guest.stderr", transcript.encode()),
+            ("guest.exit", b"0")):
+        with open(os.path.join(boot, name), "wb") as handle:
+            handle.write(blob)
+    staged = b'{"case": "matrix"}\n'
+    with open(os.path.join(export, core.GUEST_INPUTS_FILE),
+              "wb") as handle:
+        handle.write(staged)
+    name = "identity.json"
+    with open(os.path.join(export, name), "wb") as handle:
+        handle.write(b"{}\n")
+    digest = sha_file(os.path.join(export, name))
+    with open(os.path.join(export, name + ".sha256"),
+              "w") as handle:
+        handle.write("%s  %s\n" % (digest, name))
+    manifest_path = os.path.join(tmp, "mock-inputs.json")
+    with open(manifest_path, "w") as handle:
+        handle.write("{}\n")
+    manifest = {"runner_commit": "mock",
+                "consumer": {}, "candidate": {},
+                "oracle": {}, "guest": {}, "profile": {}}
+    out = Path(tmp) / "receipt" / "matrix"
+    try:
+        save_case_receipts(
+            out, "matrix", Path(boot), Path(export),
+            {name: Path(export) / name}, [name],
+            manifest_path, manifest, [], {})
+    except OSError as exc:
+        return check("console-receipt", False,
+                     str(exc)[:160])
+    try:
+        kept = (out / "host-guest.stderr").read_text()
+        verdict = json.loads(
+            (out / "host-verdict.json").read_text())
+        pinned = (out / "host-guest-inputs.json"
+                  ).read_bytes()
+        ok = check("console-receipt",
+                   kept == transcript
+                   and verdict["console_transcript"]
+                   == "host-guest.stderr"
+                   and pinned == staged,
+                   kept[:80]) and ok
+    except (OSError, ValueError) as exc:
+        ok = check("console-receipt", False,
+                   str(exc)[:160]) and ok
+    return ok
+
+
 def run_self_test(work=None):
     """Full offline suite: proofs plus unarmed checks. No boot."""
     print("battery self-test (unarmed, offline)")
@@ -2461,6 +2936,11 @@ def run_self_test(work=None):
         ok = self_test_manifest(tmp) and ok
         ok = self_test_selection() and ok
         ok = self_test_guest_argv(tmp) and ok
+        ok = self_test_cmdline_budget(tmp) and ok
+        ok = self_test_guest_inputs(tmp) and ok
+        ok = self_test_inputs_binding(tmp) and ok
+        ok = self_test_inputs_manifest(tmp) and ok
+        ok = self_test_console_capture(tmp) and ok
         ok = self_test_identity() and ok
     finally:
         if not keep:
@@ -2512,7 +2992,12 @@ def verify_guest_cache():
 
 
 def verify_exports(export, case):
-    """Exact inventory + sidecar check; returns {ok, files, reasons}."""
+    """Exact inventory + sidecar check; returns {ok, files, reasons}.
+
+    The host-staged inputs doc shares the export dir but
+    is not guest output: the binding check verifies it
+    separately, so the guest inventory excludes it here.
+    """
     names = EXPORT_NAMES[case]
     result = {"ok": False, "files": {}, "reasons": []}
     try:
@@ -2520,6 +3005,7 @@ def verify_exports(export, case):
     except OSError as exc:
         result["reasons"].append("export unreadable: %s" % (exc,))
         return result
+    have.discard(core.GUEST_INPUTS_FILE)
     want = set(names) | {"%s.sha256" % n for n in names}
     if have != want:
         result["reasons"].append(
@@ -2542,29 +3028,151 @@ def verify_exports(export, case):
     return result
 
 
-def armed_boot_case(case, args, manifest_path, manifest, built,
-                    inputs, flight, work):
-    """Boot once, run one case in-guest, judge host-side."""
-    from vm_process import run_owned_guest
-    names = EXPORT_NAMES[case]
-    tmp = Path(tempfile.mkdtemp(prefix="vmgate-battery-boot-"))
-    export = tmp / "export"
-    export.mkdir()
-    guest_argv = build_guest_argv(
-        manifest_path, built, inputs, case,
-        manifest.get("test_objects"))
-    cmd = flight["prefix"] + ["--run", core.VNG_TAG, "-m", "6G",
-                              "--append", "swiotlb=force"]
+def build_vng_argv(case, flight, export, exec_str):
+    """vng command for one case (host-tested wiring).
+
+    Always verbose: that routes the guest console to the
+    captured stderr instead of /dev/null, so a boot that
+    never reaches the guest flow still leaves a console
+    transcript in the case's host-guest.stderr.
+    """
+    cmd = flight["prefix"] + ["--run", core.VNG_TAG, "-m",
+                              "6G", "--append",
+                              "swiotlb=force", "--verbose"]
     if core.CASE_NETWORK[case]:
         cmd += ["--disable-microvm", "--network", "user",
                 "--qemu-opts=-cpu host",
                 "--qemu-opts=-device pcnet,netdev=pcnet0"
                 " -netdev user,id=pcnet0,net=10.0.3.0/24"]
     cmd += ["--rwdir=/tmp/export=%s" % (export,),
-            "--exec", shlex.join(guest_argv)]
+            "--exec", exec_str]
+    return cmd
+
+
+def check_guest_inputs_binding(files, case, manifest, export):
+    """Refuse unless the guest saw the exact staged bytes.
+
+    Returns a reason list (empty ok): the guest-observed
+    digest exported in input-verify.json must equal the
+    manifest-bound digest for this case, and the staged
+    copy still in the export dir must hash the same.
+    """
+    try:
+        observed = json.loads(
+            files["input-verify.json"].read_text())
+    except (KeyError, ValueError, OSError) as exc:
+        return ["%s: input-verify unreadable: %s"
+                % (case, exc)]
+    bad = []
+    if observed.get("case") != case:
+        bad.append("%s: input-verify names case %r"
+                   % (case, observed.get("case")))
+    entry = manifest.get("guest_inputs", {}).get(case, {})
+    if observed.get("guest_inputs_file") != entry.get("file"):
+        bad.append("%s: guest saw inputs file %r, bound %r"
+                   % (case, observed.get("guest_inputs_file"),
+                      entry.get("file")))
+    if observed.get("guest_inputs_sha256") \
+            != entry.get("sha256"):
+        bad.append("%s: guest-observed inputs digest "
+                   "differs from the manifest binding"
+                   % case)
+    try:
+        staged = sha_file(str(Path(export)
+                              / core.GUEST_INPUTS_FILE))
+    except OSError as exc:
+        return sorted(bad + ["%s: staged inputs "
+                             "unreadable: %s" % (case, exc)])
+    if staged != entry.get("sha256"):
+        bad.append("%s: staged inputs bytes differ from "
+                   "the manifest binding" % case)
+    return sorted(bad)
+
+
+def save_case_receipts(out, case, tmp, export, files, names,
+                       manifest_path, manifest, bad, metrics):
+    """Copy one case receipt set; raises OSError on failure.
+
+    The boot console transcript lands in the receipt as
+    host-guest.stderr (the verbose boot routes the guest
+    console to the captured stderr);
+    host-guest-inputs.json pins the staged inputs bytes
+    the guest had to see.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        shutil.copy2(files[name], out / name)
+        shutil.copy2(export / ("%s.sha256" % name),
+                     out / ("%s.sha256" % name))
+    shutil.copy2(manifest_path, out / "inputs.json")
+    shutil.copy2(export / core.GUEST_INPUTS_FILE,
+                 out / "host-guest-inputs.json")
+    for name in ("boot.json", "guest.stdout",
+                 "guest.stderr", "guest.exit"):
+        shutil.copy2(tmp / name, out / ("host-%s" % name))
+    (out / "host-verdict.json").write_text(json.dumps(
+        {"verdict": "PASS" if not bad else "FAIL",
+         "case": case, "reasons": bad, "metrics": metrics,
+         "console_transcript": "host-guest.stderr",
+         "runner_commit": manifest["runner_commit"],
+         "consumer": manifest["consumer"],
+         "candidate": manifest["candidate"],
+         "oracle": manifest["oracle"],
+         "guest": manifest["guest"],
+         "profile": manifest["profile"]},
+        indent=2, sort_keys=True) + "\n")
+
+
+def armed_boot_case(case, args, manifest_path, manifest,
+                    staged_inputs, flight):
+    """Boot once, run one case in-guest, judge host-side."""
+    from vm_process import run_owned_guest
+    names = EXPORT_NAMES[case]
+    tmp = Path(tempfile.mkdtemp(prefix="vmgate-battery-boot-"))
+    export = tmp / "export"
+    export.mkdir()
+    guest_argv = build_guest_argv(case)
+    exec_str = shlex.join(guest_argv)
+    projected = project_cmdline_total(len(exec_str))
+    if cmdline_over_budget(len(exec_str)):
+        (tmp / "boot.json").write_text(json.dumps(
+            {"case": case, "refused": "cmdline budget",
+             "exec_chars": len(exec_str),
+             "projected_cmdline": projected,
+             "cmdline_ceiling": COMMAND_LINE_SIZE,
+             "exec_budget": GUEST_EXEC_BUDGET},
+            indent=2, sort_keys=True) + "\n")
+        print("FAIL vm-battery %s: guest argv projects to "
+              "%d cmdline chars (exec %d chars, budget %d "
+              "total / %d exec); refusing boot, artifacts "
+              "kept at %s"
+              % (case, projected, len(exec_str),
+                 COMMAND_LINE_SIZE, GUEST_EXEC_BUDGET, tmp))
+        return 2
+    try:
+        shutil.copyfile(staged_inputs,
+                        export / core.GUEST_INPUTS_FILE)
+        copied = sha_file(export / core.GUEST_INPUTS_FILE)
+    except OSError as exc:
+        print("FAIL vm-battery %s: staged inputs copy "
+              "failed (%s); artifacts kept at %s"
+              % (case, exc, tmp))
+        return 1
+    bound = manifest.get("guest_inputs", {}).get(case, {})
+    if copied != bound.get("sha256"):
+        print("FAIL vm-battery %s: staged inputs copy "
+              "differs from the manifest binding; "
+              "artifacts kept at %s" % (case, tmp))
+        return 1
+    cmd = build_vng_argv(case, flight, export, exec_str)
     (tmp / "boot.json").write_text(json.dumps(
         {"case": case, "cmd": cmd, "manifest": manifest,
-         "harness": flight["harness"]},
+         "harness": flight["harness"],
+         "exec_chars": len(exec_str),
+         "projected_cmdline": projected,
+         "cmdline_ceiling": COMMAND_LINE_SIZE,
+         "exec_budget": GUEST_EXEC_BUDGET,
+         "guest_inputs_sha256": copied},
         indent=2, sort_keys=True) + "\n")
     timeout = core.CASE_TIMEOUTS[case]
     try:
@@ -2592,27 +3200,14 @@ def armed_boot_case(case, args, manifest_path, manifest, built,
               % (case, "; ".join(verified["reasons"]), tmp))
         return 1
     bad, metrics = judge_case(verified["files"], case, manifest)
+    bad = sorted(bad + check_guest_inputs_binding(
+        verified["files"], case, manifest, export))
     out = Path(args.out) / case
     try:
-        out.mkdir(parents=True, exist_ok=True)
-        for name in names:
-            shutil.copy2(verified["files"][name], out / name)
-            shutil.copy2(export / ("%s.sha256" % name),
-                         out / ("%s.sha256" % name))
-        shutil.copy2(manifest_path, out / "inputs.json")
-        for name in ("boot.json", "guest.stdout",
-                     "guest.stderr", "guest.exit"):
-            shutil.copy2(tmp / name, out / ("host-%s" % name))
-        (out / "host-verdict.json").write_text(json.dumps(
-            {"verdict": "PASS" if not bad else "FAIL",
-             "case": case, "reasons": bad, "metrics": metrics,
-             "runner_commit": manifest["runner_commit"],
-             "consumer": manifest["consumer"],
-             "candidate": manifest["candidate"],
-             "oracle": manifest["oracle"],
-             "guest": manifest["guest"],
-             "profile": manifest["profile"]},
-            indent=2, sort_keys=True) + "\n")
+        save_case_receipts(out, case, tmp, export,
+                           verified["files"], names,
+                           manifest_path, manifest, bad,
+                           metrics)
     except OSError as exc:
         print("FAIL vm-battery %s: receipt failed (%s); "
               "artifacts kept at %s" % (case, exc, tmp))
@@ -2685,10 +3280,19 @@ def armed_run(args):
     # No test-object inputs exist yet, so saturation stays
     # unbound here; the writer already takes the bound pair
     # once the small-ring objects land.
+    try:
+        staged = write_guest_inputs_docs(
+            str(work), cases, manifest_path, built, inputs,
+            None, args.expect_release)
+    except (ValueError, OSError) as exc:
+        print("FAIL vm-battery: %s" % exc)
+        shutil.rmtree(work, ignore_errors=True)
+        return 1
     manifest = core.write_input_manifest(
         str(manifest_path), inputs,
         {"sha256": built["sha256"], "build": built["build"]},
-        cases, sys.argv, commit)
+        cases, sys.argv, commit,
+        guest_inputs=staged)
     reasons = core.verify_input_manifest(manifest,
                                          built["path"])
     if reasons:
@@ -2714,8 +3318,8 @@ def armed_run(args):
             return 1
         for case in cases:
             step = armed_boot_case(case, args, manifest_path,
-                                   manifest, built, inputs,
-                                   flight, work)
+                                   manifest, staged[case],
+                                   flight)
             if step == 2:
                 rc = step
                 break

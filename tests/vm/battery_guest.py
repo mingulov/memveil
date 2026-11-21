@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Scenario-battery guest flow: one case per boot.
 
-Runs as root inside the virtme-ng guest. Re-verifies the
-exact consumer, object, binary, profile, and oracle bytes
+Runs as root inside the virtme-ng guest. The host stages
+the full inputs doc in the shared export dir and passes
+only its filename via --inputs; this flow hashes those
+exact bytes first and refuses unless the run manifest
+binds the same digest. It then re-verifies the exact
+consumer, object, binary, profile, and oracle bytes
 from the run manifest before attaching, then runs one
 battery case: the consumer legs (matrix/copy/canonical/
 saturation/stop/skipsync) drive the test-only Rust consumer
@@ -53,6 +57,14 @@ CASES = ("matrix", "copy", "canonical-c", "canonical-e",
          "saturation", "stop", "faults", "record3",
          "skipsync")
 FAULT_CAPTURES = ("f3a", "f3b", "f5a", "f5b", "f5c", "f6")
+
+# Guest-inputs doc schema, mirrored from the host
+# battery core (which owns the writer): the host stages
+# the full inputs doc in the shared export dir and the
+# guest command line carries only the pointer filename.
+# The guest hashes the exact bytes first and refuses
+# unless the run manifest binds the same digest.
+GUEST_INPUTS_SCHEMA = "memveil-battery-guest-inputs/1"
 
 
 def export_names_for_case(case):
@@ -105,6 +117,110 @@ def fail(msg):
     """Abort the guest flow; the host judges this failed."""
     print("battery-guest: FAIL: %s" % msg, file=sys.stderr)
     sys.exit(1)
+
+
+def parse_guest_inputs(export_dir, name):
+    """Read the staged inputs doc; return (fields, observed_sha).
+
+    Runs before anything else in the guest: the pointer
+    must be a bare filename resolved against the export
+    dir, the exact bytes are hashed first, and the run
+    manifest named inside must bind the same filename and
+    digest for the doc's case. Raises ValueError; the
+    caller maps it to the guest abort.
+    """
+    if not name or not isinstance(name, str) \
+            or os.path.basename(name) != name \
+            or name in (".", "..") \
+            or os.path.isabs(name):
+        raise ValueError(
+            "inputs pointer must be a bare filename, "
+            "got %r" % (name,))
+    path = os.path.join(export_dir, name)
+    try:
+        with open(path, "rb") as handle:
+            blob = handle.read()
+    except OSError as exc:
+        raise ValueError("cannot read guest inputs %r: %s"
+                         % (name, exc))
+    observed = hashlib.sha256(blob).hexdigest()
+    try:
+        doc = json.loads(blob.decode("utf-8"))
+    except ValueError as exc:
+        raise ValueError("guest inputs %r are not JSON: %s"
+                         % (name, exc))
+    if not isinstance(doc, dict):
+        raise ValueError("guest inputs %r are not a mapping"
+                         % (name,))
+    if doc.get("schema") != GUEST_INPUTS_SCHEMA:
+        raise ValueError("guest inputs schema %r"
+                         % (doc.get("schema"),))
+    case = doc.get("case")
+    if case not in CASES:
+        raise ValueError("bad case %r" % (case,))
+    manifest_path = doc.get("manifest")
+    if not manifest_path or not isinstance(
+            manifest_path, str):
+        raise ValueError("guest inputs lack a run manifest")
+    try:
+        with open(manifest_path) as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read run manifest: %s"
+                         % exc)
+    staged = manifest.get("guest_inputs", {})
+    entry = staged.get(case, {}) if isinstance(
+        staged, dict) else {}
+    if not isinstance(entry, dict) \
+            or not entry.get("sha256"):
+        raise ValueError("run manifest lacks a "
+                         "guest-inputs binding for %s"
+                         % case)
+    if entry.get("file") != name:
+        raise ValueError("guest inputs file %r is not the "
+                         "bound doc for %s" % (name, case))
+    if entry.get("sha256") != observed:
+        raise ValueError(
+            "guest inputs bytes differ from the manifest "
+            "binding for %s: observed %s... bound %s..."
+            % (case, observed[:16],
+               str(entry.get("sha256"))[:16]))
+    fields = {"case": case, "manifest": manifest_path}
+    for key in ("consumer", "ko", "lc", "cp", "attempt",
+                "binary", "profile"):
+        section = doc.get(key, {})
+        if not isinstance(section, dict) \
+                or not isinstance(
+                    section.get("path"), str) \
+                or not section.get("path") \
+                or not isinstance(
+                    section.get("sha256"), str) \
+                or not section.get("sha256"):
+            raise ValueError("guest inputs lack %s "
+                             "path/digest" % key)
+        fields[key] = section["path"]
+        fields[key + "_sha"] = section["sha256"]
+    for key in ("test_lc", "test_cp"):
+        section = doc.get(key, {})
+        if not isinstance(section, dict) \
+                or not isinstance(
+                    section.get("path"), str) \
+                or not isinstance(
+                    section.get("sha256"), str):
+            raise ValueError("guest inputs lack %s "
+                             "path/digest" % key)
+        fields[key] = section["path"]
+        fields[key + "_sha"] = section["sha256"]
+    if not isinstance(doc.get("profiles_dir"), str) \
+            or not doc.get("profiles_dir"):
+        raise ValueError(
+            "guest inputs lack a profiles dir")
+    fields["profiles_dir"] = doc["profiles_dir"]
+    if not isinstance(doc.get("expect_release"), str):
+        raise ValueError(
+            "guest inputs lack an expect-release")
+    fields["expect_release"] = doc["expect_release"]
+    return fields, observed
 
 
 def sh(args, timeout=TIMEOUT_DMESG, **kw):
@@ -216,6 +332,8 @@ class Gate:
         self.test_cp = args.test_cp
         self.test_lc_sha = args.test_lc_sha
         self.test_cp_sha = args.test_cp_sha
+        self.guest_inputs_file = args.guest_inputs_file
+        self.guest_inputs_sha = args.guest_inputs_sha
         try:
             with open(args.manifest) as handle:
                 self.manifest = json.load(handle)
@@ -336,6 +454,8 @@ class Gate:
         self.write_json("input-verify.json", {
             "case": self.case,
             "digests": checked,
+            "guest_inputs_file": self.guest_inputs_file,
+            "guest_inputs_sha256": self.guest_inputs_sha,
             "manifest_schema": manifest.get("schema"),
             "runner_commit": manifest.get("runner_commit"),
         })
@@ -1145,30 +1265,20 @@ def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument("work")
     parser.add_argument("export")
-    parser.add_argument("--manifest", required=True)
-    parser.add_argument("--consumer", required=True)
-    parser.add_argument("--consumer-sha", required=True)
-    parser.add_argument("--ko", required=True)
-    parser.add_argument("--ko-sha", required=True)
-    parser.add_argument("--lc", required=True)
-    parser.add_argument("--lc-sha", required=True)
-    parser.add_argument("--cp", required=True)
-    parser.add_argument("--cp-sha", required=True)
-    parser.add_argument("--attempt", required=True)
-    parser.add_argument("--attempt-sha", required=True)
-    parser.add_argument("--binary", required=True)
-    parser.add_argument("--binary-sha", required=True)
-    parser.add_argument("--profile", required=True)
-    parser.add_argument("--profile-sha", required=True)
-    parser.add_argument("--profiles-dir", required=True)
-    parser.add_argument("--test-lc", default="")
-    parser.add_argument("--test-cp", default="")
-    parser.add_argument("--test-lc-sha", default="")
-    parser.add_argument("--test-cp-sha", default="")
-    parser.add_argument("--case", required=True)
-    parser.add_argument("--expect-release", default="")
+    parser.add_argument("--inputs", required=True,
+                        help="staged inputs doc filename "
+                             "(a bare name resolved "
+                             "against the export dir)")
     args = parser.parse_args(argv)
-    gate = Gate(args.work, args.export, args)
+    try:
+        fields, observed = parse_guest_inputs(
+            args.export, args.inputs)
+    except ValueError as exc:
+        fail(str(exc))
+    fields["guest_inputs_file"] = args.inputs
+    fields["guest_inputs_sha"] = observed
+    gate = Gate(args.work, args.export,
+                argparse.Namespace(**fields))
     try:
         if gate.case == "matrix":
             run_matrix(gate)

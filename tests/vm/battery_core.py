@@ -41,6 +41,18 @@ import stress_core as core  # noqa: E402
 
 SCHEMA = "memveil-battery-inputs/1"
 
+# Guest-inputs delivery: the full guest argv no longer
+# fits the kernel command line once vng base64-encodes the
+# --exec payload into virtme.exec=, so the host stages the
+# complete inputs doc in the already-shared export dir and
+# the guest command line carries only this stable pointer
+# filename (a fixed token: never a digest, never a host
+# path). The guest resolves it against its export dir,
+# hashes the exact bytes first, and refuses unless the run
+# manifest binds the same digest for its case.
+GUEST_INPUTS_FILE = "guest-inputs.json"
+GUEST_INPUTS_SCHEMA = "memveil-battery-guest-inputs/1"
+
 # The only guest release this battery admits, single-sourced
 # from the guest flow. The oracle fixture loads only there,
 # so the host pins below must all name it too.
@@ -341,14 +353,19 @@ def materialize(repo, work, candidate_path, bundle_path):
 
 
 def write_input_manifest(path, inputs, consumer, cases, argv,
-                         runner_commit, test_objects=None):
+                         runner_commit, test_objects=None,
+                         guest_inputs=None):
     """Write the battery input manifest binding every byte.
 
     test_objects names the bound saturation pair
     ({lc/cp: {path, sha256}}) once the 4 KiB objects land;
     without it the saturation case stays unbound and
-    refuses. Bound bytes are re-hashed at write time, so
-    the manifest always stamps measured bytes.
+    refuses. guest_inputs maps each listed case to the
+    staged guest-inputs doc path for that case; the doc
+    bytes are re-hashed at write time, so the manifest
+    always stamps the exact bytes the guest must see.
+    Bound bytes are re-hashed at write time, so the
+    manifest always stamps measured bytes.
     """
     if test_objects is None:
         test_entry = {
@@ -365,6 +382,13 @@ def write_input_manifest(path, inputs, consumer, cases, argv,
                 "path": entry["path"],
                 "sha256": sha_file(entry["path"]),
             }
+    staged = {}
+    for case, doc_path in sorted((guest_inputs or {}).items()):
+        staged[case] = {
+            "file": GUEST_INPUTS_FILE,
+            "path": doc_path,
+            "sha256": sha_file(doc_path),
+        }
     manifest = {
         "schema": SCHEMA,
         "runner_commit": runner_commit,
@@ -385,6 +409,7 @@ def write_input_manifest(path, inputs, consumer, cases, argv,
                    "sha256": inputs["cp"]["sha256"]},
         },
         "test_objects": test_entry,
+        "guest_inputs": staged,
         "profile": {"path": inputs["profile"]["path"],
                     "sha256": inputs["profile"]["sha256"],
                     "profile_id":
@@ -413,15 +438,15 @@ def verify_input_manifest(manifest, consumer_path=None):
         return ["manifest schema %r" % (manifest.get("schema"),)]
     for field in ("runner_commit", "runner_argv", "cases",
                   "consumer", "binary", "objects",
-                  "test_objects", "profile", "candidate",
-                  "oracle", "guest"):
+                  "test_objects", "guest_inputs", "profile",
+                  "candidate", "oracle", "guest"):
         if field not in manifest:
             bad.append("manifest lacks %s" % field)
     if bad:
         return sorted(bad)
     for field in ("consumer", "binary", "objects",
-                  "test_objects", "profile", "candidate",
-                  "oracle", "guest"):
+                  "test_objects", "guest_inputs", "profile",
+                  "candidate", "oracle", "guest"):
         if not isinstance(manifest.get(field), dict):
             bad.append("manifest %s is not a mapping" % field)
     if not isinstance(manifest.get("cases"), list):
@@ -506,6 +531,32 @@ def verify_input_manifest(manifest, consumer_path=None):
     if guest.get("modules_manifest_sha256") \
             != MODULES_MANIFEST_SHA256:
         bad.append("guest modules drift")
+    staged = manifest.get("guest_inputs", {})
+    for case in cases:
+        if not isinstance(case, str):
+            bad.append("guest inputs lack a staged doc "
+                       "for %r" % (case,))
+            continue
+        entry = staged.get(case, {})
+        if not isinstance(entry, dict) \
+                or entry.get("file") != GUEST_INPUTS_FILE:
+            bad.append("guest inputs lack a staged doc "
+                       "for %s" % case)
+            continue
+        path = entry.get("path", "")
+        try:
+            got = sha_file(path)
+        except OSError:
+            bad.append("guest inputs doc unreadable for "
+                       "%s: %s" % (case, path))
+            continue
+        if got != entry.get("sha256"):
+            bad.append("guest inputs doc bytes differ "
+                       "from manifest for %s" % case)
+    for case in sorted(staged):
+        if case not in CASES:
+            bad.append("guest inputs stage unknown case "
+                       "%r" % (case,))
     test_objects = manifest.get("test_objects", {})
     if "saturation" in cases and test_objects.get("bound"):
         for channel in ("lc", "cp"):
