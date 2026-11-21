@@ -32,7 +32,8 @@ import gate_kernel  # noqa: E402
 import guest_lifecycle  # noqa: E402
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
-                           require_lifecycle_env)
+                           require_lifecycle_env,
+                           sealed_profiles_dir)
 from test_record3 import (ATTEMPT_PROBE, SPEC, _events,
                           _mint_profile, check_capture_session,
                           check_lifetimes, check_oracle_slice)
@@ -111,20 +112,6 @@ def _sealed_inputs_requested(env=None):
     sys.path.insert(0, os.path.join(REPO, "tests"))
     from support.candidate_input import requested
     return requested(env)
-
-
-def sealed_profiles_dir(selected):
-    """Verified shipped-profile dir under the verified root.
-
-    Every listed member is hash-checked through the
-    candidate before selection reads the dir, so a sealed
-    selection binds exactly the sealed profiles. A tampered
-    or unlisted member raises instead of selecting.
-    """
-    manifest = selected.path("profiles/manifest.txt")
-    for name in manifest.read_text().split():
-        selected.path("profiles/" + name)
-    return manifest.parent
 
 
 def require_bundle_env(selected):
@@ -372,7 +359,11 @@ def test_bundle_three_phase_capture():
         host_bundle_inputs()
     require_bundle_env(selected)
     assert os.path.isfile(tarball), "missing %s" % tarball
-    ensure_oracle_module()
+    if selected is None:
+        ensure_oracle_module()
+    else:
+        ensure_oracle_module(
+            profiles=sealed_profiles_dir(selected))
     if selected is None:
         _mint_profile()
     else:
@@ -885,19 +876,40 @@ def test_bundle_validates_candidate_before_preflight(
 
 DEV_INPUT_DIRS = tuple(os.path.join(REPO, name) + os.sep
                        for name in ("build", "dist"))
+CHECKOUT_PROFILES = (os.path.join(REPO, "profiles") + os.sep,)
 
 
-def _refuse_dev_consult(monkeypatch, real, target):
+def _refuse_dev_consult(monkeypatch, real, target,
+                        dirs=DEV_INPUT_DIRS):
     """Fail the test if sealed work consults dev inputs."""
     def guard(path, *args, **kwargs):
         if isinstance(path, (str, os.PathLike)):
             text = os.fspath(path)
-            if text.startswith(DEV_INPUT_DIRS):
+            if text.startswith(dirs):
                 raise AssertionError(
                     "sealed leg consulted dev input: %s"
                     % text)
         return real(path, *args, **kwargs)
     monkeypatch.setattr(target[0], target[1], guard)
+
+
+SEALED_FOREIGN_RELEASE = "9.9.9-sealed-foreign"
+
+
+def _sealed_foreign_profile(pin):
+    """Validated sealed profile naming the foreign release."""
+    return {
+        "status": "validated",
+        "profile_id": "sealed-foreign",
+        "identity": {
+            "source": {
+                "revision": SEALED_FOREIGN_RELEASE,
+                "note": ("config=sha256:%s config_src=file "
+                         "btf=sha256:%s format=sha256:%s"
+                         % ("c" * 64, pin, "f" * 64)),
+            },
+        },
+    }
 
 
 @pytest.mark.dev_fixture
@@ -1175,6 +1187,175 @@ def test_bundle_sealed_selection_reports_sealed_drift(
                 objects=objects, profiles=profiles,
                 host_release=REL, require_shipped=True,
                 sat_object=sat_object)
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_oracle_pin_resolves_verified_profiles(
+        tmp_path, monkeypatch):
+    """A sealed foreign-kernel oracle pins the sealed BTF root.
+
+    The sealed bundle carries a validated profile for the
+    foreign guest release; with the guest kernel override
+    naming that release, the oracle identity takes the BTF
+    pin from the verified root while the checkout profiles
+    stay untouched. No VM boots.
+    """
+    from test_oracle_kver import make_kernel_tree, refuse_subprocess
+    import lifecycle_env as preflight
+    pin = "e" * 64
+    selected = _sealed_select_bundle(
+        tmp_path, "oraclepin",
+        {"sealed-foreign.json": _sealed_foreign_profile(pin)})
+    try:
+        profiles = sealed_profiles_dir(selected)
+        assert profiles == selected.root / "profiles"
+        tree = make_kernel_tree(tmp_path / "kernels",
+                                SEALED_FOREIGN_RELEASE)
+        assert tree["btf_sha"] != pin
+        monkeypatch.setenv("MEMVEIL_ORACLE_KVER",
+                           SEALED_FOREIGN_RELEASE)
+        refuse_subprocess(monkeypatch)
+        _refuse_dev_consult(monkeypatch, os.path.isfile,
+                            (os.path, "isfile"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, os.path.exists,
+                            (os.path, "exists"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, builtins.open,
+                            (builtins, "open"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, io.open, (io, "open"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, os.stat, (os, "stat"),
+                            CHECKOUT_PROFILES)
+        ident = preflight.module_build_identity(
+            host_release="9.9.1-host",
+            modules_root=tree["modules_root"],
+            boot_root=tree["boot_root"], btf_path=tree["btf_path"],
+            profiles_dir=profiles)
+        assert ident["release"] == SEALED_FOREIGN_RELEASE
+        assert ident["btf_sha"] == pin
+        assert ident["btf_provenance"] == "profile-pinned"
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_oracle_refuses_unpinned_foreign_kernel(
+        tmp_path, monkeypatch):
+    """A sealed foreign kernel without a sealed pin fails closed.
+
+    The sealed profiles name only another release, so the
+    oracle identity for the foreign guest release refuses
+    instead of falling back to the checkout. No VM boots.
+    """
+    from test_oracle_kver import make_kernel_tree, refuse_subprocess
+    import lifecycle_env as preflight
+    doc = _sealed_foreign_profile("e" * 64)
+    doc["identity"]["source"]["revision"] = "9.9.1-other"
+    selected = _sealed_select_bundle(
+        tmp_path, "oraclerefuse", {"sealed-other.json": doc})
+    try:
+        profiles = sealed_profiles_dir(selected)
+        tree = make_kernel_tree(tmp_path / "kernels",
+                                SEALED_FOREIGN_RELEASE)
+        monkeypatch.setenv("MEMVEIL_ORACLE_KVER",
+                           SEALED_FOREIGN_RELEASE)
+        refuse_subprocess(monkeypatch)
+        _refuse_dev_consult(monkeypatch, os.path.isfile,
+                            (os.path, "isfile"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, os.path.exists,
+                            (os.path, "exists"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, builtins.open,
+                            (builtins, "open"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, io.open, (io, "open"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, os.stat, (os, "stat"),
+                            CHECKOUT_PROFILES)
+        with pytest.raises(pytest.fail.Exception,
+                           match="no validated shipped profile"):
+            preflight.module_build_identity(
+                host_release="9.9.1-host",
+                modules_root=tree["modules_root"],
+                boot_root=tree["boot_root"],
+                btf_path=tree["btf_path"],
+                profiles_dir=profiles)
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_export_resolves_verified_profiles(
+        tmp_path, monkeypatch):
+    """Sealed export checks pin the kernel identity to the sealed root.
+
+    The export verifier hands the verified profile root to
+    the identity builder; the recorded profiles dir is the
+    sealed one, the artifact table resolves under the
+    verified root, and the checkout profiles stay untouched.
+    No VM boots.
+    """
+    import vm_boot
+    import lifecycle_env as preflight
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    import support.candidate_input as candidate_input
+    sealed = _seal_wire_bundle(tmp_path, "exportsealed",
+                               libgcc=True)
+    selected = candidate_input.load(
+        env=_wire_env(sealed), required=True)
+    try:
+        monkeypatch.setattr(candidate_input, "load",
+                            lambda *args, **kwargs: selected)
+        recorded = {}
+
+        def fake_identity(**kwargs):
+            recorded.update(kwargs)
+            return dict(release="9.9.9-sealed-foreign",
+                        config_sha="c" * 64, btf_sha="d" * 64)
+
+        monkeypatch.setattr(preflight, "module_build_identity",
+                            fake_identity)
+        ko = tmp_path / "oracle.ko"
+        ko.write_bytes(b"fake-ko")
+        monkeypatch.setattr(preflight, "ORACLE_KO", str(ko))
+        identity = dict(
+            release="9.9.9-sealed-foreign", swiotlb_force=True,
+            config_sha="c" * 64, btf_sha="d" * 64,
+            lc_sha=_sha(str(selected.path(
+                "bpf/swiotlb_lifecycle.bpf.o"))),
+            cp_sha=_sha(str(selected.path(
+                "bpf/swiotlb_copy.bpf.o"))),
+            bridge_sha=_sha(str(selected.path(
+                "lib/memveil/libgcc_s.so.1"))),
+            ko_sha=_sha(str(ko)))
+        run = tmp_path / "run"
+        export = run / "export"
+        export.mkdir(parents=True)
+        target = export / "bundle-identity.json"
+        target.write_text(json.dumps(identity))
+        (export / "bundle-identity.json.sha256").write_text(
+            _sha(str(target)) + "\n")
+        _refuse_dev_consult(monkeypatch, os.path.isfile,
+                            (os.path, "isfile"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, os.path.exists,
+                            (os.path, "exists"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, builtins.open,
+                            (builtins, "open"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, io.open, (io, "open"),
+                            CHECKOUT_PROFILES)
+        _refuse_dev_consult(monkeypatch, os.stat, (os, "stat"),
+                            CHECKOUT_PROFILES)
+        vm_boot.verify_exports(run, "bundle", ["identity.json"])
+        assert recorded == {"profiles_dir": selected.root
+                            / "profiles"}, recorded
     finally:
         selected.close()
 

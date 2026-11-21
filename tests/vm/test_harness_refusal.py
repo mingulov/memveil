@@ -278,7 +278,7 @@ def test_oracle_sha_reuse_is_not_file_presence(monkeypatch,tmp_path):
         if args[0]=='make': raise RuntimeError('rebuild reached')
         return type('Result',(),dict(returncode=0,stdout='',stderr=''))()
     monkeypatch.setattr(env.subprocess,'run',run)
-    monkeypatch.setattr(env,'module_build_identity',lambda:dict(release='test'))
+    monkeypatch.setattr(env,'module_build_identity',lambda **kw:dict(release='test'))
     (tmp_path/'memveil_region_oracle.c').write_text('region')
     monkeypatch.setattr(env.os.path,'isfile',lambda p: True)
     with pytest.raises(RuntimeError,match='rebuild reached'): env.ensure_oracle_module()

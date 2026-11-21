@@ -96,7 +96,8 @@ def run_guest(sub, timeout=900, network=False):
     from support.candidate_input import load
     selected = load()
     prefix, env = gate_prefix()
-    from lifecycle_env import ensure_oracle_module
+    from lifecycle_env import (ensure_oracle_module,
+                               sealed_profiles_dir)
     from harness_env import check_harness_versions
     harness = check_harness_versions(prefix[-1])
     lock_dir = REPO / "build" / "vm"
@@ -108,7 +109,11 @@ def run_guest(sub, timeout=900, network=False):
         lease.close()
         raise ValueError("VM suite lease already owned")
     try:
-        ensure_oracle_module()
+        if selected is None:
+            ensure_oracle_module()
+        else:
+            ensure_oracle_module(
+                profiles=sealed_profiles_dir(selected))
     except BaseException:
         lease.close()
         raise
@@ -174,8 +179,13 @@ def verify_exports(tmp, sub, names):
         sys.path.insert(0, str(TESTS))
         from support.candidate_input import load
         selected = load()
-        from lifecycle_env import ORACLE_KO, module_build_identity
-        expected = module_build_identity()
+        from lifecycle_env import (ORACLE_KO, module_build_identity,
+                                   sealed_profiles_dir)
+        if selected is None:
+            expected = module_build_identity()
+        else:
+            expected = module_build_identity(
+                profiles_dir=sealed_profiles_dir(selected))
         identity = json.loads(got["identity.json"].read_text())
         for key in ("release", "config_sha", "btf_sha"):
             assert identity[key] == expected[key], "guest kernel identity drift: " + key

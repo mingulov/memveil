@@ -97,6 +97,20 @@ def prepare_gate_kernel(memveil=None, objects=None, profiles=None,
         pytest.fail("armed but %s" % exc)
 
 
+def sealed_profiles_dir(selected):
+    """Verified shipped-profile dir under the verified root.
+
+    Every listed member is hash-checked through the
+    candidate before the caller reads the dir, so a sealed
+    consumer binds exactly the sealed profiles. A tampered
+    or unlisted member raises instead of resolving.
+    """
+    manifest = selected.path("profiles/manifest.txt")
+    for name in manifest.read_text().split():
+        selected.path("profiles/" + name)
+    return manifest.parent
+
+
 def profile_btf_pin(note):
     """BTF pin from a narrow identity note, or None when absent."""
     for field in (note or "").split():
@@ -211,14 +225,17 @@ def module_build_identity(host_release=None, modules_root="/lib/modules",
                 btf_provenance=provenance)
 
 
-def ensure_oracle_module():
+def ensure_oracle_module(profiles=None):
     """Reuse only a hash-verified module built from this source/kernel.
 
     Build in an owned temporary directory, so other fixture module inputs
-    and source-tree outputs are not overwritten between lanes.
+    and source-tree outputs are not overwritten between lanes. profiles
+    names the validated-profile root for a foreign guest kernel (the
+    verified candidate profiles in sealed runs); without it the shipped
+    checkout profiles apply.
     """
     try:
-        identity = module_build_identity()
+        identity = module_build_identity(profiles_dir=profiles)
     except OSError as exc:
         pytest.fail("armed but module identity unavailable: %s" % exc)
     kdir = "/lib/modules/%s/build" % identity["release"]
@@ -247,7 +264,7 @@ def ensure_oracle_module():
             pytest.fail("oracle module vermagic mismatch")
         # Recheck source/kernel inputs after the build before accepting bytes.
         try:
-            rechecked = module_build_identity()
+            rechecked = module_build_identity(profiles_dir=profiles)
         except OSError as exc:
             pytest.fail("armed but module identity unavailable: %s" % exc)
         if rechecked != identity:
