@@ -33,6 +33,12 @@
 # mode routes before this check and never touches the
 # build tree, so qualification works with an empty dev
 # build tree.
+# MEMVEIL_BIN overrides the binary under test: when set
+# to an executable file the runner uses it verbatim (no
+# rebuild, no relink of build/memveil); a set-but-missing
+# or non-executable value fails closed with exit 1.
+# Python suites still read build/memveil, so point that
+# link at the same binary (docs/sanitizer-lane.md).
 # LMB_SANITIZE=1 exports fail-fast UBSan options for
 # sanitizer-instrumented runs (plain binaries ignore this).
 #
@@ -117,7 +123,14 @@ asan_preload() {
 }
 
 memveil_bin() {
-    # Binary under test: the Rust release build.
+    # Binary under test: the Rust release build, or
+    # $MEMVEIL_BIN verbatim when set (sanitizer-lane
+    # override; rust_bin_setup refuses an unusable value
+    # before any suite runs).
+    if [ "${MEMVEIL_BIN+x}" = x ]; then
+        printf '%s\n' "$MEMVEIL_BIN"
+        return
+    fi
     printf '%s\n' "$ROOT/target/release/memveil"
 }
 
@@ -127,6 +140,16 @@ memveil_build_hint() {
 }
 
 rust_bin_setup() {
+    # MEMVEIL_BIN override: use the named binary verbatim
+    # (no rebuild, no relink of build/memveil), failing
+    # closed unless it names an executable file.
+    if [ "${MEMVEIL_BIN+x}" = x ]; then
+        if [ ! -f "$MEMVEIL_BIN" ] || [ ! -x "$MEMVEIL_BIN" ]; then
+            echo "test: MEMVEIL_BIN=$MEMVEIL_BIN missing or not executable" >&2
+            return 1
+        fi
+        return 0
+    fi
     # The release binary must exist, and the Python suites
     # (which hardcode build/memveil) must reach it: link
     # build/memveil at the Rust binary, replacing any stale

@@ -61,28 +61,23 @@ $LANE test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --test cli_par
 $LANE test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --test wire_compat
 ```
 
-Reader-adversarial on the instrumented binary: NEVER route this
-leg through `tools/test`: every non-help dispatch runs
-`rust_bin_setup` first (`tools/test:129-143`, called at
-`tools/test:2004-2006`), which unconditionally relinks
-`build/memveil` at the plain `target/release/memveil` before
-the suite starts. A pre-pointed lane link is silently
-replaced, so the suite would test the wrong binary; there is
-no override knob (`memveil_bin` hardcodes the release path
-and the Python suites hardcode `build/memveil`). Invoke the
-suite body directly instead. These three lines replicate
-`suite_reader_adversarial` exactly: re-verify them against
-`tools/test` if that suite body ever changes.
+Reader-adversarial on the instrumented binary: route this
+leg through `tools/test` with `MEMVEIL_BIN` set to the
+lane binary. When `MEMVEIL_BIN` names an executable file,
+`tools/test` uses it verbatim: `memveil_bin` returns it
+and `rust_bin_setup` skips its release relink, so a
+pre-pointed `build/memveil` link survives dispatch
+(`tools/test:142-166`, called at `tools/test:2027-2029`);
+a set-but-missing or non-executable value fails closed.
+The Python drivers still read `build/memveil`, so
+pre-point that link at the lane binary as well.
 
 ```sh
 export ASAN_OPTIONS=detect_leaks=0
 LANE_BIN="$PWD/target/asan/x86_64-unknown-linux-gnu/debug/memveil"
 mkdir -p build
 ln -sfn "$LANE_BIN" build/memveil
-# Suite body, in dispatch order:
-python3 tests/cli/prepare_capture_failures.py \
-&& python3 tests/cli/test_adversarial_cli.py \
-&& python3 tests/cli/test_checkpoint_recovery.py
+MEMVEIL_BIN="$LANE_BIN" tools/test reader-adversarial
 ```
 
 Prove the instrumented binary actually ran (all required):
@@ -98,6 +93,11 @@ release binary must not leave a dangling link):
 ```sh
 if [ -x "$PWD/target/release/memveil" ]; then ln -sfn "$PWD/target/release/memveil" build/memveil; fi
 ```
+
+An earlier revision of this section bypassed `tools/test`
+entirely; the `MEMVEIL_BIN` knob supersedes that bypass by
+routing the leg through the real dispatch without
+resetting the link.
 
 `detect_leaks=0` applies to the reader leg only: one of its cases
 drives the binary under `strace`, and LeakSanitizer cannot run
