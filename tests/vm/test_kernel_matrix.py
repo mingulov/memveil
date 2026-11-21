@@ -6853,6 +6853,87 @@ def test_row_receipt_distro_early_failure(tmp_path):
     assert detail
 
 
+def _swap_distro_source_valid(source, name):
+    if name == "package-sha":
+        assert source["packages"][0]["sha256"] != "0" * 64
+        source["packages"][0]["sha256"] = "0" * 64
+    elif name == "banner":
+        source["banner"] += " (different build)"
+    elif name == "kind":
+        source["kind"] = "built"
+    else:
+        raise AssertionError("unknown swap " + name)
+
+
+_DISTRO_SOURCE_SWAPS = ("package-sha", "banner", "kind")
+
+
+@pytest.mark.parametrize("swap", _DISTRO_SOURCE_SWAPS)
+def test_row_receipt_distro_bound_readback_refuses_swap(
+        tmp_path, swap):
+    entry = _distro_entry()
+    pinned = json.loads(json.dumps(entry))
+    row = _distro_admitted_row(tmp_path)
+    rec = _distro_row_rec()
+    doc = km.write_row_receipt(row, rec, entry,
+                               _distro_row_ctx())
+    km.validate_row_receipt(doc, pinned)
+    ok, detail = km.rederive_row(row, rec, pinned)
+    assert ok, detail
+    _swap_distro_source_valid(
+        doc["kernel"]["lock_source"], swap)
+    assert doc["kernel"]["lock_source"] != pinned["source"]
+    with pytest.raises(ValueError, match="lock entry"):
+        km.validate_row_receipt(doc, pinned)
+    (row / "receipt.json").write_text(json.dumps(doc))
+    ok, detail = km.rederive_row(row, rec, pinned)
+    assert ok is False
+    assert "lock entry" in detail
+
+
+def test_row_receipt_distro_reader_refuses_noguest_pass(
+        tmp_path):
+    out = tmp_path / "out"
+    row = out / "debian13"
+    row.mkdir(parents=True)
+    (row / "job.json").write_text(
+        json.dumps(_distro_row_job()))
+    (row / "cache-FAIL.txt").write_text(
+        "cache missing vmlinuz; run tools/kernel-fetch\n")
+    failed = {"id": "debian13", "ok": False,
+              "run_id": "20261030T000000Z", "elapsed": 0.1,
+              "checks": [{"name": "cache", "ok": False,
+                          "detail": "cache-unverified",
+                          "skipped": False}]}
+    early = km.write_row_receipt(row, failed, _distro_entry(),
+                                 _distro_row_ctx())
+    assert early["artifacts"] == {"status": "no-guest"}
+    assert early["kernel"]["config_status"] == "missing"
+    km.validate_row_receipt(early)
+    assert km.rederive_row(row) == (
+        False, "row re-derived FAIL from the receipt")
+    forged = json.loads(json.dumps(early))
+    forged["actual"]["ok"] = True
+    forged["actual"]["checks"][0]["ok"] = True
+    with pytest.raises(ValueError, match="distro pass"):
+        km.validate_row_receipt(forged)
+    (row / "receipt.json").write_text(json.dumps(forged))
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert "distro pass" in detail
+    passed = json.loads(json.dumps(failed))
+    passed["ok"] = True
+    passed["checks"][0]["ok"] = True
+    ok, detail = km.rederive_row(row, passed)
+    assert ok is False
+    assert "distro pass" in detail
+    (out / "debian13.json").write_text(json.dumps(passed))
+    (out / "summary.json").write_text(json.dumps([passed]))
+    report = km.verify_matrix_out(out)
+    assert report["ok"] is False
+    assert "distro pass" in report["rows"][0]["detail"]
+
+
 def test_verify_matrix_out_pass(tmp_path):
     report = km.verify_matrix_out(
         str(_matrix_out(tmp_path)))

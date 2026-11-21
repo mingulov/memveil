@@ -4988,7 +4988,7 @@ def write_row_receipt(row_dir, rec, entry, ctx):
     return doc
 
 
-def validate_row_receipt(doc):
+def validate_row_receipt(doc, entry=None):
     """Strict grammar for one matrix row receipt.
 
     Accepts the /2 Rust shape and the historical /1
@@ -4998,7 +4998,12 @@ def validate_row_receipt(doc):
     conjunction, the smoke label, the boot label, and the
     pass-evidence rules are recomputed: a pass with
     admitted caps needs measured guest artifacts, a clean
-    oracle, and structured channel losses.
+    oracle, and structured channel losses, and a distro
+    pass always needs measured guest artifacts. When the
+    caller supplies the frozen lock entry, the receipt's
+    full kernel source including its kind must equal the
+    entry's source; without it only the grammar is
+    checked.
     """
     if not isinstance(doc, dict) or set(doc) != {
             "schema", "id", "release", "run_id", "mode",
@@ -5104,6 +5109,13 @@ def validate_row_receipt(doc):
     if lock_source["kind"] == "distro":
         _check_row_lock_source_distro(
             lock_source, "its kernel")
+    if entry is not None:
+        source = entry.get("source") \
+            if isinstance(entry, dict) else None
+        if source != lock_source:
+            raise ValueError(
+                "row receipt source differs from its "
+                "lock entry")
     if kernel["boot_label"] != row_boot_label(
             {"source": lock_source, "id": doc["id"]}):
         raise ValueError("row receipt rejects its kernel")
@@ -5299,6 +5311,11 @@ def validate_row_receipt(doc):
             _check_losses_block(losses["busy"], True)
     else:
         raise ValueError("row receipt rejects losses")
+    if lock_source["kind"] == "distro" and actual_ok \
+            and not measured:
+        raise ValueError(
+            "row receipt refuses a distro pass without "
+            "measured artifacts")
     if admitted and measured and actual_ok:
         if mode == "matrix":
             if not oracle.get("present") \
@@ -5507,7 +5524,7 @@ def _rederive_compare_rec(doc, rec):
     return None
 
 
-def rederive_row(row_dir, rec=None):
+def rederive_row(row_dir, rec=None, entry=None):
     """Re-derive one row verdict from its receipt and siblings.
 
     Validates receipt.json, verifies every inventoried hash,
@@ -5517,6 +5534,8 @@ def rederive_row(row_dir, rec=None):
     from the receipt instead of trusting it. Returns
     (ok, detail). A pass needs the recomputed verdict plus
     every cross-check; anything else fails with its reason.
+    An optional frozen lock entry binds the receipt's
+    kernel source during validation.
 
     This re-proves transcription, provenance, evidence
     integrity, and consistency. It does not re-execute the
@@ -5534,7 +5553,7 @@ def rederive_row(row_dir, rec=None):
     except ValueError as exc:
         return False, "receipt.json unreadable: %s" % exc
     try:
-        validate_row_receipt(doc)
+        validate_row_receipt(doc, entry)
     except ValueError as exc:
         return False, "receipt invalid: %s" % exc
     try:
@@ -6116,9 +6135,10 @@ def verify_tested_rows(out_dir, lock, manifest):
     carry the /2 Rust shape (historical /1 receipts verify
     structurally but predate the Rust bindings and refuse
     here), the row must name this candidate, and the row must
-    have tested these exact bytes (pinned lock entry, full-run
-    non-smoke mode, source, toolchain, executable, selected
-    artifact, BPF objects, runtime closure). Returns the {row
+    have tested these exact bytes (pinned lock entry, receipt
+    kernel source, full-run non-smoke mode, source,
+    toolchain, executable, selected artifact, BPF objects,
+    runtime closure). Returns the {row
     id: checks} map; raises ValueError and writes nothing
     otherwise.
 
@@ -6167,6 +6187,11 @@ def verify_tested_rows(out_dir, lock, manifest):
         candidate.require(
             inputs.get("entry") == entry,
             "matrix expectations differ from "
+            "pinned lock")
+        candidate.require(
+            receipt["kernel"]["lock_source"]
+            == entry.get("source"),
+            "matrix kernel source differs from "
             "pinned lock")
         candidate.require(
             receipt["mode"] == "matrix"
