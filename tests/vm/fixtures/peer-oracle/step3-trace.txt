@@ -1,0 +1,1014 @@
+# tracer: nop
+#
+# entries-in-buffer/entries-written: 1002/1002   #P:2
+#
+#                                _-----=> irqs-off/BH-disabled
+#                               / _----=> need-resched
+#                              | / _---=> hardirq/softirq
+#                              || / _--=> preempt-depth
+#                              ||| / _-=> migrate-disable
+#                              |||| /     delay
+#           TASK-PID     CPU#  |||||  TIMESTAMP  FUNCTION
+#              | |         |   |||||     |         |
+         python3-178     [001] ...1.     1.639620: tracing_mark_write: L11-PHASE3-BEGIN
+            ping-188     [000] D..3.     1.643363: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdb000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.643471: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdb000 size=98 attrs=
+            ping-188     [000] D..3.     1.643545: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdb800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.643639: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdb800 size=98 attrs=
+            ping-188     [000] D..3.     1.643685: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdc000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.643785: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdc000 size=98 attrs=
+            ping-188     [000] D..3.     1.643832: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdc800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.643909: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdc800 size=98 attrs=
+            ping-188     [000] D..3.     1.643963: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdd000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.644040: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdd000 size=98 attrs=
+            ping-188     [000] D..3.     1.644086: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdd800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.644163: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdd800 size=98 attrs=
+            ping-188     [000] D..3.     1.644209: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcde000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.644308: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcde000 size=98 attrs=
+            ping-188     [000] D..3.     1.644357: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcde800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.644435: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcde800 size=98 attrs=
+            ping-188     [000] D..3.     1.644481: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdf000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.644558: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdf000 size=98 attrs=
+            ping-188     [000] D..3.     1.644604: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdf800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.644681: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcdf800 size=98 attrs=
+            ping-188     [000] D..3.     1.644726: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce0000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] dls2.     1.644814: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce0000 size=98 attrs=
+            ping-188     [000] D..3.     1.644901: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce0800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.644988: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce0800 size=98 attrs=
+            ping-188     [000] D..3.     1.645034: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce1000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.645112: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce1000 size=98 attrs=
+            ping-188     [000] D..3.     1.645157: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce1800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.645237: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce1800 size=98 attrs=
+            ping-188     [000] D..3.     1.645284: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce2000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.645363: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce2000 size=98 attrs=
+            ping-188     [000] D..3.     1.645409: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce2800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.645487: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce2800 size=98 attrs=
+            ping-188     [000] D..3.     1.645533: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce3000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.645611: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce3000 size=98 attrs=
+            ping-188     [000] D..3.     1.645657: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce3800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.645735: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce3800 size=98 attrs=
+            ping-188     [000] D..3.     1.645791: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce4000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.645877: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce4000 size=98 attrs=
+            ping-188     [000] D..3.     1.645931: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce4800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.646010: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce4800 size=98 attrs=
+            ping-188     [000] D..3.     1.646057: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce5000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.646135: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce5000 size=98 attrs=
+            ping-188     [000] D..3.     1.646181: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce5800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.646259: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce5800 size=98 attrs=
+            ping-188     [000] D..3.     1.646305: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce6000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.646383: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce6000 size=98 attrs=
+            ping-188     [000] D..3.     1.646429: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce6800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.646507: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce6800 size=98 attrs=
+            ping-188     [000] D..3.     1.646553: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce7000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.646631: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce7000 size=98 attrs=
+            ping-188     [000] D..3.     1.646677: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce7800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.646755: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce7800 size=98 attrs=
+            ping-188     [000] D..3.     1.646810: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce8000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.646888: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce8000 size=98 attrs=
+            ping-188     [000] D..3.     1.646939: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce8800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.647017: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce8800 size=98 attrs=
+            ping-188     [000] D..3.     1.647064: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce9000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.647146: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce9000 size=98 attrs=
+            ping-188     [000] D..3.     1.647192: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce9800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.647296: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbce9800 size=98 attrs=
+            ping-188     [000] D..3.     1.647346: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcea000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.647425: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcea000 size=98 attrs=
+            ping-188     [000] D..3.     1.647471: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcea800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.647549: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcea800 size=98 attrs=
+            ping-188     [000] D..3.     1.647595: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbceb000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.647673: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbceb000 size=98 attrs=
+            ping-188     [000] D..3.     1.647719: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbceb800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.647805: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbceb800 size=98 attrs=
+            ping-188     [000] D..3.     1.647852: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcec000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.647938: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcec000 size=98 attrs=
+            ping-188     [000] D..3.     1.647984: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcec800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.648062: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcec800 size=98 attrs=
+            ping-188     [000] D..3.     1.648109: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbced000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.648186: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbced000 size=98 attrs=
+            ping-188     [000] D..3.     1.648233: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbced800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.648332: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbced800 size=98 attrs=
+            ping-188     [000] D..3.     1.648380: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcee000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.648461: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcee000 size=98 attrs=
+            ping-188     [000] D..3.     1.648507: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcee800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.648585: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcee800 size=98 attrs=
+            ping-188     [000] D..3.     1.648631: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcef000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.648709: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcef000 size=98 attrs=
+            ping-188     [000] D..3.     1.648754: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcef800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.648848: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcef800 size=98 attrs=
+            ping-188     [000] D..3.     1.648895: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf0000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.648980: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf0000 size=98 attrs=
+            ping-188     [000] D..3.     1.649026: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf0800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.649104: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf0800 size=98 attrs=
+            ping-188     [000] D..3.     1.649150: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf1000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.649229: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf1000 size=98 attrs=
+            ping-188     [000] D..3.     1.649299: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf1800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.649380: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf1800 size=98 attrs=
+            ping-188     [000] D..3.     1.649427: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf2000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.649504: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf2000 size=98 attrs=
+            ping-188     [000] D..3.     1.649550: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf2800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.649628: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf2800 size=98 attrs=
+            ping-188     [000] D..3.     1.649674: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf3000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.649752: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf3000 size=98 attrs=
+            ping-188     [000] D..3.     1.649807: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf3800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.649894: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf3800 size=98 attrs=
+            ping-188     [000] D..3.     1.649956: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf4000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.650044: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf4000 size=98 attrs=
+            ping-188     [000] D..3.     1.650092: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf4800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.650171: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf4800 size=98 attrs=
+            ping-188     [000] D..3.     1.650217: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf5000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.650317: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf5000 size=98 attrs=
+            ping-188     [000] D..3.     1.650365: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf5800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.650444: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf5800 size=98 attrs=
+            ping-188     [000] D..3.     1.650490: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf6000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.650568: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf6000 size=98 attrs=
+            ping-188     [000] D..3.     1.650614: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf6800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.650692: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf6800 size=98 attrs=
+            ping-188     [000] D..3.     1.650739: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf7000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.650826: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf7000 size=98 attrs=
+            ping-188     [000] D..3.     1.650875: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf7800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.650963: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf7800 size=98 attrs=
+            ping-188     [000] D..3.     1.651010: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf8000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.651088: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf8000 size=98 attrs=
+            ping-188     [000] D..3.     1.651135: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf8800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.651213: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf8800 size=98 attrs=
+            ping-188     [000] D..3.     1.651260: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf9000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.651346: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf9000 size=98 attrs=
+            ping-188     [000] D..3.     1.651392: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf9800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.651471: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcf9800 size=98 attrs=
+            ping-188     [000] D..3.     1.651517: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfa000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.651608: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfa000 size=98 attrs=
+            ping-188     [000] D..3.     1.651652: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfa800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.651728: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfa800 size=98 attrs=
+            ping-188     [000] D..3.     1.651787: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfb000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.651864: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfb000 size=98 attrs=
+            ping-188     [000] D..3.     1.651910: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfb800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.651993: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfb800 size=98 attrs=
+            ping-188     [000] D..3.     1.652038: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfc000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.652118: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfc000 size=98 attrs=
+            ping-188     [000] D..3.     1.652163: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfc800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.652255: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfc800 size=98 attrs=
+            ping-188     [000] D..3.     1.652300: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfd000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.652376: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfd000 size=98 attrs=
+            ping-188     [000] D..3.     1.652421: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfd800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.652497: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfd800 size=98 attrs=
+            ping-188     [000] D..3.     1.652542: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfe000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.652631: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfe000 size=98 attrs=
+            ping-188     [000] D..3.     1.652674: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfe800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.652748: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcfe800 size=98 attrs=
+            ping-188     [000] D..3.     1.652817: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcff000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.652892: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcff000 size=98 attrs=
+            ping-188     [000] D..3.     1.652943: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcff800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.653017: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbcff800 size=98 attrs=
+            ping-188     [000] D..3.     1.653060: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd00000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.653135: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd00000 size=98 attrs=
+            ping-188     [000] D..3.     1.653179: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd00800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.653253: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd00800 size=98 attrs=
+            ping-188     [000] D..3.     1.653305: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd01000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.653378: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd01000 size=98 attrs=
+            ping-188     [000] D..3.     1.653422: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd01800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.653496: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd01800 size=98 attrs=
+            ping-188     [000] D..3.     1.653540: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd02000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.653614: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd02000 size=98 attrs=
+            ping-188     [000] D..3.     1.653657: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd02800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.653731: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd02800 size=98 attrs=
+            ping-188     [000] D..3.     1.653784: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd03000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.653858: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd03000 size=98 attrs=
+            ping-188     [000] D..3.     1.653902: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd03800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.653984: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd03800 size=98 attrs=
+            ping-188     [000] D..3.     1.654028: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd04000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.654103: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd04000 size=98 attrs=
+            ping-188     [000] D..3.     1.654146: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd04800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.654221: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd04800 size=98 attrs=
+            ping-188     [000] D..3.     1.654280: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd05000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.654355: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd05000 size=98 attrs=
+            ping-188     [000] D..3.     1.654399: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd05800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.654473: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd05800 size=98 attrs=
+            ping-188     [000] D..3.     1.654517: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd06000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.654591: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd06000 size=98 attrs=
+            ping-188     [000] D..3.     1.654635: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd06800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.654709: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd06800 size=98 attrs=
+            ping-188     [000] D..3.     1.654753: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd07000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.654836: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd07000 size=98 attrs=
+            ping-188     [000] D..3.     1.654880: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd07800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.654962: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd07800 size=98 attrs=
+            ping-188     [000] D..3.     1.655007: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd08000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.655081: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd08000 size=98 attrs=
+            ping-188     [000] D..3.     1.655125: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd08800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.655200: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd08800 size=98 attrs=
+            ping-188     [000] D..3.     1.655244: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd09000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.655330: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd09000 size=98 attrs=
+            ping-188     [000] D..3.     1.655374: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd09800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.655448: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd09800 size=98 attrs=
+            ping-188     [000] D..3.     1.655492: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.655567: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0a000 size=98 attrs=
+            ping-188     [000] D..3.     1.655611: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.655696: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0a800 size=98 attrs=
+            ping-188     [000] D..3.     1.655739: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.655818: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0b000 size=98 attrs=
+            ping-188     [000] D..3.     1.655868: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.655946: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0b800 size=98 attrs=
+            ping-188     [000] D..3.     1.655989: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.656062: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0c000 size=98 attrs=
+            ping-188     [000] D..3.     1.656104: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.656177: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0c800 size=98 attrs=
+            ping-188     [000] D..3.     1.656219: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.656316: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0d000 size=98 attrs=
+            ping-188     [000] D..3.     1.656360: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.656433: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0d800 size=98 attrs=
+            ping-188     [000] D..3.     1.656476: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.656548: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0e000 size=98 attrs=
+            ping-188     [000] D..3.     1.656590: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.656677: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0e800 size=98 attrs=
+            ping-188     [000] D..3.     1.656720: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.656803: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0f000 size=98 attrs=
+            ping-188     [000] D..3.     1.656848: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.656927: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd0f800 size=98 attrs=
+            ping-188     [000] D..3.     1.656972: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd10000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.657046: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd10000 size=98 attrs=
+            ping-188     [000] D..3.     1.657090: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd10800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.657164: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd10800 size=98 attrs=
+            ping-188     [000] D..3.     1.657207: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd11000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.657297: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd11000 size=98 attrs=
+            ping-188     [000] D..3.     1.657340: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd11800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.657414: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd11800 size=98 attrs=
+            ping-188     [000] D..3.     1.657458: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd12000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.657531: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd12000 size=98 attrs=
+            ping-188     [000] D..3.     1.657576: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd12800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.657650: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd12800 size=98 attrs=
+            ping-188     [000] D..3.     1.657694: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd13000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.657777: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd13000 size=98 attrs=
+            ping-188     [000] D..3.     1.657822: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd13800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.657896: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd13800 size=98 attrs=
+            ping-188     [000] D..3.     1.657947: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd14000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.658022: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd14000 size=98 attrs=
+            ping-188     [000] D..3.     1.658066: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd14800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.658141: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd14800 size=98 attrs=
+            ping-188     [000] D..3.     1.658184: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd15000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.658259: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd15000 size=98 attrs=
+            ping-188     [000] D..3.     1.658311: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd15800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.658385: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd15800 size=98 attrs=
+            ping-188     [000] D..3.     1.658428: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd16000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.658502: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd16000 size=98 attrs=
+            ping-188     [000] D..3.     1.658545: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd16800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.658620: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd16800 size=98 attrs=
+            ping-188     [000] D..3.     1.658677: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd17000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.658753: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd17000 size=98 attrs=
+            ping-188     [000] D..3.     1.658807: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd17800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.658883: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd17800 size=98 attrs=
+            ping-188     [000] D..3.     1.658935: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd18000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.659012: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd18000 size=98 attrs=
+            ping-188     [000] D..3.     1.659057: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd18800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.659133: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd18800 size=98 attrs=
+            ping-188     [000] D..3.     1.659177: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd19000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.659254: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd19000 size=98 attrs=
+            ping-188     [000] D..3.     1.659312: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd19800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.659389: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd19800 size=98 attrs=
+            ping-188     [000] D..3.     1.659434: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.659511: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1a000 size=98 attrs=
+            ping-188     [000] D..3.     1.659556: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.659632: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1a800 size=98 attrs=
+            ping-188     [000] D..3.     1.659677: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.659753: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1b000 size=98 attrs=
+            ping-188     [000] D..3.     1.659806: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.659883: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1b800 size=98 attrs=
+            ping-188     [000] D..3.     1.659937: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.660015: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1c000 size=98 attrs=
+            ping-188     [000] D..3.     1.660060: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.660136: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1c800 size=98 attrs=
+            ping-188     [000] D..3.     1.660181: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.660259: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1d000 size=98 attrs=
+            ping-188     [000] D..3.     1.660309: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.660386: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1d800 size=98 attrs=
+            ping-188     [000] D..3.     1.660431: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.660507: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1e000 size=98 attrs=
+            ping-188     [000] D..3.     1.660551: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.660628: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1e800 size=98 attrs=
+            ping-188     [000] D..3.     1.660672: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.660749: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1f000 size=98 attrs=
+            ping-188     [000] D..3.     1.660803: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.660880: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd1f800 size=98 attrs=
+            ping-188     [000] D..3.     1.660937: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd20000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.661013: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd20000 size=98 attrs=
+            ping-188     [000] D..3.     1.661058: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd20800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.661135: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd20800 size=98 attrs=
+            ping-188     [000] D..3.     1.661180: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd21000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.661298: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd21000 size=98 attrs=
+            ping-188     [000] D..3.     1.661354: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd21800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.661435: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd21800 size=98 attrs=
+            ping-188     [000] D..3.     1.661481: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd22000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.661559: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd22000 size=98 attrs=
+            ping-188     [000] D..3.     1.661617: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd22800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.661692: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd22800 size=98 attrs=
+            ping-188     [000] D..3.     1.661737: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd23000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.661824: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd23000 size=98 attrs=
+            ping-188     [000] D..3.     1.661870: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd23800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.661954: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd23800 size=98 attrs=
+            ping-188     [000] D..3.     1.661998: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd24000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.662073: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd24000 size=98 attrs=
+            ping-188     [000] D..3.     1.662118: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd24800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.662194: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd24800 size=98 attrs=
+            ping-188     [000] D..3.     1.662246: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd25000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.662326: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd25000 size=98 attrs=
+            ping-188     [000] D..3.     1.662370: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd25800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.662446: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd25800 size=98 attrs=
+            ping-188     [000] D..3.     1.662490: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd26000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.662566: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd26000 size=98 attrs=
+            ping-188     [000] D..3.     1.662622: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd26800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.662695: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd26800 size=98 attrs=
+            ping-188     [000] D..3.     1.662738: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd27000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.662819: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd27000 size=98 attrs=
+            ping-188     [000] D..3.     1.662863: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd27800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.662945: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd27800 size=98 attrs=
+            ping-188     [000] D..3.     1.662990: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd28000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.663064: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd28000 size=98 attrs=
+            ping-188     [000] D..3.     1.663108: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd28800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.663181: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd28800 size=98 attrs=
+            ping-188     [000] D..3.     1.663225: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd29000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.663315: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd29000 size=98 attrs=
+            ping-188     [000] D..3.     1.663366: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd29800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.663445: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd29800 size=98 attrs=
+            ping-188     [000] D..3.     1.663488: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.663563: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2a000 size=98 attrs=
+            ping-188     [000] D..3.     1.663606: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.663690: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2a800 size=98 attrs=
+            ping-188     [000] D..3.     1.663732: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.663811: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2b000 size=98 attrs=
+            ping-188     [000] D..3.     1.663855: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.663934: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2b800 size=98 attrs=
+            ping-188     [000] D..3.     1.663977: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.664048: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2c000 size=98 attrs=
+            ping-188     [000] D..3.     1.664090: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.664162: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2c800 size=98 attrs=
+            ping-188     [000] D..3.     1.664204: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.664306: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2d000 size=98 attrs=
+            ping-188     [000] D..3.     1.664353: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.664426: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2d800 size=98 attrs=
+            ping-188     [000] D..3.     1.664469: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.664542: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2e000 size=98 attrs=
+            ping-188     [000] D..3.     1.664586: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.664669: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2e800 size=98 attrs=
+            ping-188     [000] D..3.     1.664711: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.664790: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2f000 size=98 attrs=
+            ping-188     [000] D..3.     1.664833: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.664902: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd2f800 size=98 attrs=
+            ping-188     [000] D..3.     1.664951: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd30000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.665022: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd30000 size=98 attrs=
+            ping-188     [000] D..3.     1.665063: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd30800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.665133: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd30800 size=98 attrs=
+            ping-188     [000] D..3.     1.665174: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd31000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.665265: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd31000 size=98 attrs=
+            ping-188     [000] D..3.     1.665309: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd31800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.665381: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd31800 size=98 attrs=
+            ping-188     [000] D..3.     1.665422: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd32000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.665491: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd32000 size=98 attrs=
+            ping-188     [000] D..3.     1.665533: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd32800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.665603: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd32800 size=98 attrs=
+            ping-188     [000] D..3.     1.665644: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd33000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.665713: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd33000 size=98 attrs=
+            ping-188     [000] D..3.     1.665754: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd33800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.665833: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd33800 size=98 attrs=
+            ping-188     [000] D..3.     1.665874: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd34000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.665951: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd34000 size=98 attrs=
+            ping-188     [000] D..3.     1.665992: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd34800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.666062: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd34800 size=98 attrs=
+            ping-188     [000] D..3.     1.666103: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd35000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.666173: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd35000 size=98 attrs=
+            ping-188     [000] D..3.     1.666213: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd35800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.666303: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd35800 size=98 attrs=
+            ping-188     [000] D..3.     1.666346: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd36000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.666417: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd36000 size=98 attrs=
+            ping-188     [000] D..3.     1.666458: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd36800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.666527: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd36800 size=98 attrs=
+            ping-188     [000] D..3.     1.666568: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd37000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.666638: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd37000 size=98 attrs=
+            ping-188     [000] D..3.     1.666679: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd37800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.666749: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd37800 size=98 attrs=
+            ping-188     [000] D..3.     1.666798: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd38000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.666869: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd38000 size=98 attrs=
+            ping-188     [000] D..3.     1.666911: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd38800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.666987: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd38800 size=98 attrs=
+            ping-188     [000] D..3.     1.667028: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd39000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.667097: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd39000 size=98 attrs=
+            ping-188     [000] D..3.     1.667138: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd39800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.667207: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd39800 size=98 attrs=
+            ping-188     [000] D..3.     1.667270: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.667342: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3a000 size=98 attrs=
+            ping-188     [000] D..3.     1.667383: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.667452: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3a800 size=98 attrs=
+            ping-188     [000] D..3.     1.667493: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.667562: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3b000 size=98 attrs=
+            ping-188     [000] D..3.     1.667603: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.667673: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3b800 size=98 attrs=
+            ping-188     [000] D..3.     1.667714: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.667793: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3c000 size=98 attrs=
+            ping-188     [000] D..3.     1.667835: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.667905: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3c800 size=98 attrs=
+            ping-188     [000] D..3.     1.667953: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.668023: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3d000 size=98 attrs=
+            ping-188     [000] D..3.     1.668064: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.668134: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3d800 size=98 attrs=
+            ping-188     [000] D..3.     1.668174: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.668263: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3e000 size=98 attrs=
+            ping-188     [000] D..3.     1.668304: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.668373: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3e800 size=98 attrs=
+            ping-188     [000] D..3.     1.668414: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.668483: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3f000 size=98 attrs=
+            ping-188     [000] D..3.     1.668524: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.668621: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd3f800 size=98 attrs=
+            ping-188     [000] D..3.     1.668662: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd40000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.668732: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd40000 size=98 attrs=
+            ping-188     [000] D..3.     1.668782: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd40800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.668853: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd40800 size=98 attrs=
+            ping-188     [000] D..3.     1.668894: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd41000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.668971: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd41000 size=98 attrs=
+            ping-188     [000] D..3.     1.669012: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd41800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.669082: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd41800 size=98 attrs=
+            ping-188     [000] D..3.     1.669123: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd42000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.669193: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd42000 size=98 attrs=
+            ping-188     [000] D..3.     1.669236: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd42800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.669310: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd42800 size=98 attrs=
+            ping-188     [000] D..3.     1.669351: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd43000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.669420: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd43000 size=98 attrs=
+            ping-188     [000] D..3.     1.669461: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd43800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.669532: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd43800 size=98 attrs=
+            ping-188     [000] D..3.     1.669580: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd44000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.669650: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd44000 size=98 attrs=
+            ping-188     [000] D..3.     1.669691: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd44800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.669760: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd44800 size=98 attrs=
+            ping-188     [000] D..3.     1.669809: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd45000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.669879: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd45000 size=98 attrs=
+            ping-188     [000] D..3.     1.669926: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd45800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.669996: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd45800 size=98 attrs=
+            ping-188     [000] D..3.     1.670037: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd46000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.670107: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd46000 size=98 attrs=
+            ping-188     [000] D..3.     1.670148: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd46800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.670217: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd46800 size=98 attrs=
+            ping-188     [000] D..3.     1.670279: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd47000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.670349: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd47000 size=98 attrs=
+            ping-188     [000] D..3.     1.670390: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd47800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.670461: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd47800 size=98 attrs=
+            ping-188     [000] D..3.     1.670501: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd48000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.670571: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd48000 size=98 attrs=
+            ping-188     [000] D..3.     1.670612: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd48800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.670682: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd48800 size=98 attrs=
+            ping-188     [000] D..3.     1.670723: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd49000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.670800: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd49000 size=98 attrs=
+            ping-188     [000] D..3.     1.670842: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd49800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.670914: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd49800 size=98 attrs=
+            ping-188     [000] D..3.     1.670962: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.671032: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4a000 size=98 attrs=
+            ping-188     [000] D..3.     1.671072: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.671144: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4a800 size=98 attrs=
+            ping-188     [000] D..3.     1.671186: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.671273: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4b000 size=98 attrs=
+            ping-188     [000] D..3.     1.671315: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.671384: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4b800 size=98 attrs=
+            ping-188     [000] D..3.     1.671425: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.671494: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4c000 size=98 attrs=
+            ping-188     [000] D..3.     1.671534: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.671605: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4c800 size=98 attrs=
+            ping-188     [000] D..3.     1.671646: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.671714: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4d000 size=98 attrs=
+            ping-188     [000] D..3.     1.671756: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.671833: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4d800 size=98 attrs=
+            ping-188     [000] D..3.     1.671874: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.671950: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4e000 size=98 attrs=
+            ping-188     [000] D..3.     1.671991: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.672061: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4e800 size=98 attrs=
+            ping-188     [000] D..3.     1.672102: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.672172: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4f000 size=98 attrs=
+            ping-188     [000] D..3.     1.672212: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.672301: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd4f800 size=98 attrs=
+            ping-188     [000] D..3.     1.672343: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd50000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.672413: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd50000 size=98 attrs=
+            ping-188     [000] D..3.     1.672453: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd50800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.672523: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd50800 size=98 attrs=
+            ping-188     [000] D..3.     1.672563: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd51000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.672632: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd51000 size=98 attrs=
+            ping-188     [000] D..3.     1.672673: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd51800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.672742: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd51800 size=98 attrs=
+            ping-188     [000] D..3.     1.672791: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd52000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.672861: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd52000 size=98 attrs=
+            ping-188     [000] D..3.     1.672901: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd52800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.672978: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd52800 size=98 attrs=
+            ping-188     [000] D..3.     1.673018: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd53000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.673088: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd53000 size=98 attrs=
+            ping-188     [000] D..3.     1.673128: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd53800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.673197: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd53800 size=98 attrs=
+            ping-188     [000] D..3.     1.673256: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd54000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.673327: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd54000 size=98 attrs=
+            ping-188     [000] D..3.     1.673368: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd54800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.673437: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd54800 size=98 attrs=
+            ping-188     [000] D..3.     1.673479: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd55000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.673548: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd55000 size=98 attrs=
+            ping-188     [000] D..3.     1.673589: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd55800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.673658: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd55800 size=98 attrs=
+            ping-188     [000] D..3.     1.673707: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd56000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.673798: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd56000 size=98 attrs=
+            ping-188     [000] D..3.     1.673848: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd56800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.673941: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd56800 size=98 attrs=
+            ping-188     [000] D..3.     1.673992: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd57000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.674079: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd57000 size=98 attrs=
+            ping-188     [000] D..3.     1.674130: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd57800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.674211: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd57800 size=98 attrs=
+            ping-188     [000] D..3.     1.674259: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd58000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.674359: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd58000 size=98 attrs=
+            ping-188     [000] D..3.     1.674406: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd58800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.674495: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd58800 size=98 attrs=
+            ping-188     [000] D..3.     1.674547: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd59000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.674638: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd59000 size=98 attrs=
+            ping-188     [000] D..3.     1.674690: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd59800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.674791: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd59800 size=98 attrs=
+            ping-188     [000] D..3.     1.674843: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.674938: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5a000 size=98 attrs=
+            ping-188     [000] D..3.     1.674991: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.675076: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5a800 size=98 attrs=
+            ping-188     [000] D..3.     1.675126: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.675215: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5b000 size=98 attrs=
+            ping-188     [000] D..3.     1.675266: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.675352: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5b800 size=98 attrs=
+            ping-188     [000] D..3.     1.675403: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.675490: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5c000 size=98 attrs=
+            ping-188     [000] D..3.     1.675539: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.675622: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5c800 size=98 attrs=
+            ping-188     [000] D..3.     1.675674: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.675746: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5d000 size=98 attrs=
+            ping-188     [000] D..3.     1.675798: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.675868: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5d800 size=98 attrs=
+            ping-188     [000] D..3.     1.675945: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.676014: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5e000 size=98 attrs=
+            ping-188     [000] D..3.     1.676055: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.676125: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5e800 size=98 attrs=
+            ping-188     [000] D..3.     1.676165: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.676234: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5f000 size=98 attrs=
+            ping-188     [000] D..3.     1.676291: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.676360: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd5f800 size=98 attrs=
+            ping-188     [000] D..3.     1.676401: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd60000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.676470: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd60000 size=98 attrs=
+            ping-188     [000] D..3.     1.676510: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd60800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.676580: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd60800 size=98 attrs=
+            ping-188     [000] D..3.     1.676621: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd61000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.676696: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd61000 size=98 attrs=
+            ping-188     [000] D..3.     1.676737: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd61800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.676813: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd61800 size=98 attrs=
+            ping-188     [000] D..3.     1.676855: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd62000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.676931: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd62000 size=98 attrs=
+            ping-188     [000] D..3.     1.676973: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd62800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.677042: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd62800 size=98 attrs=
+            ping-188     [000] D..3.     1.677083: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd63000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.677152: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd63000 size=98 attrs=
+            ping-188     [000] D..3.     1.677192: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd63800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.677274: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd63800 size=98 attrs=
+            ping-188     [000] D..3.     1.677315: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd64000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.677384: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd64000 size=98 attrs=
+            ping-188     [000] D..3.     1.677425: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd64800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.677494: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd64800 size=98 attrs=
+            ping-188     [000] D..3.     1.677535: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd65000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.677604: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd65000 size=98 attrs=
+            ping-188     [000] D..3.     1.677645: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd65800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.677715: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd65800 size=98 attrs=
+            ping-188     [000] D..3.     1.677755: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd66000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.677840: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd66000 size=98 attrs=
+            ping-188     [000] D..3.     1.677881: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd66800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.677958: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd66800 size=98 attrs=
+            ping-188     [000] D..3.     1.678000: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd67000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.678069: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd67000 size=98 attrs=
+            ping-188     [000] D..3.     1.678110: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd67800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.678180: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd67800 size=98 attrs=
+            ping-188     [000] D..3.     1.678221: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd68000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.678307: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd68000 size=98 attrs=
+            ping-188     [000] D..3.     1.678347: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd68800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.678417: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd68800 size=98 attrs=
+            ping-188     [000] D..3.     1.678458: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd69000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.678527: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd69000 size=98 attrs=
+            ping-188     [000] D..3.     1.678568: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd69800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.678637: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd69800 size=98 attrs=
+            ping-188     [000] D..3.     1.678678: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.678747: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6a000 size=98 attrs=
+            ping-188     [000] D..3.     1.678796: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.678866: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6a800 size=98 attrs=
+            ping-188     [000] D..3.     1.678907: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.678984: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6b000 size=98 attrs=
+            ping-188     [000] D..3.     1.679025: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.679094: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6b800 size=98 attrs=
+            ping-188     [000] D..3.     1.679135: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.679204: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6c000 size=98 attrs=
+            ping-188     [000] D..3.     1.679245: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.679326: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6c800 size=98 attrs=
+            ping-188     [000] D..3.     1.679367: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.679437: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6d000 size=98 attrs=
+            ping-188     [000] D..3.     1.679478: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.679547: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6d800 size=98 attrs=
+            ping-188     [000] D..3.     1.679588: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.679657: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6e000 size=98 attrs=
+            ping-188     [000] D..3.     1.679698: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.679791: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6e800 size=98 attrs=
+            ping-188     [000] D..3.     1.679844: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.679941: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6f000 size=98 attrs=
+            ping-188     [000] D..3.     1.679995: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.680073: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd6f800 size=98 attrs=
+            ping-188     [000] D..3.     1.680114: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd70000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.680184: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd70000 size=98 attrs=
+            ping-188     [000] D..3.     1.680225: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd70800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.680311: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd70800 size=98 attrs=
+            ping-188     [000] D..3.     1.680352: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd71000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.680421: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd71000 size=98 attrs=
+            ping-188     [000] D..3.     1.680462: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd71800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.680532: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd71800 size=98 attrs=
+            ping-188     [000] D..3.     1.680573: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd72000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.680649: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd72000 size=98 attrs=
+            ping-188     [000] D..3.     1.680690: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd72800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.680760: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd72800 size=98 attrs=
+            ping-188     [000] D..3.     1.680809: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd73000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.680879: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd73000 size=98 attrs=
+            ping-188     [000] D..3.     1.680926: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd73800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.680997: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd73800 size=98 attrs=
+            ping-188     [000] D..3.     1.681038: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd74000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.681108: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd74000 size=98 attrs=
+            ping-188     [000] D..3.     1.681148: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd74800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.681218: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd74800 size=98 attrs=
+            ping-188     [000] D..3.     1.681261: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd75000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.681337: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd75000 size=98 attrs=
+            ping-188     [000] D..3.     1.681378: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd75800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.681448: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd75800 size=98 attrs=
+            ping-188     [000] D..3.     1.681489: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd76000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.681559: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd76000 size=98 attrs=
+            ping-188     [000] D..3.     1.681600: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd76800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.681669: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd76800 size=98 attrs=
+            ping-188     [000] D..3.     1.681710: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd77000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.681787: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd77000 size=98 attrs=
+            ping-188     [000] D..3.     1.681830: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd77800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.681900: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd77800 size=98 attrs=
+            ping-188     [000] D..3.     1.681948: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd78000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.682017: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd78000 size=98 attrs=
+            ping-188     [000] D..3.     1.682059: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd78800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.682129: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd78800 size=98 attrs=
+            ping-188     [000] D..3.     1.682170: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd79000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.682258: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd79000 size=98 attrs=
+            ping-188     [000] D..3.     1.682300: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd79800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.682370: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd79800 size=98 attrs=
+            ping-188     [000] D..3.     1.682412: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.682482: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7a000 size=98 attrs=
+            ping-188     [000] D..3.     1.682523: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.682592: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7a800 size=98 attrs=
+            ping-188     [000] D..3.     1.682633: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.682704: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7b000 size=98 attrs=
+            ping-188     [000] D..3.     1.682745: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.682829: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7b800 size=98 attrs=
+            ping-188     [000] D..3.     1.682871: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.682949: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7c000 size=98 attrs=
+            ping-188     [000] D..3.     1.682990: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.683060: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7c800 size=98 attrs=
+            ping-188     [000] D..3.     1.683101: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.683170: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7d000 size=98 attrs=
+            ping-188     [000] D..3.     1.683212: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.683294: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7d800 size=98 attrs=
+            ping-188     [000] D..3.     1.683336: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.683405: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7e000 size=98 attrs=
+            ping-188     [000] D..3.     1.683449: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.683524: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7e800 size=98 attrs=
+            ping-188     [000] D..3.     1.683567: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.683641: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7f000 size=98 attrs=
+            ping-188     [000] D..3.     1.683683: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.683752: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd7f800 size=98 attrs=
+            ping-188     [000] D..3.     1.683802: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd80000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.683874: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd80000 size=98 attrs=
+            ping-188     [000] D..3.     1.683915: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd80800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.683993: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd80800 size=98 attrs=
+            ping-188     [000] D..3.     1.684034: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd81000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.684104: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd81000 size=98 attrs=
+            ping-188     [000] D..3.     1.684145: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd81800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.684215: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd81800 size=98 attrs=
+            ping-188     [000] D..3.     1.684276: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd82000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.684347: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd82000 size=98 attrs=
+            ping-188     [000] D..3.     1.684389: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd82800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.684458: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd82800 size=98 attrs=
+            ping-188     [000] D..3.     1.684500: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd83000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.684571: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd83000 size=98 attrs=
+            ping-188     [000] D..3.     1.684625: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd83800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.684696: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd83800 size=98 attrs=
+            ping-188     [000] D..3.     1.684738: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd84000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.684818: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd84000 size=98 attrs=
+            ping-188     [000] D..3.     1.684862: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd84800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.684943: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd84800 size=98 attrs=
+            ping-188     [000] D..3.     1.684985: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd85000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.685056: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd85000 size=98 attrs=
+            ping-188     [000] D..3.     1.685099: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd85800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.685170: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd85800 size=98 attrs=
+            ping-188     [000] D..3.     1.685212: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd86000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.685296: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd86000 size=98 attrs=
+            ping-188     [000] D..3.     1.685339: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd86800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.685410: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd86800 size=98 attrs=
+            ping-188     [000] D..3.     1.685452: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd87000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.685524: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd87000 size=98 attrs=
+            ping-188     [000] D..3.     1.685580: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd87800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.685656: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd87800 size=98 attrs=
+            ping-188     [000] D..3.     1.685701: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd88000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.685787: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd88000 size=98 attrs=
+            ping-188     [000] D..3.     1.685834: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd88800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.685909: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd88800 size=98 attrs=
+            ping-188     [000] D..3.     1.685962: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd89000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.686038: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd89000 size=98 attrs=
+            ping-188     [000] D..3.     1.686083: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd89800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.686159: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd89800 size=98 attrs=
+            ping-188     [000] D..3.     1.686203: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.686298: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8a000 size=98 attrs=
+            ping-188     [000] D..3.     1.686343: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.686421: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8a800 size=98 attrs=
+            ping-188     [000] D..3.     1.686466: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.686541: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8b000 size=98 attrs=
+            ping-188     [000] D..3.     1.686598: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.686668: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8b800 size=98 attrs=
+            ping-188     [000] D..3.     1.686708: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.686786: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8c000 size=98 attrs=
+            ping-188     [000] D..3.     1.686828: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.686898: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8c800 size=98 attrs=
+            ping-188     [000] D..3.     1.686946: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.687016: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8d000 size=98 attrs=
+            ping-188     [000] D..3.     1.687058: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.687127: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8d800 size=98 attrs=
+            ping-188     [000] D..3.     1.687168: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.687240: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8e000 size=98 attrs=
+            ping-188     [000] D..3.     1.687283: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.687353: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8e800 size=98 attrs=
+            ping-188     [000] D..3.     1.687394: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.687464: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8f000 size=98 attrs=
+            ping-188     [000] D..3.     1.687506: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.687589: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd8f800 size=98 attrs=
+            ping-188     [000] D..3.     1.687632: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd90000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.687709: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd90000 size=98 attrs=
+            ping-188     [000] D..3.     1.687756: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd90800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.687842: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd90800 size=98 attrs=
+            ping-188     [000] D..3.     1.687898: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd91000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.687987: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd91000 size=98 attrs=
+            ping-188     [000] D..3.     1.688038: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd91800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.688130: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd91800 size=98 attrs=
+            ping-188     [000] D..3.     1.688175: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd92000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.688269: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd92000 size=98 attrs=
+            ping-188     [000] D..3.     1.688312: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd92800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.688385: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd92800 size=98 attrs=
+            ping-188     [000] D..3.     1.688428: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd93000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.688501: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd93000 size=98 attrs=
+            ping-188     [000] D..3.     1.688544: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd93800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.688631: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd93800 size=98 attrs=
+            ping-188     [000] D..3.     1.688678: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd94000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.688757: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd94000 size=98 attrs=
+            ping-188     [000] D..3.     1.688819: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd94800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.688899: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd94800 size=98 attrs=
+            ping-188     [000] D..3.     1.688957: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd95000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.689037: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd95000 size=98 attrs=
+            ping-188     [000] D..3.     1.689084: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd95800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.689165: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd95800 size=98 attrs=
+            ping-188     [000] D..3.     1.689217: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd96000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.689329: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd96000 size=98 attrs=
+            ping-188     [000] D..3.     1.689381: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd96800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.689462: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd96800 size=98 attrs=
+            ping-188     [000] D..3.     1.689509: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd97000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.689588: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd97000 size=98 attrs=
+            ping-188     [000] D..3.     1.689648: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd97800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.689733: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd97800 size=98 attrs=
+            ping-188     [000] D..3.     1.689786: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd98000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.689858: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd98000 size=98 attrs=
+            ping-188     [000] D..3.     1.689902: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd98800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.689983: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd98800 size=98 attrs=
+            ping-188     [000] D..3.     1.690026: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd99000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.690097: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd99000 size=98 attrs=
+            ping-188     [000] D..3.     1.690140: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd99800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.690212: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd99800 size=98 attrs=
+            ping-188     [000] D..3.     1.690276: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9a000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.690348: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9a000 size=98 attrs=
+            ping-188     [000] D..3.     1.690390: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9a800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.690461: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9a800 size=98 attrs=
+            ping-188     [000] D..3.     1.690504: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9b000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.690575: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9b000 size=98 attrs=
+            ping-188     [000] D..3.     1.690617: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9b800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.690688: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9b800 size=98 attrs=
+            ping-188     [000] D..3.     1.690730: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9c000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.690809: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9c000 size=98 attrs=
+            ping-188     [000] D..3.     1.690852: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9c800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.690930: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9c800 size=98 attrs=
+            ping-188     [000] D..3.     1.690973: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9d000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.691044: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9d000 size=98 attrs=
+            ping-188     [000] D..3.     1.691086: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9d800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.691158: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9d800 size=98 attrs=
+            ping-188     [000] D..3.     1.691200: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9e000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.691294: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9e000 size=98 attrs=
+            ping-188     [000] D..3.     1.691337: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9e800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.691408: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9e800 size=98 attrs=
+            ping-188     [000] D..3.     1.691451: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9f000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.691522: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9f000 size=98 attrs=
+            ping-188     [000] D..3.     1.691564: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9f800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.691635: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbd9f800 size=98 attrs=
+            ping-188     [000] D..3.     1.691677: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda0000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.691748: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda0000 size=98 attrs=
+            ping-188     [000] D..3.     1.691806: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda0800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.691879: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda0800 size=98 attrs=
+            ping-188     [000] D..3.     1.691929: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda1000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.692002: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda1000 size=98 attrs=
+            ping-188     [000] D..3.     1.692044: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda1800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.692115: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda1800 size=98 attrs=
+            ping-188     [000] D..3.     1.692157: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda2000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.692230: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda2000 size=98 attrs=
+            ping-188     [000] D..3.     1.692285: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda2800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.692357: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda2800 size=98 attrs=
+            ping-188     [000] D..3.     1.692404: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda3000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.692478: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda3000 size=98 attrs=
+            ping-188     [000] D..3.     1.692522: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda3800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.692593: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda3800 size=98 attrs=
+            ping-188     [000] D..3.     1.692635: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda4000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.692705: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda4000 size=98 attrs=
+            ping-188     [000] D..3.     1.692747: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda4800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.692827: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda4800 size=98 attrs=
+            ping-188     [000] D..3.     1.692870: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda5000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.692949: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda5000 size=98 attrs=
+            ping-188     [000] D..3.     1.692992: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda5800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.693063: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda5800 size=98 attrs=
+            ping-188     [000] D..3.     1.693106: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda6000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.693177: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda6000 size=98 attrs=
+            ping-188     [000] D..3.     1.693219: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda6800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.693313: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda6800 size=98 attrs=
+            ping-188     [000] D..3.     1.693356: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda7000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.693428: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda7000 size=98 attrs=
+            ping-188     [000] D..3.     1.693470: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda7800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.693541: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda7800 size=98 attrs=
+            ping-188     [000] D..3.     1.693583: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda8000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.693654: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda8000 size=98 attrs=
+            ping-188     [000] D..3.     1.693695: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda8800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.693766: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda8800 size=98 attrs=
+            ping-188     [000] D..3.     1.693819: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda9000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.693890: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda9000 size=98 attrs=
+            ping-188     [000] D..3.     1.693938: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda9800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.694009: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbda9800 size=98 attrs=
+            ping-188     [000] D..3.     1.694051: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaa000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.694123: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaa000 size=98 attrs=
+            ping-188     [000] D..3.     1.694165: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaa800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.694257: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaa800 size=98 attrs=
+            ping-188     [000] D..3.     1.694299: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdab000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.694371: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdab000 size=98 attrs=
+            ping-188     [000] D..3.     1.694413: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdab800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.694484: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdab800 size=98 attrs=
+            ping-188     [000] D..3.     1.694526: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdac000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.694597: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdac000 size=98 attrs=
+            ping-188     [000] D..3.     1.694639: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdac800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.694712: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdac800 size=98 attrs=
+            ping-188     [000] D..3.     1.694754: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdad000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.694834: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdad000 size=98 attrs=
+            ping-188     [000] D..3.     1.694876: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdad800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.694954: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdad800 size=98 attrs=
+            ping-188     [000] D..3.     1.694996: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdae000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.695068: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdae000 size=98 attrs=
+            ping-188     [000] D..3.     1.695110: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdae800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.695181: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdae800 size=98 attrs=
+            ping-188     [000] D..3.     1.695224: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaf000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.695318: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaf000 size=98 attrs=
+            ping-188     [000] D..3.     1.695360: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaf800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.695432: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdaf800 size=98 attrs=
+            ping-188     [000] D..3.     1.695474: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb0000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.695546: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb0000 size=98 attrs=
+            ping-188     [000] D..3.     1.695588: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb0800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.695660: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb0800 size=98 attrs=
+            ping-188     [000] D..3.     1.695702: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb1000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.695780: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb1000 size=98 attrs=
+            ping-188     [000] D..3.     1.695824: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb1800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.695895: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb1800 size=98 attrs=
+            ping-188     [000] D..3.     1.695944: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb2000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.696016: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb2000 size=98 attrs=
+            ping-188     [000] D..3.     1.696058: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb2800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.696129: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb2800 size=98 attrs=
+            ping-188     [000] D..3.     1.696172: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb3000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.696262: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb3000 size=98 attrs=
+            ping-188     [000] D..3.     1.696304: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb3800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.696376: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb3800 size=98 attrs=
+            ping-188     [000] D..3.     1.696418: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb4000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.696489: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb4000 size=98 attrs=
+            ping-188     [000] D..3.     1.696531: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb4800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.696602: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb4800 size=98 attrs=
+            ping-188     [000] D..3.     1.696644: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb5000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.696716: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb5000 size=98 attrs=
+            ping-188     [000] D..3.     1.696758: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb5800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.696839: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb5800 size=98 attrs=
+            ping-188     [000] D..3.     1.696881: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb6000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.696960: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb6000 size=98 attrs=
+            ping-188     [000] D..3.     1.697002: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb6800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.697073: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb6800 size=98 attrs=
+            ping-188     [000] D..3.     1.697116: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb7000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.697187: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb7000 size=98 attrs=
+            ping-188     [000] D..3.     1.697231: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb7800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.697320: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb7800 size=98 attrs=
+            ping-188     [000] D..3.     1.697363: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb8000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.697435: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb8000 size=98 attrs=
+            ping-188     [000] D..3.     1.697477: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb8800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.697549: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb8800 size=98 attrs=
+            ping-188     [000] D..3.     1.697591: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb9000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.697662: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb9000 size=98 attrs=
+            ping-188     [000] D..3.     1.697704: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb9800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.697782: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdb9800 size=98 attrs=
+            ping-188     [000] D..3.     1.697825: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdba000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.697896: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdba000 size=98 attrs=
+            ping-188     [000] D..3.     1.697945: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdba800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.698017: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdba800 size=98 attrs=
+            ping-188     [000] D..3.     1.698059: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbb000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.698130: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbb000 size=98 attrs=
+            ping-188     [000] D..3.     1.698172: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbb800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.698262: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbb800 size=98 attrs=
+            ping-188     [000] D..3.     1.698305: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbc000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.698376: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbc000 size=98 attrs=
+            ping-188     [000] D..3.     1.698418: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbc800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.698489: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbc800 size=98 attrs=
+            ping-188     [000] D..3.     1.698531: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbd000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.698602: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbd000 size=98 attrs=
+            ping-188     [000] D..3.     1.698657: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbd800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.698726: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbd800 size=98 attrs=
+            ping-188     [000] D..3.     1.698767: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbe000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.698845: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbe000 size=98 attrs=
+            ping-188     [000] D..3.     1.698887: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbe800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.698965: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbe800 size=98 attrs=
+            ping-188     [000] D..3.     1.699006: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbf000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.699076: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbf000 size=98 attrs=
+            ping-188     [000] D..3.     1.699118: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbf800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.699187: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdbf800 size=98 attrs=
+            ping-188     [000] D..3.     1.699230: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc0000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.699315: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc0000 size=98 attrs=
+            ping-188     [000] D..3.     1.699356: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc0800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.699427: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc0800 size=98 attrs=
+            ping-188     [000] D..3.     1.699468: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc1000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.699539: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc1000 size=98 attrs=
+            ping-188     [000] D..3.     1.699580: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc1800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.699650: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc1800 size=98 attrs=
+            ping-188     [000] D..3.     1.699691: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc2000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.699761: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc2000 size=98 attrs=
+            ping-188     [000] D..3.     1.699810: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc2800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.699881: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc2800 size=98 attrs=
+            ping-188     [000] D..3.     1.699928: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc3000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.699999: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc3000 size=98 attrs=
+            ping-188     [000] D..3.     1.700040: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc3800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.700109: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc3800 size=98 attrs=
+            ping-188     [000] D..3.     1.700150: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc4000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.700238: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc4000 size=98 attrs=
+            ping-188     [000] D..3.     1.700281: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc4800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.700351: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc4800 size=98 attrs=
+            ping-188     [000] D..3.     1.700392: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc5000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.700461: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc5000 size=98 attrs=
+            ping-188     [000] D..3.     1.700502: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc5800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.700579: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc5800 size=98 attrs=
+            ping-188     [000] D..3.     1.700619: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc6000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.700689: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc6000 size=98 attrs=
+            ping-188     [000] D..3.     1.700730: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc6800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.700813: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc6800 size=98 attrs=
+            ping-188     [000] D..3.     1.700855: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc7000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.700931: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc7000 size=98 attrs=
+            ping-188     [000] D..3.     1.700972: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc7800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.701042: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc7800 size=98 attrs=
+            ping-188     [000] D..3.     1.701083: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc8000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.701153: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc8000 size=98 attrs=
+            ping-188     [000] D..3.     1.701193: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc8800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.701285: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc8800 size=98 attrs=
+            ping-188     [000] D..3.     1.701327: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc9000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.701397: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc9000 size=98 attrs=
+            ping-188     [000] D..3.     1.701438: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc9800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.701507: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdc9800 size=98 attrs=
+            ping-188     [000] D..3.     1.701548: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdca000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.701617: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdca000 size=98 attrs=
+            ping-188     [000] D..3.     1.701658: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdca800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.701728: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdca800 size=98 attrs=
+            ping-188     [000] D..3.     1.701769: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcb000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.701848: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcb000 size=98 attrs=
+            ping-188     [000] D..3.     1.701889: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcb800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.701966: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcb800 size=98 attrs=
+            ping-188     [000] D..3.     1.702007: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcc000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.702076: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcc000 size=98 attrs=
+            ping-188     [000] D..3.     1.702117: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcc800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.702187: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcc800 size=98 attrs=
+            ping-188     [000] D..3.     1.702229: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcd000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.702310: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcd000 size=98 attrs=
+            ping-188     [000] D..3.     1.702352: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcd800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.702422: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcd800 size=98 attrs=
+            ping-188     [000] D..3.     1.702463: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdce000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.702532: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdce000 size=98 attrs=
+            ping-188     [000] D..3.     1.702573: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdce800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.702642: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdce800 size=98 attrs=
+            ping-188     [000] D..3.     1.702683: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcf000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.702753: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcf000 size=98 attrs=
+            ping-188     [000] D..3.     1.702802: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcf800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.702879: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdcf800 size=98 attrs=
+            ping-188     [000] D..3.     1.702927: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd0000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.702997: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd0000 size=98 attrs=
+            ping-188     [000] D..3.     1.703037: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd0800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.703107: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd0800 size=98 attrs=
+            ping-188     [000] D..3.     1.703148: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd1000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.703217: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd1000 size=98 attrs=
+            ping-188     [000] D..3.     1.703278: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd1800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.703349: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd1800 size=98 attrs=
+            ping-188     [000] D..3.     1.703390: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd2000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.703462: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd2000 size=98 attrs=
+            ping-188     [000] D..3.     1.703509: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd2800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.703580: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd2800 size=98 attrs=
+            ping-188     [000] D..3.     1.703620: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd3000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.703689: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd3000 size=98 attrs=
+            ping-188     [000] D..3.     1.703730: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd3800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.703807: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd3800 size=98 attrs=
+            ping-188     [000] D..3.     1.703851: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd4000 size=98 phys_addr=1034258c2 attrs=
+            ping-188     [000] d.s2.     1.703925: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd4000 size=98 attrs=
+            ping-188     [000] D..3.     1.703967: dma_map_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd4800 size=98 phys_addr=103430582 attrs=
+            ping-188     [000] d.s2.     1.704037: dma_unmap_phys: 0000:00:0c.0 dir=TO_DEVICE dma_addr=bbdd4800 size=98 attrs=
+         python3-178     [000] ...1.     1.705929: tracing_mark_write: L11-PHASE3-END
