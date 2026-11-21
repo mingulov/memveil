@@ -240,7 +240,7 @@ class Workshop:
         manifest = {
             "bundle": "memveil-fixture",
             "build_receipt": receipt,
-            "engine_version": "0.1.0",
+            "engine_version": "0.1.1",
             "memveil_revision": commit,
             "toolchain": {
                 "cargo": {"version": tools["cargo"]},

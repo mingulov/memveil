@@ -433,65 +433,6 @@ def test_bundle_three_phase_capture():
                 expected=expected)
 
 
-def _freeze_stub_binaries(dest):
-    """Compile freeze-version stub bytes for the wire seal.
-
-    The fixture stub still reports the pre-freeze version
-    while the tree spec moved on, which the packaging guard
-    refuses; compile the equivalent bytes from a patched copy
-    (the tree sources stay untouched) so the wire seal runs
-    the real scripts. Once the fixture stub reports the
-    freeze version this normalize step is a no-op.
-    """
-    package_dir = os.path.join(REPO, "tests", "package")
-    sys.path.insert(0, package_dir)
-    import sealed_fixture as fixture
-    for tool in ("rustc", "readelf"):
-        fixture.require_tool(tool)
-    dest.mkdir(parents=True, exist_ok=True)
-    with open(os.path.join(package_dir, "stub_engine.rs")) as fh:
-        text = fh.read()
-    want = 'const VERSION: &str = "%s";' % BUNDLE_VERSION
-    patched = [want if line.strip().startswith(
-        "const VERSION") else line
-        for line in text.splitlines()]
-    src = dest / "stub_engine.rs"
-    src.write_text("\n".join(patched) + "\n")
-    lib_src = dest / "stub_lib.rs"
-    shutil.copy2(os.path.join(package_dir, "stub_lib.rs"),
-                 lib_src)
-    env = {key: value for key, value in os.environ.items()
-           if key != "RUSTUP_TOOLCHAIN"}
-    engine = dest / "wire-engine"
-    proc = subprocess.run(
-        ["rustc", "--edition=2021", "-O", str(src),
-         "-o", str(engine)],
-        cwd=REPO, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env=env)
-    assert proc.returncode == 0, proc.stderr[-3000:]
-    lib = dest / "wire-lib.so"
-    proc = subprocess.run(
-        ["rustc", "--edition=2021", "-O",
-         "--crate-type=cdylib", str(lib_src),
-         "-o", str(lib)],
-        cwd=REPO, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, env=env)
-    assert proc.returncode == 0, proc.stderr[-3000:]
-    proc = subprocess.run(
-        [str(engine), "version"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True)
-    assert proc.returncode == 0 and proc.stdout.strip() == \
-        "memveil-" + BUNDLE_VERSION, proc.stderr[-1000:]
-    proc = subprocess.run(
-        ["readelf", "-V", str(lib)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True)
-    assert proc.returncode == 0, \
-        "wire lib is not well-formed ELF"
-    return (engine.read_bytes(), lib.read_bytes())
-
-
 def _seal_wire_bundle(tmp_path, name, libgcc=True):
     """Seal a synthetic bundle through the real candidate protocol.
 
@@ -511,28 +452,11 @@ def _seal_wire_bundle(tmp_path, name, libgcc=True):
     shop = fixture.workshop()
     fix = shop.fresh(tmp_path / name)
     if libgcc:
-        # The packaging guards require spec, manifest, and
-        # binary to agree; stage the freeze version in the
-        # manifest before the shaped seal reads it. The
-        # fixture-global override is saved and restored, so
-        # other seals in this process keep their own bytes.
+        # The stock shaped seal agrees on the freeze version
+        # (spec, manifest, and stub binaries); no overrides.
         manifest_path = fix["bundle_dir"] / "MANIFEST.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["engine_version"] = BUNDLE_VERSION
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True)
-            + "\n")
-        saved_version = fixture.STUB_VERSION
-        fixture.STUB_VERSION = BUNDLE_VERSION
-        saved = fixture._stub_binaries
-        fixture._stub_binaries = _freeze_stub_binaries(
-            tmp_path / (name + "-stub"))
-        try:
-            fixture._shape_bundle(
-                fix, tmp_path / (name + "-shape"))
-        finally:
-            fixture._stub_binaries = saved
-            fixture.STUB_VERSION = saved_version
+        fixture._shape_bundle(
+            fix, tmp_path / (name + "-shape"))
         manifest = json.loads(manifest_path.read_text())
         manifest["bundle"] = "memveil-" + BUNDLE_VERSION
         manifest_path.write_text(
