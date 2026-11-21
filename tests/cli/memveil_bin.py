@@ -9,10 +9,12 @@ executes:
 - MEMVEIL_BIN set to an absolute slash path: it must name
   an executable file, used verbatim (no rebuild, no relink,
   no default fallback).
-- MEMVEIL_BIN set to a relative slash path: resolved
-  against the caller's directory to an absolute canonical
-  path before dispatch, so a later directory change cannot
-  lose it.
+- MEMVEIL_BIN set to a relative slash path: every leading
+  directory of the spelled path must exist, checked before
+  canonicalizing so a later dot-dot cannot hide a file or
+  a missing directory; only then resolved against the
+  caller's directory to an absolute canonical path before
+  dispatch, so a later directory change cannot lose it.
 - MEMVEIL_BIN set to a bare name: looked up on PATH, left to
   right, resolving to an absolute canonical path. The lookup is
   explicit so validation and dispatch cannot disagree about
@@ -54,13 +56,31 @@ def resolve_memveil_bin():
             if os.path.isfile(knob) and os.access(knob, os.X_OK):
                 return knob
         else:
-            # Relative slash: resolve against the caller's
-            # directory now, mirroring the runner, so the
-            # returned absolute path survives a later chdir
-            # before dispatch.
-            resolved = os.path.realpath(knob)
-            if os.path.isfile(resolved) and os.access(resolved, os.X_OK):
-                return resolved
+            # Relative slash: every leading directory of
+            # the spelled path must exist, checked on the
+            # original spelling before canonicalizing, so
+            # a later dot-dot cannot hide a file or a
+            # missing directory; only then resolve against
+            # the caller's directory now, mirroring the
+            # runner, so the returned absolute path
+            # survives a later chdir before dispatch.
+            head, _, _ = knob.rpartition("/")
+            parts = head.split("/")
+            prefix = None
+            usable = True
+            for index, comp in enumerate(parts):
+                if index == 0:
+                    prefix = comp
+                else:
+                    prefix = prefix + "/" + comp
+                probe = prefix if prefix else "/"
+                if not os.path.isdir(probe):
+                    usable = False
+                    break
+            if usable:
+                resolved = os.path.realpath(knob)
+                if os.path.isfile(resolved) and os.access(resolved, os.X_OK):
+                    return resolved
     else:
         # Bare name: explicit PATH lookup, mirroring the
         # runner's resolver (an unset or empty PATH refuses

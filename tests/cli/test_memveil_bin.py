@@ -7,11 +7,13 @@ same selector (memveil_bin.resolve_memveil_bin), so the knob
 binary provably equals the executed binary:
 
 - set+usable resolves: an absolute slash path verbatim, a
-  relative slash path against the caller's directory to an
-  absolute path, a bare name via PATH to an absolute path;
-  unset resolves the build/memveil default; bogus (missing,
+  relative slash path with every leading directory present,
+  resolved against the caller's directory to an absolute
+  path, a bare name via PATH to an absolute path; unset
+  resolves the build/memveil default; bogus (missing,
   not-a-file, non-executable, empty, unresolvable-on-PATH,
-  unresolvable relative) refuses before dispatch.
+  unresolvable relative, dot-dot hiding a file or a missing
+  directory) refuses before dispatch.
 - identity: every CLI driver resolves the knob to the identical
   string, and wrapper-knob end-to-end runs prove the executed
   binary is the knob binary (marker checks, for absolute
@@ -192,6 +194,55 @@ class KnobContract(unittest.TestCase):
                     os.environ.pop("MEMVEIL_BIN", None)
                 else:
                     os.environ["MEMVEIL_BIN"] = old_knob
+
+    def test_dotdot_cannot_hide_unusable_intermediate(self):
+        # A relative slash knob whose dot-dot lexically
+        # removes a file or a missing directory still
+        # refuses: every leading directory of the spelled
+        # path must exist. From the repository root,
+        # README.md is a file and the probe directory is
+        # missing, so both spellings collapse lexically to
+        # the executable tools/test yet must fail closed in
+        # the driver selector and in the runner.
+        cases = (
+            "./README.md/../tools/test",
+            "./mv-no-such-dir/../tools/test",
+        )
+        old_knob = os.environ.get("MEMVEIL_BIN")
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(ROOT)
+            for knob in cases:
+                with self.subTest(knob):
+                    os.environ["MEMVEIL_BIN"] = knob
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        with self.assertRaises(SystemExit) as raised:
+                            resolve_memveil_bin()
+                    self.assertEqual(raised.exception.code, 1)
+                    self.assertIn("MEMVEIL_BIN", err.getvalue())
+            # The runner refuses before dispatch too (no
+            # recursion: bogus knobs exit in setup).
+            for knob in cases:
+                with self.subTest("runner-" + knob):
+                    env = dict(os.environ)
+                    env["MEMVEIL_BIN"] = knob
+                    proc = subprocess.run(
+                        [str(ROOT / "tools/test"),
+                         "reader-adversarial"],
+                        env=env, capture_output=True, text=True,
+                        cwd=ROOT)
+                    self.assertEqual(proc.returncode, 1,
+                                     proc.stderr[-2000:])
+                    self.assertIn("MEMVEIL_BIN", proc.stderr)
+                    self.assertIn("missing or not executable",
+                                  proc.stderr)
+        finally:
+            os.chdir(old_cwd)
+            if old_knob is None:
+                os.environ.pop("MEMVEIL_BIN", None)
+            else:
+                os.environ["MEMVEIL_BIN"] = old_knob
 
     def test_bogus_refuses_before_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -36,9 +36,12 @@
 # MEMVEIL_BIN overrides the binary under test: an absolute
 # slash path must name an executable file, used verbatim
 # (no rebuild, no relink of build/memveil); a relative
-# slash path resolves against the caller's directory to an
-# absolute canonical path before dispatch, so a later
-# directory change cannot lose it; a bare name is looked up
+# slash path first requires every leading directory of the
+# spelled path to exist, so a later dot-dot cannot hide a
+# file or a missing directory, and only then resolves
+# against the caller's directory to an absolute canonical
+# path before dispatch, so a later directory change cannot
+# lose it; a bare name is looked up
 # on PATH and resolves to an absolute path. A
 # set-but-unusable value (missing, not executable, or
 # unresolvable on PATH) fails closed with exit 1. The CLI
@@ -131,11 +134,14 @@ memveil_knob_resolved() {
     # Resolve a MEMVEIL_BIN value to the binary to run: an
     # absolute slash path prints verbatim (the caller
     # checks it names an executable file); a relative
-    # slash path prints as an absolute canonical path
-    # resolved against the caller's directory, so the
-    # blessed path survives a directory change before
-    # dispatch; a bare name is looked up on PATH, left to
-    # right, and prints as an absolute canonical path.
+    # slash path first requires every leading directory of
+    # the spelled path to exist, so a later dot-dot cannot
+    # hide a file or a missing directory, and only then
+    # prints as an absolute canonical path resolved
+    # against the caller's directory, so the blessed path
+    # survives a directory change before dispatch; a bare
+    # name is looked up on PATH, left to right, and prints
+    # as an absolute canonical path.
     # The lookup is explicit so validation and dispatch
     # cannot disagree about which file a bare name means:
     # an executed bare name would otherwise search PATH
@@ -152,6 +158,36 @@ memveil_knob_resolved() {
             return 0
             ;;
         */*)
+            # Every leading directory of the spelled path
+            # must exist, checked on the original spelling
+            # before canonicalizing, so a later dot-dot
+            # cannot hide a file or a missing directory.
+            head=${knob%/*}
+            rest=$head
+            prefix=
+            while [ -n "$rest" ]; do
+                case $rest in
+                    */*)
+                        comp=${rest%%/*}
+                        rest=${rest#*/}
+                        ;;
+                    *)
+                        comp=$rest
+                        rest=
+                        ;;
+                esac
+                if [ -z "$prefix" ]; then
+                    prefix=$comp
+                    if [ -z "$prefix" ]; then
+                        prefix=/
+                    fi
+                else
+                    prefix=$prefix/$comp
+                fi
+                if [ ! -d "$prefix" ]; then
+                    return 1
+                fi
+            done
             resolved=$(command -p readlink -f -- "$knob" \
                 2>/dev/null) || return 1
             if [ -z "$resolved" ]; then
@@ -210,8 +246,10 @@ rust_bin_setup() {
     # MEMVEIL_BIN override: use the named binary (no
     # rebuild, no relink of build/memveil), failing
     # closed unless it names an executable file — a
-    # relative slash path resolves against the caller's
-    # directory first, a bare name must resolve on PATH.
+    # relative slash path first requires every leading
+    # directory of the spelled path, then resolves
+    # against the caller's directory, a bare name must
+    # resolve on PATH.
     # The slash check runs against the resolved path, so
     # setup blesses exactly what dispatch executes.
     if [ "${MEMVEIL_BIN+x}" = x ]; then
