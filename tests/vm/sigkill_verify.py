@@ -38,21 +38,35 @@ KILLED_BY_SIGKILL = -9
 # A SIGKILL always precedes final publication, so session.json must never
 # exist (final-stop halts at the session.json rename itself,
 # tests/cli/capture_faults.c:82).
-# Caveat: the finalization set below is the pre-armed expectation, NOT a
-# verified armed shape. finalize() releases .finalization-reserve BEFORE
-# the stopped session.json rename (src/capture/writer.rs:928-936,
-# release_reserve at :1198-1216, rename at :989), so an armed final-stop
-# capture holds no reserve and the barrier's reserve stat cannot run
-# there. Re-derive this set from an armed final-stop capture (plus a
-# barrier-semantics fix) before trusting it.
+# The finalization set is the final-stop halt INSIDE finalize(), derived
+# per name from the writer lifecycle and the shim stop point:
+# - .finalization-reserve: ABSENT. finalize() releases it first
+#   (src/capture/writer.rs:928-936 calls release_reserve, which unlinks
+#   it at :1212), before staging (:945) and the stopped rename (:989).
+# - session.finalizing: PRESENT, filled with the session document.
+#   prepare() creates it empty (:584); fill_or_write_stage (:945) fills
+#   it via fill_stage (:1226-1251); the rename to session.json at :989
+#   never runs because the shim raises SIGSTOP first
+#   (tests/cli/capture_faults.c:82).
+# - session.json: ABSENT. It is the rename target at :989 that never runs.
+# - checkpoint.json: PRESENT. finalize() removes it only after the rename
+#   succeeds (:1047-1056), which never happens here.
+# - checkpoint.json.tmp: ABSENT. Every completed checkpoint exchange
+#   removes the previous generation (:732-734), and no checkpoint is in
+#   flight during finalize().
+# - session.json.tmp: ABSENT. Only the unprepared finalize path stages
+#   here (:1269); record always prepares (checkpoint() calls prepare()
+#   at :652, and the armed readiness capture holds the reserve).
+# - events.ndjson: PRESENT, created by EventWriter::new (:461) and fsynced
+#   in finalize() before staging (:937).
 CAPTURE_INVENTORY = {
     'readiness': frozenset(('.finalization-reserve', 'checkpoint.json',
                             'events.ndjson', 'session.finalizing')),
     'checkpoint': frozenset(('.finalization-reserve', 'checkpoint.json',
                              'checkpoint.json.tmp', 'events.ndjson',
                              'session.finalizing')),
-    'finalization': frozenset(('.finalization-reserve', 'checkpoint.json',
-                               'events.ndjson', 'session.finalizing')),
+    'finalization': frozenset(('checkpoint.json', 'events.ndjson',
+                               'session.finalizing')),
 }
 EXPORT_INVENTORY = frozenset(('barrier.json', 'result.json',
                               'prefix-events.ndjson', 'checkpoint.json',
@@ -116,9 +130,23 @@ def validate_barrier(doc, nonce, scenario, inputs):
         raise ValueError('wrong boundary marker: %r' % (doc.get('marker'),))
     if doc.get('ready_observed') is not True:
         raise ValueError('readiness announcement not observed')
-    if not isinstance(doc.get('reserve_allocated'), int) or \
-            doc['reserve_allocated'] < RESERVE_BYTES:
-        raise ValueError('allocated 17 MiB reserve missing at barrier')
+    if scenario == 'finalization':
+        # finalize() unlinks the reserve before the stopped rename, so
+        # ABSENCE is the release proof here; a still-present reserve is
+        # an unreleased one, not a proof.
+        if doc.get('reserve_released') is not True:
+            raise ValueError('finalization barrier must prove '
+                             'reserve release')
+        if doc.get('reserve_allocated') is not None:
+            raise ValueError('finalization barrier must not claim '
+                             'allocated reserve')
+    else:
+        if not isinstance(doc.get('reserve_allocated'), int) or \
+                doc['reserve_allocated'] < RESERVE_BYTES:
+            raise ValueError('allocated 17 MiB reserve missing at barrier')
+        if doc.get('reserve_released') is not False:
+            raise ValueError('reserve release misreported '
+                             'before finalization')
     integrity = doc.get('integrity')
     if not isinstance(integrity, dict):
         raise ValueError('barrier prefix integrity absent')

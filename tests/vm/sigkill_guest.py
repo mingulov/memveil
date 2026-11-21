@@ -121,9 +121,41 @@ def wait_stopped_at_marker(child, marker, text, seconds):
     raise ValueError('boundary %r not reached' % text)
 
 
-def reserve_allocated(capture):
-    reserve = Path(capture) / '.finalization-reserve'
-    return reserve.stat().st_blocks * 512
+def reserve_proof(scenario, capture):
+    """Prove the reserve state the barrier requires. Raises ValueError.
+
+    Readiness/checkpoint barriers prove the 17 MiB allocation is still
+    held; the finalization barrier proves finalize() released it, so
+    ABSENCE is the proof there. Returns (allocated_bytes_or_None,
+    released). Every outcome fails closed with the scenario name, never
+    a bare OSError.
+    """
+    path = Path(capture) / '.finalization-reserve'
+    try:
+        blocks = path.stat().st_blocks
+    except FileNotFoundError:
+        if scenario == 'finalization':
+            return None, True
+        raise ValueError('%s barrier: allocated reserve absent' % scenario)
+    except OSError as exc:
+        raise ValueError('%s barrier: reserve stat failed: %s'
+                         % (scenario, exc))
+    if scenario == 'finalization':
+        raise ValueError('finalization barrier: reserve still present, '
+                         'release unproven')
+    return blocks * 512, False
+
+
+def barrier_present(scenario, capture, name):
+    """Presence check that fails closed with the scenario name."""
+    try:
+        (Path(capture) / name).stat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ValueError('%s barrier: cannot stat %s: %s'
+                         % (scenario, name, exc))
 
 
 def snapshot_barrier(scenario, nonce, marker, capture, identity):
@@ -131,17 +163,33 @@ def snapshot_barrier(scenario, nonce, marker, capture, identity):
         doc = independent(Path(capture))
     except (AssertionError, KeyError) as exc:
         raise ValueError('independent prefix check failed: %s' % exc)
+    except OSError as exc:
+        raise ValueError('%s barrier: cannot read durable prefix: %s'
+                         % (scenario, exc))
     if doc is None:
         raise ValueError('no durable checkpoint at barrier')
+    allocated, released = reserve_proof(scenario, capture)
+    try:
+        marker_text = Path(marker).read_text()
+    except OSError as exc:
+        raise ValueError('%s barrier: cannot read marker: %s'
+                         % (scenario, exc))
+    try:
+        checkpoint_digest = digest(Path(capture) / 'checkpoint.json')
+    except OSError as exc:
+        raise ValueError('%s barrier: cannot digest checkpoint: %s'
+                         % (scenario, exc))
     return dict(
         nonce=nonce, scenario=scenario, stopped=True,
-        marker=Path(marker).read_text(), ready_observed=True,
-        reserve_allocated=reserve_allocated(capture),
+        marker=marker_text, ready_observed=True,
+        reserve_allocated=allocated, reserve_released=released,
         integrity=doc['capture']['integrity'],
         session_id=doc['session_id'],
-        session_json_absent=not (Path(capture) / 'session.json').exists(),
-        finalizing_present=(Path(capture) / 'session.finalizing').exists(),
-        checkpoint_sha256=digest(Path(capture) / 'checkpoint.json'),
+        session_json_absent=not barrier_present(scenario, capture,
+                                                'session.json'),
+        finalizing_present=barrier_present(scenario, capture,
+                                           'session.finalizing'),
+        checkpoint_sha256=checkpoint_digest,
         identity=identity)
 
 

@@ -458,7 +458,7 @@ class SigkillSelfTests(unittest.TestCase):
         inputs = {'binary': 'a' * 64}
         good = dict(nonce='b' * 32, scenario='readiness', stopped=True,
                     marker='readiness-announced', ready_observed=True,
-                    reserve_allocated=17 * 1048576,
+                    reserve_allocated=17 * 1048576, reserve_released=False,
                     integrity={'events_bytes': '0', 'line_count': '0',
                                'events_sha256': hashlib.sha256(b'').hexdigest(),
                                'kinds': {}},
@@ -470,6 +470,7 @@ class SigkillSelfTests(unittest.TestCase):
         for key, value in [('nonce', 'other'), ('scenario', 'checkpoint'),
                            ('stopped', False), ('marker', 'attach-refused'),
                            ('ready_observed', False), ('reserve_allocated', 0),
+                           ('reserve_released', True),
                            ('integrity', {}), ('identity', {}),
                            ('checkpoint_sha256', None)]:
             bad = copy.deepcopy(good)
@@ -478,6 +479,74 @@ class SigkillSelfTests(unittest.TestCase):
                 validate_barrier(bad, 'b' * 32, 'readiness', inputs)
         with self.assertRaises(ValueError):
             validate_barrier({}, 'b' * 32, 'readiness', inputs)
+
+    def test_finalization_barrier_requires_release_proof(self):
+        inputs = {'binary': 'a' * 64}
+        integrity = {'events_bytes': '10', 'line_count': '1',
+                     'events_sha256': 'd' * 64,
+                     'kinds': {'bounce_attempt': '1'}}
+        good = dict(nonce='b' * 32, scenario='finalization', stopped=True,
+                    marker='final-stop', ready_observed=True,
+                    reserve_allocated=None, reserve_released=True,
+                    integrity=dict(integrity), session_json_absent=True,
+                    finalizing_present=True, checkpoint_sha256='c' * 64,
+                    identity=dict(inputs=inputs, boot_id='boot',
+                                  release='7.0.14', banner='banner',
+                                  btf_sha256='btf'))
+        validate_barrier(good, 'b' * 32, 'finalization', inputs)
+        for key, value in [('reserve_released', False),
+                           ('reserve_released', None),
+                           ('reserve_allocated', 17 * 1048576),
+                           ('session_json_absent', False),
+                           ('finalizing_present', False)]:
+            bad = copy.deepcopy(good)
+            bad[key] = value
+            with self.subTest(key=key, value=value), \
+                    self.assertRaises(ValueError):
+                validate_barrier(bad, 'b' * 32, 'finalization', inputs)
+
+    def test_finalization_barrier_proves_armed_release_shape(self):
+        # The armed final-stop capture holds NO .finalization-reserve:
+        # finalize() unlinks it before the stopped session.json rename
+        # (derivation in the CAPTURE_INVENTORY comment). The barrier and
+        # the inventory gate must accept that true shape and refuse the
+        # NOT-released one, or the release proof is vacuous. Built
+        # WITHOUT the mock collector so a stand-in/harness co-drift
+        # cannot hide a mismatch.
+        from sigkill_verify import CAPTURE_INVENTORY
+        inputs = {'binary': 'a' * 64}
+        nonce = 'f' * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = Path(tmp) / 'capture'
+            capture.mkdir(mode=0o700)
+            events, kinds = sigkill_mock.make_events(
+                sigkill_mock.EVENT_COUNT)
+            sigkill_mock.publish(capture, 2, events, kinds)
+            doc = sigkill_mock.checkpoint_doc(2, events, kinds)
+            doc['capture']['finalized'] = True
+            (capture / 'session.finalizing').write_text(json.dumps(doc)
+                                                       + '\n')
+            marker = Path(tmp) / 'reached'
+            marker.write_text('final-stop')
+            barrier = sigkill_guest.snapshot_barrier(
+                'finalization', nonce, marker, capture,
+                mock_identity(inputs))
+            self.assertTrue(barrier['reserve_released'])
+            self.assertIsNone(barrier['reserve_allocated'])
+            validate_barrier(barrier, nonce, 'finalization', inputs)
+            cleanup = sigkill_guest.check_cleanup(
+                'finalization', capture, 'memveil-test-no-such-process')
+            self.assertEqual(set(cleanup['capture_inventory']),
+                             set(CAPTURE_INVENTORY['finalization']))
+            self.assertNotIn('.finalization-reserve',
+                             cleanup['capture_inventory'])
+            # The old (wrong) shape — reserve still present at the
+            # finalization barrier — must fail closed.
+            sigkill_mock.write_reserve(capture / '.finalization-reserve')
+            with self.assertRaisesRegex(ValueError, 'release'):
+                sigkill_guest.snapshot_barrier(
+                    'finalization', nonce, marker, capture,
+                    mock_identity(inputs))
 
     def test_result_negatives(self):
         inputs = {'binary': 'a' * 64}

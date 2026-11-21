@@ -91,6 +91,10 @@ def collector(capture, marker, mode, lie=False):
     generation = 3 if mode == 'checkpoint-2' else 2
     publish(capture, generation, events, kinds, lie=lie)
     if mode == 'final-stop':
+        # finalize() unlinks .finalization-reserve before staging the
+        # session document (writer.rs:928-936 -> release_reserve at
+        # :1212), so the armed final-stop capture holds no reserve.
+        (capture / '.finalization-reserve').unlink()
         finalizing = {'session_id': SESSION,
                       'capture': checkpoint_doc(
                           generation, events, kinds)['capture']}
