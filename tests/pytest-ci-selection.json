@@ -42,6 +42,7 @@
     "tests/cli/test_capture_failures.py",
     "tests/cli/test_capture_integrity.py",
     "tests/cli/test_dangling_unmap.py",
+    "tests/cli/test_memveil_bin.py",
     "tests/cli/test_report_context.py",
     "tests/cli/test_uncertainty.py",
     "tests/confidential/spikes/test_journal_spike.py",
