@@ -36,9 +36,9 @@
 # MEMVEIL_BIN overrides the binary under test: when set
 # to an executable file the runner uses it verbatim (no
 # rebuild, no relink of build/memveil); a set-but-missing
-# or non-executable value fails closed with exit 1.
-# Python suites still read build/memveil, so point that
-# link at the same binary (docs/sanitizer-lane.md).
+# or non-executable value fails closed with exit 1. The
+# CLI Python drivers resolve the same knob through
+# tests/cli/memveil_bin.py (docs/sanitizer-lane.md).
 # LMB_SANITIZE=1 exports fail-fast UBSan options for
 # sanitizer-instrumented runs (plain binaries ignore this).
 #
@@ -150,10 +150,10 @@ rust_bin_setup() {
         fi
         return 0
     fi
-    # The release binary must exist, and the Python suites
-    # (which hardcode build/memveil) must reach it: link
-    # build/memveil at the Rust binary, replacing any stale
-    # file from before the cutover.
+    # The release binary must exist, and the build/memveil
+    # default (used by the CLI drivers when MEMVEIL_BIN is
+    # unset) must reach it: link build/memveil at the Rust
+    # binary, replacing any stale file from before the cutover.
     rust="$ROOT/target/release/memveil"
     if [ ! -x "$rust" ]; then
         echo "test: missing $rust" \
@@ -1276,6 +1276,9 @@ suite_reader_adversarial() {
             "(run $(memveil_build_hint) first)" >&2
         return 1
     fi
+    # R82: the knob contract first — the blessed binary must be
+    # the executed binary before the reader drivers run.
+    python3 "$ROOT/tests/cli/test_memveil_bin.py" || return 1
     python3 "$ROOT/tests/cli/prepare_capture_failures.py" || return 1
     python3 "$ROOT/tests/cli/test_adversarial_cli.py" || return 1
     python3 "$ROOT/tests/cli/test_checkpoint_recovery.py"

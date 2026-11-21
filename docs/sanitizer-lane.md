@@ -65,39 +65,38 @@ Reader-adversarial on the instrumented binary: route this
 leg through `tools/test` with `MEMVEIL_BIN` set to the
 lane binary. When `MEMVEIL_BIN` names an executable file,
 `tools/test` uses it verbatim: `memveil_bin` returns it
-and `rust_bin_setup` skips its release relink, so a
-pre-pointed `build/memveil` link survives dispatch
-(`tools/test:142-166`, called at `tools/test:2027-2029`);
+and `rust_bin_setup` skips its release relink
+(`tools/test:142-166`, called at `tools/test:2030-2032`);
 a set-but-missing or non-executable value fails closed.
-The Python drivers still read `build/memveil`, so
-pre-point that link at the lane binary as well.
+The CLI Python drivers resolve the same knob through
+`tests/cli/memveil_bin.py`, so the blessed binary is the
+executed binary by construction — no manual
+`build/memveil` pre-pointing (retired with R82).
 
 ```sh
 export ASAN_OPTIONS=detect_leaks=0
 LANE_BIN="$PWD/target/asan/x86_64-unknown-linux-gnu/debug/memveil"
-mkdir -p build
-ln -sfn "$LANE_BIN" build/memveil
 MEMVEIL_BIN="$LANE_BIN" tools/test reader-adversarial
 ```
 
 Prove the instrumented binary actually ran (all required):
 
 ```sh
-readlink build/memveil   # before AND after the leg: the lane path, never the release path
+MEMVEIL_BIN="$LANE_BIN" python3 tests/cli/test_memveil_bin.py   # knob contract: knob binary == executed binary
 nm "$LANE_BIN" | grep -c __asan   # nonzero (__asan symbols linked into the lane binary)
 ```
 
-Then restore the normal release link (guarded: a missing
-release binary must not leave a dangling link):
-
-```sh
-if [ -x "$PWD/target/release/memveil" ]; then ln -sfn "$PWD/target/release/memveil" build/memveil; fi
-```
+`build/memveil` is untouched by the lane leg now (the
+knob bypasses the link entirely), so there is no link to
+restore afterwards.
 
 An earlier revision of this section bypassed `tools/test`
 entirely; the `MEMVEIL_BIN` knob supersedes that bypass by
 routing the leg through the real dispatch without
-resetting the link.
+resetting the link. A later revision pre-pointed
+`build/memveil` at the lane binary because the drivers
+still read the link; R82 retired that step by teaching
+the drivers the knob.
 
 `detect_leaks=0` applies to the reader leg only: one of its cases
 drives the binary under `strace`, and LeakSanitizer cannot run
