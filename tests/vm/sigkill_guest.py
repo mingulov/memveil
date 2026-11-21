@@ -31,6 +31,7 @@ from sigkill_verify import (SCENARIOS, MARKERS, RESERVE_BYTES,
                             validate_result)
 from test_checkpoint_writer import independent
 
+INPUT_KEYS = ('binary', 'object', 'bridge', 'profile', 'shim')
 FAULT = {'readiness': 'none', 'checkpoint': 'checkpoint-2',
          'finalization': 'final-stop'}
 DURATIONS = {'readiness': '300', 'checkpoint': '180', 'finalization': '60'}
@@ -67,8 +68,8 @@ def guest_identity(config):
         release=os.uname().release, banner=banner,
         boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
         btf_sha256=btf,
-        inputs={key: digest(config[key])
-                for key in ('binary', 'object', 'bridge', 'profile', 'shim')})
+        inputs={key: digest(config[key]) for key in INPUT_KEYS
+                if config.get(key)})
 
 
 def check_identity(identity, config, inputs, expect_release):
@@ -77,8 +78,8 @@ def check_identity(identity, config, inputs, expect_release):
     if identity['release'] != expect_release:
         raise ValueError('guest booted release %s, expected %s'
                          % (identity['release'], expect_release))
-    for key in ('binary', 'object', 'bridge', 'profile', 'shim'):
-        if digest(config[key]) != inputs[key]:
+    for key in INPUT_KEYS:
+        if config.get(key) and digest(config[key]) != inputs[key]:
             raise ValueError('guest input drift: ' + key)
 
 
@@ -273,8 +274,10 @@ def export_evidence(export, capture, barrier, result, record_stderr):
 def collector_argv(config, capture, scenario):
     argv = [config['binary'], 'record', '--output', str(capture),
            '--duration', DURATIONS[scenario], '--object', config['object'],
-           '--bridge', config['bridge'], '--profile', config['profile'],
+           '--profile', config['profile'],
            '--max-events-bytes', MAX_EVENTS_BYTES]
+    if config.get('bridge'):
+        argv += ['--bridge', config['bridge']]
     return argv
 
 
@@ -372,8 +375,8 @@ def main():
             accepted_report(capture, out, code, allow_partial=True)
 
         config = json.loads(Path(config_path).read_text())
-        inputs = {key: digest(config[key]) for key in
-                  ('binary', 'object', 'bridge', 'profile', 'shim')}
+        inputs = {key: digest(config[key]) for key in INPUT_KEYS
+                  if config.get(key)}
         identity = guest_identity(config)
         expect_release = config['expect_release']
         check_identity(identity, config, inputs, expect_release)

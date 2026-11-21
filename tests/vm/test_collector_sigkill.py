@@ -113,7 +113,10 @@ def execute(args):
         raise ValueError('owned unprivileged QEMU needs vng and writable /dev/kvm')
     harness = check_harness_versions(vng)
     config = {key: str(getattr(args, key).resolve(strict=True))
-              for key in ('binary', 'object', 'bridge', 'profile')}
+              for key in ('binary', 'object', 'profile')}
+    if args.bridge:
+        # Omitted for statically linked loaders, which ship no bridge.
+        config['bridge'] = str(args.bridge.resolve(strict=True))
     shim = args.shim.resolve(strict=True) if args.shim else \
         (ROOT / 'build/shim/capture_faults.so').resolve(strict=True)
     config['shim'] = str(shim)
@@ -497,6 +500,16 @@ class SigkillSelfTests(unittest.TestCase):
                 host_verify(Path(tmp), Path(export), nonce, 'checkpoint',
                             inputs)
 
+    def test_collector_argv_omits_missing_bridge(self):
+        base = dict(binary='/b/memveil', object='/b/attempt.bpf.o',
+                    profile='/b/7.0.json')
+        argv = sigkill_guest.collector_argv(dict(base), '/cap', 'checkpoint')
+        self.assertNotIn('--bridge', argv)
+        self.assertIn('--object', argv)
+        argv = sigkill_guest.collector_argv(dict(base, bridge='/b/bridge.so'),
+                                           '/cap', 'checkpoint')
+        self.assertIn('--bridge', argv)
+
     def test_boot_rejects_kernel_paths(self):
         with self.assertRaises(ValueError):
             boot('vng', Path('/tmp/config'), '../evil', 'readiness',
@@ -508,8 +521,10 @@ def main():
         unittest.main(argv=[sys.argv[0]] + sys.argv[1:], verbosity=2)
         return 0
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('binary', 'object', 'bridge', 'profile', 'out'):
+    for name in ('binary', 'object', 'profile', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--bridge', type=Path, required=False,
+                        help='native bridge (omit for static loaders)')
     parser.add_argument('--kernel', required=True,
                         help='vng release token for the pinned guest')
     parser.add_argument('--expect-release', required=True,
