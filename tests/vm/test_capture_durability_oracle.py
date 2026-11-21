@@ -79,19 +79,19 @@ class BarrierTests(unittest.TestCase):
 
     def test_missing_or_false_reached_boundary_fails(self):
         inputs = {'binary': 'a' * 64}
-        good = dict(nonce='b' * 32, scenario='readiness', stopped=True,
+        good = dict(nonce='b' * 20, scenario='readiness', stopped=True,
                     marker='readiness-announced', ready_observed=True, reserve_allocated=17 * 1048576,
                     fs_uuid='owned', identity=dict(inputs=inputs, boot_id='before'),
                     integrity=dict(events_bytes='0', line_count='0', events_sha256=hashlib.sha256(b'').hexdigest()))
-        validate_barrier(good, 'b' * 32, 'readiness', inputs)
+        validate_barrier(good, 'b' * 20, 'readiness', inputs)
         for key, value in [('nonce', 'other'), ('ready_observed', False), ('stopped', False), ('marker', 'attach-refused'),
                            ('reserve_allocated', 0), ('identity', {}), ('fs_uuid', '')]:
             bad = copy.deepcopy(good)
             bad[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
-                validate_barrier(bad, 'b' * 32, 'readiness', inputs)
+                validate_barrier(bad, 'b' * 20, 'readiness', inputs)
         with self.assertRaises(ValueError):
-            validate_barrier({}, 'b' * 32, 'readiness', inputs)
+            validate_barrier({}, 'b' * 20, 'readiness', inputs)
 
     def test_preflight_failure_never_overwrites_existing_evidence(self):
         import capture_durability
@@ -143,10 +143,96 @@ class BarrierTests(unittest.TestCase):
 
     def test_guest_refuses_host_before_device_lookup(self):
         from capture_durability_guest import owned_device
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, '^invalid ownership nonce$'):
             owned_device('invalid')
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, '^invalid ownership nonce$'):
             owned_device('0' * 32)
+
+
+class OwnershipNonceTests(unittest.TestCase):
+    """The 20-char ownership serial fits the virtio-blk ID truncation."""
+
+    NONCE = '0123456789abcdef0123'
+
+    @contextlib.contextmanager
+    def guest(self, nonce, serials, mounts='sysfs /sys sysfs rw 0 0\n'):
+        """Mocked guest: root, cmdline gate for nonce, vd serials, mounts."""
+        cmdline = 'swiotlb=force memveil_fs_gate=' + nonce + '\n'
+        entries = [Path('/sys/block/vd' + chr(ord('a') + index))
+                   for index in range(len(serials))]
+        contents = {str(entry / 'serial'): text
+                    for entry, text in zip(entries, serials)}
+
+        def fake_glob(node, pattern):
+            if str(node) == '/sys/block' and pattern == 'vd*':
+                return list(entries)
+            raise AssertionError('unexpected guest glob: ' + str(node))
+
+        def fake_exists(node):
+            if str(node) in contents:
+                return True
+            raise AssertionError('unexpected guest exists: ' + str(node))
+
+        def fake_read_text(node, *args, **kwargs):
+            name = str(node)
+            if name == '/proc/cmdline':
+                return cmdline
+            if name == '/proc/mounts':
+                return mounts
+            if name in contents:
+                return contents[name]
+            raise AssertionError('unexpected guest read: ' + name)
+
+        with patch.object(os, 'geteuid', return_value=0), \
+             patch.object(Path, 'glob', autospec=True, side_effect=fake_glob), \
+             patch.object(Path, 'exists', autospec=True, side_effect=fake_exists), \
+             patch.object(Path, 'read_text', autospec=True, side_effect=fake_read_text):
+            yield
+
+    def test_round_trip_accepts_exact_20_bytes(self):
+        from capture_durability_guest import owned_device
+        with self.guest(self.NONCE, [self.NONCE]):
+            self.assertEqual(owned_device(self.NONCE), '/dev/vda')
+        with self.guest(self.NONCE, [self.NONCE + '\n']):
+            self.assertEqual(owned_device(self.NONCE), '/dev/vda')
+
+    def test_old_32_char_shape_refused(self):
+        from capture_durability_guest import owned_device
+        with self.assertRaisesRegex(ValueError, '^invalid ownership nonce$'):
+            owned_device('0' * 32)
+
+    def test_off_by_one_lengths_refused(self):
+        from capture_durability_guest import owned_device
+        for text in ('0' * 19, '0' * 21):
+            with self.subTest(length=len(text)):
+                with self.assertRaisesRegex(ValueError, '^invalid ownership nonce$'):
+                    owned_device(text)
+
+    def test_non_hex_at_exact_length_refused(self):
+        from capture_durability_guest import owned_device
+        for text in ('g' * 20, 'B' * 20, '0' * 19 + ' '):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, '^invalid ownership nonce$'):
+                    owned_device(text)
+
+    def test_truncated_32_char_presentation_refused(self):
+        from capture_durability_guest import owned_device
+        long = '0123456789abcdef0123456789abcdef'
+        # The kernel exposes only the first 20 bytes of the serial, so a
+        # 32-char nonce arrives truncated; the shape gate must refuse it
+        # rather than match the visible prefix.
+        with self.guest(long, [long[:20]]):
+            with self.assertRaisesRegex(ValueError, '^invalid ownership nonce$'):
+                owned_device(long)
+
+    def test_serial_mismatch_refused(self):
+        from capture_durability_guest import owned_device
+        with self.guest(self.NONCE, ['f' * 20]):
+            with self.assertRaisesRegex(ValueError, '^expected exactly one owned virtio disk$'):
+                owned_device(self.NONCE)
+        with self.guest(self.NONCE, []):
+            with self.assertRaisesRegex(ValueError, '^expected exactly one owned virtio disk$'):
+                owned_device(self.NONCE)
 
 
 class IdentityTests(unittest.TestCase):
@@ -753,6 +839,46 @@ class HostBindingTests(unittest.TestCase):
             self.assertEqual(aggregate['status'], 'PASS')
             self.assertEqual(aggregate['identity']['config_status_by_scenario'], statuses)
             self.assertEqual(aggregate['identity']['modules_files'], stage.mods_files)
+
+    def test_generated_nonce_fits_20_byte_serial(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            boots = self.fake_boots(stage, statuses)
+            with self.harness(stage, boots):
+                capture_durability.execute(args)
+            nonces = []
+            for scenario in capture_durability.SCENARIOS:
+                export = stage.root / 'out' / 'ev' / scenario / 'export'
+                if scenario in ('readiness', 'checkpoint'):
+                    nonces.append(json.loads((export / 'barrier.json').read_text())['nonce'])
+                nonces.append(json.loads((export / 'result.json').read_text())['nonce'])
+            self.assertEqual(len(nonces), 6)
+            for nonce in nonces:
+                self.assertEqual(len(nonce), capture_durability.OWNERSHIP_NONCE_LENGTH)
+                self.assertTrue(all(c in '0123456789abcdef' for c in nonce))
+            self.assertEqual(len(set(nonces)), 4)
+
+    def test_boot_binds_serial_to_cmdline_gate(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / 'logs'
+            logs.mkdir()
+            nonce = '0123456789abcdef0123'
+            self.assertEqual(len(nonce), capture_durability.OWNERSHIP_NONCE_LENGTH)
+            with patch('subprocess.Popen', return_value=Mock()) as launched:
+                capture_durability.boot('/fake/vng', Path(tmp) / 'config.json',
+                                        Path(tmp) / 'vmlinuz', 'readiness', nonce,
+                                        Path(tmp) / 'disk.img', Path(tmp) / 'export',
+                                        Path(tmp) / 'qmp', 'capture', logs)
+            self.assertEqual(launched.call_count, 1)
+            command = json.loads((logs / 'capture-command.json').read_text())
+            append = command[command.index('--append') + 1]
+            self.assertIn('memveil_fs_gate=' + nonce, append.split())
+            opts = next(part for part in command if part.startswith('--qemu-opts='))
+            self.assertIn('serial=' + nonce, opts)
 
 
 if __name__ == '__main__':

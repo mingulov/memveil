@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / 'tests/cli'))
 sys.path.insert(0, str(ROOT / 'tests/fuzz'))
 from test_checkpoint_writer import independent
 from report_oracle import accepted_report
-from capture_durability import APPROVED_CONFIG_ABSENT_RELEASE
+from capture_durability import APPROVED_CONFIG_ABSENT_RELEASE, OWNERSHIP_NONCE_LENGTH
 from kernel_matrix import modules_manifest_sha
 
 
@@ -35,7 +35,10 @@ def run(args):
 
 
 def owned_device(nonce):
-    if len(nonce) != 32 or any(c not in '0123456789abcdef' for c in nonce):
+    # Exact 20-char shape: the virtio-blk serial survives the guest
+    # kernel only up to VIRTIO_BLK_ID_BYTES (20 bytes), so a longer
+    # value can never round-trip and a shorter one is not ours.
+    if len(nonce) != OWNERSHIP_NONCE_LENGTH or any(c not in '0123456789abcdef' for c in nonce):
         raise ValueError('invalid ownership nonce')
     if os.geteuid() != 0 or 'memveil_fs_gate=' + nonce not in Path('/proc/cmdline').read_text().split():
         raise ValueError('owned guest command-line barrier absent')

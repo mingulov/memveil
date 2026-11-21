@@ -39,6 +39,17 @@ SCENARIOS = ('readiness', 'checkpoint', 'bytes-full', 'inodes-full')
 # use.
 APPROVED_CONFIG_ABSENT_RELEASE = '7.0.14-070014-generic'
 
+# Ownership-nonce shape. The guest reads the nonce back through the
+# virtio-blk serial, which the kernel exposes truncated to
+# VIRTIO_BLK_ID_BYTES (20 bytes) at /sys/block/vdX/serial, so a nonce
+# longer than 20 chars can never round-trip. The generated value is
+# exactly 20 lowercase hex chars. 20 hex chars carry 80 bits of fresh
+# uuid4 randomness per scenario run, which suffices for a per-run
+# ownership binding: each value is used once, matched exactly against
+# one attached disk, and never reused, so passing the gate requires
+# predicting the fresh 80-bit value outright.
+OWNERSHIP_NONCE_LENGTH = 20
+
 # Shell-inert path characters. The launcher interpolates the verified
 # kernel path, the export dir, and the disk/QMP socket paths into one
 # shell command without quoting (virtme_ng/run.py: kimg at :1058, rwdir
@@ -300,7 +311,7 @@ def execute(args):
             disk = case / 'owned-ext4.img'
             with disk.open('xb') as image:
                 image.truncate(128 * 1048576)
-            nonce = uuid.uuid4().hex
+            nonce = uuid.uuid4().hex[:OWNERSHIP_NONCE_LENGTH]
             with tempfile.TemporaryDirectory(prefix='mvfs-qmp-') as sockets:
                 qmp = Path(sockets) / 'monitor'
                 check_shell_inert_path(qmp, 'QMP socket path')
