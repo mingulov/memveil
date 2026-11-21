@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Stop-race VM gate: bounded live stress for the stop protocol.
 
+SUPERSEDED by tests/vm/test_battery.py case `stop`
+(battery port onto two separately controllable
+test-only Rust consumers); kept until the reviewed removal
+step.
+
 Requires MEMVEIL_VM_STOP=1 with qualified lifecycle probes.
 Unarmed runs exit 77 without booting; armed runs boot one
 guest and drive five stop-race cycles (STOP/continue both
@@ -129,6 +134,55 @@ def check_short_cycle(got, tag):
     return bad
 
 
+def judge_stop_cycles(got, ledger):
+    """Judge five stop-race cycles from verified exports.
+
+    Shared by the retired consumer entry below and the
+    battery runner: exact scripted traffic on the
+    undisturbed cycles, honest victim incompleteness with
+    SIGTERM death and no final summary, and quiet-window
+    silence. Returns a sorted reason list.
+    """
+    bad = []
+    modes = [row["mode"] for row in ledger]
+    if modes != ["stop-both", "term-cp", "quiet", "stop-lc",
+                 "short"]:
+        bad.append("ledger modes %r" % (modes,))
+    bad += check_full_cycle(got, "c0")
+    bad += check_full_cycle(got, "c3")
+    bad += check_quiet_cycle(got, "c2")
+    bad += check_short_cycle(got, "c4")
+    # Victim cycle: the survivor is exact, the victim died
+    # loud with no summary.
+    lc, lc_sum = parse_consume_file(str(got["c1-lc.txt"]))
+    bad += check_conservation(lc, lc_sum, "c1-lc")
+    ops_log, releases, complete = parse_oracle_log(
+        str(got["c1-oracle.log"]))
+    bad += check_oracle_script(ops_log, releases, complete, 4,
+                               -1, "c1")
+    want = scripted_expectation(4, -1)
+    got_lc = consumed_multisets(lc, [])
+    if got_lc["maps"] != want["maps"]:
+        bad.append("c1: survivor maps differ")
+    if got_lc["unmaps"] != want["unmaps"]:
+        bad.append("c1: survivor unmaps differ")
+    victim = ledger[1]
+    from guest_lifecycle import validate_victim
+    try:
+        validate_victim(victim.get("victim_alive"), victim.get("victim_rc"))
+    except ValueError as exc:
+        bad.append("c1: " + str(exc))
+    if victim.get("victim_signal") != 15 or type(victim.get("victim_signal_ns")) is not int:
+        bad.append("c1: missing signal receipt")
+    if "c1-cp.txt" in got:
+        body = got["c1-cp.txt"].read_text()
+        if body.startswith("summary ") or "\nsummary " in body:
+            bad.append("c1: victim left a summary")
+    elif victim.get("victim_file"):
+        bad.append("c1: ledger claims a victim file")
+    return sorted(bad)
+
+
 def run_flow():
     tmp = None
     try:
@@ -151,43 +205,7 @@ def run_flow():
         got = verify_exports(tmp, "stop", names)
         expected = expected_from_verified(got, "stop")
         ledger = json.loads(got["ledger.json"].read_text())
-        bad = []
-        modes = [row["mode"] for row in ledger]
-        if modes != ["stop-both", "term-cp", "quiet", "stop-lc",
-                     "short"]:
-            bad.append("ledger modes %r" % (modes,))
-        bad += check_full_cycle(got, "c0")
-        bad += check_full_cycle(got, "c3")
-        bad += check_quiet_cycle(got, "c2")
-        bad += check_short_cycle(got, "c4")
-        # Victim cycle: the survivor is exact, the victim died
-        # loud with no summary.
-        lc, lc_sum = parse_consume_file(str(got["c1-lc.txt"]))
-        bad += check_conservation(lc, lc_sum, "c1-lc")
-        ops_log, releases, complete = parse_oracle_log(
-            str(got["c1-oracle.log"]))
-        bad += check_oracle_script(ops_log, releases, complete, 4,
-                                   -1, "c1")
-        want = scripted_expectation(4, -1)
-        got_lc = consumed_multisets(lc, []) 
-        if got_lc["maps"] != want["maps"]:
-            bad.append("c1: survivor maps differ")
-        if got_lc["unmaps"] != want["unmaps"]:
-            bad.append("c1: survivor unmaps differ")
-        victim = ledger[1]
-        from guest_lifecycle import validate_victim
-        try:
-            validate_victim(victim.get("victim_alive"), victim.get("victim_rc"))
-        except ValueError as exc:
-            bad.append("c1: " + str(exc))
-        if victim.get("victim_signal") != 15 or type(victim.get("victim_signal_ns")) is not int:
-            bad.append("c1: missing signal receipt")
-        if "c1-cp.txt" in got:
-            body = got["c1-cp.txt"].read_text()
-            if body.startswith("summary ") or "\nsummary " in body:
-                bad.append("c1: victim left a summary")
-        elif victim.get("victim_file"):
-            bad.append("c1: ledger claims a victim file")
+        bad = judge_stop_cycles(got, ledger)
         if bad:
             print("FAIL vm-stop:")
             for line in bad:

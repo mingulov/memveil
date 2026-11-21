@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Saturation VM gate: live ring/staging exhaustion behavior.
 
+SUPERSEDED by tests/vm/test_battery.py case `saturation`
+(battery port onto the test-only Rust consumer with
+separately hashed 4 KiB test objects); kept until the
+reviewed removal step. The battery `saturation` live leg
+stays stopped until the test objects plus the loader test
+layout land.
+
 Requires MEMVEIL_VM_SATURATION=1 with qualified probes.
 Unarmed runs exit 77 without booting; armed runs boot one
 guest, flood 300 scripted ops through 4 KiB ring variants
@@ -64,6 +71,57 @@ def armed_preflight():
     return ok
 
 
+def judge_saturation_flood(got, tag="flood", ops=FLOOD_OPS):
+    """Judge one saturation flood from its verified exports.
+
+    Shared by the retired consumer entry below and the
+    battery runner: exact loss accounting under STOP, with
+    BPF-observed totals matching the module ground truth
+    exactly. Returns a sorted reason list.
+    """
+    lc, lc_sum = parse_consume_file(str(got["%s-lc.txt" % tag]))
+    cp, cp_sum = parse_consume_file(str(got["%s-cp.txt" % tag]))
+    bad = check_conservation(lc, lc_sum, tag + "-lc")
+    bad += check_conservation(cp, cp_sum, tag + "-cp")
+    if lc_sum["cnt_fail"] == 0 or cp_sum["cnt_fail"] == 0:
+        bad.append("no loss induced: lc_fail=%d cp_fail=%d"
+                   % (lc_sum["cnt_fail"], cp_sum["cnt_fail"]))
+    ops_log, releases, complete = parse_oracle_log(
+        str(got["%s-oracle.log" % tag]))
+    bad += check_oracle_script(ops_log, releases, complete,
+                               ops, -1, tag)
+    bad += check_retained_script(lc, cp, ops, -1, tag)
+    bad += check_identity_closure(lc, tag + "-lc")
+    want = scripted_expectation(ops, -1)
+    want_lc = len(want["maps"]) + len(want["unmaps"])
+    want_cp = (len(want["syncs_dev"]) + len(want["syncs_cpu"])
+               + len(want["bounces"]))
+    if lc_sum["cnt_obs"] != want_lc:
+        bad.append("lc observed %d != module %d"
+                   % (lc_sum["cnt_obs"], want_lc))
+    if cp_sum["cnt_obs"] != want_cp:
+        bad.append("cp observed %d != module %d"
+                   % (cp_sum["cnt_obs"], want_cp))
+    want_lc_bytes = (sum(s for s, _, _ in want["maps"])
+                     + sum(s for s, _, _ in want["unmaps"]))
+    want_cp_bytes = (sum(s for s, _ in want["syncs_dev"])
+                     + sum(s for s, _ in want["syncs_cpu"])
+                     + sum(s for _, s, _ in want["bounces"]))
+    if lc_sum["cnt_obsb"] != want_lc_bytes:
+        bad.append("lc observed bytes %d != module %d"
+                   % (lc_sum["cnt_obsb"], want_lc_bytes))
+    if cp_sum["cnt_obsb"] != want_cp_bytes:
+        bad.append("cp observed bytes %d != module %d"
+                   % (cp_sum["cnt_obsb"], want_cp_bytes))
+    if len(lc) != lc_sum["cnt_emit"]:
+        bad.append("lc persisted %d != emitted %d"
+                   % (len(lc), lc_sum["cnt_emit"]))
+    if len(cp) != cp_sum["cnt_emit"]:
+        bad.append("cp persisted %d != emitted %d"
+                   % (len(cp), cp_sum["cnt_emit"]))
+    return sorted(bad)
+
+
 def run_flow():
     tmp = None
     try:
@@ -79,46 +137,7 @@ def run_flow():
                              ["identity.json", "flood-lc.txt",
                               "flood-cp.txt", "flood-oracle.log"])
         expected = expected_from_verified(got, "saturation")
-        lc, lc_sum = parse_consume_file(str(got["flood-lc.txt"]))
-        cp, cp_sum = parse_consume_file(str(got["flood-cp.txt"]))
-        bad = check_conservation(lc, lc_sum, "flood-lc")
-        bad += check_conservation(cp, cp_sum, "flood-cp")
-        if lc_sum["cnt_fail"] == 0 or cp_sum["cnt_fail"] == 0:
-            bad.append("no loss induced: lc_fail=%d cp_fail=%d"
-                       % (lc_sum["cnt_fail"], cp_sum["cnt_fail"]))
-        ops_log, releases, complete = parse_oracle_log(
-            str(got["flood-oracle.log"]))
-        bad += check_oracle_script(ops_log, releases, complete,
-                                   FLOOD_OPS, -1, "flood")
-        bad += check_retained_script(lc, cp, FLOOD_OPS, -1, "flood")
-        bad += check_identity_closure(lc, "flood-lc")
-        want = scripted_expectation(FLOOD_OPS, -1)
-        want_lc = len(want["maps"]) + len(want["unmaps"])
-        want_cp = (len(want["syncs_dev"]) + len(want["syncs_cpu"])
-                   + len(want["bounces"]))
-        if lc_sum["cnt_obs"] != want_lc:
-            bad.append("lc observed %d != module %d"
-                       % (lc_sum["cnt_obs"], want_lc))
-        if cp_sum["cnt_obs"] != want_cp:
-            bad.append("cp observed %d != module %d"
-                       % (cp_sum["cnt_obs"], want_cp))
-        want_lc_bytes = (sum(s for s, _, _ in want["maps"])
-                         + sum(s for s, _, _ in want["unmaps"]))
-        want_cp_bytes = (sum(s for s, _ in want["syncs_dev"])
-                         + sum(s for s, _ in want["syncs_cpu"])
-                         + sum(s for _, s, _ in want["bounces"]))
-        if lc_sum["cnt_obsb"] != want_lc_bytes:
-            bad.append("lc observed bytes %d != module %d"
-                       % (lc_sum["cnt_obsb"], want_lc_bytes))
-        if cp_sum["cnt_obsb"] != want_cp_bytes:
-            bad.append("cp observed bytes %d != module %d"
-                       % (cp_sum["cnt_obsb"], want_cp_bytes))
-        if len(lc) != lc_sum["cnt_emit"]:
-            bad.append("lc persisted %d != emitted %d"
-                       % (len(lc), lc_sum["cnt_emit"]))
-        if len(cp) != cp_sum["cnt_emit"]:
-            bad.append("cp persisted %d != emitted %d"
-                       % (len(cp), cp_sum["cnt_emit"]))
+        bad = judge_saturation_flood(got)
         if bad:
             print("FAIL vm-saturation:")
             for line in bad:
@@ -127,6 +146,10 @@ def run_flow():
                            export_prefix="saturation")
             print(f"gate artifacts kept at {tmp}")
             return 1
+        _, lc_sum = parse_consume_file(
+            str(got["flood-lc.txt"]))
+        _, cp_sum = parse_consume_file(
+            str(got["flood-cp.txt"]))
         print("vm-saturation: PASS: lc obs=%d emit=%d fail=%d, "
               "cp obs=%d emit=%d fail=%d, exact vs %d ops"
               % (lc_sum["cnt_obs"], lc_sum["cnt_emit"],

@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """F2-7: multi-channel faults through shipped record.
 
+SUPERSEDED by tests/vm/test_battery.py case `faults`
+(battery port: the sealed C9 record runs directly
+under the bound reference profile with no bridge, plus
+per-channel loss reconcile); kept until the reviewed
+removal step.
+
 Seven scenarios in one guest: truncated lc/cp objects refuse
 with exit 3 and zero BPF residue; SIGTERM mid-capture (1ch and
 3ch) stops bounded with a signal end reason; a full output
@@ -139,12 +145,193 @@ def check_cut_slice(events, ops_logged, tag):
     return bad
 
 
+def judge_faults_capture(got, expect_decision=None):
+    """Judge one multi-channel faults boot.
+
+    Shared by the retired consumer entry below and the
+    battery runner: truncated-object refusals, signal
+    cuts, full-filesystem honesty, paced and burst
+    floods, and the attach race. expect_decision
+    overrides the admitted profile decision for
+    rebound legs. Shape violations raise
+    AssertionError (as before); returns the sorted
+    reason list.
+    """
+    want = scripted_expectation(FLOOD_OPS, -1)
+    ledger = {row["scenario"]: row for row in
+              json.loads(got["faults.json"].read_text())}
+    for tag, row in sorted(ledger.items()):
+        assert row["settle_s"] < 30, (tag, row)
+        if tag == "f3b-report":
+            continue
+        assert row["progs_after"] == row["progs_before"], \
+            (tag, row)
+        assert row["maps_after"] == row["maps_before"], \
+            (tag, row)
+    for tag in ("f1", "f2"):
+        row = ledger[tag]
+        assert row["exit"] == 3, row
+        assert row["cap"] is False, row
+        assert row["stderr"], row
+        print("ft-%s refused: %s" % (tag, row["stderr"]))
+    row = ledger["f4"]
+    assert row["exit"] == 1, row
+    assert row["cap"] is False, row
+    assert row["events_kept"] is True, row
+    assert row["stderr"], row
+    f4_ops, _, _ = parse_oracle_log(
+        str(got["f4-oracle.log"]))
+    assert len(f4_ops) == 2, f4_ops
+    caps = {}
+    for tag in CAPTURES:
+        record = json.loads(
+            got[f"{tag}-record.json"].read_text())
+        session = json.loads(
+            got[f"{tag}-session.json"].read_text())
+        events = _events(got[f"{tag}-events.ndjson"])
+        ops, _, _ = parse_oracle_log(
+            str(got[f"{tag}-oracle.log"]))
+        caps[tag] = (record, session, events, ops)
+    bad = []
+    for tag in ("f3a", "f3b"):
+        record, session, events, ops = caps[tag]
+        window = ledger[tag]["window"]
+        rest = "3ch" if tag == "f3b" else "1ch"
+        cut, _, _ = parse_oracle_log(
+            str(got[f"{tag}-cut-oracle.log"]))
+        assert len(ops) == FLOOD_OPS, (tag, len(ops))
+        assert 0 < len(cut) < FLOOD_OPS, \
+            (tag, len(cut))
+        bad += check_capture_session(
+            events, session, record, "ft-" + tag,
+            5_000_000_000, 30_000_000_000,
+            "record3-ephemeral", tag == "f3b", "signal",
+            False, expect_decision=expect_decision)
+        bad += check_cut_slice(_slice(events, window),
+                               len(cut), "ft-" + tag)
+        print("ft-%s (%s signal cut): %d/%d ops at cut" % (
+            tag, rest, len(cut), len(ops)))
+    report = json.loads(got["f3b-report.json"].read_text())
+    # Rendered reports exit 0 on finalized captures
+    # whatever the verdict (the report carries verdict
+    # complete/partial instead); the pre-cutover exit-4
+    # expectation never held on this product and
+    # contradicts check_report's rendered-exit demand.
+    assert ledger["f3b-report"]["exit"] == 0, ledger
+    bad += check_report(
+        report, caps["f3b"][2],
+        {"report_exit": ledger["f3b-report"]["exit"]},
+        "ft-f3b-r", False)
+    for tag in ("f5a", "f5b"):
+        record, session, events, ops = caps[tag]
+        window = ledger[tag]["window"]
+        assert len(ops) == FLOOD_OPS, (tag, len(ops))
+        bad += check_capture_session(
+            events, session, record, "ft-" + tag,
+            100_000_000_000, 150_000_000_000,
+            "record3-ephemeral", tag == "f5b",
+            expect_decision=expect_decision)
+        sl = _slice(events, window)
+        kinds = {e["kind"] for e in sl}
+        if tag == "f5a":
+            assert not (kinds & {"map_result", "unmap",
+                                 "sync_request", "copy"}), \
+                (tag, kinds)
+            got_sizes = sorted(
+                int(e["data"]["requested_bytes"]) for e in sl
+                if e["kind"] == "bounce_attempt")
+            assert got_sizes == sorted(
+                s for s, _, _ in want["maps"]), tag
+        else:
+            bad += check_flood_slice(sl, want, "ft-" + tag)
+    a_sizes = sorted(
+        int(e["data"]["requested_bytes"]) for e in _slice(
+            caps["f5a"][2], ledger["f5a"]["window"])
+        if e["kind"] == "bounce_attempt")
+    b_sizes = sorted(
+        int(e["data"]["requested_bytes"]) for e in _slice(
+            caps["f5b"][2], ledger["f5b"]["window"])
+        if e["kind"] == "bounce_attempt")
+    assert a_sizes == b_sizes, "1ch/3ch attempt drift"
+    print("ft-f5: 1ch/3ch attempt streams identical, "
+          "%d floods exact" % len(a_sizes))
+    record, session, events, ops = caps["f5c"]
+    window = ledger["f5c"]["window"]
+    assert len(ops) == FLOOD_OPS, len(ops)
+    bad += check_capture_session(
+        events, session, record, "ft-f5c",
+        100_000_000_000, 150_000_000_000,
+        "record3-ephemeral", True, "duration", False,
+        expect_decision=expect_decision)
+    sl = _slice(events, window)
+    kinds = {}
+    for event in sl:
+        kinds.setdefault(event["kind"], []).append(event)
+    predicted = (len(want["maps"]) + len(want["unmaps"])
+                 + len(want["syncs_dev"])
+                 + len(want["syncs_cpu"])
+                 + len(want["bounces"])
+                 + len(want["maps"]))
+    loss = int(session["quality"]["detail"]["loss_count"])
+    buckets = dict(re.findall(
+        r"([a-z_]+)=\((\d+)\)",
+        session["quality"]["detail"]["reason"]))
+    assert buckets, session["quality"]["detail"]["reason"]
+    for key, value in buckets.items():
+        if key != "duration_omitted":
+            assert value == "0", (key, buckets)
+    assert buckets.get("duration_omitted", "0") == str(
+        loss), buckets
+    ambient = [e for e in _detail(events)
+               if not window[0] <= int(e["ts_ns"])
+               <= window[1]]
+    total = len(_detail(events)) + loss
+    assert total == predicted + len(ambient), (
+        len(_detail(events)), loss, predicted,
+        len(ambient))
+    if len(kinds.get("map_result", [])) > len(want["maps"]):
+        bad.append("ft-f5c: maps exceed prediction")
+    if len(kinds.get("copy", [])) > len(want["bounces"]):
+        bad.append("ft-f5c: copies exceed prediction")
+    bad += check_lifetimes(kinds.get("map_result", []),
+                           kinds.get("unmap", []),
+                           "ft-f5c", False)
+    print("ft-f5c: burst %d recorded + %d omitted == "
+          "predicted + ambient" % (
+              len(_detail(events)), loss))
+    record, session, events, ops = caps["f6"]
+    window = ledger["f6"]["window"]
+    assert len(ops) == 2, ops
+    assert sorted(e["requested"] for e in ops.values()
+                  ) == [1024, 4096], ops
+    bad += check_capture_session(
+        events, session, record, "ft-f6",
+        40_000_000_000, 90_000_000_000,
+        "record3-ephemeral",
+        expect_decision=expect_decision)
+    start = int(session["capture"]["window"]["start_ns"])
+    early = [e for e in _detail(events)
+             if int(e["ts_ns"]) < start]
+    assert not early, "pre-window records: %r" % early[:3]
+    bad += check_oracle_slice(_slice(events, window),
+                              "ft-f6")
+    ambient = [e for e in _detail(events)
+               if not window[0] <= int(e["ts_ns"])
+               <= window[1]]
+    bad += check_lifetimes(
+        [e for e in events if e["kind"] == "map_result"],
+        [e for e in ambient if e["kind"] == "unmap"],
+        "ft-f6-amb", False)
+    print("ft-f6: attach race clean, oracle slice exact, "
+          "%d ambient" % len(ambient))
+    return sorted(bad)
+
+
 def test_faults_multi_channel():
     require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE,
                           ATTEMPT_PROBE, BRIDGE)
     ensure_oracle_module()
     _mint_profile()
-    want = scripted_expectation(FLOOD_OPS, -1)
     tmp = None
     try:
         tmp, proc = run_guest("faults", timeout=1200, network=True)
@@ -160,164 +347,7 @@ def test_faults_multi_channel():
         expected = expected_from_verified(got, "faults")
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == gate_kernel.selected().release, ident
-        ledger = {row["scenario"]: row for row in
-                  json.loads(got["faults.json"].read_text())}
-        for tag, row in sorted(ledger.items()):
-            assert row["settle_s"] < 30, (tag, row)
-            if tag == "f3b-report":
-                continue
-            assert row["progs_after"] == row["progs_before"], \
-                (tag, row)
-            assert row["maps_after"] == row["maps_before"], \
-                (tag, row)
-        for tag in ("f1", "f2"):
-            row = ledger[tag]
-            assert row["exit"] == 3, row
-            assert row["cap"] is False, row
-            assert row["stderr"], row
-            print("ft-%s refused: %s" % (tag, row["stderr"]))
-        row = ledger["f4"]
-        assert row["exit"] == 1, row
-        assert row["cap"] is False, row
-        assert row["events_kept"] is True, row
-        assert row["stderr"], row
-        f4_ops, _, _ = parse_oracle_log(
-            str(got["f4-oracle.log"]))
-        assert len(f4_ops) == 2, f4_ops
-        caps = {}
-        for tag in CAPTURES:
-            record = json.loads(
-                got[f"{tag}-record.json"].read_text())
-            session = json.loads(
-                got[f"{tag}-session.json"].read_text())
-            events = _events(got[f"{tag}-events.ndjson"])
-            ops, _, _ = parse_oracle_log(
-                str(got[f"{tag}-oracle.log"]))
-            caps[tag] = (record, session, events, ops)
-        bad = []
-        for tag in ("f3a", "f3b"):
-            record, session, events, ops = caps[tag]
-            window = ledger[tag]["window"]
-            rest = "3ch" if tag == "f3b" else "1ch"
-            cut, _, _ = parse_oracle_log(
-                str(got[f"{tag}-cut-oracle.log"]))
-            assert len(ops) == FLOOD_OPS, (tag, len(ops))
-            assert 0 < len(cut) < FLOOD_OPS, \
-                (tag, len(cut))
-            bad += check_capture_session(
-                events, session, record, "ft-" + tag,
-                5_000_000_000, 30_000_000_000,
-                "record3-ephemeral", tag == "f3b", "signal",
-                False)
-            bad += check_cut_slice(_slice(events, window),
-                                   len(cut), "ft-" + tag)
-            print("ft-%s (%s signal cut): %d/%d ops at cut" % (
-                tag, rest, len(cut), len(ops)))
-        report = json.loads(got["f3b-report.json"].read_text())
-        assert ledger["f3b-report"]["exit"] == 4, ledger
-        bad += check_report(
-            report, caps["f3b"][2],
-            {"report_exit": ledger["f3b-report"]["exit"]},
-            "ft-f3b-r", False)
-        for tag in ("f5a", "f5b"):
-            record, session, events, ops = caps[tag]
-            window = ledger[tag]["window"]
-            assert len(ops) == FLOOD_OPS, (tag, len(ops))
-            bad += check_capture_session(
-                events, session, record, "ft-" + tag,
-                100_000_000_000, 150_000_000_000,
-                "record3-ephemeral", tag == "f5b")
-            sl = _slice(events, window)
-            kinds = {e["kind"] for e in sl}
-            if tag == "f5a":
-                assert not (kinds & {"map_result", "unmap",
-                                     "sync_request", "copy"}), \
-                    (tag, kinds)
-                got_sizes = sorted(
-                    int(e["data"]["requested_bytes"]) for e in sl
-                    if e["kind"] == "bounce_attempt")
-                assert got_sizes == sorted(
-                    s for s, _, _ in want["maps"]), tag
-            else:
-                bad += check_flood_slice(sl, want, "ft-" + tag)
-        a_sizes = sorted(
-            int(e["data"]["requested_bytes"]) for e in _slice(
-                caps["f5a"][2], ledger["f5a"]["window"])
-            if e["kind"] == "bounce_attempt")
-        b_sizes = sorted(
-            int(e["data"]["requested_bytes"]) for e in _slice(
-                caps["f5b"][2], ledger["f5b"]["window"])
-            if e["kind"] == "bounce_attempt")
-        assert a_sizes == b_sizes, "1ch/3ch attempt drift"
-        print("ft-f5: 1ch/3ch attempt streams identical, "
-              "%d floods exact" % len(a_sizes))
-        record, session, events, ops = caps["f5c"]
-        window = ledger["f5c"]["window"]
-        assert len(ops) == FLOOD_OPS, len(ops)
-        bad += check_capture_session(
-            events, session, record, "ft-f5c",
-            100_000_000_000, 150_000_000_000,
-            "record3-ephemeral", True, "duration", False)
-        sl = _slice(events, window)
-        kinds = {}
-        for event in sl:
-            kinds.setdefault(event["kind"], []).append(event)
-        predicted = (len(want["maps"]) + len(want["unmaps"])
-                     + len(want["syncs_dev"])
-                     + len(want["syncs_cpu"])
-                     + len(want["bounces"])
-                     + len(want["maps"]))
-        loss = int(session["quality"]["detail"]["loss_count"])
-        buckets = dict(re.findall(
-            r"([a-z_]+)=\((\d+)\)",
-            session["quality"]["detail"]["reason"]))
-        assert buckets, session["quality"]["detail"]["reason"]
-        for key, value in buckets.items():
-            if key != "duration_omitted":
-                assert value == "0", (key, buckets)
-        assert buckets.get("duration_omitted", "0") == str(
-            loss), buckets
-        ambient = [e for e in _detail(events)
-                   if not window[0] <= int(e["ts_ns"])
-                   <= window[1]]
-        total = len(_detail(events)) + loss
-        assert total == predicted + len(ambient), (
-            len(_detail(events)), loss, predicted,
-            len(ambient))
-        if len(kinds.get("map_result", [])) > len(want["maps"]):
-            bad.append("ft-f5c: maps exceed prediction")
-        if len(kinds.get("copy", [])) > len(want["bounces"]):
-            bad.append("ft-f5c: copies exceed prediction")
-        bad += check_lifetimes(kinds.get("map_result", []),
-                               kinds.get("unmap", []),
-                               "ft-f5c", False)
-        print("ft-f5c: burst %d recorded + %d omitted == "
-              "predicted + ambient" % (
-                  len(_detail(events)), loss))
-        record, session, events, ops = caps["f6"]
-        window = ledger["f6"]["window"]
-        assert len(ops) == 2, ops
-        assert sorted(e["requested"] for e in ops.values()
-                      ) == [1024, 4096], ops
-        bad += check_capture_session(
-            events, session, record, "ft-f6",
-            40_000_000_000, 90_000_000_000,
-            "record3-ephemeral")
-        start = int(session["capture"]["window"]["start_ns"])
-        early = [e for e in _detail(events)
-                 if int(e["ts_ns"]) < start]
-        assert not early, "pre-window records: %r" % early[:3]
-        bad += check_oracle_slice(_slice(events, window),
-                                  "ft-f6")
-        ambient = [e for e in _detail(events)
-                   if not window[0] <= int(e["ts_ns"])
-                   <= window[1]]
-        bad += check_lifetimes(
-            [e for e in events if e["kind"] == "map_result"],
-            [e for e in ambient if e["kind"] == "unmap"],
-            "ft-f6-amb", False)
-        print("ft-f6: attach race clean, oracle slice exact, "
-              "%d ambient" % len(ambient))
+        bad = judge_faults_capture(got)
         assert not bad, "\n".join(bad)
     except Exception:
         retain_failure(tmp, "faults")

@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Low-rate lifecycle matrix in the disposable VM.
 
+SUPERSEDED by tests/vm/test_battery.py case `matrix`
+(battery port onto the test-only Rust consumer);
+kept until the reviewed removal step.
+
 Loads the oracle module at stepped rates (1, 10, 100 maps/s),
 captures with the laboratory lifecycle probes, and compares decoded
 wire records against scripted module facts. Also
