@@ -1576,6 +1576,55 @@ def replay_window(tmp, tag, wire, ring, total, total_bytes):
     return out
 
 
+def skew_loss(src, dst):
+    """Add one balanced submit loss to a window file."""
+    order = ("observed", "badframe", "badrec", "cnt_obs",
+             "cnt_obsb", "cnt_emit", "cnt_emitb", "cnt_fail",
+             "cnt_flags", "rx", "dlv", "mal", "drop")
+    skewed = []
+    for line in open(src).read().split("\n"):
+        if line.startswith("summary "):
+            fields = dict(token.split("=", 1)
+                          for token in line.split()[1:])
+            fields["cnt_obs"] = str(int(fields["cnt_obs"]) + 1)
+            fields["cnt_fail"] = str(int(fields["cnt_fail"]) + 1)
+            line = "summary " + " ".join(
+                "%s=%s" % (key, fields[key]) for key in order)
+        skewed.append(line)
+    open(dst, "w").write("\n".join(skewed))
+
+
+def write_oracle_log(path, ops):
+    """Write one scripted oracle dmesg log with ops ops.
+
+    Module order: every op attempts once with its cycled
+    size, succeeds, and syncs (op 1 twice); every mapping
+    releases once; the completion line closes the script.
+    A realistic dmesg prefix: the parser tolerates it.
+    """
+    from consume import LC_SIZES
+    lines = []
+    for i in range(ops):
+        size = LC_SIZES[i % len(LC_SIZES)]
+        direction = 2 if i % 2 else 1
+        lines.append("mv-oracle: op=%d attempt requested=%d forced=0"
+                     % (i, size))
+        lines.append("mv-oracle: op=%d outcome=success mapping=%d "
+                     "mapped=%d" % (i, i, size))
+        syncs = 2 if i == 1 else 1
+        for _ in range(syncs):
+            lines.append("mv-oracle: op=%d mapping=%d sync dir=%d "
+                         "len=%d for=device" % (i, i, direction,
+                                                size))
+    for i in range(ops):
+        lines.append("mv-oracle: mapping=%d release "
+                     "lifetime_ns=%d" % (i, 5000 + i))
+    lines.append("mv-oracle: script complete ops=%d" % ops)
+    with open(path, "w") as handle:
+        for line in lines:
+            handle.write("[    5.123456] %s\n" % line)
+
+
 def synth_q3_leg(tmp, name, miss_unmaps=0):
     """One coherent synthetic q3 leg, replay-generated.
 
@@ -1583,15 +1632,13 @@ def synth_q3_leg(tmp, name, miss_unmaps=0):
     conservation, and the scripted multisets still hold,
     so the leg passes with M == miss_unmaps.
     """
-    from consume import LC_SIZES, scripted_expectation
+    from consume import scripted_expectation
     ops = core.P1_OPS
     want = scripted_expectation(ops, -1)
     # Multiset order for the wire (matches the
     # expectation exactly); op order for the log.
     sizes = [size for size, _dir, _ok in want["maps"]]
     dirs = [direction for _size, direction, _ok in want["maps"]]
-    op_sizes = [LC_SIZES[i % len(LC_SIZES)] for i in range(ops)]
-    op_dirs = [2 if i % 2 else 1 for i in range(ops)]
     wire = b""
     seq = 0
     for i in range(ops):
@@ -1631,28 +1678,8 @@ def synth_q3_leg(tmp, name, miss_unmaps=0):
         seq += 1
     cp = replay_window(tmp, "%s-p1-cp" % name, wire, "mv_copies",
                        seq, cp_bytes)
-    lines = []
-    for i in range(ops):
-        size = op_sizes[i]
-        direction = op_dirs[i]
-        lines.append("mv-oracle: op=%d attempt requested=%d forced=0"
-                     % (i, size))
-        lines.append("mv-oracle: op=%d outcome=success mapping=%d "
-                     "mapped=%d" % (i, i, size))
-        syncs = 2 if i == 1 else 1
-        for _ in range(syncs):
-            lines.append("mv-oracle: op=%d mapping=%d sync dir=%d "
-                         "len=%d for=device" % (i, i, direction,
-                                                size))
-    for i in range(ops):
-        lines.append("mv-oracle: mapping=%d release "
-                     "lifetime_ns=%d" % (i, 5000 + i))
-    lines.append("mv-oracle: script complete ops=%d" % ops)
-    # A realistic dmesg prefix: the parser tolerates it.
     oracle = os.path.join(tmp, "%s-p1-oracle.log" % name)
-    with open(oracle, "w") as handle:
-        for line in lines:
-            handle.write("[    5.123456] %s\n" % line)
+    write_oracle_log(oracle, ops)
     c0a = replay_window(
         tmp, "%s-c0a-lc" % name,
         core.encode_lc(1, True, False, 1, 0, 100, 512, 7)
@@ -1697,6 +1724,77 @@ def synth_q3_leg(tmp, name, miss_unmaps=0):
             "%s-p1-lc.txt" % name: Path(lc),
             "%s-p1-cp.txt" % name: Path(cp),
             "%s-p1-oracle.log" % name: Path(oracle)}
+
+
+def synth_full_leg(tmp, name):
+    """One coherent synthetic full leg, replay-generated.
+
+    Controls plus the quiet phase come from the q3 leg;
+    the overlap phase is a small honest window: 100 maps
+    plus 100 resolving unmaps against matching bpftrace
+    counts, 50 syncs plus 50 bounces, a 2000-op oracle
+    script, and sidecars proving the flood flowed inside
+    the oracle window.
+    """
+    files = synth_q3_leg(tmp, name)
+    wire = b""
+    seq = 0
+    for i in range(100):
+        wire += core.encode_lc(core.LC_KIND_MAP, True, False,
+                               1, seq, 1000 + seq, 512, i + 1)
+        seq += 1
+    for i in range(100):
+        wire += core.encode_lc(2, True, True, 1, seq,
+                               3000 + seq, 512, i + 1)
+        seq += 1
+    lc2 = replay_window(tmp, "%s-p2-lc" % name, wire,
+                        "mv_lifecycle", 200, 200 * 512)
+    wire = b""
+    seq = 0
+    cp_bytes = 0
+    for _ in range(50):
+        wire += core.encode_cp(1, 1, False, False, False,
+                               1, 4, seq, 1000 + seq, 512, 0)
+        cp_bytes += 512
+        seq += 1
+    for _ in range(50):
+        wire += core.encode_cp(2, 1, True, False, False,
+                               1, 0, seq, 1000 + seq,
+                               1024, 1024)
+        cp_bytes += 1024
+        seq += 1
+    cp2 = replay_window(tmp, "%s-p2-cp" % name, wire,
+                        "mv_copies", seq, cp_bytes)
+    oracle2 = os.path.join(tmp, "%s-p2-oracle.log" % name)
+    write_oracle_log(oracle2, core.P2_OPS)
+    bpf = os.path.join(tmp, "%s-bpftrace.txt" % name)
+    with open(bpf, "w") as handle:
+        handle.write("@maps: 100\n@unmaps: 100\n@bounces: 50\n")
+    stats = os.path.join(tmp, "%s-blockstats.json" % name)
+    with open(stats, "w") as handle:
+        handle.write(json.dumps({"before": {"read_ios": 10},
+                                 "after": {"read_ios": 60}})
+                     + "\n")
+    dd = os.path.join(tmp, "%s-dd.json" % name)
+    with open(dd, "w") as handle:
+        handle.write(json.dumps(
+            {"cpu0": {"bytes": 128 * 16 * 65536,
+                      "seconds": 0.1,
+                      "start_ns": 100, "finish_ns": 200}})
+                     + "\n")
+    window = os.path.join(tmp, "%s-window.json" % name)
+    with open(window, "w") as handle:
+        handle.write(json.dumps({"start_ns": 150,
+                                 "finish_ns": 250}) + "\n")
+    files.update({
+        "%s-p2-lc.txt" % name: Path(lc2),
+        "%s-p2-cp.txt" % name: Path(cp2),
+        "%s-p2-oracle.log" % name: Path(oracle2),
+        "%s-bpftrace.txt" % name: Path(bpf),
+        "%s-blockstats.json" % name: Path(stats),
+        "%s-dd.json" % name: Path(dd),
+        "%s-window.json" % name: Path(window)})
+    return files
 
 
 def self_test_q3_mode(tmp, pairs):
@@ -1756,24 +1854,6 @@ def self_test_q3_mode(tmp, pairs):
     bad, _ = judge_q3_leg(garbage, "baseline", "syn-trash")
     ok = check("q3-controls-tripwire", bad != [],
                "; ".join(bad)) and ok
-
-    def skew_loss(src, dst):
-        """Add one balanced submit loss to a window file."""
-        order = ("observed", "badframe", "badrec", "cnt_obs",
-                 "cnt_obsb", "cnt_emit", "cnt_emitb", "cnt_fail",
-                 "cnt_flags", "rx", "dlv", "mal", "drop")
-        skewed = []
-        for line in open(src).read().split("\n"):
-            if line.startswith("summary "):
-                fields = dict(token.split("=", 1)
-                              for token in line.split()[1:])
-                fields["cnt_obs"] = str(int(fields["cnt_obs"]) + 1)
-                fields["cnt_fail"] = str(int(fields["cnt_fail"]) + 1)
-                line = "summary " + " ".join(
-                    "%s=%s" % (key, fields[key]) for key in order)
-            skewed.append(line)
-        open(dst, "w").write("\n".join(skewed))
-
     # A balanced loss in the second control window still
     # conserves, so only the loss-free rule refuses it.
     lossy = dict(base)
@@ -1862,6 +1942,54 @@ def self_test_q3_mode(tmp, pairs):
     return ok
 
 
+def self_test_full_mode(tmp):
+    """Full-mode judge: honest legs pass, lossy legs refuse."""
+    ok = True
+    base = synth_full_leg(tmp, "baseline")
+    bad, metrics = judge_leg(base, "baseline", "syn-full")
+    ok = check("full-leg-pass", bad == []
+               and metrics["M"] == 0 and metrics["D"] == 200,
+               "; ".join(bad)) and ok
+    # A balanced loss in the second control window still
+    # conserves, so only the loss-free rule refuses it.
+    lossy = dict(base)
+    c0b_loss = os.path.join(tmp, "baseline-c0b-lossy.txt")
+    skew_loss(str(base["baseline-c0b-lc.txt"]), c0b_loss)
+    lossy["baseline-c0b-lc.txt"] = Path(c0b_loss)
+    events, summary = parse_consume_file(c0b_loss)
+    bad, _ = judge_leg(lossy, "baseline", "syn-full-c0-loss")
+    ok = check("full-controls-loss-refuses",
+               check_conservation(events, summary,
+                                  "skew-full-c0b") == []
+               and any("cnt_fail" in reason for reason in bad),
+               "; ".join(bad)) and ok
+    # Same for a balanced loss in the quiet copy window.
+    quiet_lossy = dict(base)
+    cp_loss = os.path.join(tmp, "baseline-p1-cp-lossy.txt")
+    skew_loss(str(base["baseline-p1-cp.txt"]), cp_loss)
+    quiet_lossy["baseline-p1-cp.txt"] = Path(cp_loss)
+    events, summary = parse_consume_file(cp_loss)
+    bad, _ = judge_leg(quiet_lossy, "baseline",
+                        "syn-full-quiet-loss")
+    ok = check("full-quiet-loss-refuses",
+               check_conservation(events, summary,
+                                  "skew-full-quiet") == []
+               and any("cnt_fail" in reason for reason in bad),
+               "; ".join(bad)) and ok
+    # A blanked control oracle log refuses: the control
+    # record is mandatory evidence, not optional.
+    blanked = dict(base)
+    c0_blank = os.path.join(tmp, "baseline-c0-blank.log")
+    open(c0_blank, "w").write("")
+    blanked["baseline-c0-oracle.log"] = Path(c0_blank)
+    bad, _ = judge_leg(blanked, "baseline", "syn-full-blank")
+    ok = check("full-blanked-control-log-refuses",
+               any("script complete" in reason
+                   for reason in bad),
+               "; ".join(bad)) and ok
+    return ok
+
+
 def run_self_test(work=None):
     """Full offline suite: proofs plus unarmed checks. No boot."""
     print("stress-consumer self-test (unarmed, offline)")
@@ -1895,6 +2023,7 @@ def run_self_test(work=None):
         ok = self_test_identity() and ok
         if pairs is not None:
             ok = self_test_q3_mode(tmp, pairs) and ok
+        ok = self_test_full_mode(tmp) and ok
     finally:
         if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -2097,11 +2226,18 @@ def judge_leg(files, name, tag):
     try:
         first, first_sum = parse_consume_file(
             str(files["%s-c0a-lc.txt" % name]))
-        second, _ = parse_consume_file(
+        second, second_sum = parse_consume_file(
             str(files["%s-c0b-lc.txt" % name]))
+        ops_log, releases, complete = parse_oracle_log(
+            str(files["%s-c0-oracle.log" % name]))
     except ValueError as exc:
         return (["%s: control files unparsable: %s" % (tag, exc)], {})
     bad += check_conservation(first, first_sum, tag + "-c0a")
+    bad += check_conservation(second, second_sum, tag + "-c0b")
+    bad += check_loss_free(first_sum, tag + "-c0a")
+    bad += check_loss_free(second_sum, tag + "-c0b")
+    bad += check_oracle_script(ops_log, releases, complete,
+                               2, -1, tag + "-c0")
     known = [e for e in first if e["kind"] == 1 and e["size"] == 512
              and e["gen"] != 0]
     if not known:
@@ -2129,6 +2265,8 @@ def judge_leg(files, name, tag):
                 {})
     bad += check_conservation(lc, lc_sum, tag + "-p1-lc")
     bad += check_conservation(cp, cp_sum, tag + "-p1-cp")
+    bad += check_loss_free(lc_sum, tag + "-p1-lc")
+    bad += check_loss_free(cp_sum, tag + "-p1-cp")
     bad += check_identity_closure(lc, tag + "-p1-lc")
     bad += check_oracle_script(ops_log, releases, complete,
                                core.P1_OPS, -1, tag + "-p1")
