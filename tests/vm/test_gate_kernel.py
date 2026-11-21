@@ -337,7 +337,7 @@ def test_live_gaps_require_available_and_live_verified():
         "absent-cap (absent)"]
 
 
-def test_prepare_threads_candidate_engine_and_objects(
+def test_prepare_threads_sealed_inputs(
         tmp_path, monkeypatch):
     gate_doc = tmp_path / "gate.json"
     gate_doc.write_text('{"profile_id": "gate-test"}')
@@ -364,9 +364,15 @@ def test_prepare_threads_candidate_engine_and_objects(
     objects = {"object": str(tmp_path / "a.o"),
                "lc_object": str(tmp_path / "lc.o"),
                "cp_object": str(tmp_path / "cp.o")}
+    profiles = tmp_path / "profiles"
+    sat = tmp_path / "sat.o"
     assert gate_kernel.prepare(memveil=str(engine),
-                               objects=objects) is sel
-    assert calls["select"] == {"objects": objects}
+                               objects=objects,
+                               profiles=profiles,
+                               sat_object=sat) is sel
+    assert calls["select"] == {"objects": objects,
+                               "profiles": profiles,
+                               "sat_object": sat}
     assert calls["live"] == (
         ("attempt-trace", "mapping-lifecycle", "copy-actual"),
         str(engine))
@@ -376,8 +382,36 @@ def test_prepare_threads_candidate_engine_and_objects(
         json.loads(gate_doc.read_text())
     calls.clear()
     assert gate_kernel.prepare() is sel
-    assert calls["select"] == {"objects": None}
+    assert calls["select"] == {"objects": None, "profiles": None,
+                               "sat_object": None}
     assert calls["live"][1] == str(gate_kernel.MEMVEIL)
+
+
+def test_emit_objects_refuses_partial_inputs(tmp_path):
+    assert gate_kernel.emit_objects(None, None) is None
+    objects = {"object": tmp_path / "a.o",
+               "lc_object": tmp_path / "lc.o",
+               "cp_object": tmp_path / "cp.o"}
+    sat = tmp_path / "sat.o"
+    assert gate_kernel.emit_objects(objects, sat) == {
+        "attempt": objects["object"], "saturation": sat,
+        "lc": objects["lc_object"], "cp": objects["cp_object"]}
+    with pytest.raises(gate_kernel.GateKernelError,
+                       match="saturation input"):
+        gate_kernel.emit_objects(objects, None)
+    with pytest.raises(gate_kernel.GateKernelError,
+                       match="saturation input"):
+        gate_kernel.emit_objects(None, sat)
+    with pytest.raises(gate_kernel.GateKernelError,
+                       match="lack"):
+        gate_kernel.emit_objects({"object": sat}, sat)
+
+
+def test_gate_docs_refuses_partial_channels(tmp_path):
+    emit = gate_kernel.emitter()
+    assert emit.resolve_objects(None) == emit.DEV_OBJECTS
+    with pytest.raises(ValueError, match="lack channels"):
+        emit.resolve_objects({"attempt": tmp_path / "a.o"})
 
 
 def test_emit_gate_profiles_requires_explicit_out(monkeypatch):

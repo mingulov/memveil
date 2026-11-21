@@ -289,6 +289,14 @@ IDENTITY_DOC = dict(
         'config_sha', 'btf_sha', 'bridge_sha', 'consume_sha',
         'lc_sha', 'cp_sha', 'ko_sha')})
 
+# The bundle leg runs the packaged record, never the dev
+# consumer, so its identity carries no consumer hash.
+BUNDLE_IDENTITY_DOC = dict(
+    release='7.0.0-34-generic', swiotlb_force=True,
+    **{key: 'a' * 64 for key in (
+        'config_sha', 'btf_sha', 'bridge_sha',
+        'lc_sha', 'cp_sha', 'ko_sha')})
+
 
 def test_identity_accepts_distro_suffixes(tmp_path):
     # Fedora '_' and Debian '+' suffixes are valid releases in
@@ -304,12 +312,38 @@ def test_identity_accepts_distro_suffixes(tmp_path):
         assert test_attempt_capture.verify_exports(run, 'correctness')
 
 
+def test_bundle_identity_omits_the_consumer_hash(tmp_path):
+    export_validation.identity(dict(BUNDLE_IDENTITY_DOC),
+                               'bundle')
+    path = tmp_path / 'identity.json'
+    path.write_text(json.dumps(BUNDLE_IDENTITY_DOC))
+    export_validation.validate_lifecycle_exports(
+        {'identity.json': path}, 'bundle')
+
+
+def test_bundle_identity_refuses_the_consumer_hash(tmp_path):
+    with pytest.raises(ValueError):
+        export_validation.identity(dict(IDENTITY_DOC), 'bundle')
+    path = tmp_path / 'identity.json'
+    path.write_text(json.dumps(IDENTITY_DOC))
+    with pytest.raises(ValueError):
+        export_validation.validate_lifecycle_exports(
+            {'identity.json': path}, 'bundle')
+
+
+def test_consumer_identity_still_requires_its_hash():
+    with pytest.raises(ValueError):
+        export_validation.identity(
+            dict(BUNDLE_IDENTITY_DOC), 'copy')
+    export_validation.identity(dict(IDENTITY_DOC), 'copy')
+
+
 def retention_run(tmp_path, gate='bundle', files=None):
     run = tmp_path / 'run'
     export = run / 'export'
     export.mkdir(parents=True)
     files = files if files is not None else {
-        'identity.json': json.dumps(IDENTITY_DOC),
+        'identity.json': json.dumps(BUNDLE_IDENTITY_DOC),
         'record.json': json.dumps(
             {'exit': 4, 'ready': 'ready session=q'}),
     }
@@ -342,7 +376,7 @@ def test_retained_success_identity_survives_export_deletion(
     assert doc['complete'] is True
     assert doc['disposition'] == 'passed'
     kept = owned / 'gates' / 'bundle' / 'bundle-identity.json'
-    assert json.loads(kept.read_text()) == IDENTITY_DOC
+    assert json.loads(kept.read_text()) == BUNDLE_IDENTITY_DOC
     listed = {entry['name']: entry for entry in doc['files']}
     assert listed['bundle-identity.json']['sha256'] == hashlib.sha256(
         kept.read_bytes()).hexdigest()

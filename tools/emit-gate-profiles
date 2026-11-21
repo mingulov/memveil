@@ -4,8 +4,10 @@
 
 Inputs: guest identity JSON (release, config_src, config/btf/
 format/image shas, image bid) plus the live format text, plus
-the current production, saturation, lifecycle, and copy
-object builds, plus an explicit output path.
+the production, saturation, lifecycle, and copy objects
+(the current builds, or explicit inputs a sealed leg
+resolves under its verified root), plus an explicit output
+path.
 Outputs:
   the named gate doc (schema 0.1.2
     with the built objects' CO-RE layouts; reference-
@@ -59,8 +61,8 @@ def minter():
     return module
 
 
-def sha(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def sha(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def note_for(b: dict) -> str:
@@ -143,13 +145,40 @@ def doc_for(
     }
 
 
-def core_layouts() -> list:
-    """0.1.2 layouts from the built objects' CO-RE set."""
+DEV_OBJECTS = {
+    "attempt": PROD_OBJ,
+    "saturation": SAT_OBJ,
+    "lc": LC_OBJ,
+    "cp": CP_OBJ,
+}
+
+ATTEMPT_RING_VAR = "mv_attempts"
+
+
+def resolve_objects(objects) -> dict:
+    """Object inputs keyed by channel, defaulting to the builds.
+
+    An explicit mapping must name every channel: a sealed
+    leg that forgot one would otherwise silently bind a
+    build-tree object.
+    """
+    if objects is None:
+        return dict(DEV_OBJECTS)
+    missing = [key for key in DEV_OBJECTS if key not in objects]
+    if missing:
+        raise ValueError(
+            "gate objects lack channels: %s" % ", ".join(missing))
+    return {key: objects[key] for key in DEV_OBJECTS}
+
+
+def core_layouts(objects=None) -> list:
+    """0.1.2 layouts from the inputs' CO-RE set."""
+    resolved = resolve_objects(objects)
     proc = subprocess.run(
         [sys.executable, str(LAYOUTS_TOOL),
-         "--object", "attempt-trace=%s" % PROD_OBJ,
-         "--object", "mapping-lifecycle=%s" % LC_OBJ,
-         "--object", "copy-actual=%s" % CP_OBJ,
+         "--object", "attempt-trace=%s" % resolved["attempt"],
+         "--object", "mapping-lifecycle=%s" % resolved["lc"],
+         "--object", "copy-actual=%s" % resolved["cp"],
          "--print"],
         capture_output=True, text=True)
     if proc.returncode != 0:
@@ -158,8 +187,15 @@ def core_layouts() -> list:
     return json.loads(proc.stdout)
 
 
-def gate_docs(ident: dict, fmt_text: str, gate_id: str) -> tuple:
-    """Gate and saturation docs for one measured identity."""
+def gate_docs(ident: dict, fmt_text: str, gate_id: str,
+              objects=None) -> tuple:
+    """Gate and saturation docs for one measured identity.
+
+    objects names the attempt, saturation, lifecycle, and
+    copy inputs; without it the current builds apply. Ring
+    bindings are parsed from those same inputs, so a sealed
+    leg binds its verified bytes end to end.
+    """
     for key in (
         "release",
         "config_src",
@@ -173,15 +209,18 @@ def gate_docs(ident: dict, fmt_text: str, gate_id: str) -> tuple:
             raise ValueError(f"identity lacks {key}")
     if hashlib.sha256(fmt_text.encode()).hexdigest() != ident["format_sha"]:
         raise ValueError("format text does not match format_sha")
+    resolved = resolve_objects(objects)
+    mint = minter()
     bind = {
         "config": ident["config_sha"],
         "config_src": ident["config_src"],
         "btf": ident["btf_sha"],
         "format": ident["format_sha"],
-        "object": sha(PROD_OBJ),
+        "object": sha(resolved["attempt"]),
         "image": ident["image_sha"],
         "image_bid": ident["image_bid"],
-        "ring": "8388608",
+        "ring": str(mint.btf_ring_bytes(
+            resolved["attempt"], ATTEMPT_RING_VAR)),
     }
     gate = doc_for(
         gate_id,
@@ -191,18 +230,23 @@ def gate_docs(ident: dict, fmt_text: str, gate_id: str) -> tuple:
         fmt_text,
         "supported",
     )
-    minter().apply_tracing(
-        gate, LC_OBJ, CP_OBJ, LC_REASON, CP_REASON, HOOK_NOTE
+    mint.apply_tracing(
+        gate, resolved["lc"], resolved["cp"],
+        LC_REASON, CP_REASON, HOOK_NOTE
     )
     # The gate doc carries the objects' CO-RE layouts, so a
-    # re-emit reproduces the shipped narrow profile exactly.
-    gate["layouts"] = core_layouts()
+    # re-emit reproduives the shipped narrow profile exactly.
+    gate["layouts"] = core_layouts(resolved)
     gate["schema_version"] = "0.1.2"
     sat = doc_for(
         "saturation-candidate",
         "reference-unvalidated",
         ident["release"],
-        note_for({**bind, "object": sha(SAT_OBJ), "ring": "4096"}),
+        note_for({**bind,
+                  "object": sha(resolved["saturation"]),
+                  "ring": str(mint.btf_ring_bytes(
+                      resolved["saturation"],
+                      ATTEMPT_RING_VAR))}),
         fmt_text,
         "candidate",
     )

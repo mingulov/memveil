@@ -200,7 +200,10 @@ class Gate:
         self.work = work
         self.export_dir = export
         self.repo = repo
-        self.consume = os.path.join(repo, "build", "vm", "mv_consume")
+        # The bundle leg runs the packaged record, never the
+        # dev consumer, so it carries no consumer prerequisite.
+        self.consume = None if sub == "bundle" else os.path.join(
+            repo, "build", "vm", "mv_consume")
         self.bridge = guest_bridge_input(repo, sub, self.candidate)
         self.lc_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle.bpf.o")
@@ -222,8 +225,11 @@ class Gate:
             fail("guest flow requires root")
         os.makedirs(work, exist_ok=True)
         os.makedirs(export, exist_ok=True)
-        for path in (self.consume, self.bridge, self.lc_obj,
-                     self.cp_obj, self.ko):
+        required = [self.bridge, self.lc_obj, self.cp_obj,
+                    self.ko]
+        if self.consume is not None:
+            required = [self.consume] + required
+        for path in required:
             if not os.path.isfile(path):
                 fail(f"missing {path}")
         if os.path.exists("/sys/module/memveil_dma_oracle"):
@@ -238,13 +244,16 @@ class Gate:
             cmdline = fh.read().strip()
         from lifecycle_env import module_build_identity
         config_btf = module_build_identity()
-        return {"release": release, "swiotlb_force": "swiotlb=force" in cmdline,
-                "config_sha": config_btf["config_sha"], "btf_sha": config_btf["btf_sha"],
-                "bridge_sha": sha_file(self.bridge),
-                "consume_sha": sha_file(self.consume),
+        doc = {"release": release, "swiotlb_force": "swiotlb=force" in cmdline,
+               "config_sha": config_btf["config_sha"], "btf_sha": config_btf["btf_sha"],
+               "bridge_sha": sha_file(self.bridge)}
+        if self.consume is not None:
+            doc["consume_sha"] = sha_file(self.consume)
+        doc.update({
                 "lc_sha": sha_file(self.lc_test_obj if self.sub == "saturation" else self.lc_obj),
                 "cp_sha": sha_file(self.cp_test_obj if self.sub == "saturation" else self.cp_obj),
-                "ko_sha": sha_file(self.ko)}
+                "ko_sha": sha_file(self.ko)})
+        return doc
 
     def start_consumer(self, obj, ring, sites, seconds, out):
         """Start one consumer; return the Popen handle."""

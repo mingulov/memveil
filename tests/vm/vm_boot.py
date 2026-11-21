@@ -55,15 +55,16 @@ def guest_artifact_paths(sub, repo, selected=None):
     under the verified root for every subcommand; a
     saturation guest still runs the dev test objects, so
     its identity refuses here instead of passing mixed
-    bytes as qualified. Consume keeps its dev path (a
-    fixture the candidate never carries); bridge keeps
-    its dev path too, except the sealed bundle leg, which
-    loads no bridge and pins the candidate runtime
+    bytes as qualified. The bundle leg runs the packaged
+    record, never the dev consumer, so its table carries
+    no consumer entry. Otherwise consume keeps its dev
+    path (a fixture the candidate never carries); bridge
+    keeps its dev path too, except the sealed bundle leg,
+    which loads no bridge and pins the candidate runtime
     member under the verified root instead.
     """
     repo = str(repo)
     table = {
-        "consume_sha": os.path.join(repo, "build", "vm", "mv_consume"),
         "lc_sha": os.path.join(repo, "build", "bpf",
                                "swiotlb_lifecycle-test.bpf.o"
                                if sub == "saturation"
@@ -75,6 +76,9 @@ def guest_artifact_paths(sub, repo, selected=None):
         "bridge_sha": os.path.join(repo, "build", "deps", "lmb",
                                    "lib", "libbpf_mojo.so.1"),
     }
+    if sub != "bundle":
+        table["consume_sha"] = os.path.join(
+            repo, "build", "vm", "mv_consume")
     if selected is not None:
         table["lc_sha"] = str(selected.path(
             "bpf/swiotlb_lifecycle.bpf.o"))
@@ -176,11 +180,9 @@ def verify_exports(tmp, sub, names):
         for key in ("release", "config_sha", "btf_sha"):
             assert identity[key] == expected[key], "guest kernel identity drift: " + key
         paths = guest_artifact_paths(sub, REPO, selected)
-        for key, path in (("consume_sha", paths["consume_sha"]),
-                          ("lc_sha", paths["lc_sha"]),
-                          ("cp_sha", paths["cp_sha"]),
-                          ("bridge_sha", paths["bridge_sha"]),
-                          ("ko_sha", Path(ORACLE_KO))):
+        checks = dict(paths)
+        checks["ko_sha"] = Path(ORACLE_KO)
+        for key, path in checks.items():
             assert identity[key] == sha_file(path), "guest artifact mismatch: " + key
     return VerifiedExports(got, verified)
 

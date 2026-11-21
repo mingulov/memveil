@@ -47,15 +47,17 @@ ORACLE_KO = os.path.join(REPO, "build", "vm", "oracle", "memveil_dma_oracle.ko")
 BIN = os.path.join(REPO, "build", "memveil")
 
 
-def require_lifecycle_env(*probes, memveil=None, objects=None):
+def require_lifecycle_env(*probes, memveil=None, objects=None,
+                          profiles=None, sat_object=None):
     """Preflight one lifecycle gate. Skips or fails honestly.
 
-    Legs that run a verified candidate name its engine
-    (memveil) and BPF objects (objects) instead of the dev
-    probe paths: the binary check and the gate-kernel
-    selection/doctor check then run against those inputs
-    and never consult the dev tree. Without them the dev
-    tree inputs apply.
+    Legs that run verified inputs name the engine
+    (memveil), the BPF objects (objects), the saturation
+    input (sat_object), and the shipped profile dir
+    (profiles) instead of the build tree paths: the binary
+    check and the gate-kernel selection/doctor check then
+    run against those inputs and never consult the build
+    tree. Without them the build tree inputs apply.
     """
     armed = os.environ.get("MEMVEIL_VM_LIFECYCLE") == "1"
     missing = [p for p in probes if not os.path.isfile(p)]
@@ -79,14 +81,18 @@ def require_lifecycle_env(*probes, memveil=None, objects=None):
     probe = subprocess.run(["sudo", "-n", "true"], capture_output=True)
     if probe.returncode != 0:
         pytest.fail("armed but no passwordless sudo for vng")
-    prepare_gate_kernel(memveil=memveil, objects=objects)
+    prepare_gate_kernel(memveil=memveil, objects=objects,
+                        profiles=profiles, sat_object=sat_object)
 
 
-def prepare_gate_kernel(memveil=None, objects=None):
+def prepare_gate_kernel(memveil=None, objects=None, profiles=None,
+                        sat_object=None):
     """Select and live-verify the gate kernel, or fail the gate."""
     try:
         return gate_kernel.prepare(memveil=memveil,
-                                   objects=objects)
+                                   objects=objects,
+                                   profiles=profiles,
+                                   sat_object=sat_object)
     except gate_kernel.GateKernelError as exc:
         pytest.fail("armed but %s" % exc)
 

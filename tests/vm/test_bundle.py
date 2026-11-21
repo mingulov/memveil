@@ -113,14 +113,32 @@ def _sealed_inputs_requested(env=None):
     return requested(env)
 
 
+def sealed_profiles_dir(selected):
+    """Verified shipped-profile dir under the verified root.
+
+    Every listed member is hash-checked through the
+    candidate before selection reads the dir, so a sealed
+    selection binds exactly the sealed profiles. A tampered
+    or unlisted member raises instead of selecting.
+    """
+    manifest = selected.path("profiles/manifest.txt")
+    for name in manifest.read_text().split():
+        selected.path("profiles/" + name)
+    return manifest.parent
+
+
 def require_bundle_env(selected):
     """Arming, harness, and gate kernel for the bundle leg.
 
     The caller resolves and validates the candidate first;
     the sealed leg then preflights against the candidate
-    engine and objects only, while the dev leg keeps the
-    dev probes. Unarmed runs skip here, from this file, so
-    the offline selection accounts the skip to this leg.
+    engine, objects, and profiles only, while the dev leg
+    keeps the dev probes. The sealed run carries no
+    saturation test object, so the saturation input names
+    the sealed attempt bytes; the minted candidate binds
+    them with their parsed ring and stays unvalidated. Unarmed
+    runs skip here, from this file, so the offline selection
+    accounts the skip to this leg.
     """
     if os.environ.get("MEMVEIL_VM_LIFECYCLE") != "1":
         pytest.skip(UNARMED_SKIP)
@@ -137,7 +155,9 @@ def require_bundle_env(selected):
                           memveil=engine,
                           objects={"object": attempt,
                                    "lc_object": lc_obj,
-                                   "cp_object": cp_obj})
+                                   "cp_object": cp_obj},
+                          profiles=sealed_profiles_dir(selected),
+                          sat_object=attempt)
 
 
 def _slice(events, window):
@@ -549,6 +569,114 @@ def _wire_env(sealed):
             str(sealed["manifest_path"])}
 
 
+AYA_DIR = os.path.join(REPO, "tests", "vm", "fixtures", "aya")
+
+
+def seal_bundle_with_members(tmp_path, name, members):
+    """Seal a synthetic bundle with replaced member bytes.
+
+    members maps bundle-relative paths to bytes; the BPF
+    copies and the profiles typically take caller bytes
+    while the rest stays workshop synthetic. Manifest pins
+    are rebound and the install pair rebuilt before the
+    seal, so the result verifies through the real candidate
+    protocol. Selection tests share this helper.
+    """
+    package_dir = os.path.join(REPO, "tests", "package")
+    sys.path.insert(0, package_dir)
+    sys.path.insert(0, os.path.join(REPO, "tools"))
+    import sealed_fixture as fixture
+    from test_candidate import deterministic_tar_gz
+    import candidate as protocol
+    shop = fixture.workshop()
+    fix = shop.fresh(tmp_path / name)
+    bundle = fix["bundle_dir"]
+    manifest_path = bundle / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text())
+    files = dict(manifest["files"])
+    for rel, data in members.items():
+        path = bundle / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        files[rel] = hashlib.sha256(data).hexdigest()
+    manifest["files"] = files
+    bpf = {short: files["bpf/" + short] for short in (
+        "swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
+        "swiotlb_copy.bpf.o")}
+    manifest["build_receipt"]["outputs"]["bpf"] = bpf
+    manifest["embedded_bpf"] = dict(bpf)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    if members:
+        # Changed payload bytes need a rebuilt install pair;
+        # the seal compares its closure against the bundle.
+        fixture._shape_bundle(fix, tmp_path / (name + "-shape"))
+    else:
+        # The loader requires an executable engine; re-tar so
+        # the bundle artifact matches the rebound manifest
+        # before the seal binds the bytes.
+        engine = bundle / "bin" / "memveil"
+        engine.chmod(0o755)
+        tarball, arcname = fixture._bundle_tarball(
+            fix["artifacts"])
+        deterministic_tar_gz(bundle, arcname, tarball)
+    fixture._regenerate_seal_bindings(fix, shop.harness_bin())
+    sealed_manifest = protocol.create_manifest(
+        bundle, fix["artifacts"], fix["policy"],
+        {"root": str(fix["root"]),
+         "harness_bin": shop.harness_bin()})
+    out = fix["artifacts"] / "candidate.json"
+    protocol.seal_manifest(sealed_manifest, out)
+    roles = {entry["role"]: fix["artifacts"] / entry["name"]
+             for entry in sealed_manifest["artifacts"]}
+    assert roles["bundle"].is_file()
+    return {"manifest_path": out, "manifest": sealed_manifest,
+            "bundle": roles["bundle"]}
+
+
+def _aya_member(short):
+    with open(os.path.join(AYA_DIR, short), "rb") as handle:
+        return handle.read()
+
+
+def _sealed_select_bundle(tmp_path, name, profile_docs):
+    """Sealed candidate with real BPF bytes and given profiles.
+
+    profile_docs maps a profile filename to its doc; the
+    manifest lists exactly those names. Returns the loaded
+    selection, which the caller closes.
+    """
+    members = {
+        "bpf/swiotlb_attempt.bpf.o":
+        _aya_member("swiotlb_attempt.bpf.o"),
+        "bpf/swiotlb_lifecycle.bpf.o":
+        _aya_member("swiotlb_lifecycle.bpf.o"),
+        "bpf/swiotlb_copy.bpf.o":
+        _aya_member("swiotlb_copy.bpf.o"),
+        "profiles/manifest.txt":
+        ("\n".join(sorted(profile_docs)) + "\n").encode(),
+    }
+    for filename, doc in profile_docs.items():
+        members["profiles/" + filename] = (
+            json.dumps(doc, indent=2, sort_keys=True) + "\n"
+        ).encode()
+    sealed = seal_bundle_with_members(tmp_path, name, members)
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    return load(env=_wire_env(sealed), required=True)
+
+
+def _sealed_select_objects(selected):
+    """(bindings, saturation input) under the verified root."""
+    attempt = str(selected.path("bpf/swiotlb_attempt.bpf.o"))
+    return ({"object": attempt,
+             "lc_object": str(selected.path(
+                 "bpf/swiotlb_lifecycle.bpf.o")),
+             "cp_object": str(selected.path(
+                 "bpf/swiotlb_copy.bpf.o"))},
+            attempt)
+
+
 @pytest.mark.dev_fixture
 def test_bundle_sealed_inputs_wiring(tmp_path):
     """Sealed inputs resolve the sealed 0.1.1 bundle both sides.
@@ -835,15 +963,266 @@ def test_bundle_sealed_preflight_names_candidate_inputs(
         require_bundle_env(selected)
         engine = str(selected.path("bin/memveil"))
         assert recorded["memveil"] == engine, recorded
+        attempt = str(selected.path(
+            "bpf/swiotlb_attempt.bpf.o"))
         assert recorded["objects"] == {
-            "object": str(selected.path(
-                "bpf/swiotlb_attempt.bpf.o")),
+            "object": attempt,
             "lc_object": str(selected.path(
                 "bpf/swiotlb_lifecycle.bpf.o")),
             "cp_object": str(selected.path(
                 "bpf/swiotlb_copy.bpf.o"))}, recorded
+        assert recorded["profiles"] == selected.root / \
+            "profiles", recorded
+        assert recorded["sat_object"] == attempt, recorded
         assert seen, "sealed preflight probed no inputs"
         for path in seen:
             assert path.startswith(str(selected.root)), path
     finally:
         selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_selection_uses_candidate_profiles(
+        tmp_path):
+    """A sealed selection serves the candidate profile as is.
+
+    The sealed bundle carries real BPF bytes and one
+    validated profile minted for the fixture kernel over
+    those same bytes; selection serves that doc from under
+    the verified root with no drift, and the saturation
+    candidate binds the sealed attempt bytes with their
+    parsed ring. No VM boots.
+    """
+    from test_gate_kernel import REL, kernel_tree
+    root = kernel_tree(tmp_path)
+    ident, fmt = gate_kernel.measure_identity(REL, str(root))
+    emit = {
+        "attempt": os.path.join(AYA_DIR,
+                                "swiotlb_attempt.bpf.o"),
+        "saturation": os.path.join(AYA_DIR,
+                                   "swiotlb_attempt.bpf.o"),
+        "lc": os.path.join(AYA_DIR,
+                           "swiotlb_lifecycle.bpf.o"),
+        "cp": os.path.join(AYA_DIR, "swiotlb_copy.bpf.o"),
+    }
+    gate, _sat = gate_kernel.emitter().gate_docs(
+        ident, fmt, "sealed-shipped", emit)
+    gate["status"] = "validated"
+    selected = _sealed_select_bundle(
+        tmp_path, "selectshipped",
+        {"sealed-shipped.json": gate})
+    try:
+        profiles = sealed_profiles_dir(selected)
+        assert profiles == selected.root / "profiles"
+        objects, sat_object = _sealed_select_objects(selected)
+        sel = gate_kernel.select(
+            REL, str(root), tmp_path / "out", objects=objects,
+            profiles=profiles, host_release=REL,
+            require_shipped=True, sat_object=sat_object)
+        assert sel.mode == "shipped"
+        assert sel.gate_doc == profiles / "sealed-shipped.json"
+        assert str(sel.gate_doc).startswith(
+            str(selected.root)), sel.gate_doc
+        sat = json.loads(sel.sat_doc.read_text())
+        note = dict(part.split("=", 1) for part in
+                    sat["identity"]["source"]["note"].split())
+        files = selected.manifest["files"]
+        assert note["object"] == "sha256:" + files[
+            "bpf/swiotlb_attempt.bpf.o"]
+        assert note["ring_bytes"] == "8388608"
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_selection_mints_without_dev_tree(
+        tmp_path, monkeypatch, capsys):
+    """A sealed mint consults no build-tree profiles or objects.
+
+    The sealed profiles name only another release, so
+    selection mints; with guards refusing any build/ or
+    dist/ consult, the mint binds the sealed bytes
+    throughout. No VM boots.
+    """
+    from test_gate_kernel import REL, kernel_tree
+    root = kernel_tree(tmp_path)
+    ident, fmt = gate_kernel.measure_identity(REL, str(root))
+    other, _sat = gate_kernel.emitter().gate_docs(
+        ident, fmt, "sealed-other", None)
+    other["status"] = "validated"
+    other["identity"]["source"]["revision"] = "9.9.1-other"
+    selected = _sealed_select_bundle(
+        tmp_path, "selectmint", {"sealed-other.json": other})
+    try:
+        profiles = sealed_profiles_dir(selected)
+        objects, sat_object = _sealed_select_objects(selected)
+        _refuse_dev_consult(monkeypatch, os.path.isfile,
+                            (os.path, "isfile"))
+        _refuse_dev_consult(monkeypatch, os.path.exists,
+                            (os.path, "exists"))
+        _refuse_dev_consult(monkeypatch, builtins.open,
+                            (builtins, "open"))
+        _refuse_dev_consult(monkeypatch, io.open, (io, "open"))
+        _refuse_dev_consult(monkeypatch, os.stat, (os, "stat"))
+        sel = gate_kernel.select(
+            REL, str(root), tmp_path / "out", objects=objects,
+            profiles=profiles, host_release=REL,
+            require_shipped=False, sat_object=sat_object)
+        assert sel.mode == "minted"
+        assert "no validated shipped profile names" in \
+            capsys.readouterr().out
+        gate = json.loads(sel.gate_doc.read_text())
+        note = dict(part.split("=", 1) for part in
+                    gate["identity"]["source"]["note"].split())
+        files = selected.manifest["files"]
+        for key, rel in (("object", "bpf/swiotlb_attempt.bpf.o"),
+                         ("lc_object",
+                          "bpf/swiotlb_lifecycle.bpf.o"),
+                         ("cp_object",
+                          "bpf/swiotlb_copy.bpf.o")):
+            assert note[key] == "sha256:" + files[rel], key
+        assert note["ring_bytes"] == "8388608"
+        assert note["lc_ring_bytes"] == "33554432"
+        assert note["cp_ring_bytes"] == "33554432"
+        sat = json.loads(sel.sat_doc.read_text())
+        sat_note = dict(part.split("=", 1) for part in
+                        sat["identity"]["source"]["note"].split())
+        assert sat_note["object"] == "sha256:" + files[
+            "bpf/swiotlb_attempt.bpf.o"]
+        assert sat_note["ring_bytes"] == "8388608"
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_selection_reports_sealed_drift(
+        tmp_path):
+    """Sealed drift names the sealed doc, not the build tree.
+
+    A validated sealed profile with foreign bindings mints
+    with a drift reason naming that sealed doc, proving
+    selection consulted the candidate profiles.
+    """
+    from test_gate_kernel import REL, kernel_tree
+    root = kernel_tree(tmp_path)
+    ident, fmt = gate_kernel.measure_identity(REL, str(root))
+    gate, _sat = gate_kernel.emitter().gate_docs(
+        ident, fmt, "sealed-drifted", None)
+    gate["status"] = "validated"
+    fields = []
+    for part in gate["identity"]["source"]["note"].split():
+        if part.startswith("object="):
+            part = "object=sha256:" + "0" * 64
+        fields.append(part)
+    gate["identity"]["source"]["note"] = " ".join(fields)
+    selected = _sealed_select_bundle(
+        tmp_path, "selectdrift",
+        {"sealed-drifted.json": gate})
+    try:
+        profiles = sealed_profiles_dir(selected)
+        objects, sat_object = _sealed_select_objects(selected)
+        with pytest.raises(gate_kernel.GateKernelError,
+                           match="sealed-drifted.json.*drift"):
+            gate_kernel.select(
+                REL, str(root), tmp_path / "out",
+                objects=objects, profiles=profiles,
+                host_release=REL, require_shipped=True,
+                sat_object=sat_object)
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_profiles_reject_tampering(tmp_path):
+    """Sealed profile reads fail closed on tampered bytes.
+
+    The member check and the manifest check each refuse
+    bytes that changed after verification.
+    """
+    sealed = seal_bundle_with_members(tmp_path, "profiletamper",
+                                      {})
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    env = _wire_env(sealed)
+    selected = load(env=env, required=True)
+    try:
+        member = selected.root / "profiles" / "p.json"
+        member.write_bytes(b'{"tampered": true}\n')
+        with pytest.raises(ValueError,
+                           match="candidate input changed"):
+            sealed_profiles_dir(selected)
+    finally:
+        selected.close()
+    selected = load(env=env, required=True)
+    try:
+        manifest = selected.root / "profiles" / "manifest.txt"
+        manifest.write_bytes(b"p.json\ntampered.json\n")
+        with pytest.raises(ValueError,
+                           match="candidate input changed"):
+            sealed_profiles_dir(selected)
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_profiles_reject_unlisted_member(
+        tmp_path):
+    """A sealed manifest cannot smuggle an unlisted profile."""
+    sealed = seal_bundle_with_members(
+        tmp_path, "profileghost",
+        {"profiles/manifest.txt": b"p.json\nghost.json\n"})
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    selected = load(env=_wire_env(sealed), required=True)
+    try:
+        with pytest.raises(ValueError,
+                           match="outside candidate closure"):
+            sealed_profiles_dir(selected)
+    finally:
+        selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_identity_carries_no_consumer(
+        tmp_path, monkeypatch):
+    """The bundle leg neither maps nor reports the consumer.
+
+    The host identity table omits the consumer entry for
+    the bundle leg in both modes, and the guest identity
+    omits the consumer hash for the bundle leg while
+    keeping it for consumer legs.
+    """
+    from vm_boot import guest_artifact_paths
+    table = guest_artifact_paths("bundle", "/nonexistent-repo")
+    assert "consume_sha" not in table
+    assert set(table) == {"lc_sha", "cp_sha", "bridge_sha"}
+    assert "consume_sha" in guest_artifact_paths(
+        "copy", "/nonexistent-repo")
+    work = tmp_path / "gate"
+    work.mkdir()
+    files = {}
+    for key in ("bridge", "lc", "cp", "ko"):
+        path = work / key
+        path.write_bytes(key.encode())
+        files[key] = str(path)
+    gate = guest_lifecycle.Gate.__new__(guest_lifecycle.Gate)
+    gate.sub = "bundle"
+    gate.consume = None
+    gate.bridge = files["bridge"]
+    gate.lc_obj = files["lc"]
+    gate.cp_obj = files["cp"]
+    gate.lc_test_obj = files["lc"]
+    gate.cp_test_obj = files["cp"]
+    gate.ko = files["ko"]
+    import lifecycle_env as preflight
+    monkeypatch.setattr(
+        preflight, "module_build_identity",
+        lambda: {"config_sha": "c" * 64, "btf_sha": "d" * 64})
+    doc = gate.identity()
+    assert "consume_sha" not in doc
+    assert set(doc) == {"release", "swiotlb_force", "config_sha",
+                        "btf_sha", "bridge_sha", "lc_sha",
+                        "cp_sha", "ko_sha"}
+    gate.sub = "copy"
+    gate.consume = files["bridge"]
+    assert "consume_sha" in gate.identity()
