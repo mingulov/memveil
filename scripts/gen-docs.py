@@ -26,6 +26,7 @@ only when PATH already holds a fresh build.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 
@@ -42,6 +43,38 @@ def default_binary():
     target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(
         ROOT_DIR, "target")
     return os.path.join(target, "release", "memveil")
+
+
+def remap_build_paths(env):
+    """Append path remaps so the built binary names no build machine.
+
+    Home directory first, then the checkout root last, so
+    checkout paths land under /build-root (the same pair the
+    packager and the BPF build script apply). The binary
+    lands on the default packaging input path, so it must be
+    shippable as-is. Extends the encoded flags: that spelling
+    wins over RUSTFLAGS when both reach cargo, so merge
+    RUSTFLAGS in and drop it rather than clobber it. A
+    missing or empty HOME contributes no remap.
+    """
+    flags = []
+    encoded = env.get("CARGO_ENCODED_RUSTFLAGS", "")
+    if encoded:
+        flags.extend(flag for flag in encoded.split("\x1f")
+                     if flag)
+    rustflags = env.get("RUSTFLAGS", "")
+    if rustflags:
+        try:
+            flags.extend(shlex.split(rustflags))
+        except ValueError as exc:
+            fail("cannot parse RUSTFLAGS: %s" % exc)
+    home = env.get("HOME", "")
+    if home:
+        flags.append("--remap-path-prefix=%s=/build-prefix" % home)
+    flags.append("--remap-path-prefix=%s=/build-root"
+                 % os.path.abspath(ROOT_DIR))
+    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
+    env.pop("RUSTFLAGS", None)
 
 
 def run(argv):
@@ -78,9 +111,12 @@ def main(argv):
     if build:
         # Mirror the tarball build: locked + offline, with the
         # ambient RUSTUP_TOOLCHAIN stripped so the repository
-        # pin wins.
+        # pin wins, and build-machine paths remapped out of
+        # the binary, which lands on the default packaging
+        # input path.
         env = dict(os.environ)
         env.pop("RUSTUP_TOOLCHAIN", None)
+        remap_build_paths(env)
         try:
             proc = subprocess.run(
                 ["cargo", "build", "--release", "--locked",
