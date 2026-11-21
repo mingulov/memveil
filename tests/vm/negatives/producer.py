@@ -427,7 +427,9 @@ def loader_sha256_of(path):
     except the `.debug*` family, which the loader never reads
     (it consumes BTF, not DWARF). DWARF embeds absolute-path-
     derived crate disambiguators, so full bytes vary across
-    checkouts while this digest is rebuild-stable everywhere.
+    checkouts while this digest stays stable for the
+    producer's fixed relative staging layout (BTF carries
+    the remapped relative source paths).
     """
     sections = elfutil.elf_sections(path)
     digest = hashlib.sha256(b"MVLOADER1")

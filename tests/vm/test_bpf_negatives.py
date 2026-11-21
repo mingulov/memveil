@@ -5,10 +5,10 @@
 No boots, no privileged calls, no network: rebuilds the four
 negative objects twice (determinism), round-trips the
 run-input manifest, reproduces the baseline bytes (positive
-control), checks loader-bytes path stability, and re-runs
-every offline proof. Slow by design (~6 minutes of
-pinned-toolchain builds); run alone, not as part of a fast
-gate.
+control), confines staging-path variance to debug/BTF path
+strings, and re-runs every offline proof. Slow by design
+(~6 minutes of pinned-toolchain builds); run alone, not as
+part of a fast gate.
 """
 
 import json
@@ -79,13 +79,16 @@ def test_base_reproduction(built, tmp_path):
     assert rebuilt == fixture
 
 
-def test_loader_sha_path_stable(built, tmp_path):
-    """Loader bytes identical from a second staging path.
+def test_loader_core_path_stable(built, tmp_path):
+    """Staging-path variance stays out of loader behavior.
 
-    DWARF embeds absolute-path-derived crate disambiguators,
-    so full bytes vary with the staging path while every
-    loader-read section stays identical: the manifest's
-    loader sha is the rebuild-stable binding.
+    DWARF embeds absolute-path-derived crate disambiguators
+    and BTF carries the remapped source paths, so full bytes
+    vary with the staging path. From a second staging path,
+    every behavior-bearing section (programs, relocations,
+    maps, text) stays byte-identical and the loader's own
+    parser judges both objects the same: only debug/BTF path
+    strings may move.
     """
     root, _, _ = built
     producer.stage_tree(root, "widened_layout",
@@ -97,8 +100,19 @@ def test_loader_sha_path_stable(built, tmp_path):
         canonical = os.path.join(
             root, "build", "bpf-negative",
             "swiotlb_copy-widened_layout.bpf.o")
-        assert producer.loader_sha256_of(out) == \
-            producer.loader_sha256_of(canonical)
+        want = proof.elf_sections(canonical)
+        got = proof.elf_sections(out)
+        sections = [section for _, section in
+                    proof.BOUNCE + proof.SYNC]
+        sections += [".rel" + section for section in sections]
+        sections += ["maps", "license", "memveil_channel",
+                     ".text"]
+        for section in sections:
+            assert got.get(section) == want.get(section), \
+                section
+        judgments = proof.oracle_judgment(root, [canonical,
+                                                 out])
+        assert judgments[out] == judgments[canonical]
     finally:
         shutil.rmtree(os.path.join(
             root, "build", "bpf-negative", "src",

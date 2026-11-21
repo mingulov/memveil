@@ -121,9 +121,14 @@ family (programs, relocations, maps, license, channel,
 `.text`, BTF, `.BTF.ext`, string and symbol tables), which
 is everything the loader and the verifier consume — the
 loader parses BTF, never DWARF. It is rebuild-stable across
-checkouts and is the binding a rebuilding rerun verifies.
-The self-tests pin both properties: same-path full rebuild
-identity plus cross-path loader identity.
+checkouts for the producer's fixed relative staging layout
+(the rerun rebuilds the same layout, so BTF paths agree);
+only the absolute checkout prefix varies, and that moves
+nothing outside DWARF. A differently-laid-out rebuild keeps
+identical behavior-bearing sections and an identical
+loader-parse judgment while BTF path strings move — the
+self-tests pin same-path full identity plus that
+confinement.
 - `../test_bpf_negatives.py` — the unarmed self-tests:
   producer determinism (rebuild twice, identical shas),
   manifest round-trip and committed-manifest check, base
