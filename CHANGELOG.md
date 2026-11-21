@@ -10,8 +10,6 @@ the rest.
 
 ## Unreleased
 
-- Pinned toolchain moves to pixi 0.83.0 and
-  Mojo 1.2.0; libbpf-mojo 0.2.2.
 - `record`, `report`, and `top` exit 0 for
   valid captures and carry a `verdict` field;
   `--strict` restores a nonzero exit on
