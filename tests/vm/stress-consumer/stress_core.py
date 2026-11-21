@@ -105,10 +105,66 @@ def sha_file(path):
     return digest.hexdigest()
 
 
-def run(cmd, cwd=None, timeout=600, env=None):
-    """Run a command, returning the completed process."""
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
-                          timeout=timeout, env=env)
+# Post-kill reap, then the pipe drain, for the shared
+# host runner below. Same bound shape as the guest
+# command helper: the verdict never waits on a child
+# unconditionally.
+RUN_REAP_TIMEOUT = 5
+RUN_DRAIN_TIMEOUT = 5
+
+
+def _run_text(blob, binary):
+    """Decode runner bytes, lossy-but-total for text."""
+    if binary:
+        return b"" if blob is None else blob
+    if blob is None:
+        blob = b""
+    return blob.decode("utf-8", "replace").replace(
+        "\r\n", "\n").replace("\r", "\n")
+
+
+def run(cmd, cwd=None, timeout=600, env=None, text=True):
+    """Run a command, returning the completed process.
+
+    Bounded end to end: the command gets `timeout`, then
+    SIGKILL plus a bounded reap, then a bounded output
+    collection. Nothing here waits on the child
+    unconditionally (contrast subprocess.run, which reaps
+    with wait(None) after the kill). A timeout still
+    raises TimeoutExpired, carrying whatever partials
+    were readable; text decoding never raises.
+    """
+    # Binary pipes throughout: decoding happens once,
+    # below, so undecodable bytes can never raise out of
+    # either the success or the timeout path.
+    proc = subprocess.Popen(cmd, cwd=cwd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env)
+    binary = not text
+    try:
+        raw_out, raw_err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        return subprocess.CompletedProcess(
+            cmd, proc.returncode, _run_text(raw_out, binary),
+            _run_text(raw_err, binary))
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=RUN_REAP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        raw_out, raw_err = proc.communicate(
+            timeout=RUN_DRAIN_TIMEOUT)
+    except subprocess.TimeoutExpired as partial:
+        raw_out, raw_err = partial.output, partial.stderr
+    raise subprocess.TimeoutExpired(
+        cmd, timeout, output=_run_text(raw_out, binary),
+        stderr=_run_text(raw_err, binary))
 
 
 def git_head(repo):
@@ -150,10 +206,10 @@ def materialize(repo, work):
     }
     for channel, (rel, blob_id, want) in base.items():
         # Byte-level extraction: blobs are raw object bytes, never
-        # text, so the call bypasses the text-mode helper.
-        raw = subprocess.run(["git", "-C", repo, "cat-file", "-p",
-                              "%s:%s" % (BASELINE_COMMIT, rel)],
-                             capture_output=True, timeout=60)
+        # text, so the shared runner stays in binary mode.
+        raw = run(["git", "-C", repo, "cat-file", "-p",
+                   "%s:%s" % (BASELINE_COMMIT, rel)],
+                  timeout=60, text=False)
         if raw.returncode != 0 or not raw.stdout:
             raise ValueError("cannot extract baseline %s" % rel)
         got = hashlib.sha256(raw.stdout).hexdigest()

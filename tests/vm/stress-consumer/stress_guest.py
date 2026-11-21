@@ -72,6 +72,9 @@ TIMEOUT_CLEANUP = 120
 # delay forensics by this long, never stall the verdict.
 TIMEOUT_REAP = 5
 TIMEOUT_DRAIN = 5
+# SIGINT grace for the overlap tracer: the counts print
+# on SIGINT, then SIGKILL plus the reap above applies.
+TIMEOUT_TRACER = 30
 
 # Readiness stdout without an ack past this is a flood, not
 # a slow attach.
@@ -95,14 +98,70 @@ def fail(msg):
     sys.exit(1)
 
 
+def _pipe_text(blob):
+    """Decode captured pipe bytes, lossy-but-total.
+
+    Undecodable bytes surface as U+FFFD; they never
+    raise past a verdict the pipes still inform.
+    """
+    if blob is None:
+        blob = b""
+    return blob.decode("utf-8", "replace").replace(
+        "\r\n", "\n").replace("\r", "\n")
+
+
 def sh(args, timeout=TIMEOUT_DMESG, **kw):
-    """Run one guest command, bounded, partials preserved."""
+    """Run one guest command, bounded, partials preserved.
+
+    Bounded end to end: the command gets `timeout`, then
+    SIGKILL plus a bounded reap, then a bounded output
+    collection, so the whole call stays within timeout +
+    reap + drain. Nothing here waits on the child
+    unconditionally (contrast subprocess.run, which reaps
+    with wait(None) after the kill and can hang past any
+    timeout). A child still unreaped past the reap
+    deadline, or pipes a stray holder keeps open, delays
+    forensics but never the verdict: StepTimeout carries
+    whatever partials were readable, with the collection
+    state noted on the diagnostic stream.
+    """
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, **kw)
     try:
-        return subprocess.run(args, capture_output=True, text=True,
-                              timeout=timeout, **kw)
-    except subprocess.TimeoutExpired as exc:
-        raise StepTimeout(" ".join(args), timeout, exc.stdout,
-                          exc.stderr)
+        raw_out, raw_err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        return subprocess.CompletedProcess(
+            args, proc.returncode, _pipe_text(raw_out),
+            _pipe_text(raw_err))
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=TIMEOUT_REAP)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        raw_out, raw_err = proc.communicate(
+            timeout=TIMEOUT_DRAIN)
+    except subprocess.TimeoutExpired as partial:
+        out = _pipe_text(partial.output)
+        err = _pipe_text(partial.stderr)
+        cut = True
+    else:
+        out = _pipe_text(raw_out)
+        err = _pipe_text(raw_err)
+        cut = False
+    if proc.poll() is None:
+        err += ("\n[stress-guest: child unreaped after "
+                "%ds; showing partial output]\n"
+                % TIMEOUT_REAP)
+    elif cut:
+        err += ("\n[stress-guest: output truncated after "
+                "%ds post-kill drain]\n" % TIMEOUT_DRAIN)
+    raise StepTimeout(" ".join(args), timeout, out, err)
 
 
 def drain_bounded(proc, seconds):
@@ -479,7 +538,12 @@ class Gate:
                 rest, truncated = drain_bounded(proc, TIMEOUT_DRAIN)
             except (OSError, ValueError):
                 continue
-            if rest or truncated:
+            # The readiness prefix is preserved consumer
+            # output too: a diagnostic consumed before a
+            # readiness failure still exports its tail,
+            # even when the post-kill drain reads empty.
+            prefix = getattr(proc, "gate_prefix", "")
+            if rest or truncated or prefix:
                 if truncated:
                     rest += ("\n[stress-guest: tail truncated "
                              "after %ds]\n" % TIMEOUT_DRAIN)
@@ -496,8 +560,10 @@ class Gate:
                 self.marker("abort-rmmod", "ok" if inner.returncode == 0
                             else "fail",
                             {"exit": inner.returncode})
-            except StepTimeout:
-                self.marker("abort-rmmod", "timeout")
+            except StepTimeout as exc:
+                self.marker("abort-rmmod", "timeout",
+                            {"out": exc.out[-500:],
+                             "err": exc.err[-500:]})
             except OSError as exc:
                 self.marker("abort-rmmod", "error",
                             {"reason": str(exc)[:200]})
@@ -589,6 +655,17 @@ class Gate:
                     pending.remove(proc)
         finally:
             for proc in procs:
+                # Save-then-timeout: a readiness failure
+                # must not discard the bytes already
+                # consumed (often the one diagnostic
+                # explaining the failure); the abort tail
+                # exports them. Acked consumers already
+                # carry the same prefix, untouched.
+                if not getattr(proc, "gate_prefix", ""):
+                    buf = buffers.get(id(proc), b"")
+                    if buf:
+                        proc.gate_prefix = buf.decode(
+                            "utf-8", "replace")
                 try:
                     os.set_blocking(proc.stdout.fileno(), True)
                 except OSError:
@@ -633,6 +710,37 @@ class Gate:
             if want not in seen:
                 fail("%s: consumer never ready" % tag)
         return out
+
+    def stop_tracer(self, proc):
+        """Stop the overlap tracer, failing closed if stuck.
+
+        SIGINT first (the counts print on SIGINT), a
+        bounded wait, then SIGKILL plus a bounded reap.
+        A tracer unreaped on both waits is left owned
+        for the abort backstop and fails here: no
+        checkpoint may cover a phase whose tracer never
+        reported. The tracer state lands in the progress
+        markers, mirrored to the export like the rest.
+        """
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=TIMEOUT_TRACER)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=TIMEOUT_REAP)
+            except subprocess.TimeoutExpired:
+                pass
+        if proc.poll() is not None:
+            return
+        self.marker("bpftrace", "unreaped",
+                    {"sigint_wait_s": TIMEOUT_TRACER,
+                     "reap_wait_s": TIMEOUT_REAP})
+        fail("bpftrace unreaped after SIGINT and SIGKILL; "
+             "phase-2 outputs withheld")
 
     def clear_dmesg(self):
         inner = sh(["dmesg", "-C"])
@@ -810,21 +918,21 @@ def run_phase2(gate, name, pair, family, disk, short):
             window = gate.insmod(["mv_oracle_ops=2000",
                                   "mv_oracle_delay_ms=10"])
             legs = {}
+            # Bounded transitively: each worker runs exactly
+            # one sh() (bounded by its own kill, reap, and
+            # drain), so every future resolves; the bound
+            # lives in sh, where the kill happens, because a
+            # result() deadline could not stop the thread
+            # the pool join still waits for.
             for fut in concurrent.futures.as_completed(futs):
                 legs["cpu%d" % futs[fut]] = fut.result()
         stats1 = block_stat(short)
         # The tracer stays up through the final release: the held
         # mapping's unmap must be counted, not cut off.
         gate.rmmod()
-        bpf.send_signal(signal.SIGINT)
-        try:
-            bpf.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            bpf.kill()
-            try:
-                bpf.wait(timeout=TIMEOUT_REAP)
-            except subprocess.TimeoutExpired:
-                pass
+        # Fail-closed: an unreaped tracer raises before
+        # the checkpoint below may cover this phase.
+        gate.stop_tracer(bpf)
         gate.transients.remove(bpf)
         bpf_out.close()
         bpf_err.close()

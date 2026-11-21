@@ -76,8 +76,8 @@ def check(name, cond, detail=""):
 
 
 def consumer_run(args, timeout=120):
-    return subprocess.run([core.CONSUMER_RELEASE] + args,
-                          capture_output=True, text=True, timeout=timeout)
+    return core.run([core.CONSUMER_RELEASE] + args,
+                    timeout=timeout)
 
 
 # -- Unarmed self-test: pins ------------------------------------
@@ -85,10 +85,10 @@ def consumer_run(args, timeout=120):
 def self_test_pins():
     """Every pinned byte still matches its source."""
     ok = True
-    parent = subprocess.run(
+    parent = core.run(
         ["git", "-C", str(REPO), "rev-parse",
          "%s^" % core.BASELINE_CUTOVER],
-        capture_output=True, text=True, timeout=30)
+        timeout=30)
     ok = check("pins-cutover-parent",
                parent.returncode == 0
                and parent.stdout.strip() == core.BASELINE_COMMIT,
@@ -98,14 +98,14 @@ def self_test_pins():
              core.BASELINE_LC_SHA),
             (core.BASELINE_CP_BLOB, core.BASELINE_CP_BLOB_ID,
              core.BASELINE_CP_SHA)]:
-        ident = subprocess.run(
+        ident = core.run(
             ["git", "-C", str(REPO), "rev-parse",
              "%s:%s" % (core.BASELINE_COMMIT, rel)],
-            capture_output=True, text=True, timeout=30)
-        raw = subprocess.run(
+            timeout=30)
+        raw = core.run(
             ["git", "-C", str(REPO), "cat-file", "-p",
              "%s:%s" % (core.BASELINE_COMMIT, rel)],
-            capture_output=True, timeout=30)
+            timeout=30, text=False)
         got = hashlib.sha256(raw.stdout).hexdigest()
         ok = check("pins-%s" % rel.rsplit("/", 1)[1],
                    ident.returncode == 0
@@ -484,9 +484,9 @@ def self_test_malformed(tmp):
 
 def self_test_cargo_unit():
     """The consumer's own unit tests (decoders, gates, BTF)."""
-    proc = subprocess.run(
+    proc = core.run(
         ["cargo", "test", "--locked", "--offline"], cwd=core.CONSUMER_DIR,
-        capture_output=True, text=True, timeout=600, env=core.cargo_env())
+        timeout=600, env=core.cargo_env())
     tail = (proc.stdout + proc.stderr).strip().split("\n")[-1]
     return check("cargo-unit", proc.returncode == 0, tail[-200:])
 
@@ -751,9 +751,9 @@ def self_test_guest_oracle(tmp, pairs):
         ok = check("oracle-modinfo-agrees", False,
                    "no parsed vermagic") and ok
     else:
-        proc = subprocess.run(
+        proc = core.run(
             [modinfo, "-F", "vermagic", guest_oracle.FIXTURE_KO],
-            capture_output=True, text=True, timeout=30)
+            timeout=30)
         ok = check("oracle-modinfo-agrees",
                    proc.returncode == 0
                    and proc.stdout.strip() == magic.strip(),
@@ -931,7 +931,10 @@ def self_test_forensics(tmp):
                    1.9 <= elapsed < 10, "%.1fs" % elapsed) and ok
     finally:
         stall.kill()
-        stall.communicate()
+        try:
+            stall.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
     # A complete line for another ring refuses too.
     wrong = subprocess.Popen(
         [sys.executable, "-c",
@@ -952,7 +955,10 @@ def self_test_forensics(tmp):
                    1.9 <= elapsed < 10, "%.1fs" % elapsed) and ok
     finally:
         wrong.kill()
-        wrong.communicate()
+        try:
+            wrong.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
     # A proper ack is still accepted, with its prefix kept
     # for the later readiness cross-check.
     good = subprocess.Popen(
@@ -1176,6 +1182,261 @@ def self_test_forensics(tmp):
             os.kill(int(open(outer_pid).read()), signal.SIGKILL)
         except (OSError, ValueError):
             pass
+    # A child that outlives SIGKILL must not hang the
+    # guest command helper: the post-kill reap has a
+    # deadline, and the timeout carries the partials.
+    from unittest import mock
+
+    class StuckPopen:
+        """A child that never dies within a deadline.
+
+        communicate() always raises TimeoutExpired with
+        byte partials (like POSIX _communicate); wait()
+        honors its deadline like the kernel, then raises.
+        """
+
+        def __init__(self, *args, **kwargs):
+            self.args = args[0] if args else None
+
+        def communicate(self, *args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                self.args, 1, output=b"partial-out",
+                stderr=b"partial-err")
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                time.sleep(timeout)
+            else:
+                time.sleep(3600)
+            raise subprocess.TimeoutExpired(self.args,
+                                            timeout)
+
+        def poll(self):
+            return None
+
+    start = time.monotonic()
+    try:
+        with mock.patch.object(stress_guest.subprocess,
+                               "Popen", StuckPopen):
+            stress_guest.sh(["sleep", "30"], timeout=1)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-sh-kill-bounded", False,
+                   "returned") and ok
+    except stress_guest.StepTimeout as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-sh-kill-bounded",
+                   4.5 <= elapsed < 10
+                   and "partial-out" in exc.out
+                   and "partial-err" in exc.err
+                   and "unreaped" in exc.err,
+                   "%.1fs %r %r" % (elapsed, exc.out,
+                                    exc.err)) and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-sh-kill-bounded", False,
+                   "%.1fs bare %s" % (elapsed, exc)) and ok
+    # The shared host runner bounds the same way: the
+    # same TimeoutExpired type, carrying decoded partials.
+    start = time.monotonic()
+    try:
+        with mock.patch.object(core.subprocess, "Popen",
+                               StuckPopen):
+            core.run(["sleep", "30"], timeout=1)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-run-kill-bounded", False,
+                   "returned") and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-run-kill-bounded",
+                   4.5 <= elapsed < 10
+                   and "partial-out" in (exc.output or "")
+                   and "partial-err" in (exc.stderr or ""),
+                   "%.1fs %r" % (elapsed,
+                                 exc.output)) and ok
+    # Undecodable tail bytes on the timeout path must not
+    # cost the receipt either stream: both arrive, with
+    # the replacement shown honestly on the stream that
+    # needed it.
+    bad_pid = os.path.join(tmp, "bad-holder.pid")
+    bad_script = ("import subprocess,sys,time,pathlib;"
+                  "print('badbytes-marker',flush=True);"
+                  "sys.stderr.buffer.write(b'\\xe2\\x82');"
+                  "sys.stderr.buffer.flush();"
+                  "p=subprocess.Popen([sys.executable,'-c',"
+                  "'import os,time;os.setsid();time.sleep(30)']);"
+                  "pathlib.Path(%r).write_text(str(p.pid));"
+                  "time.sleep(30)" % bad_pid)
+    start = time.monotonic()
+    try:
+        run_owned_guest([sys.executable, "-c", bad_script],
+                        timeout=0.2)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-owned-undecodable", False,
+                   "no timeout") and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-owned-undecodable",
+                   10 <= elapsed < 14
+                   and "badbytes-marker"
+                   in (exc.stdout or "")
+                   and "truncated" in (exc.stdout or "")
+                   and "truncated" in (exc.stderr or "")
+                   and "\ufffd" in (exc.stderr or "")
+                   and "undecodable" in (exc.stderr or "")
+                   and "undecodable"
+                   not in (exc.stdout or ""),
+                   "%.1fs %r %r" % (elapsed, exc.stdout,
+                                    exc.stderr)) and ok
+    except UnicodeDecodeError as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-owned-undecodable", False,
+                   "%.1fs %s" % (elapsed, exc)) and ok
+    finally:
+        try:
+            os.kill(int(open(bad_pid).read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    # Same undecodable bytes on the success path return a
+    # receipt instead of raising: lossy, total, marked.
+    try:
+        proc = run_owned_guest(
+            [sys.executable, "-c",
+             "import sys;"
+             "sys.stderr.buffer.write(b'\\xe2\\x82')"],
+            timeout=10)
+        ok = check("forensics-owned-undecodable-success",
+                   proc.returncode == 0
+                   and "\ufffd" in proc.stderr
+                   and "undecodable" in proc.stderr
+                   and "undecodable" not in proc.stdout,
+                   "%r" % (proc.stderr,)) and ok
+    except UnicodeDecodeError as exc:
+        ok = check("forensics-owned-undecodable-success",
+                   False, str(exc)) and ok
+    # A diagnostic consumed before a readiness failure
+    # still exports its tail: save-then-timeout, not
+    # save-only-on-ack.
+    gate.consumers.clear()
+    diag = subprocess.Popen(
+        [sys.executable, "-c",
+         "print('verifier: BTF knob missing',flush=True);"
+         "import time;time.sleep(30)"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    diag.gate_ring = "mv_lifecycle"
+    gate.consumers.append(diag)
+    try:
+        try:
+            gate.wait_ready([diag], timeout=2)
+            ok = check("forensics-ready-diagnostic", False,
+                       "accepted") and ok
+        except SystemExit:
+            gate.abort("probe diagnostic abort")
+            tail = open(os.path.join(
+                export, "abort-consumer-0.txt")).read()
+            record = json.loads(open(os.path.join(
+                export, "abort.json")).read())
+            ok = check(
+                "forensics-ready-diagnostic",
+                "verifier: BTF knob missing" in getattr(
+                    diag, "gate_prefix", "")
+                and record.get("tails")
+                == ["abort-consumer-0.txt"]
+                and "verifier: BTF knob missing" in tail,
+                "%r" % (record,)) and ok
+    except (OSError, ValueError) as exc:
+        ok = check("forensics-ready-diagnostic", False,
+                   str(exc)) and ok
+    finally:
+        gate.consumers.remove(diag)
+        try:
+            diag.kill()
+        except OSError:
+            pass
+        try:
+            diag.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+    class ScriptedTracer:
+        """A tracer with scripted wait/poll behavior."""
+
+        def __init__(self, waits, poll_result):
+            self._waits = list(waits)
+            self._poll = poll_result
+            self.killed = False
+
+        def send_signal(self, sig):
+            pass
+
+        def wait(self, timeout=None):
+            outcome = self._waits.pop(0)
+            if outcome == "timeout":
+                raise subprocess.TimeoutExpired(
+                    ["bpftrace"], timeout)
+            return outcome
+
+        def kill(self):
+            self.killed = True
+
+        def poll(self):
+            return self._poll
+
+    def unreaped_marks():
+        marks = open(os.path.join(
+            work, "progress.log")).read()
+        return marks.count('"status": "unreaped"')
+
+    # A tracer unreaped on both waits fails closed: the
+    # proc stays owned for the abort backstop, an
+    # explicit marker records the tracer state, and the
+    # raise lands before any checkpoint may run.
+    stuck_tracer = ScriptedTracer(["timeout", "timeout"],
+                                  None)
+    gate.transients.append(stuck_tracer)
+    base_marks = unreaped_marks()
+    try:
+        gate.stop_tracer(stuck_tracer)
+        ok = check("forensics-tracer-unreaped", False,
+                   "returned") and ok
+    except SystemExit:
+        ok = check("forensics-tracer-unreaped",
+                   stuck_tracer in gate.transients
+                   and stuck_tracer.killed
+                   and unreaped_marks() == base_marks + 1,
+                   "owned=%s killed=%s marks=%d"
+                   % (stuck_tracer in gate.transients,
+                      stuck_tracer.killed,
+                      unreaped_marks())) and ok
+    finally:
+        gate.transients.remove(stuck_tracer)
+    # A tracer that reports on SIGINT stops quietly: no
+    # kill, no unreaped marker.
+    before = unreaped_marks()
+    quick = ScriptedTracer([0], 0)
+    try:
+        gate.stop_tracer(quick)
+        ok = check("forensics-tracer-reaps",
+                   not quick.killed
+                   and unreaped_marks() == before) and ok
+    except SystemExit as exc:
+        ok = check("forensics-tracer-reaps", False,
+                   str(exc)) and ok
+    # A tracer that needs SIGKILL still stops quietly
+    # once the reap lands.
+    mid = unreaped_marks()
+    slow = ScriptedTracer(["timeout", 0], 0)
+    try:
+        gate.stop_tracer(slow)
+        ok = check("forensics-tracer-kill-reaps",
+                   slow.killed
+                   and unreaped_marks() == mid) and ok
+    except SystemExit as exc:
+        ok = check("forensics-tracer-kill-reaps", False,
+                   str(exc)) and ok
     return ok
 
 
@@ -1439,7 +1700,7 @@ def self_test_identity():
                != []) and ok
     # Guest init order: the release gate fires before the
     # manifest is even read (no traceback on any host).
-    probe = subprocess.run(
+    probe = core.run(
         [sys.executable, str(GUEST), "/tmp/sg-work", "/tmp/sg-export",
          "--manifest", "/tmp/sg-absent-manifest.json",
          "--consumer", "/tmp/sg-c", "--consumer-sha", "0" * 64,
@@ -1449,7 +1710,7 @@ def self_test_identity():
          "--baseline-lc-sha", "0" * 64, "--baseline-cp-sha", "0" * 64,
          "--c9-lc", "/tmp/c", "--c9-cp", "/tmp/d",
          "--c9-lc-sha", "0" * 64, "--c9-cp-sha", "0" * 64],
-        capture_output=True, text=True, timeout=30)
+        timeout=30)
     ok = check("identity-guest-order",
                probe.returncode == 1
                and "FAIL" in probe.stderr
@@ -1594,6 +1855,44 @@ def skew_loss(src, dst):
     open(dst, "w").write("\n".join(skewed))
 
 
+def skew_release(src, dst, size, direction):
+    """Rewrite kind=2 record size/dir; rebalance bytes.
+
+    Generation and counters stay coherent: delivered
+    bytes still equal the emitted aggregate, so only
+    the release match key can refuse the skewed window.
+    """
+    lines = open(src).read().split("\n")
+    delta = 0
+    skewed = []
+    for line in lines:
+        if line.startswith("lc ") and "kind=2" in line:
+            fixed = []
+            for tok in line.split():
+                if tok.startswith("size="):
+                    delta += size - int(
+                        tok.partition("=")[2])
+                    tok = "size=%d" % size
+                elif tok.startswith("dir="):
+                    tok = "dir=%d" % direction
+                fixed.append(tok)
+            line = " ".join(fixed)
+        skewed.append(line)
+    out = []
+    for line in skewed:
+        if line.startswith("summary "):
+            fixed = []
+            for tok in line.split():
+                key, _, val = tok.partition("=")
+                if key in ("cnt_obsb", "cnt_emitb"):
+                    tok = "%s=%d" % (key,
+                                     int(val) + delta)
+                fixed.append(tok)
+            line = " ".join(fixed)
+        out.append(line)
+    open(dst, "w").write("\n".join(out))
+
+
 def write_oracle_log(path, ops):
     """Write one scripted oracle dmesg log with ops ops.
 
@@ -1685,9 +1984,13 @@ def synth_q3_leg(tmp, name, miss_unmaps=0):
         core.encode_lc(1, True, False, 1, 0, 100, 512, 7)
         + core.encode_lc(2, True, True, 1, 1, 200, 512, 7),
         "mv_lifecycle", 2, 1024)
+    # The held release is op 1's (size 1024, dir 2): the
+    # unmap probe emits the call's direction on every
+    # unmap record, including gen-0 misses, so an honest
+    # held-across-attach release carries dir 2, not 1.
     c0b = replay_window(
         tmp, "%s-c0b-lc" % name,
-        core.encode_lc(2, True, True, 1, 0, 100, 1024, 0,
+        core.encode_lc(2, True, True, 2, 0, 100, 1024, 0,
                        miss=True),
         "mv_lifecycle", 1, 1024)
     # The 2-op control script, in module order: op 0 runs
@@ -1939,6 +2242,89 @@ def self_test_q3_mode(tmp, pairs):
                and receipt["comparison"]["verdict"] == "NOT_RUN"
                and receipt["c9"]["metrics"] == {"M": 50, "D": 400},
                "%r" % (receipt,)) and ok
+    # A release that keeps its generation but mutates
+    # size and direction, with rebalanced counters, must
+    # refuse: generation alone never binds a release.
+    skew = dict(base)
+    c0a_skew = os.path.join(tmp, "baseline-c0a-skew.txt")
+    skew_release(str(base["baseline-c0a-lc.txt"]), c0a_skew,
+                 1024, 2)
+    skew["baseline-c0a-lc.txt"] = Path(c0a_skew)
+    events, summary = parse_consume_file(c0a_skew)
+    bad, _ = judge_q3_leg(skew, "baseline", "syn-c0-skew")
+    ok = check("q3-release-skew-refuses",
+               check_conservation(events, summary,
+                                  "skew-c0a") == []
+               and any("contradicts" in reason
+                       for reason in bad),
+               "; ".join(bad)) and ok
+    # Each mutated field refuses on its own: size-only
+    # with rebalanced bytes, and direction-only with
+    # counters untouched.
+    size_only = dict(base)
+    c0a_size = os.path.join(tmp, "baseline-c0a-size.txt")
+    skew_release(str(base["baseline-c0a-lc.txt"]), c0a_size,
+                 1024, 1)
+    size_only["baseline-c0a-lc.txt"] = Path(c0a_size)
+    events, summary = parse_consume_file(c0a_size)
+    bad, _ = judge_q3_leg(size_only, "baseline",
+                           "syn-c0-size")
+    ok = check("q3-release-size-only-refuses",
+               check_conservation(events, summary,
+                                  "skew-c0a-size") == []
+               and any("contradicts" in reason
+                       for reason in bad),
+               "; ".join(bad)) and ok
+    dir_only = dict(base)
+    c0a_dir = os.path.join(tmp, "baseline-c0a-dir.txt")
+    skew_release(str(base["baseline-c0a-lc.txt"]), c0a_dir,
+                 512, 2)
+    dir_only["baseline-c0a-lc.txt"] = Path(c0a_dir)
+    events, summary = parse_consume_file(c0a_dir)
+    bad, _ = judge_q3_leg(dir_only, "baseline",
+                           "syn-c0-dir")
+    ok = check("q3-release-dir-only-refuses",
+               check_conservation(events, summary,
+                                  "skew-c0a-dir") == []
+               and any("contradicts" in reason
+                       for reason in bad),
+               "; ".join(bad)) and ok
+    # The held release binds its direction too: op 1's
+    # release with any other direction is not op 1's.
+    held_skew = dict(base)
+    c0b_skew = os.path.join(tmp, "baseline-c0b-skew.txt")
+    skew_release(str(base["baseline-c0b-lc.txt"]), c0b_skew,
+                 1024, 1)
+    held_skew["baseline-c0b-lc.txt"] = Path(c0b_skew)
+    events, summary = parse_consume_file(c0b_skew)
+    bad, _ = judge_q3_leg(held_skew, "baseline",
+                           "syn-c0-held")
+    ok = check("q3-held-dir-refuses",
+               check_conservation(events, summary,
+                                  "skew-c0b") == []
+               and any("no held op-1" in reason
+                       for reason in bad),
+               "; ".join(bad)) and ok
+    # The shared release key, pinned directly: honest
+    # pairs pass with the op-0 gen, each mutation refuses.
+    first = [{"kind": 1, "size": 512, "dir": 1, "gen": 7},
+             {"kind": 2, "size": 512, "dir": 1, "gen": 7}]
+    second = [{"kind": 2, "size": 1024, "dir": 2, "gen": 0}]
+    rel_bad, gen0 = check_control_releases(
+        first, second, "unit")
+    unit_ok = rel_bad == [] and gen0 == 7
+    rel_bad, _ = check_control_releases(
+        [{"kind": 1, "size": 512, "dir": 1, "gen": 7},
+         {"kind": 2, "size": 1024, "dir": 2, "gen": 7}],
+        second, "unit")
+    unit_ok = unit_ok and any("contradicts" in reason
+                              for reason in rel_bad)
+    rel_bad, _ = check_control_releases(
+        first, [{"kind": 2, "size": 1024, "dir": 1,
+                 "gen": 0}], "unit")
+    unit_ok = unit_ok and any("no held op-1" in reason
+                              for reason in rel_bad)
+    ok = check("q3-control-releases-unit", unit_ok) and ok
     return ok
 
 
@@ -1985,6 +2371,18 @@ def self_test_full_mode(tmp):
     bad, _ = judge_leg(blanked, "baseline", "syn-full-blank")
     ok = check("full-blanked-control-log-refuses",
                any("script complete" in reason
+                   for reason in bad),
+               "; ".join(bad)) and ok
+    # Same release-mutation class through the full-mode
+    # judge: the shared key refuses there too.
+    skew = dict(base)
+    c0a_skew = os.path.join(tmp, "full-c0a-skew.txt")
+    skew_release(str(base["baseline-c0a-lc.txt"]), c0a_skew,
+                 1024, 2)
+    skew["baseline-c0a-lc.txt"] = Path(c0a_skew)
+    bad, _ = judge_leg(skew, "baseline", "syn-full-skew")
+    ok = check("full-release-skew-refuses",
+               any("contradicts" in reason
                    for reason in bad),
                "; ".join(bad)) and ok
     return ok
@@ -2132,6 +2530,53 @@ def check_loss_free(summary, tag):
     return []
 
 
+def check_control_releases(first, second, tag):
+    """Match control releases by generation, size, dir.
+
+    The control script is fully pinned: op 0 (size 512,
+    dir 1) maps and releases under the first consumer,
+    op 1 (size 1024, dir 2) maps there, stays held, and
+    releases under the second. Generation alone cannot
+    bind a release: a mutated size or direction with
+    rebalanced counters would still pass. The op-0
+    release must therefore repeat its map's full record
+    (generation, size, direction), and the held release
+    must repeat the scripted op-1 record with gen 0
+    (the second consumer never saw the map, so any
+    known gen there would be fabricated; the unmap
+    probe emits the call's direction on every unmap,
+    misses included). Returns (reasons, op0_gen).
+    """
+    bad = []
+    known = [e for e in first if e["kind"] == 1
+             and e["size"] == 512 and e["dir"] == 1
+             and e["gen"] != 0]
+    if not known:
+        bad.append("%s: no post-attach known map" % tag)
+        gen0 = None
+    else:
+        gen0 = known[0]["gen"]
+        same_gen = [e for e in first if e["kind"] == 2
+                    and e["gen"] == gen0]
+        if not same_gen:
+            bad.append("%s: post-attach release lost gen %d"
+                       % (tag, gen0))
+        elif not any(e["size"] == 512 and e["dir"] == 1
+                     for e in same_gen):
+            bad.append("%s: post-attach release gen %d "
+                       "contradicts op 0 size/dir"
+                       % (tag, gen0))
+    held = [e for e in second if e["kind"] == 2
+            and e["size"] == 1024 and e["dir"] == 2]
+    if not held:
+        bad.append("%s: no held op-1 release (size/dir)"
+                   % tag)
+    elif not any(e["gen"] == 0 for e in held):
+        bad.append("%s: held-across-attach release not gen 0"
+                   % tag)
+    return sorted(bad), gen0
+
+
 def judge_controls(files, name, tag):
     """Host re-derivation of one leg's controls.
 
@@ -2157,19 +2602,10 @@ def judge_controls(files, name, tag):
     bad += check_loss_free(second_sum, tag + "-c0b")
     bad += check_oracle_script(ops_log, releases, complete,
                                2, -1, tag + "-c0")
-    known = [e for e in first if e["kind"] == 1 and e["size"] == 512
-             and e["gen"] != 0]
-    if not known:
-        bad.append("%s: no post-attach known map" % tag)
-    elif not any(e["kind"] == 2 and e["gen"] == known[0]["gen"]
-                 for e in first):
-        bad.append("%s: post-attach release lost gen %d"
-                   % (tag, known[0]["gen"]))
-    held = [e for e in second if e["kind"] == 2 and e["size"] == 1024]
-    if not any(e["gen"] == 0 for e in held):
-        bad.append("%s: held-across-attach release not gen 0" % tag)
+    rel_bad, op0_gen = check_control_releases(first, second, tag)
+    bad += rel_bad
     controls = json.loads(files["%s-controls.json" % name].read_text())
-    if controls.get("op0_gen") != (known[0]["gen"] if known else None):
+    if controls.get("op0_gen") != op0_gen:
         bad.append("%s: guest controls.json disagrees" % tag)
     return sorted(bad), {}
 
@@ -2238,19 +2674,10 @@ def judge_leg(files, name, tag):
     bad += check_loss_free(second_sum, tag + "-c0b")
     bad += check_oracle_script(ops_log, releases, complete,
                                2, -1, tag + "-c0")
-    known = [e for e in first if e["kind"] == 1 and e["size"] == 512
-             and e["gen"] != 0]
-    if not known:
-        bad.append("%s: no post-attach known map" % tag)
-    elif not any(e["kind"] == 2 and e["gen"] == known[0]["gen"]
-                 for e in first):
-        bad.append("%s: post-attach release lost gen %d"
-                   % (tag, known[0]["gen"]))
-    held = [e for e in second if e["kind"] == 2 and e["size"] == 1024]
-    if not any(e["gen"] == 0 for e in held):
-        bad.append("%s: held-across-attach release not gen 0" % tag)
+    rel_bad, op0_gen = check_control_releases(first, second, tag)
+    bad += rel_bad
     controls = json.loads(files["%s-controls.json" % name].read_text())
-    if controls.get("op0_gen") != (known[0]["gen"] if known else None):
+    if controls.get("op0_gen") != op0_gen:
         bad.append("%s: guest controls.json disagrees" % tag)
     # Quiet phase: exact scripted expectations.
     try:

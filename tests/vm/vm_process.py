@@ -14,41 +14,51 @@ import subprocess
 FINAL_DRAIN_GRACE = 1
 
 
-def _partial_text(pipe, blob):
-    """Decode a TimeoutExpired partial like text-mode pipes.
+def _capture_text(blob, stream):
+    """Decode captured bytes, lossy-but-total, honestly.
 
-    Matches communicate()'s own translation (locale
-    decoding plus universal newlines) so the final drain
-    carries the same bytes a completed read would.
+    Text pipes would raise UnicodeDecodeError on a
+    truncated multibyte tail; that must never cost the
+    receipt both streams. Undecodable bytes surface as
+    U+FFFD with an explicit note naming the stream, so
+    the receipt shows the replacement instead of
+    silently carrying corrupted text.
     """
     if blob is None:
         blob = b""
-    text = blob.decode(pipe.encoding, pipe.errors)
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
+        text = blob.decode("utf-8", "replace")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return (text + "\n[vm_process: %s has undecodable "
+                "bytes; shown as U+FFFD]\n" % stream)
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def run_owned_guest(cmd,timeout):
     proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                          text=True,start_new_session=True)
+                          start_new_session=True)
     try:
-        out,err=proc.communicate(timeout=timeout)
+        raw_out,raw_err=proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         # Descendant QEMU processes share this newly created group. Nothing
         # from before this invocation is addressed by the cleanup.
         os.killpg(proc.pid,signal.SIGTERM)
         try:
-            out,err=proc.communicate(timeout=10)
+            raw_out,raw_err=proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid,signal.SIGKILL)
             try:
-                out,err=proc.communicate(timeout=FINAL_DRAIN_GRACE)
+                raw_out,raw_err=proc.communicate(
+                    timeout=FINAL_DRAIN_GRACE)
             except subprocess.TimeoutExpired as final:
                 # Either pipe may still be complete (EOF closes
                 # it); only a pipe the deadline caught open is
                 # truncated, and it says so instead of silently
                 # dropping whatever the holder still withheld.
-                out=_partial_text(proc.stdout,final.output)
-                err=_partial_text(proc.stderr,final.stderr)
+                out=_capture_text(final.output,"stdout")
+                err=_capture_text(final.stderr,"stderr")
                 if not proc.stdout.closed:
                     out+=("\n[vm_process: stdout truncated after "
                            "%ds post-kill drain]\n" % FINAL_DRAIN_GRACE)
@@ -61,6 +71,10 @@ def run_owned_guest(cmd,timeout):
                 elif final.stderr is None:
                     err+=("\n[vm_process: stderr unavailable: "
                            "process unreaped with closed pipes]\n")
+                raise subprocess.TimeoutExpired(cmd,timeout,output=out,
+                                                stderr=err)
+        out=_capture_text(raw_out,"stdout")
+        err=_capture_text(raw_err,"stderr")
         # The post-kill drain holds the partial console
         # capture; attach it so a timeout still leaves
         # forensics instead of discarding everything. The
@@ -68,4 +82,6 @@ def run_owned_guest(cmd,timeout):
         # output.
         raise subprocess.TimeoutExpired(cmd,timeout,output=out,
                                         stderr=err)
+    out=_capture_text(raw_out,"stdout")
+    err=_capture_text(raw_err,"stderr")
     return subprocess.CompletedProcess(cmd,proc.returncode,out,err)

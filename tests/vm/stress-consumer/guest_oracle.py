@@ -237,12 +237,33 @@ def rebuild_from_kbuild(scratch, kbuild=None):
                         os.path.join(build_dir, name))
     kflags = "-g0 -ffile-prefix-map=%s=. " \
         "-ffile-prefix-map=%s=." % (tree, build_dir)
-    proc = subprocess.run(
+    # Bounded inline (this module sits below the shared
+    # host runner in import order, so it cannot call it):
+    # SIGKILL plus a bounded reap and a bounded drain,
+    # never subprocess.run's wait(None) after the kill.
+    make = subprocess.Popen(
         ["make", "-C", tree, "M=" + build_dir, "modules",
          "CC=gcc", "KCFLAGS=" + kflags],
-        capture_output=True, text=True, timeout=600)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        raw_out, raw_err = make.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        try:
+            make.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            make.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            raw_out, raw_err = make.communicate(timeout=5)
+        except subprocess.TimeoutExpired as partial:
+            raw_out, raw_err = (partial.output,
+                                partial.stderr)
+    err = (raw_err or b"").decode("utf-8", "replace")
     made = os.path.join(build_dir, "memveil_dma_oracle.ko")
-    if proc.returncode != 0 or not os.path.isfile(made):
+    if make.returncode != 0 or not os.path.isfile(made):
         raise ValueError("oracle rebuild failed: %s"
-                         % proc.stderr.strip()[-2000:])
+                         % err.strip()[-2000:])
     return made
