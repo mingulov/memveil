@@ -19,6 +19,11 @@ from pathlib import Path
 SESSION = 'mock-session-01'
 EVENT_COUNT = 25
 RESERVE_BYTES = 17 * 1048576
+# Exactly the ten product event kinds: the product seals all ten, zeros
+# included (src/model/integrity.rs:22-36, src/capture/writer.rs:134-151).
+KINDS = ('bounce_attempt', 'map_result', 'unmap', 'copy', 'sync_request',
+         'transition_result', 'pool_sample', 'gap', 'marker',
+         'counter_snapshot')
 
 
 def write_reserve(path):
@@ -33,14 +38,32 @@ def write_reserve(path):
 
 
 def integrity_for(events, kinds, lie=False):
+    # Seals the exact 7-key product shape: constant sha256 algorithm
+    # (src/model/encode.rs:582-583), null sequence bounds on the empty
+    # prefix and the 0..N-1 span otherwise
+    # (src/capture/writer.rs:149-150), and the full ten-kind table.
+    # `kinds` names the event kinds the caller emitted; the sealed
+    # table always covers all ten, like the product.
     digest = hashlib.sha256(events).hexdigest()
     if lie:
         digest = '0' * 63 + ('1' if digest[-1] != '1' else '2')
-    counts = dict.fromkeys(kinds, 0)
-    for line in events.splitlines():
-        counts[json.loads(line)['kind']] += 1
-    return {'events_bytes': str(len(events)),
-            'line_count': str(len(events.splitlines())),
+    counts = dict.fromkeys(KINDS, 0)
+    lines = events.splitlines()
+    for line in lines:
+        kind = json.loads(line)['kind']
+        if kind not in counts:
+            raise ValueError('mock event carries an unknown kind: %r'
+                             % (kind,))
+        counts[kind] += 1
+    if lines:
+        first, last = '0', str(len(lines) - 1)
+    else:
+        first, last = None, None
+    return {'algorithm': 'sha256',
+            'events_bytes': str(len(events)),
+            'line_count': str(len(lines)),
+            'first_seq': first,
+            'last_seq': last,
             'events_sha256': digest,
             'kinds': {key: str(value) for key, value in counts.items()}}
 

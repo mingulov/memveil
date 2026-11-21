@@ -17,6 +17,16 @@ MARKERS = {'readiness': 'readiness-announced',
 EMPTY_SHA = hashlib.sha256(b'').hexdigest()
 RESERVE_BYTES = 17 * 1048576
 KILLED_BY_SIGKILL = -9
+# Exactly the ten product event kinds in product table order
+# (src/model/integrity.rs:22-36); the writer seals all ten, zeros
+# included (src/capture/writer.rs:134-151, src/model/encode.rs:602-608).
+INTEGRITY_KINDS = ('bounce_attempt', 'map_result', 'unmap', 'copy',
+                   'sync_request', 'transition_result', 'pool_sample',
+                   'gap', 'marker', 'counter_snapshot')
+# The product emits exactly one digest algorithm
+# (src/model/encode.rs:582-583) and rejects any other
+# (src/model/integrity.rs:152-158).
+INTEGRITY_ALGORITHM = 'sha256'
 
 # Owned capture members per scenario, bound to the product writer's file
 # lifecycle and the fault-shim stop points (not a bare list):
@@ -81,12 +91,21 @@ def load_json(path):
 def recompute_prefix(events_bytes, checkpoint_doc):
     """Independently re-derive the durable prefix integrity.
 
-    Reads only raw event bytes plus the checkpoint's declared extent and
-    session binding, then re-checks the digest, line framing, per-line
-    session/sequence binding and per-kind counts. Raises ValueError on any
-    mismatch; returns the recomputed integrity dict otherwise.
+    Returns the full 7-key product shape, every value re-derived from
+    the raw prefix bytes: the digest this code computed is sha256 by
+    construction, the byte/line counts and per-kind table come from the
+    verified lines, and the sequence span is the observed first/last
+    line (null on the empty prefix, matching the writer, which reports
+    no bounds until the first commit and spans 0..N-1 afterwards:
+    src/capture/writer.rs:149-150, src/model/integrity.rs:101-117).
+    The declared books supply only the prefix extent and the session
+    binding; every declared value is cross-checked and any mismatch
+    raises ValueError, so nothing is copied into the result.
     """
     declared = checkpoint_doc['capture']['integrity']
+    if declared.get('algorithm') != INTEGRITY_ALGORITHM:
+        raise ValueError('prefix algorithm is not sha256: %r'
+                         % (declared.get('algorithm'),))
     extent = int(declared['events_bytes'])
     if extent < 0 or extent > len(events_bytes):
         raise ValueError('prefix extent exceeds retained bytes')
@@ -101,7 +120,8 @@ def recompute_prefix(events_bytes, checkpoint_doc):
     if len(lines) != int(declared['line_count']):
         raise ValueError('prefix line count mismatch: recomputed %d declared %s'
                          % (len(lines), declared['line_count']))
-    counts = dict.fromkeys(declared['kinds'], 0)
+    counts = dict.fromkeys(INTEGRITY_KINDS, 0)
+    seqs = []
     for seq, line in enumerate(lines):
         event = json.loads(line.decode('utf-8'))
         if event.get('session_id') != checkpoint_doc['session_id']:
@@ -111,11 +131,22 @@ def recompute_prefix(events_bytes, checkpoint_doc):
         if event.get('kind') not in counts:
             raise ValueError('prefix line %d carries an undeclared kind' % seq)
         counts[event['kind']] += 1
+        seqs.append(event['seq'])
     rendered = {key: str(value) for key, value in counts.items()}
     if rendered != declared['kinds']:
         raise ValueError('prefix kind counts mismatch')
-    return {'events_bytes': str(extent), 'line_count': str(len(lines)),
-            'events_sha256': digest, 'kinds': rendered}
+    if seqs:
+        first, last = seqs[0], seqs[-1]
+    else:
+        first, last = None, None
+    if declared.get('first_seq') != first or declared.get('last_seq') != last:
+        raise ValueError('prefix sequence span mismatch: recomputed %r/%r '
+                         'declared %r/%r'
+                         % (first, last, declared.get('first_seq'),
+                            declared.get('last_seq')))
+    return {'algorithm': INTEGRITY_ALGORITHM, 'events_bytes': str(extent),
+            'line_count': str(len(lines)), 'first_seq': first,
+            'last_seq': last, 'events_sha256': digest, 'kinds': rendered}
 
 
 def validate_barrier(doc, nonce, scenario, inputs):
@@ -150,7 +181,8 @@ def validate_barrier(doc, nonce, scenario, inputs):
     integrity = doc.get('integrity')
     if not isinstance(integrity, dict):
         raise ValueError('barrier prefix integrity absent')
-    for key in ('events_bytes', 'line_count', 'events_sha256', 'kinds'):
+    for key in ('algorithm', 'events_bytes', 'line_count', 'first_seq',
+                'last_seq', 'events_sha256', 'kinds'):
         if key not in integrity:
             raise ValueError('barrier integrity lacks ' + key)
     count = int(integrity['line_count'])

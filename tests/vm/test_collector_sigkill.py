@@ -246,6 +246,45 @@ def run_mock_scenario(scenario, tmp, collect_flags=None, report_flags=None,
     return barrier, result, export, inputs, nonce
 
 
+ARMED_READINESS_EXPORT = HERE / 'fixtures' / 'sigkill-armed-readiness'
+SEVEN_KEYS = frozenset(('algorithm', 'events_bytes', 'events_sha256',
+                        'first_seq', 'kinds', 'last_seq', 'line_count'))
+
+
+def armed_export_copy(tmp):
+    """Fresh writable copy of the byte-identical armed export."""
+    tmp = Path(tmp)
+    export = tmp / 'export'
+    export.mkdir(mode=0o700)
+    for name in ('barrier.json', 'result.json', 'checkpoint.json',
+                 'prefix-events.ndjson', 'record.stderr'):
+        shutil.copyfile(ARMED_READINESS_EXPORT / name, export / name)
+    return export
+
+
+def tampered_declared(declared):
+    """One wrong value per integrity key, derived from a good dict."""
+    count = int(declared['line_count'])
+    variants = {}
+    variants['algorithm'] = 'sha512'
+    variants['events_bytes'] = str(int(declared['events_bytes']) + 1)
+    variants['line_count'] = str(count + 1)
+    first = declared['events_sha256'][0]
+    variants['events_sha256'] = ('0' if first != '0' else '1') \
+        + declared['events_sha256'][1:]
+    if declared['first_seq'] is None:
+        variants['first_seq'] = '0'
+        variants['last_seq'] = '0'
+    else:
+        variants['first_seq'] = str(int(declared['first_seq']) + 1)
+        variants['last_seq'] = str(int(declared['last_seq']) - 1)
+    kinds = dict(declared['kinds'])
+    bump = sorted(kinds)[0]
+    kinds[bump] = str(int(kinds[bump]) + 1)
+    variants['kinds'] = kinds
+    return variants
+
+
 class SigkillSelfTests(unittest.TestCase):
     def test_all_three_boundaries_pass_offline(self):
         for scenario in SCENARIOS:
@@ -298,6 +337,105 @@ class SigkillSelfTests(unittest.TestCase):
                 self.assertEqual(doc['capture']['integrity'],
                                  recompute_prefix(prefix_bytes,
                                                   checkpoint_doc))
+
+    def test_host_verify_accepts_armed_seven_key_export(self):
+        # Replays the byte-identical armed readiness export through
+        # the host judge offline. The barrier carries the product's
+        # 7-key integrity shape; the host recomputation must agree
+        # exactly, not merely on a 4-key subset.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            export = armed_export_copy(tmp)
+            barrier = load_json(export / 'barrier.json')
+            self.assertEqual(set(barrier['integrity']), set(SEVEN_KEYS))
+            receipt = host_verify(tmp, export, barrier['nonce'],
+                                  barrier['scenario'],
+                                  barrier['identity']['inputs'])
+            self.assertEqual(receipt['status'], 'PASS')
+            self.assertEqual(receipt['integrity'], barrier['integrity'])
+
+    def test_mock_emits_armed_seven_key_shape(self):
+        # The mock must seal the exact product shape, or the offline
+        # suite cannot guard the host judge: the empty mock prefix
+        # must equal the armed empty prefix key for key, and the
+        # non-empty prefix must carry the 0..N-1 span over ten kinds.
+        armed = load_json(ARMED_READINESS_EXPORT / 'barrier.json')
+        with tempfile.TemporaryDirectory() as tmp:
+            barrier, _, _, _, _ = run_mock_scenario('readiness', tmp)
+            self.assertEqual(barrier['integrity'], armed['integrity'])
+        with tempfile.TemporaryDirectory() as tmp:
+            barrier, _, _, _, _ = run_mock_scenario('checkpoint', tmp)
+            integrity = barrier['integrity']
+            self.assertEqual(set(integrity), set(SEVEN_KEYS))
+            self.assertEqual(integrity['algorithm'], 'sha256')
+            self.assertEqual(integrity['first_seq'], '0')
+            self.assertEqual(integrity['last_seq'],
+                             str(int(integrity['line_count']) - 1))
+            self.assertEqual(len(integrity['kinds']), 10)
+
+    def test_recompute_derives_all_seven_keys_from_bytes(self):
+        # Every returned key is re-derived from the raw prefix bytes
+        # and cross-checked against the declared value: tampering any
+        # single declared key must raise instead of flowing into the
+        # result. Proves the host recomputation verifies rather than
+        # copies the checkpoint books. Covers the armed empty prefix
+        # and a non-empty span.
+        with tempfile.TemporaryDirectory() as tmp:
+            export = armed_export_copy(tmp)
+            armed_prefix = (export / 'prefix-events.ndjson').read_bytes()
+            armed_doc = load_json(export / 'checkpoint.json')
+            armed_barrier = load_json(export / 'barrier.json')
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, mock_export, _, _ = run_mock_scenario('checkpoint', tmp)
+            mock_export = Path(mock_export)
+            mock_prefix = (mock_export
+                           / 'prefix-events.ndjson').read_bytes()
+            mock_doc = load_json(mock_export / 'checkpoint.json')
+            mock_barrier = load_json(mock_export / 'barrier.json')
+        for label, prefix, doc, barrier in (
+                ('armed-empty', armed_prefix, armed_doc, armed_barrier),
+                ('mock-nonempty', mock_prefix, mock_doc, mock_barrier)):
+            with self.subTest(shape=label):
+                recomputed = recompute_prefix(prefix, doc)
+                self.assertEqual(set(recomputed), set(SEVEN_KEYS))
+                self.assertEqual(recomputed, barrier['integrity'])
+                for key, wrong in tampered_declared(
+                        doc['capture']['integrity']).items():
+                    bad = copy.deepcopy(doc)
+                    bad['capture']['integrity'][key] = wrong
+                    with self.subTest(key=key), \
+                            self.assertRaises(ValueError):
+                        recompute_prefix(prefix, bad)
+
+    def test_host_verify_refuses_each_tampered_key(self):
+        # Tamper one barrier/result integrity key at a time, leaving
+        # the checkpoint and prefix pristine with barrier == result,
+        # so only the host's independent checks can refuse. Keys the
+        # barrier shape gate does not cover must fail at the
+        # recomputation comparison itself.
+        recompute_refusals = {'algorithm', 'first_seq', 'last_seq',
+                              'kinds'}
+        barrier = load_json(ARMED_READINESS_EXPORT / 'barrier.json')
+        for key, wrong in tampered_declared(
+                barrier['integrity']).items():
+            with self.subTest(key=key), \
+                    tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                export = armed_export_copy(tmp)
+                for name in ('barrier.json', 'result.json'):
+                    doc = load_json(export / name)
+                    doc['integrity'][key] = wrong
+                    (export / name).write_text(json.dumps(doc) + '\n')
+                if key in recompute_refusals:
+                    with self.assertRaisesRegex(ValueError, 'recomput'):
+                        host_verify(tmp, export, barrier['nonce'],
+                                    barrier['scenario'],
+                                    barrier['identity']['inputs'])
+                else:
+                    with self.assertRaises(ValueError):
+                        host_verify(tmp, export, barrier['nonce'],
+                                    barrier['scenario'],
+                                    barrier['identity']['inputs'])
 
     def test_lying_books_fail_the_barrier(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -459,7 +597,9 @@ class SigkillSelfTests(unittest.TestCase):
         good = dict(nonce='b' * 32, scenario='readiness', stopped=True,
                     marker='readiness-announced', ready_observed=True,
                     reserve_allocated=17 * 1048576, reserve_released=False,
-                    integrity={'events_bytes': '0', 'line_count': '0',
+                    integrity={'algorithm': 'sha256',
+                               'events_bytes': '0', 'line_count': '0',
+                               'first_seq': None, 'last_seq': None,
                                'events_sha256': hashlib.sha256(b'').hexdigest(),
                                'kinds': {}},
                     checkpoint_sha256='c' * 64,
@@ -482,7 +622,8 @@ class SigkillSelfTests(unittest.TestCase):
 
     def test_finalization_barrier_requires_release_proof(self):
         inputs = {'binary': 'a' * 64}
-        integrity = {'events_bytes': '10', 'line_count': '1',
+        integrity = {'algorithm': 'sha256', 'events_bytes': '10',
+                     'line_count': '1', 'first_seq': '0', 'last_seq': '0',
                      'events_sha256': 'd' * 64,
                      'kinds': {'bounce_attempt': '1'}}
         good = dict(nonce='b' * 32, scenario='finalization', stopped=True,
@@ -550,7 +691,8 @@ class SigkillSelfTests(unittest.TestCase):
 
     def test_result_negatives(self):
         inputs = {'binary': 'a' * 64}
-        integrity = {'events_bytes': '0', 'line_count': '0',
+        integrity = {'algorithm': 'sha256', 'events_bytes': '0',
+                     'line_count': '0', 'first_seq': None, 'last_seq': None,
                      'events_sha256': hashlib.sha256(b'').hexdigest(),
                      'kinds': {}}
         barrier = dict(nonce='b' * 32, scenario='readiness',
