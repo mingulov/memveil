@@ -6,9 +6,13 @@ Mirrors tools/test's memveil_bin/rust_bin_setup exactly, so the
 binary the runner blesses is provably the binary each driver
 executes:
 
-- MEMVEIL_BIN set to a value containing a slash: it must name
-  an executable file, used verbatim (no rebuild, no relink, no
-  default fallback).
+- MEMVEIL_BIN set to an absolute slash path: it must name
+  an executable file, used verbatim (no rebuild, no relink,
+  no default fallback).
+- MEMVEIL_BIN set to a relative slash path: resolved
+  against the caller's directory to an absolute canonical
+  path before dispatch, so a later directory change cannot
+  lose it.
 - MEMVEIL_BIN set to a bare name: looked up on PATH, left to
   right, resolving to an absolute canonical path. The lookup is
   explicit so validation and dispatch cannot disagree about
@@ -18,9 +22,10 @@ executes:
 - MEMVEIL_BIN unset: the build/memveil default (which tools/test
   links at the release binary before dispatch).
 - MEMVEIL_BIN set to anything else (missing, not a file, not
-  executable, empty, unresolvable on PATH): refuse loudly before
-  dispatch (a stderr diagnostic naming the value, then
-  SystemExit 1), never silently fall back to the default.
+  executable, empty, unresolvable on PATH, unresolvable
+  relative path): refuse loudly before dispatch (a stderr
+  diagnostic naming the value, then SystemExit 1), never
+  silently fall back to the default.
 
 Every tests/cli driver resolves its BIN through
 resolve_memveil_bin().
@@ -45,8 +50,17 @@ def resolve_memveil_bin():
     if knob is None:
         return DEFAULT_BIN
     if "/" in knob:
-        if os.path.isfile(knob) and os.access(knob, os.X_OK):
-            return knob
+        if os.path.isabs(knob):
+            if os.path.isfile(knob) and os.access(knob, os.X_OK):
+                return knob
+        else:
+            # Relative slash: resolve against the caller's
+            # directory now, mirroring the runner, so the
+            # returned absolute path survives a later chdir
+            # before dispatch.
+            resolved = os.path.realpath(knob)
+            if os.path.isfile(resolved) and os.access(resolved, os.X_OK):
+                return resolved
     else:
         # Bare name: explicit PATH lookup, mirroring the
         # runner's resolver (an unset or empty PATH refuses

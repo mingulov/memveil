@@ -6,14 +6,17 @@ The runner blesses one binary and every CLI driver resolves the
 same selector (memveil_bin.resolve_memveil_bin), so the knob
 binary provably equals the executed binary:
 
-- set+usable resolves: a slash path verbatim, a bare name via
-  PATH to an absolute path; unset resolves the build/memveil
-  default; bogus (missing, not-a-file, non-executable, empty,
-  unresolvable-on-PATH) refuses before dispatch.
+- set+usable resolves: an absolute slash path verbatim, a
+  relative slash path against the caller's directory to an
+  absolute path, a bare name via PATH to an absolute path;
+  unset resolves the build/memveil default; bogus (missing,
+  not-a-file, non-executable, empty, unresolvable-on-PATH,
+  unresolvable relative) refuses before dispatch.
 - identity: every CLI driver resolves the knob to the identical
   string, and wrapper-knob end-to-end runs prove the executed
-  binary is the knob binary (marker checks, both for slash
-  paths and for bare names found on PATH).
+  binary is the knob binary (marker checks, for absolute
+  slash paths, for bare names found on PATH, and for
+  relative slash paths executed after a directory change).
 - refusal: a bogus knob fails the runner (exit 1, before dispatch)
   and a directly-invoked driver (nonzero, names MEMVEIL_BIN).
 """
@@ -51,8 +54,12 @@ DRIVERS = (
 )
 
 
-def driver_bin(driver, knob):
-    """Import a driver with MEMVEIL_BIN=knob (None unsets) and print BIN."""
+def driver_bin(driver, knob, cwd=None):
+    """Import a driver with MEMVEIL_BIN=knob (None unsets) and print BIN.
+
+    cwd sets the child's directory, so a relative knob can be
+    resolved from a chosen caller directory.
+    """
     env = dict(os.environ)
     if knob is None:
         env.pop("MEMVEIL_BIN", None)
@@ -62,7 +69,7 @@ def driver_bin(driver, knob):
             "import %s as driver; print(driver.BIN, flush=True)"
             % (str(CLI), driver))
     return subprocess.run([sys.executable, "-c", code], env=env,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, cwd=cwd)
 
 
 def make_executable(path):
@@ -99,6 +106,92 @@ class KnobContract(unittest.TestCase):
                     os.environ.pop("MEMVEIL_BIN", None)
                 else:
                     os.environ["MEMVEIL_BIN"] = old
+
+    def test_relative_slash_resolves_against_caller_directory(self):
+        # A relative slash knob resolves against the
+        # resolving process's directory to an absolute
+        # canonical path, so resolve-then-chdir-then-execute
+        # still runs the blessed file.
+        with tempfile.TemporaryDirectory() as tmp:
+            sub = os.path.join(tmp, "sub")
+            os.mkdir(sub)
+            target = make_executable(os.path.join(sub, "sentinel"))
+            elsewhere = os.path.join(tmp, "elsewhere")
+            os.mkdir(elsewhere)
+            old_knob = os.environ.get("MEMVEIL_BIN")
+            old_cwd = os.getcwd()
+            try:
+                for knob in ("sub/sentinel", "./sub/sentinel"):
+                    with self.subTest(knob):
+                        os.environ["MEMVEIL_BIN"] = knob
+                        os.chdir(tmp)
+                        resolved = resolve_memveil_bin()
+                        self.assertEqual(resolved,
+                                         os.path.realpath(target))
+                        self.assertTrue(os.path.isabs(resolved))
+                        os.chdir(elsewhere)
+                        self.assertTrue(os.path.isfile(resolved))
+                        self.assertTrue(
+                            os.access(resolved, os.X_OK))
+                        proc = subprocess.run(
+                            [resolved], capture_output=True)
+                        self.assertEqual(proc.returncode, 0)
+            finally:
+                os.chdir(old_cwd)
+                if old_knob is None:
+                    os.environ.pop("MEMVEIL_BIN", None)
+                else:
+                    os.environ["MEMVEIL_BIN"] = old_knob
+
+    def test_relative_slash_unresolvable_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sub = os.path.join(tmp, "sub")
+            os.mkdir(sub)
+            plain = os.path.join(tmp, "plain")
+            Path(plain).write_text("not executable\n")
+            cases = {
+                "missing": "sub/mv-no-such-rel-probe",
+                "dot-missing": "./mv-no-such-rel-probe",
+                "parent-missing": "../mv-no-such-rel-probe",
+                "non-executable": "./plain",
+                "directory": "./sub",
+            }
+            old_knob = os.environ.get("MEMVEIL_BIN")
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                for name, knob in cases.items():
+                    with self.subTest(name):
+                        os.environ["MEMVEIL_BIN"] = knob
+                        err = io.StringIO()
+                        with contextlib.redirect_stderr(err):
+                            with self.assertRaises(SystemExit) as raised:
+                                resolve_memveil_bin()
+                        self.assertEqual(raised.exception.code, 1)
+                        self.assertIn("MEMVEIL_BIN", err.getvalue())
+                # The runner refuses before dispatch too (no
+                # recursion: bogus knobs exit in
+                # rust_bin_setup).
+                for name, knob in cases.items():
+                    with self.subTest("runner-" + name):
+                        env = dict(os.environ)
+                        env["MEMVEIL_BIN"] = knob
+                        proc = subprocess.run(
+                            [str(ROOT / "tools/test"),
+                             "reader-adversarial"],
+                            env=env, capture_output=True, text=True,
+                            cwd=tmp)
+                        self.assertEqual(proc.returncode, 1,
+                                         proc.stderr[-2000:])
+                        self.assertIn("MEMVEIL_BIN", proc.stderr)
+                        self.assertIn("missing or not executable",
+                                      proc.stderr)
+            finally:
+                os.chdir(old_cwd)
+                if old_knob is None:
+                    os.environ.pop("MEMVEIL_BIN", None)
+                else:
+                    os.environ["MEMVEIL_BIN"] = old_knob
 
     def test_bogus_refuses_before_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,6 +322,53 @@ class KnobContract(unittest.TestCase):
                              proc.stdout[-2000:] + proc.stderr[-2000:])
             self.assertTrue(os.path.isfile(marker),
                             "PATH-resolved bare knob was not executed")
+
+    def test_relative_knob_dispatched_via_runner(self):
+        # End to end through the real runner: a relative
+        # slash knob resolves against the runner's
+        # directory, and the blessed absolute path survives
+        # the driver's directory change before execution
+        # (output-paths executes BIN from a scratch
+        # directory). Runs from a scratch directory holding
+        # the wrapper, so only caller-directory resolution
+        # can bless it. Never reader-adversarial here: that
+        # leg runs this contract file, so a usable knob
+        # there would recurse.
+        real = resolve_memveil_bin()
+        if not (os.path.isfile(real) and os.access(real, os.X_OK)):
+            self.skipTest("no usable binary under test: %s" % real)
+        with tempfile.TemporaryDirectory() as tmp:
+            sub = os.path.join(tmp, "sub")
+            os.mkdir(sub)
+            marker = os.path.join(tmp, "relative-executed")
+            wrapper = os.path.join(sub, "mv-rel-wrapper")
+            Path(wrapper).write_text(
+                "#!/bin/sh\ntouch %s\nexec %s \"$@\"\n" % (marker, real))
+            os.chmod(wrapper, 0o755)
+            env = dict(os.environ)
+            env["MEMVEIL_BIN"] = "sub/mv-rel-wrapper"
+            proc = subprocess.run(
+                [str(ROOT / "tools/test"), "output-paths"],
+                env=env, capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(proc.returncode, 0,
+                             proc.stdout[-2000:] + proc.stderr[-2000:])
+            self.assertTrue(os.path.isfile(marker),
+                            "relative slash knob was not executed")
+
+    def test_all_drivers_resolve_relative_knob_absolute(self):
+        # Every driver resolves a relative slash knob from
+        # its own caller directory to the identical absolute
+        # canonical path.
+        with tempfile.TemporaryDirectory() as tmp:
+            sub = os.path.join(tmp, "sub")
+            os.mkdir(sub)
+            sentinel = make_executable(os.path.join(sub, "sentinel"))
+            want = os.path.realpath(sentinel)
+            for driver in DRIVERS:
+                with self.subTest(driver):
+                    proc = driver_bin(driver, "sub/sentinel", cwd=tmp)
+                    self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+                    self.assertEqual(proc.stdout.strip(), want)
 
     def test_all_drivers_resolve_knob_verbatim(self):
         with tempfile.TemporaryDirectory() as tmp:
