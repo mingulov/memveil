@@ -833,6 +833,8 @@ def self_test_guest_oracle(tmp, pairs):
 
 def self_test_forensics(tmp):
     """Fault injection: stalls leave markers, partials, no strays."""
+    import contextlib
+    import signal
 
     class ProbeGate(stress_guest.Gate):
         def __init__(self, work, export):
@@ -905,26 +907,52 @@ def self_test_forensics(tmp):
         time.sleep(0.1)
     ok = check("forensics-owned-reaped", not alive,
                "stray pid %d" % pid) and ok
-    # Readiness: a partial line then silence fails at the
-    # deadline instead of hanging in the reader.
+    # Readiness: only a complete newline-terminated
+    # line for the consumer's own ring accepts. A full
+    # ack prefix without its newline then silence must
+    # fail at the deadline, not accept immediately.
     stall = subprocess.Popen(
         [sys.executable, "-c",
-         "import sys,time;sys.stdout.write('ready rin');"
+         "import sys,time;"
+         "sys.stdout.write('ready ring=mv_lifecycle');"
          "sys.stdout.flush();time.sleep(30)"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, start_new_session=True)
+    stall.gate_ring = "mv_lifecycle"
     start = time.monotonic()
     try:
         gate.wait_ready([stall], timeout=2)
         elapsed = time.monotonic() - start
-        ok = check("forensics-partial-ready", False, "accepted") and ok
+        ok = check("forensics-ready-newline-less", False,
+                   "accepted") and ok
     except SystemExit:
         elapsed = time.monotonic() - start
-        ok = check("forensics-partial-ready", elapsed < 10,
-                   "%.1fs" % elapsed) and ok
+        ok = check("forensics-ready-newline-less",
+                   1.9 <= elapsed < 10, "%.1fs" % elapsed) and ok
     finally:
         stall.kill()
         stall.communicate()
+    # A complete line for another ring refuses too.
+    wrong = subprocess.Popen(
+        [sys.executable, "-c",
+         "print('ready ring=mv_copies',flush=True);"
+         "import time;time.sleep(30)"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    wrong.gate_ring = "mv_lifecycle"
+    start = time.monotonic()
+    try:
+        gate.wait_ready([wrong], timeout=2)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-ready-wrong-ring", False,
+                   "accepted") and ok
+    except SystemExit:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-ready-wrong-ring",
+                   1.9 <= elapsed < 10, "%.1fs" % elapsed) and ok
+    finally:
+        wrong.kill()
+        wrong.communicate()
     # A proper ack is still accepted, with its prefix kept
     # for the later readiness cross-check.
     good = subprocess.Popen(
@@ -932,15 +960,222 @@ def self_test_forensics(tmp):
          "print('ready ring=mv_lifecycle',flush=True)"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, start_new_session=True)
+    good.gate_ring = "mv_lifecycle"
     try:
         gate.wait_ready([good], timeout=5)
         gate.wait_consumer(good, "forensics-ready", timeout=5)
         ok = check("forensics-ready-accept",
                    getattr(good, "gate_ready", False)
-                   and "ready ring=" in getattr(
+                   and "ready ring=mv_lifecycle\n" in getattr(
                        good, "gate_prefix", "")) and ok
     except SystemExit as exc:
         ok = check("forensics-ready-accept", False, str(exc)) and ok
+    # A descendant holding stdout past the child's exit
+    # delays the verdict by its own lifetime, never by
+    # failing: the drain completes and the full output
+    # is preserved.
+    holder_pid = os.path.join(tmp, "fast-holder.pid")
+    held = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess,sys,pathlib;"
+         "print('ready ring=mv_lifecycle',flush=True);"
+         "print('holder-output-marker',flush=True);"
+         "p=subprocess.Popen(['sleep','3']);"
+         "pathlib.Path(%r).write_text(str(p.pid))" % holder_pid],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    held.gate_ring = "mv_lifecycle"
+    start = time.monotonic()
+    try:
+        gate.wait_ready([held], timeout=5)
+        out = gate.wait_consumer(held, "forensics-held",
+                                 timeout=2)
+        elapsed = time.monotonic() - start
+        seen = getattr(held, "gate_prefix", "") + (out or "")
+        ok = check("forensics-consumer-holder-returns",
+                   "holder-output-marker" in seen
+                   and 2.0 <= elapsed < 5.5,
+                   "%.1fs %r" % (elapsed, seen[-80:])) and ok
+    except SystemExit as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-consumer-holder-returns", False,
+                   "%.1fs %s" % (elapsed, exc)) and ok
+    finally:
+        try:
+            os.kill(int(open(holder_pid).read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+        try:
+            held.kill()
+        except OSError:
+            pass
+        try:
+            held.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    # A holder that never leaves fails bounded instead:
+    # the drain grace plus truncation, never a hang and
+    # never a silent discard.
+    stuck_pid = os.path.join(tmp, "stuck-holder.pid")
+    stuck = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess,sys,pathlib;"
+         "print('ready ring=mv_lifecycle',flush=True);"
+         "print('stuck-output-marker',flush=True);"
+         "p=subprocess.Popen(['sleep','30']);"
+         "pathlib.Path(%r).write_text(str(p.pid))" % stuck_pid],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    stuck.gate_ring = "mv_lifecycle"
+    start = time.monotonic()
+    diag = io.StringIO()
+    try:
+        gate.wait_ready([stuck], timeout=5)
+        with contextlib.redirect_stderr(diag):
+            gate.wait_consumer(stuck, "forensics-stuck",
+                               timeout=1)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-consumer-holder-truncated", False,
+                   "returned") and ok
+    except SystemExit:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-consumer-holder-truncated",
+                   4.5 <= elapsed < 10
+                   and "truncated" in diag.getvalue()
+                   and "stuck-output-marker" in diag.getvalue(),
+                   "%.1fs %r" % (elapsed,
+                                 diag.getvalue()[-120:])) and ok
+    finally:
+        try:
+            os.kill(int(open(stuck_pid).read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+        try:
+            stuck.kill()
+        except OSError:
+            pass
+        try:
+            stuck.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    # Abort tails reach the shared export, not just guest
+    # work storage, with sidecars and a record entry.
+    gate.mode = "full"
+    noisy = subprocess.Popen(
+        [sys.executable, "-c",
+         "print('abort-tail-marker',flush=True);"
+         "import time;time.sleep(30)"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    gate.consumers.append(noisy)
+    try:
+        time.sleep(0.5)
+        gate.abort("probe abort")
+        tail = open(os.path.join(
+            export, "abort-consumer-0.txt")).read()
+        record = json.loads(open(os.path.join(
+            export, "abort.json")).read())
+        ok = check("forensics-abort-exports-tails",
+                   "abort-tail-marker" in tail
+                   and os.path.isfile(os.path.join(
+                       export, "abort-consumer-0.txt.sha256"))
+                   and record.get("tails")
+                   == ["abort-consumer-0.txt"]
+                   and record.get("unreaped") == 0
+                   and record.get("reason") == "probe abort",
+                   "%r" % (record,)) and ok
+    except (SystemExit, OSError, ValueError) as exc:
+        ok = check("forensics-abort-exports-tails", False,
+                   str(exc)) and ok
+    finally:
+        gate.consumers.remove(noisy)
+        try:
+            noisy.kill()
+        except OSError:
+            pass
+        try:
+            noisy.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    # An abort tail held open still exports bounded,
+    # marked truncated instead of hanging the abort.
+    gate.consumers.clear()
+    tail_pid = os.path.join(tmp, "tail-holder.pid")
+    lingering = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess,sys,pathlib;"
+         "print('lingering-tail-marker',flush=True);"
+         "p=subprocess.Popen(['sleep','30']);"
+         "pathlib.Path(%r).write_text(str(p.pid))" % tail_pid],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, start_new_session=True)
+    gate.consumers.append(lingering)
+    start = time.monotonic()
+    try:
+        lingering.wait(timeout=5)
+        gate.abort("probe lingering abort")
+        elapsed = time.monotonic() - start
+        tail = open(os.path.join(
+            export, "abort-consumer-0.txt")).read()
+        record = json.loads(open(os.path.join(
+            export, "abort.json")).read())
+        ok = check("forensics-abort-tail-truncated",
+                   4.5 <= elapsed < 12
+                   and "lingering-tail-marker" in tail
+                   and "truncated" in tail
+                   and record.get("tails")
+                   == ["abort-consumer-0.txt"],
+                   "%.1fs %r" % (elapsed, tail[-120:])) and ok
+    except (SystemExit, OSError, ValueError,
+            subprocess.TimeoutExpired) as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-abort-tail-truncated", False,
+                   "%.1fs %s" % (elapsed, exc)) and ok
+    finally:
+        gate.consumers.remove(lingering)
+        try:
+            os.kill(int(open(tail_pid).read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+        try:
+            lingering.kill()
+        except OSError:
+            pass
+        try:
+            lingering.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    # A host child in a separate session holding stdout
+    # cannot push past timeout + grace + the short final
+    # drain; the pipe-buffered capture is preserved and
+    # the cut is marked, not silent.
+    outer_pid = os.path.join(tmp, "outer-holder.pid")
+    script = ("import subprocess,sys,time,pathlib;"
+              "print('separate-session-marker',flush=True);"
+              "p=subprocess.Popen([sys.executable,'-c',"
+              "'import os,time;os.setsid();time.sleep(30)']);"
+              "pathlib.Path(%r).write_text(str(p.pid));"
+              "time.sleep(30)" % outer_pid)
+    start = time.monotonic()
+    try:
+        run_owned_guest([sys.executable, "-c", script],
+                        timeout=0.2)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-owned-separate-session", False,
+                   "no timeout") and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-owned-separate-session",
+                   10 <= elapsed < 14
+                   and "separate-session-marker" in (exc.stdout or "")
+                   and "truncated" in (exc.stdout or "")
+                   and "truncated" in (exc.stderr or ""),
+                   "%.1fs %r" % (elapsed, exc.stdout)) and ok
+    finally:
+        try:
+            os.kill(int(open(outer_pid).read()), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
     return ok
 
 
@@ -1220,6 +1455,107 @@ def self_test_identity():
                and "FAIL" in probe.stderr
                and "Traceback" not in probe.stderr,
                probe.stderr.strip()[-160:]) and ok
+    # The exec-entry marker lands before the manifest
+    # read: a stall there still leaves one marker, while
+    # the release gate above still fires first (the order
+    # probe above pins that side).
+    import contextlib
+    import threading
+    from types import SimpleNamespace
+    from unittest import mock
+    gated = SimpleNamespace(release=stress_guest.EXPECT_RELEASE)
+    args = SimpleNamespace(
+        consumer="/tmp/sg-c", consumer_sha="0" * 64,
+        ko="/tmp/sg-k", ko_sha="0" * 64, mode="q3",
+        expect_release="", manifest="/tmp/sg-absent-manifest.json",
+        baseline_lc="/tmp/a", baseline_cp="/tmp/b",
+        baseline_lc_sha="0" * 64, baseline_cp_sha="0" * 64,
+        c9_lc="/tmp/c", c9_cp="/tmp/d",
+        c9_lc_sha="0" * 64, c9_cp_sha="0" * 64)
+    tmpdir = tempfile.mkdtemp(prefix="vmgate-exec-")
+    try:
+        logged = io.StringIO()
+        with mock.patch.object(stress_guest.os, "uname",
+                               return_value=gated):
+            with contextlib.redirect_stderr(logged):
+                try:
+                    stress_guest.Gate(os.path.join(tmpdir, "work"),
+                                      os.path.join(tmpdir, "export"),
+                                      args)
+                except SystemExit as exited:
+                    code = exited.code
+                else:
+                    code = 0
+        try:
+            marks = [json.loads(line) for line in open(
+                os.path.join(tmpdir, "work", "progress.log"))]
+            mirrored = open(os.path.join(
+                tmpdir, "export", "progress.log")).read()
+        except OSError:
+            marks, mirrored = [], ""
+        ok = check("identity-exec-marker-before-manifest",
+                   code == 1
+                   and "cannot read run manifest" in logged.getvalue()
+                   and marks
+                   and marks[0]["step"] == "exec"
+                   and marks[0]["status"] == "start"
+                   and '"step": "exec"' in mirrored,
+                   "%r %r" % (code, marks)) and ok
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    # A manifest read that blocks (a FIFO with no writer
+    # yet) still leaves the marker while blocked.
+    tmpdir = tempfile.mkdtemp(prefix="vmgate-stall-")
+    fifo = os.path.join(tmpdir, "manifest.fifo")
+    os.mkfifo(fifo)
+    stalled = SimpleNamespace(**vars(args))
+    stalled.manifest = fifo
+    outcome = {}
+    logged = io.StringIO()
+
+    def construct():
+        with contextlib.redirect_stderr(logged):
+            try:
+                stress_guest.Gate(os.path.join(tmpdir, "work"),
+                                  os.path.join(tmpdir, "export"),
+                                  stalled)
+            except SystemExit as exited:
+                outcome["code"] = exited.code
+            except BaseException as exc:
+                outcome["error"] = repr(exc)
+
+    worker = threading.Thread(target=construct, daemon=True)
+    with mock.patch.object(stress_guest.os, "uname",
+                           return_value=gated):
+        worker.start()
+        deadline = time.monotonic() + 3
+        marks = []
+        while time.monotonic() < deadline:
+            try:
+                marks = [json.loads(line) for line in open(
+                    os.path.join(tmpdir, "work", "progress.log"))]
+            except (OSError, ValueError):
+                marks = []
+            if marks:
+                break
+            time.sleep(0.05)
+        marker_while_blocked = (
+            marks and marks[0]["step"] == "exec"
+            and worker.is_alive())
+        writer = os.open(fifo, os.O_WRONLY)
+        try:
+            os.write(writer, b"{")
+        finally:
+            os.close(writer)
+        worker.join(timeout=5)
+    shutil.rmtree(tmpdir, ignore_errors=True)
+    ok = check("identity-exec-marker-stall",
+               marker_while_blocked
+               and not worker.is_alive()
+               and outcome.get("code") == 1
+               and "cannot read run manifest" in logged.getvalue()
+               and "error" not in outcome,
+               "%r %r" % (marks, outcome)) and ok
     return ok
 
 
@@ -1327,6 +1663,29 @@ def synth_q3_leg(tmp, name, miss_unmaps=0):
         core.encode_lc(2, True, True, 1, 0, 100, 1024, 0,
                        miss=True),
         "mv_lifecycle", 1, 1024)
+    # The 2-op control script, in module order: op 0 runs
+    # and releases, op 1 syncs twice and stays held-open
+    # until the rmmod exit-release, then the completion
+    # and unload notes the parser tolerates.
+    c0_lines = [
+        "mv-oracle: op=0 attempt requested=512 forced=0",
+        "mv-oracle: op=0 outcome=success mapping=0 mapped=512",
+        "mv-oracle: op=0 mapping=0 sync dir=1 len=512 for=device",
+        "mv-oracle: mapping=0 release lifetime_ns=5000",
+        "mv-oracle: op=1 attempt requested=1024 forced=0",
+        "mv-oracle: op=1 outcome=success mapping=1 mapped=1024",
+        "mv-oracle: op=1 mapping=1 sync dir=2 len=1024 for=device",
+        "mv-oracle: op=1 mapping=1 sync dir=2 len=1024 for=device",
+        "mv-oracle: op=1 mapping=1 held-open",
+        "mv-oracle: script complete ops=2",
+        "mv-oracle: op=1 mapping=1 exit-release",
+        "mv-oracle: mapping=1 release lifetime_ns=5001",
+        "mv-oracle: unloaded",
+    ]
+    c0_log = os.path.join(tmp, "%s-c0-oracle.log" % name)
+    with open(c0_log, "w") as handle:
+        for line in c0_lines:
+            handle.write("[    5.123456] %s\n" % line)
     controls = os.path.join(tmp, "%s-controls.json" % name)
     with open(controls, "w") as handle:
         handle.write(json.dumps({"op0_gen": 7, "held_gen_first": 0,
@@ -1334,7 +1693,7 @@ def synth_q3_leg(tmp, name, miss_unmaps=0):
     return {"%s-controls.json" % name: Path(controls),
             "%s-c0a-lc.txt" % name: Path(c0a),
             "%s-c0b-lc.txt" % name: Path(c0b),
-            "%s-c0-oracle.log" % name: Path(oracle),
+            "%s-c0-oracle.log" % name: Path(c0_log),
             "%s-p1-lc.txt" % name: Path(lc),
             "%s-p1-cp.txt" % name: Path(cp),
             "%s-p1-oracle.log" % name: Path(oracle)}
@@ -1396,6 +1755,61 @@ def self_test_q3_mode(tmp, pairs):
     garbage["baseline-c0b-lc.txt"] = Path(trash)
     bad, _ = judge_q3_leg(garbage, "baseline", "syn-trash")
     ok = check("q3-controls-tripwire", bad != [],
+               "; ".join(bad)) and ok
+
+    def skew_loss(src, dst):
+        """Add one balanced submit loss to a window file."""
+        order = ("observed", "badframe", "badrec", "cnt_obs",
+                 "cnt_obsb", "cnt_emit", "cnt_emitb", "cnt_fail",
+                 "cnt_flags", "rx", "dlv", "mal", "drop")
+        skewed = []
+        for line in open(src).read().split("\n"):
+            if line.startswith("summary "):
+                fields = dict(token.split("=", 1)
+                              for token in line.split()[1:])
+                fields["cnt_obs"] = str(int(fields["cnt_obs"]) + 1)
+                fields["cnt_fail"] = str(int(fields["cnt_fail"]) + 1)
+                line = "summary " + " ".join(
+                    "%s=%s" % (key, fields[key]) for key in order)
+            skewed.append(line)
+        open(dst, "w").write("\n".join(skewed))
+
+    # A balanced loss in the second control window still
+    # conserves, so only the loss-free rule refuses it.
+    lossy = dict(base)
+    c0b_loss = os.path.join(tmp, "baseline-c0b-lossy.txt")
+    skew_loss(str(base["baseline-c0b-lc.txt"]), c0b_loss)
+    lossy["baseline-c0b-lc.txt"] = Path(c0b_loss)
+    events, summary = parse_consume_file(c0b_loss)
+    bad, _ = judge_q3_leg(lossy, "baseline", "syn-c0-loss")
+    ok = check("q3-controls-loss-refuses",
+               check_conservation(events, summary,
+                                  "skew-c0b") == []
+               and any("cnt_fail" in reason for reason in bad),
+               "; ".join(bad)) and ok
+    # Same for a balanced loss in the quiet copy window.
+    quiet_lossy = dict(base)
+    cp_loss = os.path.join(tmp, "baseline-p1-cp-lossy.txt")
+    skew_loss(str(base["baseline-p1-cp.txt"]), cp_loss)
+    quiet_lossy["baseline-p1-cp.txt"] = Path(cp_loss)
+    events, summary = parse_consume_file(cp_loss)
+    bad, _ = judge_q3_leg(quiet_lossy, "baseline",
+                           "syn-quiet-loss")
+    ok = check("q3-quiet-loss-refuses",
+               check_conservation(events, summary,
+                                  "skew-quiet") == []
+               and any("cnt_fail" in reason for reason in bad),
+               "; ".join(bad)) and ok
+    # A blanked control oracle log refuses: the control
+    # record is mandatory evidence, not optional.
+    blanked = dict(base)
+    c0_blank = os.path.join(tmp, "baseline-c0-blank.log")
+    open(c0_blank, "w").write("")
+    blanked["baseline-c0-oracle.log"] = Path(c0_blank)
+    bad, _ = judge_q3_leg(blanked, "baseline", "syn-blank")
+    ok = check("q3-blanked-control-log-refuses",
+               any("script complete" in reason
+                   for reason in bad),
                "; ".join(bad)) and ok
     # The q3 receipt passes despite a higher candidate
     # ratio (50/400 vs 0/400): no comparison runs.
@@ -1576,21 +1990,44 @@ def parse_bpftrace(text):
     return out
 
 
+def check_loss_free(summary, tag):
+    """Control/quiet windows must be loss-free.
+
+    Conservation tolerates a balanced submit loss (the
+    books still add up); the adapter gate does not: any
+    reported loss refuses the window, balanced or not.
+    """
+    if summary.get("cnt_fail"):
+        return ["%s: submit loss cnt_fail=%d"
+                % (tag, summary["cnt_fail"])]
+    return []
+
+
 def judge_controls(files, name, tag):
     """Host re-derivation of one leg's controls.
 
     Re-derived from the raw control windows; guest-side
-    JSON is cross-checked, never trusted.
+    JSON is cross-checked, never trusted. Both control
+    windows must conserve and be loss-free, and the
+    2-op control oracle record is mandatory evidence: a
+    blanked or short control log refuses the leg.
     """
     bad = []
     try:
         first, first_sum = parse_consume_file(
             str(files["%s-c0a-lc.txt" % name]))
-        second, _ = parse_consume_file(
+        second, second_sum = parse_consume_file(
             str(files["%s-c0b-lc.txt" % name]))
+        ops_log, releases, complete = parse_oracle_log(
+            str(files["%s-c0-oracle.log" % name]))
     except ValueError as exc:
         return (["%s: control files unparsable: %s" % (tag, exc)], {})
     bad += check_conservation(first, first_sum, tag + "-c0a")
+    bad += check_conservation(second, second_sum, tag + "-c0b")
+    bad += check_loss_free(first_sum, tag + "-c0a")
+    bad += check_loss_free(second_sum, tag + "-c0b")
+    bad += check_oracle_script(ops_log, releases, complete,
+                               2, -1, tag + "-c0")
     known = [e for e in first if e["kind"] == 1 and e["size"] == 512
              and e["gen"] != 0]
     if not known:
@@ -1627,6 +2064,8 @@ def judge_quiet(files, name, tag):
         return (["%s: p1 files unparsable: %s" % (tag, exc)], {})
     bad += check_conservation(lc, lc_sum, tag + "-p1-lc")
     bad += check_conservation(cp, cp_sum, tag + "-p1-cp")
+    bad += check_loss_free(lc_sum, tag + "-p1-lc")
+    bad += check_loss_free(cp_sum, tag + "-p1-cp")
     bad += check_identity_closure(lc, tag + "-p1-lc")
     bad += check_oracle_script(ops_log, releases, complete,
                                core.P1_OPS, -1, tag + "-p1")

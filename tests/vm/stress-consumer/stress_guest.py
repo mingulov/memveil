@@ -68,6 +68,10 @@ TIMEOUT_RMMOD = 120
 TIMEOUT_DD = 300
 TIMEOUT_DMESG = 30
 TIMEOUT_CLEANUP = 120
+# Post-kill reap, then the pipe drain. A stray holder may
+# delay forensics by this long, never stall the verdict.
+TIMEOUT_REAP = 5
+TIMEOUT_DRAIN = 5
 
 # Readiness stdout without an ack past this is a flood, not
 # a slow attach.
@@ -99,6 +103,51 @@ def sh(args, timeout=TIMEOUT_DMESG, **kw):
     except subprocess.TimeoutExpired as exc:
         raise StepTimeout(" ".join(args), timeout, exc.stdout,
                           exc.stderr)
+
+
+def drain_bounded(proc, seconds):
+    """Drain a reaped-or-dying proc's stdout, bounded.
+
+    Returns (text, truncated): everything readable before
+    EOF or the deadline, plus whether the deadline cut the
+    drain short (a stray holder kept the pipe open). EOF
+    before the deadline means complete, whatever the size.
+    The pipe is closed; later readers see .closed.
+    """
+    if proc.stdout is None:
+        return "", False
+    fd = proc.stdout.fileno()
+    os.set_blocking(fd, False)
+    chunks = []
+    truncated = False
+    try:
+        end = time.monotonic() + seconds
+        while True:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                truncated = True
+                break
+            ready, _, _ = select.select([proc.stdout], [], [],
+                                        min(remaining, 0.5))
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            if chunk == b"":
+                break
+            chunks.append(chunk)
+    finally:
+        try:
+            os.set_blocking(fd, True)
+        except OSError:
+            pass
+        try:
+            proc.stdout.close()
+        except (OSError, ValueError):
+            pass
+    return b"".join(chunks).decode("utf-8", "replace"), truncated
 
 
 def check_identity(identity, ko_digest, oracle, expect_release):
@@ -216,6 +265,13 @@ class Gate:
                    "lc_sha": args.c9_lc_sha, "cp_sha": args.c9_cp_sha},
         }
         self.consumer_sha = args.consumer_sha
+        # Entry marker before the manifest read: a stall
+        # there must still leave one marker host-side. The
+        # release gate above still fires first, so refusal
+        # order is unchanged.
+        os.makedirs(work, exist_ok=True)
+        os.makedirs(export, exist_ok=True)
+        self.marker("exec", "start", {"mode": self.mode})
         try:
             with open(args.manifest) as handle:
                 self.manifest = json.load(handle)
@@ -226,8 +282,6 @@ class Gate:
         self.oracle_loaded = False
         if os.geteuid() != 0:
             fail("guest flow requires root")
-        os.makedirs(work, exist_ok=True)
-        os.makedirs(export, exist_ok=True)
         if os.path.exists("/sys/module/memveil_dma_oracle"):
             fail("oracle module already exists; no ownership")
         if os.path.exists("/sys/module/scsi_debug"):
@@ -389,7 +443,17 @@ class Gate:
             self.marker(name, "ok")
 
     def abort(self, reason):
-        """Reap owned processes and leave an abort record."""
+        """Reap owned processes and leave an abort record.
+
+        Every wait here is bounded: the terminate grace
+        and the post-kill reap share one 10 s budget, and
+        each tail drain has its own deadline. Tails reach
+        the shared export with sidecars and are listed in
+        the abort record; a cut-short drain is marked
+        truncated, never silently dropped. A dying proc
+        still drains: the pipe is the evidence, and the
+        drain is bounded whether or not EOF arrives.
+        """
         for proc in list(self.consumers) + list(self.transients):
             if proc.poll() is None:
                 proc.terminate()
@@ -400,19 +464,31 @@ class Gate:
                     proc.wait(timeout=max(0, end - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait()
+                    try:
+                        proc.wait(timeout=max(
+                            0, end - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        pass
+        tails = []
         for index, proc in enumerate(self.consumers):
-            if proc.poll() is not None and proc.stdout is not None:
-                try:
-                    rest = proc.stdout.read()
-                except (OSError, ValueError):
-                    rest = ""
-                if rest:
-                    with open(os.path.join(
-                            self.work, "abort-consumer-%d.txt" % index),
-                            "w") as handle:
-                        handle.write(getattr(proc, "gate_prefix", "")
-                                     + rest)
+            if proc.stdout is None or proc.stdout.closed:
+                continue
+            # Reap a zombie opportunistically; never blocks.
+            proc.poll()
+            try:
+                rest, truncated = drain_bounded(proc, TIMEOUT_DRAIN)
+            except (OSError, ValueError):
+                continue
+            if rest or truncated:
+                if truncated:
+                    rest += ("\n[stress-guest: tail truncated "
+                             "after %ds]\n" % TIMEOUT_DRAIN)
+                name = "abort-consumer-%d.txt" % index
+                with open(os.path.join(self.work, name),
+                          "w") as handle:
+                    handle.write(getattr(proc, "gate_prefix", "")
+                                 + rest)
+                tails.append(name)
         if self.oracle_loaded:
             try:
                 inner = sh(["rmmod", "memveil_dma_oracle"],
@@ -426,9 +502,18 @@ class Gate:
                 self.marker("abort-rmmod", "error",
                             {"reason": str(exc)[:200]})
             self.oracle_loaded = False
+        # Recount at the end, after the opportunistic
+        # reaps above: only a genuinely live proc reports
+        # unreaped, never a kill that landed on an
+        # exhausted budget and died a millisecond later.
+        unreaped = sum(
+            1 for proc in list(self.consumers) + list(self.transients)
+            if proc.poll() is None)
         self.write_json("abort.json", {"reason": reason,
-                                       "mode": self.mode})
-        for name in ("abort.json", "progress.log"):
+                                       "mode": self.mode,
+                                       "tails": tails,
+                                       "unreaped": unreaped})
+        for name in ["abort.json", "progress.log"] + tails:
             try:
                 self.export([name])
             except SystemExit:
@@ -445,6 +530,7 @@ class Gate:
              str(seconds), out],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, start_new_session=True)
+        proc.gate_ring = ring
         self.consumers.append(proc)
         return proc
 
@@ -454,8 +540,15 @@ class Gate:
         Reads are non-blocking under a hard deadline: select
         may signal a partial line, and a blocking readline
         would then wait past the deadline (or forever) for
-        the rest. Only a full "ready ring=" line accepts.
+        the rest. Only a complete newline-terminated line
+        naming this consumer's own ring accepts; a
+        newline-less prefix or another ring's ack never
+        does, even once fully buffered.
         """
+        for proc in procs:
+            if getattr(proc, "gate_ring", None) is None:
+                fail("consumer without an expected ring "
+                     "cannot acknowledge")
         end = time.monotonic() + timeout
         buffers = {}
         for proc in procs:
@@ -484,10 +577,12 @@ class Gate:
                     if len(buf) > READY_BUFFER_CAP:
                         fail("consumer flooded stdout without readiness")
                     buffers[id(proc)] = buf
-                    for line in buf.split(b"\n"):
-                        if line.startswith(b"ready ring="):
-                            break
-                    else:
+                    want = ("ready ring=%s"
+                            % proc.gate_ring).encode()
+                    # Every element but the last is a complete
+                    # newline-terminated line; the trailing
+                    # fragment is not evidence yet.
+                    if want not in buf.split(b"\n")[:-1]:
                         continue
                     proc.gate_ready = True
                     proc.gate_prefix = buf.decode("utf-8", "replace")
@@ -500,20 +595,43 @@ class Gate:
                     pass
 
     def wait_consumer(self, proc, tag, timeout=180):
-        """Wait for one consumer; fail unless it exits 0."""
+        """Wait for one consumer; fail unless it exits 0.
+
+        The child gets `timeout`, then SIGKILL plus a
+        bounded reap; the pipe then drains under its own
+        deadline, so a stray holder delays forensics but
+        never the verdict. Drained output is preserved; a
+        cut-short drain fails closed as truncated, even
+        when the child itself already exited.
+        """
         try:
-            out, _ = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
-            fail("%s: consumer did not exit" % tag)
+            try:
+                proc.wait(timeout=TIMEOUT_REAP)
+            except subprocess.TimeoutExpired:
+                pass
+        out, truncated = drain_bounded(proc, TIMEOUT_DRAIN)
         seen = getattr(proc, "gate_prefix", "") + (out or "")
+        if proc.returncode is None:
+            fail("%s: consumer unreaped after kill; partial: %s"
+                 % (tag, seen[-500:]))
+        if truncated:
+            fail("%s: consumer output truncated after %ds; "
+                 "stray pipe holder? partial: %s"
+                 % (tag, TIMEOUT_DRAIN, seen[-500:]))
         if proc.returncode != 0:
             fail("%s: consumer exit %d: %s"
                  % (tag, proc.returncode, seen[-500:]))
-        if not getattr(proc, "gate_ready", False) \
-                and "ready ring=" not in seen:
-            fail("%s: consumer never ready" % tag)
+        if not getattr(proc, "gate_ready", False):
+            ring = getattr(proc, "gate_ring", None)
+            if ring is not None:
+                want = "ready ring=%s\n" % ring
+            else:
+                want = "ready ring="
+            if want not in seen:
+                fail("%s: consumer never ready" % tag)
         return out
 
     def clear_dmesg(self):
@@ -703,7 +821,10 @@ def run_phase2(gate, name, pair, family, disk, short):
             bpf.wait(timeout=30)
         except subprocess.TimeoutExpired:
             bpf.kill()
-            bpf.wait()
+            try:
+                bpf.wait(timeout=TIMEOUT_REAP)
+            except subprocess.TimeoutExpired:
+                pass
         gate.transients.remove(bpf)
         bpf_out.close()
         bpf_err.close()
