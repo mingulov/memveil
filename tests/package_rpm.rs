@@ -166,8 +166,9 @@ fn rpm_header() {
     assert_eq!(fields[0], "memveil");
     assert_eq!(fields[3], "x86_64");
     // The build host is a fixed placeholder, never the
-    // builder's hostname: one source regenerates one .rpm
-    // on any host.
+    // builder's hostname. That is the only cross-host pin:
+    // Release keeps the distro expansion, so distro builds
+    // still differ in tag and file name.
     assert_eq!(fields[4], "build.invalid", "{text}");
     let version = h::engine_version();
     assert_eq!(fields[1], version, "rpm Version vs engine");
