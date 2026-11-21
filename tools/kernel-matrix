@@ -1360,6 +1360,18 @@ def gather_scenario_ev(export, name, negs, base_verdict):
     }
 
 
+def _scenario_receipt_shape(rec):
+    """Three-key scenario record the row receipt admits.
+
+    The judge verdict flag duplicates the status word
+    (ok exactly when the status is ok), so the record
+    keeps the name, status, and checks the receipt
+    grammar carries.
+    """
+    return {"name": rec["name"], "status": rec["status"],
+            "checks": rec["checks"]}
+
+
 def collect_scenarios(entry, export, tools, elapsed, run_id,
                       timeout, cache_dir):
     """Judge every scenario of one booted row."""
@@ -1400,7 +1412,8 @@ def collect_scenarios(entry, export, tools, elapsed, run_id,
                 "run_id": run_id,
                 "detail": "run decision crashed: %s" % exc,
                 "elapsed": round(elapsed, 1),
-                "scenarios": [rec for _, rec in named]}
+                "scenarios": [_scenario_receipt_shape(rec)
+                              for _, rec in named]}
     ok, detail = ks.scenarios_verdict(results)
     fail_txt = read_text(os.path.join(export, "FAIL.txt"))
     if fail_txt is not None:
@@ -1431,7 +1444,8 @@ def collect_scenarios(entry, export, tools, elapsed, run_id,
             "elapsed": round(elapsed, 1),
             "binary_sha256": binary_sha,
             "negatives": dict(negs) if guest_ran else {},
-            "scenarios": results}
+            "scenarios": [_scenario_receipt_shape(res)
+                          for res in results]}
 
 
 def write_scenario_summary(out, merged):

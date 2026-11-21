@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kernel_matrix as km
+import kernel_scenarios as ks
 
 TOOL = Path(os.path.dirname(os.path.abspath(__file__))) \
     .parent.parent / "tools" / "kernel-matrix"
@@ -1217,3 +1218,576 @@ def test_collect_scenarios_unparseable_artifacts_keeps_negs(
     rec = _collect(export, tmp_path)
     assert rec["negatives"] == dict(NEG_SHAS)
     assert rec["binary_sha256"] is None
+
+
+# --- real collector output end-to-end ---
+#
+# Both cases feed REAL collect_scenarios output, judged
+# from fixture evidence through the real schema
+# validator, into write_row_receipt, validate_row_receipt,
+# and rederive_row with and without the rec. A green row
+# receipts PASS; a guard-tripped row receipts its failure.
+# Local validator runs only; no boot, mount, or network.
+
+_E2E_RUN_ID = "20261121T000000Z"
+
+_E2E_ALU = ("available-load-unchecked", "available")
+_E2E_AVAIL = ("available", "available")
+
+_E2E_TEARDOWN = {"verdict": "ready-load-unchecked"}
+_E2E_FINAL_OUT = "ready session=mvt0\n"
+
+
+def _e2e_doctor(mode, verdict, caps):
+    return {
+        "schema_version": "0.1.1", "mode": mode,
+        "provenance": {"origin": "fixture"},
+        "kernel": {"release": "6.6.160", "arch": "x86_64",
+                   "eligible_floor": True,
+                   "floor_reason": "",
+                   "btf": {"state": "present",
+                           "bytes": "100",
+                           "config_btf": "y",
+                           "config_src": "boot"},
+                   "lockdown": {"mode": "", "src": ""}},
+        "guest": {"tech": "ordinary", "signals": [],
+                  "asserted": False, "conflict": ""},
+        "profile": {"matched": False,
+                    "profile_id": None, "status": None,
+                    "reason": ""},
+        "capabilities": [
+            {"id": cap, "status": status,
+             "reason": "fixture", "reason_code": code,
+             "evidence": []}
+            for cap, (status, code)
+            in caps.items()],
+        "privilege": {"euid": 0, "denied_paths": []},
+        "requested": [], "prechecks": [],
+        "load": [], "notes": [], "verdict": verdict,
+        "summary": "",
+    }
+
+
+def _e2e_all(pair):
+    return {cap: pair for cap in km.CAPS}
+
+
+def _e2e_refuse_out(code):
+    return "memveil record: refused\n" \
+        "memveil record: code: %s\n" % code
+
+
+def _e2e_session(sid, copy_status, reason, loss,
+                 evidence):
+    def chan(status, loss_count, text):
+        return {"status": status,
+                "loss_count": loss_count,
+                "scope": "fixture", "reason": text}
+    caps = {}
+    for name in ("bounce_attempts",
+                 "mapping_lifecycle", "copy_bytes",
+                 "sync_requests",
+                 "conversion_results", "region_state",
+                 "pool_stats", "task_context"):
+        caps[name] = {
+            "status": copy_status
+            if name == "copy_bytes" else "unavailable",
+            "reason": "fixture", "hooks": []}
+    return {
+        "schema_version": "0.1.1",
+        "session_id": sid, "synthetic": True,
+        "product": {"name": "memveil",
+                    "version": "0.1.0", "build": None},
+        "environment": {"mode": "unknown",
+                        "detection": "unverified",
+                        "attestation": "not_performed",
+                        "evidence": evidence},
+        "capture": {"mode": "synthetic",
+                    "window": {
+                        "start_ns": "1000000000",
+                        "end_ns": "4000000000"},
+                    "filters": {"device": None},
+                    "finalized": True,
+                    "end_reason": "duration"},
+        "device_catalog": {"devices": [
+            {"device_id": "dev-1",
+             "name": "testdev0",
+             "driver": "synthetic-test",
+             "identity_status": "resolved"}]},
+        "baseline": {"complete": False,
+                     "region_observations": []},
+        "capabilities": caps,
+        "quality": {
+            "detail": chan("partial", loss, reason),
+            "aggregate": chan("partial", "0",
+                              "fixture"),
+            "correlation": chan("partial", "0",
+                                "fixture"),
+            "baseline": chan("partial", "0",
+                             "fixture"),
+            "terminal": chan("partial", "0",
+                             "fixture")},
+        "stop": {"outcome": "complete", "reason": "",
+                 "budget_ms": "0", "elapsed_ms": "0",
+                 "admission_closed": True,
+                 "quiescence_observed": True,
+                 "writers_settled": "0",
+                 "in_flight_at_close": "0",
+                 "late_submits_drained": "0",
+                 "drained_records": "0",
+                 "busy_at_drain": False,
+                 "counters_valid": True,
+                 "open_mappings": "0"},
+    }
+
+
+_E2E_SOURCE = {
+    "hook": "swiotlb:swiotlb_bounced",
+    "backend": "synthetic",
+    "profile_id": "synthetic-test-1",
+    "measurement": "observed",
+    "correlation": "direct"}
+
+
+def _e2e_event(sid, seq, kind, data):
+    return {"schema_version": "0.1.1",
+            "session_id": sid, "seq": str(seq),
+            "ts_ns": str(1100000000 + seq),
+            "kind": kind, "source": dict(
+                _E2E_SOURCE), "data": data}
+
+
+def _e2e_attempt(sid, seq, op):
+    return _e2e_event(sid, seq, "bounce_attempt",
+                      {"device_id": "dev-1",
+                       "requested_bytes": "4096",
+                       "forced": True,
+                       "operation_id": op})
+
+
+def _e2e_map(sid, seq, op, mid):
+    return _e2e_event(sid, seq, "map_result",
+                      {"operation_id": op,
+                       "success": True,
+                       "mapping_id": mid,
+                       "return_code": None,
+                       "mapped_bytes": "4096",
+                       "wire_generation": "1",
+                       "wire_identity": "known"})
+
+
+def _e2e_copy(sid, seq, op, mid):
+    return _e2e_event(sid, seq, "copy",
+                      {"operation_id": op,
+                       "mapping_id": mid,
+                       "direction":
+                       "original_to_bounce",
+                       "bytes": "128"})
+
+
+_E2E_WORKLOAD_OUT = "phase scn start_ns 1100 " \
+    "end_ns 1900 bytes 67108864 ios 64\n" \
+    "buf scn mod4096=0\n"
+_E2E_REPORT_JSON = {"metrics": [
+    {"name": "copy_original_to_bounce_bytes",
+     "value": None, "measurement": "unavailable"},
+    {"name": "copy_bounce_to_original_bytes",
+     "value": None, "measurement": "unavailable"}]}
+_E2E_REPORT_TXT = "metrics (2):\n" \
+    "  copy_original_to_bounce_bytes = unavailable " \
+    "bytes [unavailable]\n" \
+    "  copy_bounce_to_original_bytes = unavailable " \
+    "bytes [unavailable]\n"
+
+
+def _e2e_base_cap():
+    sid = "scn-base-pass"
+    session = _e2e_session(sid, "verified",
+                           "clean", "0", [])
+    events = [_e2e_attempt(sid, 0, "op-1"),
+              _e2e_map(sid, 1, "op-2", "m-1"),
+              _e2e_copy(sid, 2, "op-3", "m-1")]
+    return True, session, events
+
+
+def _e2e_neg_cap(neg, sha, cause, unknown_key,
+                 loss):
+    sid = "scn-neg-%s" % neg
+    evidence = [{"type": "provenance",
+                 "source": "cp.object.sha256",
+                 "interpretation": sha}]
+    if unknown_key is not None:
+        evidence.append(
+            {"type": "provenance",
+             "source": unknown_key,
+             "interpretation": "3"})
+    session = _e2e_session(
+        sid, "partial",
+        "detail loss %s (submit_fail=(0)); first "
+        "unknown copy: %s" % (cause, cause),
+        loss, evidence)
+    return False, session, [_e2e_map(
+        sid, 0, "op-2", "m-1")]
+
+
+def _e2e_write_scn(root, name, pre, passive,
+                   passive_exit, load, load_exit,
+                   rec_out, rec_exit, rec_exists,
+                   cap=None, memcg=None):
+    sdir = root / ("scn-" + name)
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / "precondition.json").write_text(
+        json.dumps(pre))
+    (sdir / "doctor-passive.json").write_text(
+        json.dumps(passive))
+    (sdir / "doctor-passive.exit").write_text(
+        passive_exit + "\n")
+    (sdir / "doctor-load.json").write_text(
+        json.dumps(load))
+    (sdir / "doctor-load.exit").write_text(
+        load_exit + "\n")
+    (sdir / "record.out").write_text(rec_out)
+    (sdir / "record.exit").write_text(
+        rec_exit + "\n")
+    (sdir / "record.exists").write_text(
+        rec_exists + "\n")
+    (sdir / "teardown.json").write_text(
+        json.dumps(_E2E_TEARDOWN))
+    if cap is not None:
+        base, session, events = cap
+        capdir = sdir / "cap"
+        capdir.mkdir(exist_ok=True)
+        (capdir / "session.json").write_text(
+            json.dumps(session))
+        (capdir / "events.ndjson").write_text(
+            "\n".join(json.dumps(line)
+                      for line in events) + "\n")
+        if not base:
+            (sdir / "report.json").write_text(
+                json.dumps(_E2E_REPORT_JSON))
+            (sdir / "report.txt").write_text(
+                _E2E_REPORT_TXT)
+            (sdir / "workload.out").write_text(
+                _E2E_WORKLOAD_OUT)
+            (sdir / "workload.exit").write_text(
+                "0\n")
+    if memcg is not None:
+        (sdir / "memcg.json").write_text(
+            json.dumps(memcg))
+
+
+def _e2e_memcg_attempt():
+    p0, p1, r0 = 20000000, 60000000, 25000000
+    limit = ks.memcg_limit(p0, r0, p1)
+    return {"cgroup": "0::/mvt_small\n",
+            "memory_max": str(limit),
+            "p0": p0, "p1": p1, "r0": r0,
+            "limit": limit,
+            "oom_before": 10, "oom_after": 10,
+            "exits": ["0", "3", "3"]}
+
+
+def _e2e_green_scenarios(root, negs):
+    alu = _e2e_doctor(
+        "passive", "ready-load-unchecked",
+        _e2e_all(_E2E_ALU))
+    ready = _e2e_doctor(
+        "load-check", "ready",
+        _e2e_all(_E2E_AVAIL))
+    _e2e_write_scn(
+        root, "base",
+        {"verdict": "ready-load-unchecked"},
+        alu, "0", ready, "0", _E2E_FINAL_OUT,
+        "4", "yes", cap=_e2e_base_cap())
+    renamed = dict(_e2e_all(_E2E_AVAIL))
+    renamed["copy-actual"] = ("unavailable",
+                              "verifier-rejected")
+    _e2e_write_scn(
+        root, "neg-renamed",
+        {"object_sha": negs["renamed_field"]},
+        alu, "0",
+        _e2e_doctor("load-check", "unavailable",
+                    renamed), "3",
+        _e2e_refuse_out("verifier-rejected"),
+        "3", "no")
+    for name, neg, cause, unknown_key, loss in (
+            ("neg-layout", "widened_layout",
+             "LAYOUT", "copy.unknown_layout", "3"),
+            ("neg-shift", "wrong_shift", "SHIFT",
+             "copy.unknown_shift", "3"),
+            ("neg-argcnt", "wrong_argcnt",
+             "argument count mismatch", None,
+             None)):
+        _e2e_write_scn(
+            root, name, {"object_sha": negs[neg]},
+            alu, "0", ready, "0", _E2E_FINAL_OUT,
+            "4", "yes",
+            cap=_e2e_neg_cap(neg, negs[neg], cause,
+                             unknown_key, loss))
+    denied = ("unknown", "tracefs-denied")
+    _e2e_write_scn(
+        root, "nonroot",
+        {"uid": 65534, "root": "sys",
+         "events_readable": False},
+        _e2e_doctor("passive", "unavailable",
+                    _e2e_all(denied)), "3",
+        _e2e_doctor("load-check", "unavailable",
+                    _e2e_all(denied)), "3",
+        _e2e_refuse_out("tracefs-denied"), "3",
+        "no")
+    _e2e_write_scn(
+        root, "nocaps", {"capeff": "0"},
+        _e2e_doctor("passive", "unavailable",
+                    _e2e_all(("unavailable",
+                              "no-bpf-privilege"))),
+        "3",
+        _e2e_doctor("load-check", "unavailable",
+                    _e2e_all(("unavailable",
+                              "load-eperm"))), "3",
+        _e2e_refuse_out("load-eperm"), "3", "no")
+    ftrace_p = dict(_e2e_all(_E2E_ALU))
+    ftrace_l = dict(_e2e_all(_E2E_AVAIL))
+    for caps in (ftrace_p, ftrace_l):
+        caps["mapping-lifecycle"] = (
+            "unavailable", "ftrace-disabled")
+        caps["copy-actual"] = (
+            "unavailable", "ftrace-disabled")
+    _e2e_write_scn(
+        root, "ftrace-off",
+        {"ftrace_enabled": "0"},
+        _e2e_doctor("passive", "unavailable",
+                    ftrace_p), "3",
+        _e2e_doctor("load-check", "unavailable",
+                    ftrace_l), "3",
+        _e2e_refuse_out("ftrace-disabled"), "3",
+        "no")
+    unmounted = ("unavailable",
+                 "tracefs-not-mounted")
+    _e2e_write_scn(
+        root, "tracefs-unmounted",
+        {"mounts": "sysfs /sys sysfs rw\n",
+         "events_present": False},
+        _e2e_doctor("passive", "unavailable",
+                    _e2e_all(unmounted)), "3",
+        _e2e_doctor("load-check", "unavailable",
+                    _e2e_all(unmounted)), "3",
+        _e2e_refuse_out("tracefs-not-mounted"),
+        "3", "no")
+    btf_p = dict(_e2e_all(_E2E_ALU))
+    btf_l = dict(_e2e_all(_E2E_AVAIL))
+    for caps in (btf_p, btf_l):
+        caps["mapping-lifecycle"] = (
+            "unknown", "btf-truncated")
+        caps["copy-actual"] = ("unknown",
+                               "btf-truncated")
+    btf_passive = _e2e_doctor(
+        "passive", "unavailable", btf_p)
+    btf_load = _e2e_doctor(
+        "load-check", "unavailable", btf_l)
+    _e2e_write_scn(root, "btf-empty", {"size": 0},
+                   btf_passive, "3", btf_load, "3",
+                   _e2e_refuse_out("btf-truncated"),
+                   "3", "no")
+    _e2e_write_scn(
+        root, "btf-truncated",
+        {"size": 512, "orig_size": 1024,
+         "head_equal": True},
+        btf_passive, "3", btf_load, "3",
+        _e2e_refuse_out("btf-truncated"), "3",
+        "no")
+    attempt = _e2e_memcg_attempt()
+    _e2e_write_scn(
+        root, "memcg", {"attempt": attempt},
+        alu, "0",
+        _e2e_doctor("load-check", "unavailable",
+                    _e2e_all(("unavailable",
+                              "load-enomem"))),
+        "3", _e2e_refuse_out("load-enomem"),
+        "3", "no",
+        memcg={"attempts": [attempt],
+               "chosen": 0})
+
+
+def _e2e_entry():
+    return {
+        "id": "6.6",
+        "upstream": "6.6.160",
+        "release": "6.6.160-0606160-generic",
+        "expected": {
+            cap: {"verdict": "admitted",
+                  "reason_class": "live-verified"}
+            for cap in km.CAPS},
+        "oracle": {"omitted": []},
+        "source": {
+            "kind": "archive",
+            "vng_version": "v6.6.160",
+            "archive_date": "2026-10-21 11:32",
+            "vmlinuz_sha256": "a" * 64,
+            "modules_manifest_sha256": "b" * 64,
+        },
+    }
+
+
+def _e2e_ctx():
+    return {
+        "mode": "scenarios", "kind": "deb",
+        "source_sha256": "d" * 64,
+        "kernel_selector": "--kernel 6.6",
+        "duration_s": 60, "dd_count": 128,
+        "timeout_s": 900, "cpus": 4,
+        "timeout": False,
+        "source": {
+            "memveil": {"commit": "e" * 40,
+                        "dirty": False},
+            "locks": {
+                "cargo_lock_sha256": "f" * 64,
+                "ebpf_lock_sha256": "0" * 64},
+        },
+        "toolchain": {
+            "lock_sha256": "a" * 64,
+            "ebpf_lock_sha256": "b" * 64,
+            "channel": "1.100.0",
+            "tools": {"cargo": "1.100.0",
+                      "rustc": "1.100.0",
+                      "bpf_linker": "0.10.4"},
+        },
+        "lock_tools": {
+            "bpftrace": "bpftrace v0.25.0",
+            "bpftool": "bpftool v7.7.0"},
+        "shipped_profile_id": None,
+    }
+
+
+def _e2e_job(negs):
+    return {
+        "id": "6.6", "vng_version": "v6.6.160",
+        "release": "6.6.160-0606160-generic",
+        "admitted": list(km.CAPS),
+        "duration": 60, "dd_count": 128,
+        "run_id": _E2E_RUN_ID,
+        "data_serial": "mv0",
+        "scratch_serial": "mv1",
+        "deb": "/work/x/memveil.deb",
+        "repo": "/work/memveil",
+        "negatives": dict(negs),
+    }
+
+
+def _e2e_green_row(tmp_path):
+    row = tmp_path / "row"
+    row.mkdir()
+    blobs = {name: ("object-%s" % name).encode()
+             for name in NEG_SHAS}
+    negs = {name: _sha(blob)
+            for name, blob in blobs.items()}
+    _e2e_green_scenarios(row, negs)
+    (row / "job.json").write_text(
+        json.dumps(_e2e_job(negs)))
+    (row / "artifacts.json").write_text(
+        json.dumps({
+            "mode": "deb",
+            "binary": {"path": "/usr/bin/memveil",
+                       "sha256": "b" * 64},
+            "dpkg_version": "0.1.0-1",
+            "bpf": {"attempt": "c" * 64},
+            "bpftrace": "bpftrace v0.25.0",
+            "bpftool": "bpftool v7.7.0"}))
+    (row / "vng.exit").write_text("0")
+    (row / "console.txt").write_text("boot\n")
+    (row / "cache.txt").write_text("hit /cache\n")
+    (row / "configid.txt").write_text(
+        "1" * 64 + "\n")
+    (row / "btf-sha.txt").write_text(
+        "2" * 64 + "\n")
+    (row / "uname.txt").write_text(
+        "Linux guest 6.6.160\n")
+    (row / "mods.txt").write_text(
+        "6.6.160\nguest\n")
+    (row / "version.txt").write_text("#1 SMP\n")
+    (row / "lockdown.txt").write_text("none\n")
+    (row / "hooks.json").write_text(json.dumps(
+        {"present": {"tp": True}, "omitted": [],
+         "btf": True}))
+    negdir = row / "neg"
+    negdir.mkdir()
+    for name, blob in blobs.items():
+        (negdir / ("swiotlb_copy-%s.bpf.o"
+                   % name)).write_bytes(blob)
+    return row
+
+
+def _e2e_guard_row(tmp_path):
+    row = tmp_path / "row"
+    row.mkdir()
+    (row / "job.json").write_text(json.dumps(
+        _e2e_job({"renamed_field": "1" * 64})))
+    (row / "FAIL.txt").write_text(
+        "scenario mounts missing: /tmp/mv/repo\n")
+    (row / "vng.exit").write_text("42")
+    (row / "console.txt").write_text(
+        "virtme.initmount0 on /tmp/export type 9p\n"
+        "scenario mounts missing: /tmp/mv/repo\n")
+    (row / "cache.txt").write_text("hit /cache\n")
+    return row
+
+
+def _e2e_collect(entry, row, tmp_path):
+    return kmt.collect_scenarios(
+        entry, str(row), {}, 5.0, _E2E_RUN_ID,
+        False, str(tmp_path))
+
+
+def test_collector_green_row_receipts(tmp_path):
+    row = _e2e_green_row(tmp_path)
+    entry = _e2e_entry()
+    rec = _e2e_collect(entry, row, tmp_path)
+    assert rec["ok"] is True
+    assert len(rec["scenarios"]) == 12
+    assert [res["status"]
+            for res in rec["scenarios"]] == \
+        ["ok"] * 12
+    doc = km.write_row_receipt(
+        row, rec, entry, _e2e_ctx())
+    for res in rec["scenarios"]:
+        assert set(res) == {"name", "status",
+                            "checks"}
+    assert doc["actual"]["ok"] is True
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+    assert detail == \
+        "row re-derived PASS from the receipt"
+    ok, detail = km.rederive_row(row, rec)
+    assert ok, detail
+    assert detail == \
+        "row re-derived PASS from the receipt"
+
+
+def test_collector_guard_trip_row_receipts(
+        tmp_path):
+    row = _e2e_guard_row(tmp_path)
+    entry = _e2e_entry()
+    rec = _e2e_collect(entry, row, tmp_path)
+    assert rec["ok"] is False
+    assert rec["negatives"] == {}
+    assert "scenario mounts missing: " \
+        "/tmp/mv/repo" in rec["detail"]
+    assert len(rec["scenarios"]) == 12
+    doc = km.write_row_receipt(
+        row, rec, entry, _e2e_ctx())
+    for res in rec["scenarios"]:
+        assert set(res) == {"name", "status",
+                            "checks"}
+    assert doc["actual"]["ok"] is False
+    assert doc["artifacts"] == {
+        "status": "no-guest"}
+    assert doc["negatives"] == {}
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert not ok
+    assert detail == \
+        "row re-derived FAIL from the receipt"
+    ok, detail = km.rederive_row(row, rec)
+    assert not ok
+    assert detail == \
+        "row re-derived FAIL from the receipt"
