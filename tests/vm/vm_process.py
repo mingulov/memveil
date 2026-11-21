@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Disposable guest processes run in an owned process group."""
 import os
+import select
 import signal
 import subprocess
+import time
 
 
 # Post-kill grace for the final pipe drain. Killed group
@@ -36,43 +38,94 @@ def _capture_text(blob, stream):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _collect(proc,timeout):
+    """Drain both pipes with a deadline, then reap.
+
+    Returns (out_bytes, err_bytes, done): done means
+    both pipes hit EOF and the child reaped. Partial
+    bytes survive either deadline: unlike
+    Popen.communicate, a child that outlives its
+    closed pipes costs the reap only, never the bytes
+    already read (communicate raises its final wait
+    timeout with empty output fields, discarding
+    them). EOF'd streams are closed, as with
+    communicate. No stdin pipe: the caller leaves
+    stdin inherited.
+    """
+    want={}
+    for key,name in (("out","stdout"),("err","stderr")):
+        stream=getattr(proc,name,None)
+        if stream is not None and not stream.closed:
+            want[stream]=key
+    chunks={"out":[],"err":[]}
+    for stream in want:
+        try:
+            os.set_blocking(stream.fileno(),False)
+        except (OSError,ValueError):
+            pass
+    open_streams=list(want)
+    end=time.monotonic()+timeout
+    try:
+        while open_streams:
+            remaining=end-time.monotonic()
+            if remaining<=0:
+                break
+            try:
+                ready,_,_=select.select(
+                    open_streams,[],[],min(remaining,0.5))
+            except (OSError,ValueError):
+                break
+            for stream in ready:
+                try:
+                    data=os.read(stream.fileno(),65536)
+                except BlockingIOError:
+                    continue
+                except (OSError,ValueError):
+                    data=b""
+                if data:
+                    chunks[want[stream]].append(data)
+                    continue
+                try:
+                    stream.close()
+                except (OSError,ValueError):
+                    pass
+                open_streams.remove(stream)
+    finally:
+        for stream in open_streams:
+            try:
+                os.set_blocking(stream.fileno(),True)
+            except (OSError,ValueError):
+                pass
+    try:
+        proc.wait(timeout=max(end-time.monotonic(),0))
+    except subprocess.TimeoutExpired:
+        return (b"".join(chunks["out"]),
+                b"".join(chunks["err"]),False)
+    return (b"".join(chunks["out"]),b"".join(chunks["err"]),
+            not open_streams)
+
+
 def run_owned_guest(cmd,timeout):
     proc=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
                           start_new_session=True)
+    first_out,first_err,done=_collect(proc,timeout)
+    if done:
+        out=_capture_text(first_out,"stdout")
+        err=_capture_text(first_err,"stderr")
+        return subprocess.CompletedProcess(cmd,proc.returncode,out,err)
+    # Descendant QEMU processes share this newly created group. Nothing
+    # from before this invocation is addressed by the cleanup.
+    # The drain above reaps the child once it exits, so the
+    # group may already be empty; that means there is
+    # nothing left to signal.
     try:
-        raw_out,raw_err=proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # Descendant QEMU processes share this newly created group. Nothing
-        # from before this invocation is addressed by the cleanup.
         os.killpg(proc.pid,signal.SIGTERM)
-        try:
-            raw_out,raw_err=proc.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid,signal.SIGKILL)
-            try:
-                raw_out,raw_err=proc.communicate(
-                    timeout=FINAL_DRAIN_GRACE)
-            except subprocess.TimeoutExpired as final:
-                # Either pipe may still be complete (EOF closes
-                # it); only a pipe the deadline caught open is
-                # truncated, and it says so instead of silently
-                # dropping whatever the holder still withheld.
-                out=_capture_text(final.output,"stdout")
-                err=_capture_text(final.stderr,"stderr")
-                if not proc.stdout.closed:
-                    out+=("\n[vm_process: stdout truncated after "
-                           "%ds post-kill drain]\n" % FINAL_DRAIN_GRACE)
-                elif final.output is None:
-                    out+=("\n[vm_process: stdout unavailable: "
-                           "process unreaped with closed pipes]\n")
-                if not proc.stderr.closed:
-                    err+=("\n[vm_process: stderr truncated after "
-                           "%ds post-kill drain]\n" % FINAL_DRAIN_GRACE)
-                elif final.stderr is None:
-                    err+=("\n[vm_process: stderr unavailable: "
-                           "process unreaped with closed pipes]\n")
-                raise subprocess.TimeoutExpired(cmd,timeout,output=out,
-                                                stderr=err)
+    except ProcessLookupError:
+        pass
+    second_out,second_err,done=_collect(proc,10)
+    raw_out=first_out+second_out
+    raw_err=first_err+second_err
+    if done:
         out=_capture_text(raw_out,"stdout")
         err=_capture_text(raw_err,"stderr")
         # The post-kill drain holds the partial console
@@ -82,6 +135,25 @@ def run_owned_guest(cmd,timeout):
         # output.
         raise subprocess.TimeoutExpired(cmd,timeout,output=out,
                                         stderr=err)
-    out=_capture_text(raw_out,"stdout")
-    err=_capture_text(raw_err,"stderr")
-    return subprocess.CompletedProcess(cmd,proc.returncode,out,err)
+    try:
+        os.killpg(proc.pid,signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    third_out,third_err,_final=_collect(proc,FINAL_DRAIN_GRACE)
+    out=_capture_text(raw_out+third_out,"stdout")
+    err=_capture_text(raw_err+third_err,"stderr")
+    # Either pipe may still be complete (EOF closes
+    # it); only a pipe the deadline caught open is
+    # truncated, and it says so instead of silently
+    # dropping whatever the holder still withheld.
+    if not proc.stdout.closed:
+        out+=("\n[vm_process: stdout truncated after "
+               "%ds post-kill drain]\n" % FINAL_DRAIN_GRACE)
+    if not proc.stderr.closed:
+        err+=("\n[vm_process: stderr truncated after "
+               "%ds post-kill drain]\n" % FINAL_DRAIN_GRACE)
+    if proc.poll() is None:
+        err+=("\n[vm_process: child unreaped after "
+               "SIGKILL; showing captured output]\n")
+    raise subprocess.TimeoutExpired(cmd,timeout,output=out,
+                                    stderr=err)

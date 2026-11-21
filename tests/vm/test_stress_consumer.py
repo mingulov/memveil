@@ -824,7 +824,7 @@ def self_test_guest_oracle(tmp, pairs):
             guest_oracle.FIXTURE_KO, "rb").read()
         ok = check("oracle-rebuild", same,
                    "rebuilt bytes differ") and ok
-    except ValueError as exc:
+    except (ValueError, subprocess.TimeoutExpired) as exc:
         ok = check("oracle-rebuild", False, str(exc)[:200]) and ok
     return ok
 
@@ -1190,18 +1190,22 @@ def self_test_forensics(tmp):
     class StuckPopen:
         """A child that never dies within a deadline.
 
-        communicate() always raises TimeoutExpired with
-        byte partials (like POSIX _communicate); wait()
-        honors its deadline like the kernel, then raises.
+        Real pipes carry one partial write each, then
+        EOF (diagnostics written, child wedged without
+        exiting); wait() honors its deadline like the
+        kernel, then raises; the child is never reaped.
         """
 
         def __init__(self, *args, **kwargs):
             self.args = args[0] if args else None
-
-        def communicate(self, *args, **kwargs):
-            raise subprocess.TimeoutExpired(
-                self.args, 1, output=b"partial-out",
-                stderr=b"partial-err")
+            out_r, out_w = os.pipe()
+            err_r, err_w = os.pipe()
+            os.write(out_w, b"partial-out")
+            os.write(err_w, b"partial-err")
+            os.close(out_w)
+            os.close(err_w)
+            self.stdout = os.fdopen(out_r, "rb")
+            self.stderr = os.fdopen(err_r, "rb")
 
         def kill(self):
             pass
@@ -1217,6 +1221,10 @@ def self_test_forensics(tmp):
         def poll(self):
             return None
 
+    # The wedge costs the full bound shape: the 1 s
+    # command window (pipes EOF, reap wedged), then
+    # the 5 s reap and the 5 s drain. Any wait(None)
+    # still trips the ceiling on the 3600 s tripwire.
     start = time.monotonic()
     try:
         with mock.patch.object(stress_guest.subprocess,
@@ -1228,7 +1236,7 @@ def self_test_forensics(tmp):
     except stress_guest.StepTimeout as exc:
         elapsed = time.monotonic() - start
         ok = check("forensics-sh-kill-bounded",
-                   4.5 <= elapsed < 10
+                   10.5 <= elapsed < 15
                    and "partial-out" in exc.out
                    and "partial-err" in exc.err
                    and "unreaped" in exc.err,
@@ -1251,7 +1259,7 @@ def self_test_forensics(tmp):
     except subprocess.TimeoutExpired as exc:
         elapsed = time.monotonic() - start
         ok = check("forensics-run-kill-bounded",
-                   4.5 <= elapsed < 10
+                   10.5 <= elapsed < 15
                    and "partial-out" in (exc.output or "")
                    and "partial-err" in (exc.stderr or ""),
                    "%.1fs %r" % (elapsed,
@@ -1437,6 +1445,228 @@ def self_test_forensics(tmp):
     except SystemExit as exc:
         ok = check("forensics-tracer-kill-reaps", False,
                    str(exc)) and ok
+    # A child that writes diagnostics, closes both pipes,
+    # then sleeps models the unreaped wedge: the bytes are
+    # already read when the reap deadline expires, so they
+    # must survive it on every runner.
+    close_script = ("import os,time;"
+                    "os.write(1,b'eof-out');"
+                    "os.write(2,b'eof-err\\xff');"
+                    "os.close(1);os.close(2);"
+                    "time.sleep(30)")
+    real_popen = subprocess.Popen
+    wedged = []
+
+    class WedgedPopen(real_popen):
+        """A real child whose SIGKILL never lands."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            wedged.append(self)
+
+        def kill(self):
+            pass
+
+    def reap_wedged():
+        for kid in wedged:
+            try:
+                os.kill(kid.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                kid.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        del wedged[:]
+
+    start = time.monotonic()
+    try:
+        with mock.patch.object(stress_guest.subprocess,
+                               "Popen", WedgedPopen):
+            stress_guest.sh([sys.executable, "-c",
+                             close_script], timeout=1)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-sh-closed-pipe", False,
+                   "returned") and ok
+    except stress_guest.StepTimeout as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-sh-closed-pipe",
+                   10.5 <= elapsed < 15
+                   and "eof-out" in exc.out
+                   and "eof-err" in exc.err
+                   and "\ufffd" in exc.err
+                   and "unreaped" in exc.err,
+                   "%.1fs %r %r" % (elapsed, exc.out,
+                                    exc.err)) and ok
+    finally:
+        reap_wedged()
+    start = time.monotonic()
+    try:
+        with mock.patch.object(core.subprocess, "Popen",
+                               WedgedPopen):
+            core.run([sys.executable, "-c", close_script],
+                     timeout=1)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-run-closed-pipe", False,
+                   "returned") and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-run-closed-pipe",
+                   10.5 <= elapsed < 15
+                   and "eof-out" in (exc.output or "")
+                   and "eof-err" in (exc.stderr or ""),
+                   "%.1fs %r %r" % (elapsed, exc.output,
+                                    exc.stderr)) and ok
+    finally:
+        reap_wedged()
+    import vm_process
+    start = time.monotonic()
+    try:
+        with mock.patch.object(vm_process.subprocess,
+                               "Popen", WedgedPopen):
+            with mock.patch.object(vm_process.os,
+                                   "killpg",
+                                   lambda *a, **k: None):
+                run_owned_guest([sys.executable, "-c",
+                                 close_script],
+                                timeout=0.2)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-owned-closed-pipe", False,
+                   "returned") and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-owned-closed-pipe",
+                   10.5 <= elapsed < 15
+                   and "eof-out" in (exc.stdout or "")
+                   and "eof-err" in (exc.stderr or "")
+                   and "\ufffd" in (exc.stderr or "")
+                   and "unreaped" in (exc.stderr or "")
+                   and "truncated"
+                   not in (exc.stdout or "")
+                   and "truncated"
+                   not in (exc.stderr or "")
+                   and "unavailable"
+                   not in (exc.stdout or "")
+                   and "unavailable"
+                   not in (exc.stderr or ""),
+                   "%.1fs %r %r" % (elapsed, exc.stdout,
+                                    exc.stderr)) and ok
+    finally:
+        reap_wedged()
+    # The audit rebuild keeps a wedged make's stderr the
+    # same way: the timeout propagates with the bytes,
+    # never an empty failure.
+    wedge_build = os.path.join(tmp, "rebuild-wedge")
+    wedge_tree = os.path.join(
+        wedge_build, "tree", "usr", "src",
+        "linux-headers-7.0.14-070014-generic")
+    os.makedirs(os.path.join(wedge_tree, "include",
+                             "config"))
+    Path(wedge_tree, "Makefile").write_text("# fake\n")
+    Path(wedge_tree, "include", "config",
+         "kernel.release").write_text(
+        guest_oracle.GUEST_RELEASE + "\n")
+
+    class WedgedMake(WedgedPopen):
+        """The audit make, wedged past its deadlines."""
+
+        def __init__(self, args, **kwargs):
+            super().__init__([sys.executable, "-c",
+                              close_script], **kwargs)
+
+    start = time.monotonic()
+    try:
+        with mock.patch.object(guest_oracle.subprocess,
+                               "Popen", WedgedMake):
+            with mock.patch.object(guest_oracle,
+                                   "REBUILD_TIMEOUT", 1):
+                guest_oracle.rebuild_from_kbuild(
+                    os.path.join(wedge_build, "scratch"),
+                    kbuild=wedge_build)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-closed-pipe", False,
+                   "returned") and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-closed-pipe",
+                   10.5 <= elapsed < 15
+                   and "eof-out" in (exc.output or "")
+                   and "eof-err" in (exc.stderr or ""),
+                   "%.1fs %r %r" % (elapsed, exc.output,
+                                    exc.stderr)) and ok
+    except ValueError as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-closed-pipe", False,
+                   "%.1fs %s" % (elapsed, exc)) and ok
+    finally:
+        reap_wedged()
+    # A make that exits 0 while a stray holder keeps its
+    # pipes open must not vouch for an artifact: both
+    # deadlines expired, so the timeout propagates even
+    # though the .ko exists.
+    held_build = os.path.join(tmp, "rebuild-held")
+    held_tree = os.path.join(
+        held_build, "tree", "usr", "src",
+        "linux-headers-7.0.14-070014-generic")
+    os.makedirs(os.path.join(held_tree, "include",
+                             "config"))
+    Path(held_tree, "Makefile").write_text("# fake\n")
+    Path(held_tree, "include", "config",
+         "kernel.release").write_text(
+        guest_oracle.GUEST_RELEASE + "\n")
+    holder_pid = os.path.join(tmp, "rebuild-holder.pid")
+    standin = ("import subprocess,sys,pathlib;"
+               "d=[a[2:] for a in sys.argv if "
+               "a.startswith('M=')][0];"
+               "pathlib.Path(d,'memveil_dma_oracle.ko')"
+               ".write_bytes(b'fake-ko');"
+               "print('standin-marker',flush=True);"
+               "p=subprocess.Popen([sys.executable,'-c',"
+               "'import os,time;os.setsid();"
+               "time.sleep(30)']);"
+               "pathlib.Path(%r).write_text(str(p.pid))"
+               % holder_pid)
+
+    class HeldMake(real_popen):
+        """A make that exits while a stray holds pipes."""
+
+        def __init__(self, args, **kwargs):
+            super().__init__([sys.executable, "-c",
+                              standin] + list(args),
+                             **kwargs)
+
+    start = time.monotonic()
+    try:
+        with mock.patch.object(guest_oracle.subprocess,
+                               "Popen", HeldMake):
+            with mock.patch.object(guest_oracle,
+                                   "REBUILD_TIMEOUT", 0.2):
+                guest_oracle.rebuild_from_kbuild(
+                    os.path.join(held_build, "scratch"),
+                    kbuild=held_build)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-deadline-refuses",
+                   False,
+                   "%.1fs returned" % elapsed) and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-deadline-refuses",
+                   4.5 <= elapsed < 10
+                   and "standin-marker"
+                   in (exc.output or ""),
+                   "%.1fs %r" % (elapsed,
+                                 exc.output)) and ok
+    except ValueError as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-deadline-refuses",
+                   False,
+                   "%.1fs %s" % (elapsed, exc)) and ok
+    finally:
+        try:
+            os.kill(int(open(holder_pid).read()),
+                    signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
     return ok
 
 

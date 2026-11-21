@@ -110,6 +110,78 @@ def _pipe_text(blob):
         "\r\n", "\n").replace("\r", "\n")
 
 
+def _collect(proc, timeout):
+    """Drain both pipes with a deadline, then reap.
+
+    Returns (out_bytes, err_bytes, done): done means
+    both pipes hit EOF and the child reaped. Partial
+    bytes survive either deadline: unlike
+    Popen.communicate, a child that outlives its
+    closed pipes costs the reap only, never the bytes
+    already read (communicate raises its final wait
+    timeout with empty output fields, discarding
+    them). EOF'd streams are closed, as with
+    communicate. No stdin pipe: every caller here
+    leaves stdin inherited.
+    """
+    want = {}
+    for key, name in (("out", "stdout"),
+                      ("err", "stderr")):
+        stream = getattr(proc, name, None)
+        if stream is not None and not stream.closed:
+            want[stream] = key
+    chunks = {"out": [], "err": []}
+    for stream in want:
+        try:
+            os.set_blocking(stream.fileno(), False)
+        except (OSError, ValueError):
+            pass
+    open_streams = list(want)
+    end = time.monotonic() + timeout
+    try:
+        while open_streams:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready, _, _ = select.select(
+                    open_streams, [], [],
+                    min(remaining, 0.5))
+            except (OSError, ValueError):
+                break
+            for stream in ready:
+                try:
+                    data = os.read(stream.fileno(),
+                                   65536)
+                except BlockingIOError:
+                    continue
+                except (OSError, ValueError):
+                    data = b""
+                if data:
+                    chunks[want[stream]].append(data)
+                    continue
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+                open_streams.remove(stream)
+    finally:
+        for stream in open_streams:
+            try:
+                os.set_blocking(stream.fileno(), True)
+            except (OSError, ValueError):
+                pass
+    try:
+        proc.wait(timeout=max(end - time.monotonic(),
+                              0))
+    except subprocess.TimeoutExpired:
+        return (b"".join(chunks["out"]),
+                b"".join(chunks["err"]), False)
+    return (b"".join(chunks["out"]),
+            b"".join(chunks["err"]),
+            not open_streams)
+
+
 def sh(args, timeout=TIMEOUT_DMESG, **kw):
     """Run one guest command, bounded, partials preserved.
 
@@ -123,18 +195,17 @@ def sh(args, timeout=TIMEOUT_DMESG, **kw):
     deadline, or pipes a stray holder keeps open, delays
     forensics but never the verdict: StepTimeout carries
     whatever partials were readable, with the collection
-    state noted on the diagnostic stream.
+    state noted on the diagnostic stream. Bytes read
+    before either deadline survive it, even when the
+    child outlives its closed pipes.
     """
     proc = subprocess.Popen(args, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, **kw)
-    try:
-        raw_out, raw_err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        pass
-    else:
+    first_out, first_err, done = _collect(proc, timeout)
+    if done:
         return subprocess.CompletedProcess(
-            args, proc.returncode, _pipe_text(raw_out),
-            _pipe_text(raw_err))
+            args, proc.returncode, _pipe_text(first_out),
+            _pipe_text(first_err))
     try:
         proc.kill()
     except ProcessLookupError:
@@ -143,22 +214,15 @@ def sh(args, timeout=TIMEOUT_DMESG, **kw):
         proc.wait(timeout=TIMEOUT_REAP)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        raw_out, raw_err = proc.communicate(
-            timeout=TIMEOUT_DRAIN)
-    except subprocess.TimeoutExpired as partial:
-        out = _pipe_text(partial.output)
-        err = _pipe_text(partial.stderr)
-        cut = True
-    else:
-        out = _pipe_text(raw_out)
-        err = _pipe_text(raw_err)
-        cut = False
+    second_out, second_err, drained = _collect(
+        proc, TIMEOUT_DRAIN)
+    out = _pipe_text(first_out + second_out)
+    err = _pipe_text(first_err + second_err)
     if proc.poll() is None:
         err += ("\n[stress-guest: child unreaped after "
-                "%ds; showing partial output]\n"
+                "%ds; showing captured output]\n"
                 % TIMEOUT_REAP)
-    elif cut:
+    elif not drained:
         err += ("\n[stress-guest: output truncated after "
                 "%ds post-kill drain]\n" % TIMEOUT_DRAIN)
     raise StepTimeout(" ".join(args), timeout, out, err)

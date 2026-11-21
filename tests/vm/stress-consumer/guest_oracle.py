@@ -23,10 +23,12 @@ byte-identical output is the pass criterion.
 import hashlib
 import json
 import os
+import select
 import shutil
 import struct
 import subprocess
 import tempfile
+import time
 
 GUEST_RELEASE = "7.0.14-070014-generic"
 GUEST_VERMAGIC = "7.0.14-070014-generic SMP preempt mod_unload modversions "
@@ -197,6 +199,83 @@ def kbuild_root():
         GUEST_RELEASE)
 
 
+# Bound for the audit make itself; the reap and
+# drain below add five seconds each past a kill.
+REBUILD_TIMEOUT = 600
+
+
+def _collect(proc, timeout):
+    """Drain both pipes with a deadline, then reap.
+
+    Returns (out_bytes, err_bytes, done): done means
+    both pipes hit EOF and the child reaped. Partial
+    bytes survive either deadline: unlike
+    Popen.communicate, a child that outlives its
+    closed pipes costs the reap only, never the bytes
+    already read (communicate raises its final wait
+    timeout with empty output fields, discarding
+    them). EOF'd streams are closed, as with
+    communicate. No stdin pipe: every caller here
+    leaves stdin inherited.
+    """
+    want = {}
+    for key, name in (("out", "stdout"),
+                      ("err", "stderr")):
+        stream = getattr(proc, name, None)
+        if stream is not None and not stream.closed:
+            want[stream] = key
+    chunks = {"out": [], "err": []}
+    for stream in want:
+        try:
+            os.set_blocking(stream.fileno(), False)
+        except (OSError, ValueError):
+            pass
+    open_streams = list(want)
+    end = time.monotonic() + timeout
+    try:
+        while open_streams:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready, _, _ = select.select(
+                    open_streams, [], [],
+                    min(remaining, 0.5))
+            except (OSError, ValueError):
+                break
+            for stream in ready:
+                try:
+                    data = os.read(stream.fileno(),
+                                   65536)
+                except BlockingIOError:
+                    continue
+                except (OSError, ValueError):
+                    data = b""
+                if data:
+                    chunks[want[stream]].append(data)
+                    continue
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+                open_streams.remove(stream)
+    finally:
+        for stream in open_streams:
+            try:
+                os.set_blocking(stream.fileno(), True)
+            except (OSError, ValueError):
+                pass
+    try:
+        proc.wait(timeout=max(end - time.monotonic(),
+                              0))
+    except subprocess.TimeoutExpired:
+        return (b"".join(chunks["out"]),
+                b"".join(chunks["err"]), False)
+    return (b"".join(chunks["out"]),
+            b"".join(chunks["err"]),
+            not open_streams)
+
+
 def rebuild_from_kbuild(scratch, kbuild=None):
     """Rebuild the oracle from the extracted headers (audit).
 
@@ -205,7 +284,10 @@ def rebuild_from_kbuild(scratch, kbuild=None):
     provenance build command and returns the fresh .ko
     path. Byte-equality with the fixture is the caller's
     pass criterion. Raises ValueError when the headers
-    cache is absent or fails its own hash check.
+    cache is absent or fails its own hash check, or
+    when the build fails; a build that outlives its
+    deadlines raises TimeoutExpired with the partials
+    instead of vouching for an artifact.
     """
     root = kbuild or kbuild_root()
     tree = os.path.join(
@@ -241,13 +323,15 @@ def rebuild_from_kbuild(scratch, kbuild=None):
     # host runner in import order, so it cannot call it):
     # SIGKILL plus a bounded reap and a bounded drain,
     # never subprocess.run's wait(None) after the kill.
+    # Bytes read before either deadline survive it,
+    # even when make outlives its closed pipes.
     make = subprocess.Popen(
         ["make", "-C", tree, "M=" + build_dir, "modules",
          "CC=gcc", "KCFLAGS=" + kflags],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    try:
-        raw_out, raw_err = make.communicate(timeout=600)
-    except subprocess.TimeoutExpired:
+    first_out, first_err, done = _collect(
+        make, REBUILD_TIMEOUT)
+    if not done:
         try:
             make.kill()
         except ProcessLookupError:
@@ -256,11 +340,20 @@ def rebuild_from_kbuild(scratch, kbuild=None):
             make.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
-        try:
-            raw_out, raw_err = make.communicate(timeout=5)
-        except subprocess.TimeoutExpired as partial:
-            raw_out, raw_err = (partial.output,
-                                partial.stderr)
+        second_out, second_err, _drained = _collect(
+            make, 5)
+        # Fail closed: a build that outlives its
+        # deadlines never vouches for an artifact,
+        # even when the .ko exists and make since
+        # exited. The timeout propagates carrying
+        # the partials.
+        raise subprocess.TimeoutExpired(
+            make.args, REBUILD_TIMEOUT,
+            output=(first_out + second_out).decode(
+                "utf-8", "replace"),
+            stderr=(first_err + second_err).decode(
+                "utf-8", "replace"))
+    raw_out, raw_err = first_out, first_err
     err = (raw_err or b"").decode("utf-8", "replace")
     made = os.path.join(build_dir, "memveil_dma_oracle.ko")
     if make.returncode != 0 or not os.path.isfile(made):

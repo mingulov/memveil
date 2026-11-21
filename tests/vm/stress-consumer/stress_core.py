@@ -13,9 +13,11 @@ unit-tested on synthetic logs; live boots stay in the runner.
 import hashlib
 import json
 import os
+import select
 import subprocess
 import sys
 import tarfile
+import time
 from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -123,6 +125,78 @@ def _run_text(blob, binary):
         "\r\n", "\n").replace("\r", "\n")
 
 
+def _collect(proc, timeout):
+    """Drain both pipes with a deadline, then reap.
+
+    Returns (out_bytes, err_bytes, done): done means
+    both pipes hit EOF and the child reaped. Partial
+    bytes survive either deadline: unlike
+    Popen.communicate, a child that outlives its
+    closed pipes costs the reap only, never the bytes
+    already read (communicate raises its final wait
+    timeout with empty output fields, discarding
+    them). EOF'd streams are closed, as with
+    communicate. No stdin pipe: every caller here
+    leaves stdin inherited.
+    """
+    want = {}
+    for key, name in (("out", "stdout"),
+                      ("err", "stderr")):
+        stream = getattr(proc, name, None)
+        if stream is not None and not stream.closed:
+            want[stream] = key
+    chunks = {"out": [], "err": []}
+    for stream in want:
+        try:
+            os.set_blocking(stream.fileno(), False)
+        except (OSError, ValueError):
+            pass
+    open_streams = list(want)
+    end = time.monotonic() + timeout
+    try:
+        while open_streams:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready, _, _ = select.select(
+                    open_streams, [], [],
+                    min(remaining, 0.5))
+            except (OSError, ValueError):
+                break
+            for stream in ready:
+                try:
+                    data = os.read(stream.fileno(),
+                                   65536)
+                except BlockingIOError:
+                    continue
+                except (OSError, ValueError):
+                    data = b""
+                if data:
+                    chunks[want[stream]].append(data)
+                    continue
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+                open_streams.remove(stream)
+    finally:
+        for stream in open_streams:
+            try:
+                os.set_blocking(stream.fileno(), True)
+            except (OSError, ValueError):
+                pass
+    try:
+        proc.wait(timeout=max(end - time.monotonic(),
+                              0))
+    except subprocess.TimeoutExpired:
+        return (b"".join(chunks["out"]),
+                b"".join(chunks["err"]), False)
+    return (b"".join(chunks["out"]),
+            b"".join(chunks["err"]),
+            not open_streams)
+
+
 def run(cmd, cwd=None, timeout=600, env=None, text=True):
     """Run a command, returning the completed process.
 
@@ -132,7 +206,9 @@ def run(cmd, cwd=None, timeout=600, env=None, text=True):
     unconditionally (contrast subprocess.run, which reaps
     with wait(None) after the kill). A timeout still
     raises TimeoutExpired, carrying whatever partials
-    were readable; text decoding never raises.
+    were readable; text decoding never raises. Bytes
+    read before either deadline survive it, even when
+    the child outlives its closed pipes.
     """
     # Binary pipes throughout: decoding happens once,
     # below, so undecodable bytes can never raise out of
@@ -141,14 +217,12 @@ def run(cmd, cwd=None, timeout=600, env=None, text=True):
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env)
     binary = not text
-    try:
-        raw_out, raw_err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        pass
-    else:
+    first_out, first_err, done = _collect(proc, timeout)
+    if done:
         return subprocess.CompletedProcess(
-            cmd, proc.returncode, _run_text(raw_out, binary),
-            _run_text(raw_err, binary))
+            cmd, proc.returncode, _run_text(first_out,
+                                            binary),
+            _run_text(first_err, binary))
     try:
         proc.kill()
     except ProcessLookupError:
@@ -157,14 +231,14 @@ def run(cmd, cwd=None, timeout=600, env=None, text=True):
         proc.wait(timeout=RUN_REAP_TIMEOUT)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        raw_out, raw_err = proc.communicate(
-            timeout=RUN_DRAIN_TIMEOUT)
-    except subprocess.TimeoutExpired as partial:
-        raw_out, raw_err = partial.output, partial.stderr
+    second_out, second_err, _drained = _collect(
+        proc, RUN_DRAIN_TIMEOUT)
     raise subprocess.TimeoutExpired(
-        cmd, timeout, output=_run_text(raw_out, binary),
-        stderr=_run_text(raw_err, binary))
+        cmd, timeout,
+        output=_run_text(first_out + second_out,
+                         binary),
+        stderr=_run_text(first_err + second_err,
+                         binary))
 
 
 def git_head(repo):
