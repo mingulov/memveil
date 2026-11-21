@@ -87,6 +87,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN_ROOT_DIR = os.path.dirname(HERE)
@@ -767,28 +768,133 @@ def select_built_binary(stdout, bin_name, target_dir):
     return binary
 
 
+def config_file_rustflags(path):
+    """build.rustflags from one Cargo config file, else None.
+
+    A string value splits on whitespace (Cargo keeps
+    quotes literal); an array passes through verbatim.
+    Fails closed on anything this reader cannot reproduce
+    exactly: an include list, target-specific rustflags
+    (those shadow build.rustflags), or a mistyped value.
+    """
+    try:
+        with open(path, "rb") as handle:
+            doc = tomllib.load(handle)
+    except OSError as exc:
+        fail("cannot read cargo config %s: %s" % (path, exc))
+    except tomllib.TOMLDecodeError as exc:
+        fail("cannot parse cargo config %s: %s" % (path, exc))
+    if "include" in doc:
+        fail("cargo config %s uses include: pass its flags "
+             "through RUSTFLAGS instead" % path)
+    target = doc.get("target")
+    if target is not None:
+        if not isinstance(target, dict):
+            fail("cargo config %s has a non-table target"
+                 % path)
+        for table in target.values():
+            if isinstance(table, dict) and "rustflags" in table:
+                fail("cargo config %s sets target rustflags: "
+                     "pass its flags through RUSTFLAGS instead"
+                     % path)
+    build = doc.get("build")
+    if build is None:
+        return None
+    if not isinstance(build, dict):
+        fail("cargo config %s has a non-table build" % path)
+    if "rustflags" not in build:
+        return None
+    value = build["rustflags"]
+    if isinstance(value, str):
+        return value.split()
+    if isinstance(value, list) \
+            and all(isinstance(item, str) for item in value):
+        return list(value)
+    fail("cargo config %s has a non-string build.rustflags"
+         % path)
+
+
+def config_layer_rustflags(build_dir, env):
+    """Config-layer flags for a build with no channel set.
+
+    Only consulted when neither CARGO_ENCODED_RUSTFLAGS nor
+    RUSTFLAGS is set: Cargo checks the encoded spelling,
+    then RUSTFLAGS, then the config layer, and a set-but-
+    empty channel still shadows everything below it. Joins
+    the home config first, then each ancestor config down
+    to the build directory, then CARGO_BUILD_RUSTFLAGS
+    last; at one directory the extensionless config wins
+    over config.toml for the key. Fails closed rather than
+    shadowing flags it cannot see.
+    """
+    for name in env:
+        if name.startswith("CARGO_TARGET_") \
+                and name.endswith("_RUSTFLAGS") \
+                and len(name) > len("CARGO_TARGET__RUSTFLAGS"):
+            fail("%s sets target rustflags: pass its flags "
+                 "through RUSTFLAGS instead" % name)
+    home = env.get("CARGO_HOME")
+    if home is None:
+        parent = env.get("HOME", "")
+        home = os.path.join(parent, ".cargo") if parent else ""
+    if home and not os.path.isabs(home):
+        home = os.path.join(os.path.abspath(build_dir), home)
+    flag_dirs = []
+    if home:
+        flag_dirs.append(home)
+    build_dir = os.path.abspath(build_dir)
+    chain = [build_dir]
+    while True:
+        parent = os.path.dirname(chain[-1])
+        if parent == chain[-1]:
+            break
+        chain.append(parent)
+    for ancestor in reversed(chain):
+        flag_dirs.append(os.path.join(ancestor, ".cargo"))
+    flags = []
+    for flag_dir in flag_dirs:
+        values = []
+        for leaf in ("config", "config.toml"):
+            path = os.path.join(flag_dir, leaf)
+            if os.path.isfile(path):
+                values.append(config_file_rustflags(path))
+            elif os.path.lexists(path):
+                fail("cargo config %s is not a readable file"
+                     % path)
+        for value in values:
+            if value is not None:
+                flags.extend(value)
+                break
+    dotted = env.get("CARGO_BUILD_RUSTFLAGS")
+    if dotted is not None:
+        flags.extend(dotted.split())
+    return flags
+
+
 def remap_build_paths(env, rust_dir):
     """Append path remaps so shipped bytes name no build machine.
 
     Home directory first, then the checkout root last, so
     checkout paths land under /build-root (the BPF build
     script applies the same pair to the objects it compiles).
-    Extends the encoded flags: that spelling wins over
-    RUSTFLAGS when both reach cargo, so merge RUSTFLAGS in
-    and drop it rather than clobber it. A missing or empty
-    HOME contributes no remap.
+    Starts from the flag set Cargo itself would use: the
+    encoded spelling when set, else RUSTFLAGS when set (a
+    set-but-empty channel still shadows the rest), else the
+    config layer carried forward so this export shadows
+    nothing. The remap pair lands exactly once at the end
+    and leaves through the encoded channel alone. A missing
+    or empty HOME contributes no remap.
     """
-    flags = []
-    encoded = env.get("CARGO_ENCODED_RUSTFLAGS", "")
-    if encoded:
-        flags.extend(flag for flag in encoded.split("\x1f")
-                     if flag)
-    rustflags = env.get("RUSTFLAGS", "")
-    if rustflags:
+    if "CARGO_ENCODED_RUSTFLAGS" in env:
+        encoded = env["CARGO_ENCODED_RUSTFLAGS"]
+        flags = encoded.split("\x1f") if encoded else []
+    elif "RUSTFLAGS" in env:
         try:
-            flags.extend(shlex.split(rustflags))
+            flags = shlex.split(env["RUSTFLAGS"])
         except ValueError as exc:
             fail("cannot parse RUSTFLAGS: %s" % exc)
+    else:
+        flags = config_layer_rustflags(rust_dir, env)
     home = env.get("HOME", "")
     if home:
         flags.append("--remap-path-prefix=%s=/build-prefix" % home)
