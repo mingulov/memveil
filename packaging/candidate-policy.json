@@ -25,5 +25,7 @@
   },
   "retention_days": "30",
   "schema": "memveil-candidate-policy/1",
-  "trusted_keys": []
+  "trusted_keys": [
+    "2514880f26bf7b7d3157aa5c3e4f80eedacecbc203dbd6b9ec46554283e6a3c7"
+  ]
 }
