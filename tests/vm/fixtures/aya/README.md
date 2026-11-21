@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Toolchain BPF objects for the offline suites
 
 `swiotlb_attempt.bpf.o`, `swiotlb_lifecycle.bpf.o`, and
