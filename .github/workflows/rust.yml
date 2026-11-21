@@ -17,6 +17,13 @@ on:
   push:
   pull_request:
 
+# Hermetic rustup: background self-updates race parallel cargo/rustc
+# invocations (duplicate channel syncs colliding in the downloads
+# cache), breaking nested builds nondeterministically. Toolchains
+# come only from the pinned install steps below.
+env:
+  RUSTUP_AUTO_SELF_UPDATE: disable
+
 jobs:
   deny:
     runs-on: ubuntu-26.04

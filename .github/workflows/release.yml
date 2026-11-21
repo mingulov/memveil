@@ -78,6 +78,11 @@ on:
 
 permissions: {}
 
+# Hermetic rustup: background self-updates race parallel cargo/rustc
+# invocations, breaking nested builds nondeterministically.
+env:
+  RUSTUP_AUTO_SELF_UPDATE: disable
+
 jobs:
   qualify:
     if: inputs.mode == 'qualify'
