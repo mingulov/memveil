@@ -124,6 +124,7 @@ dependencies = [
  "libc",
  "memveil-ebpf-common",
  "memveil-release-entry",
+ "memveil-remap-flags",
 ]
 
 [[package]]
@@ -132,6 +133,10 @@ version = "0.0.0"
 
 [[package]]
 name = "memveil-release-entry"
+version = "0.1.1"
+
+[[package]]
+name = "memveil-remap-flags"
 version = "0.1.1"
 
 [[package]]

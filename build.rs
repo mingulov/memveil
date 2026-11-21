@@ -86,9 +86,13 @@ fn main() {
     // The child invocation inherits the encoded rustflags below, so a flag
     // change must rebuild the BPF objects. Watch both spellings: cargo
     // derives the encoded form from `RUSTFLAGS`, and either may be the one
-    // the caller actually changed.
+    // the caller actually changed. The effective set also reads the dotted
+    // config spelling and the home config location, so those rerun too;
+    // config files print their own watches once probed below.
     println!("cargo::rerun-if-env-changed=RUSTFLAGS");
     println!("cargo::rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    println!("cargo::rerun-if-env-changed=CARGO_BUILD_RUSTFLAGS");
+    println!("cargo::rerun-if-env-changed=CARGO_HOME");
     // The home-directory remap below derives from HOME, so a HOME change
     // must rebuild the BPF objects too.
     println!("cargo::rerun-if-env-changed=HOME");
@@ -181,42 +185,44 @@ fn main() {
     // wrap detection) needs BPF CPU v3, i.e. kernels >= 5.12. MemVeil's
     // floors (attempts 6.0, lifecycle/copy 6.11) are all above that, so
     // v3 is matrix-compatible; non-fetch add/or and CAS lower on any CPU.
-    let mut flags = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    // The child honors the flag set Cargo itself would use: the encoded
+    // spelling when set, else RUSTFLAGS when set (a set-but-empty channel
+    // still shadows the rest), else the config layer carried forward so
+    // this export shadows nothing. The linker flags extend that set, the
+    // remap pair lands exactly once at the end, and everything leaves
+    // through the encoded channel alone.
+    let proc_env =
+        memveil_remap_flags::process_env().unwrap_or_else(|err| panic!("remap flags: {err}"));
+    let effective = memveil_remap_flags::effective_rustflags(&proc_env, &manifest_dir)
+        .unwrap_or_else(|err| panic!("remap flags: {err}"));
+    for probed in &effective.config_files {
+        println!("cargo::rerun-if-changed={}", probed.display());
+    }
+    let mut flags = effective.flags;
+    flags.extend(
+        [
+            "-C",
+            "linker=bpf-linker",
+            "-C",
+            "debuginfo=2",
+            "-C",
+            "link-arg=--btf",
+            "-C",
+            "target-cpu=v3",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
     // Debug paths baked into the shipped objects must not name the build
     // machine: remap the home directory first, then the checkout root
     // last, so checkout paths land under /build-root. Same pair the
     // offline fixtures are rebuilt with (see
     // tests/vm/fixtures/aya/README.md); a missing or empty HOME
     // contributes no remap.
-    let mut extra: Vec<String> = [
-        "-C",
-        "linker=bpf-linker",
-        "-C",
-        "debuginfo=2",
-        "-C",
-        "link-arg=--btf",
-        "-C",
-        "target-cpu=v3",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
-    if let Ok(home) = env::var("HOME")
-        && !home.is_empty()
-    {
-        extra.push(format!("--remap-path-prefix={home}=/build-prefix"));
-    }
-    extra.push(format!(
-        "--remap-path-prefix={}=/build-root",
-        manifest_dir.display()
-    ));
-    for flag in &extra {
-        if !flags.is_empty() {
-            flags.push('\u{1f}');
-        }
-        flags.push_str(flag);
-    }
-    cmd.env("CARGO_ENCODED_RUSTFLAGS", flags);
+    let home = proc_env.get("HOME").map(String::as_str).unwrap_or("");
+    memveil_remap_flags::append_remaps(&mut flags, home, &manifest_dir);
+    cmd.env("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"));
+    cmd.env_remove("RUSTFLAGS");
 
     let status = cmd.status().unwrap_or_else(|error| {
         panic!("spawning `rustup run {BPF_TOOLCHAIN} cargo` for crates/ebpf: {error} (is rustup on PATH?)")
