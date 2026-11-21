@@ -26,9 +26,56 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIOS = ('readiness', 'checkpoint', 'bytes-full', 'inodes-full')
 
+# Config-absent admission: this exact release's kernel is built without
+# IKCONFIG_PROC, so its guests expose no /proc/config.gz. Absence is accepted
+# ONLY on that release; any other row fails closed. The compensating binding
+# (verified image and modules manifest before boot; expected release plus
+# module manifest plus pinned live BTF before guest disk mutation) is
+# explicitly weaker than a direct config match: an image digest proves image
+# identity, not the exact build config. Receipts from this revision carry a
+# new evidence identity (this harness commit plus the config-absent row) and
+# require explicit downstream approval before any gate use.
+APPROVED_CONFIG_ABSENT_RELEASE = '7.0.14-070014-generic'
+
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def check_kernel_binding(kernel, expected_sha256):
+    observed = digest(kernel)
+    if observed != expected_sha256:
+        raise ValueError('kernel image differs from bound image')
+    return observed
+
+
+def check_modules_binding(modules, expected_sha256):
+    from kernel_matrix import modules_manifest_sha
+    observed, files = modules_manifest_sha(str(modules))
+    if observed != expected_sha256:
+        raise ValueError('modules manifest differs from bound modules')
+    return observed, files
+
+
+def check_bound_config(ident, config_sha, expected_release, messages):
+    """Fail-closed config claim check for one guest receipt identity.
+
+    messages is (mismatch, absent_unapproved, absent_with_hash, unknown)
+    with the caller's exact refusal texts.
+    """
+    mismatch, absent_unapproved, absent_with_hash, unknown = messages
+    status = ident.get('config_status')
+    if status == 'measured':
+        if ident.get('kernel_config_sha256') != config_sha:
+            raise ValueError(mismatch)
+        return
+    if status == 'absent':
+        if ident.get('kernel') != expected_release or expected_release != APPROVED_CONFIG_ABSENT_RELEASE:
+            raise ValueError(absent_unapproved)
+        if ident.get('kernel_config_sha256') is not None:
+            raise ValueError(absent_with_hash)
+        return
+    raise ValueError(unknown)
 
 
 def validate_barrier(doc, nonce, scenario, inputs):
@@ -109,9 +156,15 @@ def execute(args):
     if digest(config['binary']) != args.binary_sha256:
         raise ValueError('candidate executable hash mismatch')
     kernel = args.kernel.resolve(strict=True)
+    kernel_sha = check_kernel_binding(kernel, args.expected_kernel_sha256)
+    modules = args.modules.resolve(strict=True)
+    modules_sha, modules_files = check_modules_binding(modules, args.expected_modules_sha256)
     inputs = {key: digest(path) for key, path in config.items()}
     config['kernel_config'] = str(args.kernel_config.resolve(strict=True))
     config_sha = digest(config['kernel_config'])
+    config['expected_release'] = args.expected_release
+    config['expected_modules_sha256'] = args.expected_modules_sha256
+    config['expected_btf_sha256'] = args.expected_btf_sha256
     args.out = args.out.parent.resolve(strict=True) / args.out.name
     if any(c.isspace() or c == ',' for c in str(args.out)):
         raise ValueError('evidence path contains ambiguous QEMU separators')
@@ -122,7 +175,13 @@ def execute(args):
     args.owned_out_ids = (owned.st_dev, owned.st_ino)
     config_path = args.out / 'config.json'
     config_path.write_text(json.dumps(config, indent=2) + '\n')
-    identity = dict(inputs=inputs, harness=harness, kernel_sha256=digest(kernel), kernel_config_sha256=config_sha,
+    identity = dict(inputs=inputs, harness=harness, kernel_sha256=kernel_sha, expected_release=args.expected_release,
+                    modules_manifest_sha256=modules_sha, modules_files=modules_files,
+                    expected_btf_sha256=args.expected_btf_sha256,
+                    config_absent_approved=args.expected_release == APPROVED_CONFIG_ABSENT_RELEASE,
+                    publisher_config=dict(sha256=config_sha, provenance='publisher-supplied kernel build config; '
+                                           'matched against the guest only when the guest exposes /proc/config.gz, '
+                                           'otherwise recorded here and never merged into a config-absent claim'),
                     source=subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip())
     (args.out / 'identity.json').write_text(json.dumps(identity, indent=2) + '\n')
     lock_path = ROOT / 'build/vm/suite.lock'
@@ -153,8 +212,17 @@ def execute(args):
                             time.sleep(.05)
                         promised = json.loads(barrier.read_text())
                         validate_barrier(promised, nonce, scenario, inputs)
-                        if promised['identity'].get('kernel_config_sha256') != config_sha:
-                            raise ValueError('guest kernel config differs from supplied config')
+                        if promised['identity'].get('kernel') != args.expected_release:
+                            raise ValueError('guest kernel release differs from expected release')
+                        check_bound_config(promised['identity'], config_sha, args.expected_release,
+                                           ('guest kernel config differs from supplied config',
+                                            'guest kernel config absent on an unapproved row',
+                                            'guest absent config claim carries a config hash',
+                                            'guest kernel config status unknown'))
+                        if promised['identity'].get('btf_sha256') != args.expected_btf_sha256:
+                            raise ValueError('guest live BTF differs from pinned BTF')
+                        if promised['identity'].get('modules_manifest_sha256') != args.expected_modules_sha256:
+                            raise ValueError('guest modules manifest differs from bound modules')
                         qmp_disk(qmp, disk)
                         stop_owned(child)
                         (case / 'power-cut.json').write_text(json.dumps(dict(
@@ -170,8 +238,17 @@ def execute(args):
                     result = json.loads((export / 'result.json').read_text())
                     if result.get('status') != 'PASS' or result.get('nonce') != nonce or result.get('scenario') != scenario:
                         raise ValueError('guest result is missing or has wrong ownership')
-                    if result['identity'].get('kernel_config_sha256') != config_sha:
-                        raise ValueError('result kernel config identity drift')
+                    if result['identity'].get('kernel') != args.expected_release:
+                        raise ValueError('result kernel release identity drift')
+                    check_bound_config(result['identity'], config_sha, args.expected_release,
+                                       ('result kernel config identity drift',
+                                        'result kernel config absent on an unapproved row',
+                                        'result absent config claim carries a config hash',
+                                        'result kernel config status unknown'))
+                    if result['identity'].get('btf_sha256') != args.expected_btf_sha256:
+                        raise ValueError('result live BTF identity drift')
+                    if result['identity'].get('modules_manifest_sha256') != args.expected_modules_sha256:
+                        raise ValueError('result modules identity drift')
                     if result['identity']['inputs'] != inputs:
                         raise ValueError('result candidate identity drift')
                     (case / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -205,9 +282,13 @@ def main():
         print('capture-durability: SKIP: needs MEMVEIL_VM_CAPTURE_FAILURES=1 and owned guest inputs')
         return 77
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('binary', 'object', 'bridge', 'profile', 'kernel', 'kernel-config', 'out'):
+    for name in ('binary', 'object', 'bridge', 'profile', 'kernel', 'kernel-config', 'modules', 'out'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--binary-sha256', required=True)
+    parser.add_argument('--expected-release', required=True)
+    parser.add_argument('--expected-kernel-sha256', required=True)
+    parser.add_argument('--expected-modules-sha256', required=True)
+    parser.add_argument('--expected-btf-sha256', required=True)
     args = parser.parse_args()
     args.owned_out_ids = None
     try:
