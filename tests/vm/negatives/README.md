@@ -99,6 +99,31 @@ object loads, proved as the positive control below.
   baseline copy hash, and the candidate manifest digest it
   binds to. A later run verifies staged bytes (host and
   guest) against this file.
+- `elfutil.py` — the minimal ELF section reader shared by
+  the producer and the proofs.
+
+## Byte stability: full sha vs loader sha
+
+Each manifest entry carries two digests. `sha256` covers the
+whole object and verifies staged *copies* of one build. It is
+rebuild-stable within a checkout (the determinism self-test
+rebuilds twice and compares) but not across checkouts: DWARF
+embeds absolute-path-derived crate disambiguators, so the
+same sources built at different absolute paths differ in
+`.debug_info`/`.debug_str` only. This is recipe-inherent,
+not a producer flaw: the unmutated base rebuilt in a second
+checkout likewise differs from the committed fixture in
+debug sections only, with every loader-read section
+identical.
+
+`loader_sha256` covers every section but the `.debug*`
+family (programs, relocations, maps, license, channel,
+`.text`, BTF, `.BTF.ext`, string and symbol tables), which
+is everything the loader and the verifier consume — the
+loader parses BTF, never DWARF. It is rebuild-stable across
+checkouts and is the binding a rebuilding rerun verifies.
+The self-tests pin both properties: same-path full rebuild
+identity plus cross-path loader identity.
 - `../test_bpf_negatives.py` — the unarmed self-tests:
   producer determinism (rebuild twice, identical shas),
   manifest round-trip and committed-manifest check, base
@@ -121,10 +146,13 @@ Self-tests (also wired into `tools/test profile-semantics`):
 ## Rerun wiring still needed (not this producer)
 
 Staging plus host-and-guest manifest verification belong to
-the future armed rerun, outside this directory: copy the
-four canonical objects to the run root's `build/bpf-negative/`,
-verify each sha256 against `run-input-manifest.json` on the
-host before booting, re-verify the same shas inside the guest
-from the exported `neg/` directory, and record the manifest
-digest with the scenario receipt. That wiring is specified,
-not implemented, here.
+the future armed rerun, outside this directory: obtain the
+four canonical objects (copies of this build, or a fresh
+producer rebuild), place them at the run root's
+`build/bpf-negative/`, verify each entry against
+`run-input-manifest.json` on the host before booting —
+`sha256` for staged copies of this exact build,
+`loader_sha256` for a fresh rebuild — re-verify the same
+digests inside the guest from the exported `neg/` directory,
+and record the manifest digest with the scenario receipt.
+That wiring is specified, not implemented, here.

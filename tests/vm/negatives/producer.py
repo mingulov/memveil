@@ -16,7 +16,11 @@ builds with the pinned nightly recipe from
 `tests/vm/fixtures/aya/README.md` (same flags, same remaps; the
 mutant trees live under the repository root so the checkout
 remap covers them, and the cargo target dir is proven
-non-leaking). Rebuilding twice yields identical bytes.
+non-leaking). Rebuilding twice in one checkout yields
+identical bytes; across checkouts the loader-read sections
+stay identical while DWARF varies (absolute-path-derived
+crate disambiguators, recipe-inherent), so the manifest binds
+both the full sha256 and the loader sha256 (see README.md).
 
 Fail-closed: unknown input bytes, a missing anchor, a missing
 toolchain, an unexpected occupant of an output path, or a dirty
@@ -30,9 +34,14 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import elfutil
 
 NAMES = ("renamed_field", "widened_layout",
          "wrong_shift", "wrong_argcnt")
@@ -282,13 +291,13 @@ MUTATIONS = {
 }
 
 
-def stage_tree(root, name):
+def stage_tree(root, name, dest_name=None):
     """Copy the verified probe crates; apply one mutation.
 
     Returns the mutant copy.rs sha256.
     """
     neg = os.path.join(root, "build", "bpf-negative")
-    dest = os.path.join(neg, "src", name)
+    dest = os.path.join(neg, "src", dest_name or name)
     if os.path.isdir(dest):
         shutil.rmtree(dest)
     os.makedirs(dest)
@@ -411,6 +420,29 @@ def build_base_object(root, outpath):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def loader_sha256_of(path):
+    """Loader-relevant sha256: every section but DWARF.
+
+    Hashes the sorted (name, bytes) pairs for all sections
+    except the `.debug*` family, which the loader never reads
+    (it consumes BTF, not DWARF). DWARF embeds absolute-path-
+    derived crate disambiguators, so full bytes vary across
+    checkouts while this digest is rebuild-stable everywhere.
+    """
+    sections = elfutil.elf_sections(path)
+    digest = hashlib.sha256(b"MVLOADER1")
+    for name in sorted(sections):
+        if name.startswith(".debug"):
+            continue
+        if name.startswith(".rel.debug"):
+            continue
+        blob = sections[name]
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(struct.pack("<Q", len(blob)))
+        digest.update(blob)
+    return digest.hexdigest()
+
+
 def git_revision(root):
     """HEAD sha plus clean flag (unknown when not a checkout)."""
     try:
@@ -446,9 +478,9 @@ def producer_source_sha():
     """Sha over the producer, proof, and oracle sources."""
     here = os.path.dirname(os.path.abspath(__file__))
     digest = hashlib.sha256()
-    for rel in ("producer.py", "proof.py", "README.md",
-                "oracle/Cargo.toml", "oracle/Cargo.lock",
-                "oracle/src/main.rs"):
+    for rel in ("producer.py", "proof.py", "elfutil.py",
+                "README.md", "oracle/Cargo.toml",
+                "oracle/Cargo.lock", "oracle/src/main.rs"):
         with open(os.path.join(here, rel), "rb") as handle:
             digest.update(handle.read())
     return digest.hexdigest()
@@ -470,6 +502,10 @@ def write_manifest(root, versions, shas, mutant_src, path=None):
             name: {
                 "file": "swiotlb_copy-%s.bpf.o" % name,
                 "sha256": shas[name],
+                "loader_sha256": loader_sha256_of(
+                    os.path.join(
+                        root, "build", "bpf-negative",
+                        "swiotlb_copy-%s.bpf.o" % name)),
                 "mutant_source_sha256": mutant_src[name],
             } for name in NAMES
         },
@@ -542,6 +578,17 @@ def verify_manifest(root, path):
             problems.append("%s: manifest %.16s, staged %.16s"
                             % (name, entry.get("sha256"),
                                staged_sha))
+        try:
+            staged_loader = loader_sha256_of(staged)
+        except (OSError, ValueError) as exc:
+            problems.append("%s: loader sha unreadable: %s"
+                            % (name, exc))
+            continue
+        if entry.get("loader_sha256") != staged_loader:
+            problems.append("%s: loader manifest %.16s, "
+                            "staged %.16s"
+                            % (name, entry.get("loader_sha256"),
+                               staged_loader))
     pins = manifest.get("pins", {})
     for key, want in (("nightly", NIGHTLY),
                       ("rustc_commit", RUSTC_COMMIT),

@@ -5,13 +5,15 @@
 No boots, no privileged calls, no network: rebuilds the four
 negative objects twice (determinism), round-trips the
 run-input manifest, reproduces the baseline bytes (positive
-control), and re-runs every offline proof. Slow by design
-(~5 minutes of pinned-toolchain builds); run alone, not as
-part of a fast gate.
+control), checks loader-bytes path stability, and re-runs
+every offline proof. Slow by design (~6 minutes of
+pinned-toolchain builds); run alone, not as part of a fast
+gate.
 """
 
 import json
 import os
+import shutil
 import sys
 
 import pytest
@@ -75,6 +77,32 @@ def test_base_reproduction(built, tmp_path):
     with open(proof.base_object(root), "rb") as handle:
         fixture = handle.read()
     assert rebuilt == fixture
+
+
+def test_loader_sha_path_stable(built, tmp_path):
+    """Loader bytes identical from a second staging path.
+
+    DWARF embeds absolute-path-derived crate disambiguators,
+    so full bytes vary with the staging path while every
+    loader-read section stays identical: the manifest's
+    loader sha is the rebuild-stable binding.
+    """
+    root, _, _ = built
+    producer.stage_tree(root, "widened_layout",
+                        dest_name="widened_layout-altpath")
+    try:
+        out = str(tmp_path / "swiotlb_copy-altpath.bpf.o")
+        producer.build_staged(root, "widened_layout-altpath",
+                              out)
+        canonical = os.path.join(
+            root, "build", "bpf-negative",
+            "swiotlb_copy-widened_layout.bpf.o")
+        assert producer.loader_sha256_of(out) == \
+            producer.loader_sha256_of(canonical)
+    finally:
+        shutil.rmtree(os.path.join(
+            root, "build", "bpf-negative", "src",
+            "widened_layout-altpath"), ignore_errors=True)
 
 
 def test_frozen_targets_resolve(built):

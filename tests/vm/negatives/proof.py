@@ -26,6 +26,10 @@ import struct
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import elfutil
+
 NAMES = ("renamed_field", "widened_layout",
          "wrong_shift", "wrong_argcnt")
 
@@ -135,26 +139,10 @@ def mutant_source(root, name):
 
 def elf_sections(path):
     """Map section name to raw bytes."""
-    with open(path, "rb") as handle:
-        data = handle.read()
-    if data[0:4] != b"\x7fELF" or data[4] != 2:
-        raise ProofFailure("%s: not a 64-bit ELF" % path)
-    if struct.unpack_from("<H", data, 18)[0] != 247:
-        raise ProofFailure("%s: not EM_BPF" % path)
-    shoff, = struct.unpack_from("<Q", data, 0x28)
-    shentsz, = struct.unpack_from("<H", data, 0x3a)
-    shnum, = struct.unpack_from("<H", data, 0x3c)
-    shstr, = struct.unpack_from("<H", data, 0x3e)
-    so = shoff + shstr * shentsz
-    stro, _ = struct.unpack_from("<QQ", data, so + 24)
-    out = {}
-    for i in range(shnum):
-        name, _, _, _, off, size = struct.unpack_from(
-            "<IIQQQQ", data, shoff + i * shentsz)
-        end = data.index(b"\0", stro + name)
-        out[data[stro + name:end].decode()] = \
-            data[off:off + size]
-    return out
+    try:
+        return elfutil.elf_sections(path)
+    except ValueError as exc:
+        raise ProofFailure(str(exc))
 
 
 def elf_symbols(path):
