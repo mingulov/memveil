@@ -55,6 +55,12 @@ AutoReq: no
 
 Name: memveil
 Version: 0.1.1
+# Pinned across hosts: only the build-host header (the
+# packager defines _buildhost to build.invalid). Release
+# keeps the distro %{?dist} expansion, so the same source
+# builds different Release tags and file names on
+# different distributions; byte-identical output is not
+# claimed.
 Release: 1%{?dist}
 Summary: swiotlb bounce-attempt capture and offline replay on x86-64 Linux
 # The two code licenses; every redistributed third-party text

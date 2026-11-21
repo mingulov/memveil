@@ -272,6 +272,10 @@ Foreign or changed source inputs refuse; no build
 fallback or qualification inference is permitted.
 The finished .rpm names the fixed placeholder
 `build.invalid` as its build host instead of the
-builder's hostname, so one source regenerates one .rpm
-on any host; `rpm -qp --queryformat '%{BUILDHOST}'` on
-the artifact must print the placeholder.
+builder's hostname; `rpm -qp --queryformat
+'%{BUILDHOST}'` on the artifact must print the
+placeholder on any host. No wider reproducibility is
+claimed: the Release tag still carries the distro
+`%{?dist}` expansion, so the same source built on
+different distributions yields different Release tags
+and file names.
