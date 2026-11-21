@@ -677,6 +677,38 @@ def _sealed_select_objects(selected):
             attempt)
 
 
+def _sealed_bundle_with_minted_profile(
+        tmp_path, name, profile_id, ident, fmt, adjust=None):
+    """Sealed candidate with a profile minted over sealed bytes.
+
+    Two-phase: a probe bundle seals and loads first, so the
+    emitter inputs resolve under a verified root (validated
+    first; a missing member fails closed through the
+    candidate loader instead of falling back to the dev
+    tree); the minted doc is then sealed into the returned
+    bundle. adjust(doc) tweaks the minted doc before the
+    second seal. Returns the loaded selection, which the
+    caller closes.
+    """
+    probe = _sealed_select_bundle(
+        tmp_path, name + "-probe", {"probe.json": {}})
+    try:
+        objects, sat_object = _sealed_select_objects(probe)
+        emit = {"attempt": objects["object"],
+                "saturation": sat_object,
+                "lc": objects["lc_object"],
+                "cp": objects["cp_object"]}
+        doc, _sat = gate_kernel.emitter().gate_docs(
+            ident, fmt, profile_id, emit)
+    finally:
+        probe.close()
+    doc["status"] = "validated"
+    if adjust is not None:
+        adjust(doc)
+    return _sealed_select_bundle(
+        tmp_path, name, {profile_id + ".json": doc})
+
+
 @pytest.mark.dev_fixture
 def test_bundle_sealed_inputs_wiring(tmp_path):
     """Sealed inputs resolve the sealed 0.1.1 bundle both sides.
@@ -1047,12 +1079,13 @@ def test_bundle_sealed_selection_mints_without_dev_tree(
     from test_gate_kernel import REL, kernel_tree
     root = kernel_tree(tmp_path)
     ident, fmt = gate_kernel.measure_identity(REL, str(root))
-    other, _sat = gate_kernel.emitter().gate_docs(
-        ident, fmt, "sealed-other", None)
-    other["status"] = "validated"
-    other["identity"]["source"]["revision"] = "9.9.1-other"
-    selected = _sealed_select_bundle(
-        tmp_path, "selectmint", {"sealed-other.json": other})
+
+    def name_other(doc):
+        doc["identity"]["source"]["revision"] = "9.9.1-other"
+
+    selected = _sealed_bundle_with_minted_profile(
+        tmp_path, "selectmint", "sealed-other", ident, fmt,
+        name_other)
     try:
         profiles = sealed_profiles_dir(selected)
         objects, sat_object = _sealed_select_objects(selected)
@@ -1090,6 +1123,20 @@ def test_bundle_sealed_selection_mints_without_dev_tree(
         assert sat_note["object"] == "sha256:" + files[
             "bpf/swiotlb_attempt.bpf.o"]
         assert sat_note["ring_bytes"] == "8388608"
+        # The fixture doc itself binds the sealed bytes: the
+        # setup mint resolved the verified inputs, not the
+        # dev tree.
+        other_doc = json.loads(
+            (profiles / "sealed-other.json").read_text())
+        other_note = dict(
+            part.split("=", 1) for part in
+            other_doc["identity"]["source"]["note"].split())
+        for key, rel in (("object", "bpf/swiotlb_attempt.bpf.o"),
+                         ("lc_object",
+                          "bpf/swiotlb_lifecycle.bpf.o"),
+                         ("cp_object",
+                          "bpf/swiotlb_copy.bpf.o")):
+            assert other_note[key] == "sha256:" + files[rel], key
     finally:
         selected.close()
 
@@ -1106,18 +1153,18 @@ def test_bundle_sealed_selection_reports_sealed_drift(
     from test_gate_kernel import REL, kernel_tree
     root = kernel_tree(tmp_path)
     ident, fmt = gate_kernel.measure_identity(REL, str(root))
-    gate, _sat = gate_kernel.emitter().gate_docs(
-        ident, fmt, "sealed-drifted", None)
-    gate["status"] = "validated"
-    fields = []
-    for part in gate["identity"]["source"]["note"].split():
-        if part.startswith("object="):
-            part = "object=sha256:" + "0" * 64
-        fields.append(part)
-    gate["identity"]["source"]["note"] = " ".join(fields)
-    selected = _sealed_select_bundle(
-        tmp_path, "selectdrift",
-        {"sealed-drifted.json": gate})
+
+    def zero_object(doc):
+        fields = []
+        for part in doc["identity"]["source"]["note"].split():
+            if part.startswith("object="):
+                part = "object=sha256:" + "0" * 64
+            fields.append(part)
+        doc["identity"]["source"]["note"] = " ".join(fields)
+
+    selected = _sealed_bundle_with_minted_profile(
+        tmp_path, "selectdrift", "sealed-drifted", ident, fmt,
+        zero_object)
     try:
         profiles = sealed_profiles_dir(selected)
         objects, sat_object = _sealed_select_objects(selected)
