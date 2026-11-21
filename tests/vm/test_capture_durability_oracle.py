@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Host-only negative controls for the power-cut evidence barrier."""
+import contextlib
 import copy
 import gzip
 import hashlib
@@ -13,7 +14,7 @@ import signal
 import select
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from capture_durability import validate_barrier
 
@@ -336,6 +337,295 @@ class IdentityTests(unittest.TestCase):
             (root / 'kernel' / 'mod.ko').write_bytes(b'tampered bytes')
             with self.assertRaisesRegex(ValueError, '^modules manifest differs from bound modules$'):
                 check_modules_binding(root, want)
+
+
+class FakeLaunchedChild:
+    """Minimal stand-in for the QEMU child behind a mocked boot."""
+    pid = 1 << 30
+    returncode = 0
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class HostBindingTests(unittest.TestCase):
+    APPROVED = '7.0.14-070014-generic'
+    BTF = 'b' * 64
+
+    def make_stage(self, root):
+        from kernel_matrix import modules_manifest_sha
+        root = Path(root)
+        (root / 'tests' / 'vm').mkdir(parents=True)
+        (root / 'build' / 'shim').mkdir(parents=True)
+        (root / 'build' / 'shim' / 'capture_faults.so').write_bytes(b'shim')
+        mods = root / 'cache' / 'lib' / 'modules' / self.APPROVED
+        (mods / 'kernel').mkdir(parents=True)
+        (mods / 'kernel' / 'mod.ko').write_bytes(b'module bytes')
+        (mods / 'modules.order').write_bytes(b'order\n')
+        kernel = root / 'cache' / 'boot' / ('vmlinuz-' + self.APPROVED)
+        kernel.parent.mkdir(parents=True)
+        kernel.write_bytes(b'genuine kernel image')
+        other = root / 'other' / 'lib' / 'modules' / self.APPROVED
+        (other / 'kernel').mkdir(parents=True)
+        (other / 'kernel' / 'mod.ko').write_bytes(b'module bytes')
+        (other / 'modules.order').write_bytes(b'order\n')
+        kernel_sha = hashlib.sha256(b'genuine kernel image').hexdigest()
+        mods_sha, mods_files = modules_manifest_sha(str(mods))
+        lock = {'schema': 'memveil-kernel-matrix/2',
+                'kernels': [{'id': '7.0', 'release': self.APPROVED,
+                             'source': {'kind': 'archive', 'vng_version': 'v7.0.14',
+                                        'archive_date': '2026-06-27 15:46',
+                                        'vmlinuz_sha256': kernel_sha,
+                                        'modules_manifest_sha256': mods_sha}}]}
+        (root / 'tests' / 'vm' / 'kernels.lock.json').write_text(json.dumps(lock))
+        pin = {}
+        for name, data in (('binary', b'candidate'), ('object', b'object'),
+                           ('bridge', b'bridge'), ('profile', b'profile'),
+                           ('kernel-config', b'CONFIG_X=y\n')):
+            path = root / 'inputs' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            pin[name] = hashlib.sha256(data).hexdigest()
+        (root / 'out').mkdir()
+        return SimpleNamespace(root=root, mods=mods, other=other, kernel=kernel,
+                               kernel_sha=kernel_sha, mods_sha=mods_sha,
+                               mods_files=mods_files, pin=pin)
+
+    def make_args(self, stage, **override):
+        params = dict(binary=stage.root / 'inputs' / 'binary',
+                      object=stage.root / 'inputs' / 'object',
+                      bridge=stage.root / 'inputs' / 'bridge',
+                      profile=stage.root / 'inputs' / 'profile',
+                      kernel=stage.kernel,
+                      kernel_config=stage.root / 'inputs' / 'kernel-config',
+                      modules=stage.mods, out=stage.root / 'out' / 'ev',
+                      binary_sha256=stage.pin['binary'],
+                      expected_release=self.APPROVED,
+                      expected_kernel_sha256=stage.kernel_sha,
+                      expected_modules_sha256=stage.mods_sha,
+                      expected_btf_sha256=self.BTF, owned_out_ids=None)
+        params.update(override)
+        return SimpleNamespace(**params)
+
+    @contextlib.contextmanager
+    def harness(self, stage, boot_mock):
+        import capture_durability
+        real_access = os.access
+
+        def fake_access(path, mode):
+            if str(path) == '/dev/kvm':
+                return True
+            return real_access(path, mode)
+
+        with patch.object(capture_durability, 'ROOT', stage.root), \
+             patch('shutil.which', return_value='/fake/vng'), \
+             patch('os.access', side_effect=fake_access), \
+             patch('harness_env.check_harness_versions', return_value={'vng': 'fake'}), \
+             patch('subprocess.check_output', return_value='f' * 40), \
+             patch.object(capture_durability, 'boot', boot_mock), \
+             patch.object(capture_durability, 'qmp_disk', return_value=None), \
+             patch.object(capture_durability, 'stop_owned', return_value=None):
+            yield
+
+    def fake_boots(self, stage, statuses, tamper=None, tamper_at=1):
+        calls = []
+        inputs = {key: stage.pin[key] for key in ('binary', 'object', 'bridge', 'profile')}
+        inputs['shim'] = hashlib.sha256(b'shim').hexdigest()
+
+        def one(vng, config_path, kernel, scenario, nonce, disk, export, qmp, phase, logs):
+            calls.append((scenario, phase))
+            (logs / (phase + '-command.json')).write_text('[]\n')
+            status = statuses[scenario]
+            claim = {'kernel': self.APPROVED, 'config_status': status,
+                     'kernel_config_sha256': stage.pin['kernel-config'] if status == 'measured' else None,
+                     'boot_id': 'boot-' + phase, 'btf_sha256': self.BTF,
+                     'modules_manifest_sha256': stage.mods_sha, 'inputs': dict(inputs)}
+            if phase == 'capture' and scenario in ('readiness', 'checkpoint'):
+                if scenario == 'readiness':
+                    integrity = {'events_bytes': '0', 'line_count': '0',
+                                 'events_sha256': hashlib.sha256(b'').hexdigest()}
+                    marker, ready = 'readiness-announced', True
+                else:
+                    integrity = {'events_bytes': '8', 'line_count': '1',
+                                 'events_sha256': hashlib.sha256(b'x').hexdigest()}
+                    marker, ready = 'checkpoint-2', False
+                (export / 'barrier.json').write_text(json.dumps(dict(
+                    nonce=nonce, scenario=scenario, stopped=True, marker=marker,
+                    ready_observed=ready, reserve_allocated=17 * 1048576,
+                    fs_uuid='owned', identity=claim, integrity=integrity)))
+            else:
+                (export / 'result.json').write_text(json.dumps(dict(
+                    status='PASS', scenario=scenario, nonce=nonce,
+                    fs_uuid='owned', identity=claim)))
+            if tamper is not None and len(calls) == tamper_at:
+                tamper()
+            return FakeLaunchedChild()
+
+        one.calls = calls
+        return one
+
+    def test_substitute_pins_refused_before_boot(self):
+        import capture_durability
+        from kernel_matrix import modules_manifest_sha
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            sub_kernel = stage.root / 'sub' / 'vmlinuz'
+            sub_kernel.parent.mkdir()
+            sub_kernel.write_bytes(b'substitute image')
+            sub_mods = stage.root / 'sub' / 'mods'
+            (sub_mods / 'kernel').mkdir(parents=True)
+            (sub_mods / 'kernel' / 'm.ko').write_bytes(b'substitute module')
+            (sub_mods / 'modules.order').write_bytes(b'sub\n')
+            sub_kernel_sha = hashlib.sha256(b'substitute image').hexdigest()
+            sub_mods_sha, _ = modules_manifest_sha(str(sub_mods))
+            cases = [
+                (dict(kernel=sub_kernel, expected_kernel_sha256=sub_kernel_sha),
+                 '^supplied kernel pin differs from the locked row$'),
+                (dict(modules=sub_mods, expected_modules_sha256=sub_mods_sha),
+                 '^supplied modules pin differs from the locked row$'),
+            ]
+            for override, message in cases:
+                with self.subTest(message=message):
+                    args = self.make_args(stage, **override)
+                    launches = Mock(side_effect=AssertionError('unexpected boot'))
+                    with self.harness(stage, launches):
+                        with self.assertRaisesRegex(ValueError, message):
+                            capture_durability.execute(args)
+                    self.assertEqual(launches.call_count, 0)
+
+    def test_unlisted_release_refused_before_boot(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            for release in ('9.9.9-fake', '7.0.14-070014-GENERIC',
+                            ' ' + self.APPROVED, self.APPROVED + '\n'):
+                with self.subTest(release=release):
+                    args = self.make_args(stage, expected_release=release)
+                    launches = Mock(side_effect=AssertionError('unexpected boot'))
+                    with self.harness(stage, launches):
+                        with self.assertRaisesRegex(ValueError, '^expected release has no locked kernel row$'):
+                            capture_durability.execute(args)
+                    self.assertEqual(launches.call_count, 0)
+
+    def test_file_or_empty_modules_refused(self):
+        import capture_durability
+        from capture_durability import check_modules_binding
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            blob = stage.root / 'blob'
+            blob.write_bytes(b'not a modules tree')
+            empty_hash = hashlib.sha256(b'\n').hexdigest()
+            with self.assertRaisesRegex(ValueError, '^modules path is not a modules directory$'):
+                check_modules_binding(blob, empty_hash)
+            with self.assertRaisesRegex(ValueError, '^modules path is not a modules directory$'):
+                check_modules_binding(blob, stage.mods_sha)
+            bare = stage.root / 'bare'
+            bare.mkdir()
+            with self.assertRaisesRegex(ValueError, '^modules manifest is empty$'):
+                check_modules_binding(bare, empty_hash)
+            for mods, message in ((blob, '^modules path is not a modules directory$'),
+                                  (bare, '^modules manifest is empty$')):
+                with self.subTest(mods=mods.name):
+                    args = self.make_args(stage, modules=mods)
+                    launches = Mock(side_effect=AssertionError('unexpected boot'))
+                    with self.harness(stage, launches):
+                        with self.assertRaisesRegex(ValueError, message):
+                            capture_durability.execute(args)
+                    self.assertEqual(launches.call_count, 0)
+
+    def test_modules_from_other_tree_refused(self):
+        import capture_durability
+        from kernel_matrix import modules_manifest_sha
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            self.assertEqual(modules_manifest_sha(str(stage.other))[0], stage.mods_sha)
+            args = self.make_args(stage, modules=stage.other)
+            launches = Mock(side_effect=AssertionError('unexpected boot'))
+            with self.harness(stage, launches):
+                with self.assertRaisesRegex(ValueError, '^supplied modules are not the image-resolved module tree$'):
+                    capture_durability.execute(args)
+            self.assertEqual(launches.call_count, 0)
+
+    def test_kernel_drift_after_first_capture_refused(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            boots = self.fake_boots(stage, statuses,
+                                     tamper=lambda: stage.kernel.write_bytes(b'drifted image'))
+            with self.harness(stage, boots):
+                with self.assertRaisesRegex(ValueError, '^kernel image differs from bound image$'):
+                    capture_durability.execute(args)
+            self.assertEqual(boots.calls, [('readiness', 'capture')])
+
+    def test_modules_drift_after_first_capture_refused(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            target = stage.mods / 'kernel' / 'mod.ko'
+            boots = self.fake_boots(stage, statuses,
+                                     tamper=lambda: target.write_bytes(b'tampered'))
+            with self.harness(stage, boots):
+                with self.assertRaisesRegex(ValueError, '^modules manifest differs from bound modules$'):
+                    capture_durability.execute(args)
+            self.assertEqual(boots.calls, [('readiness', 'capture')])
+
+    def test_drift_after_recovery_refused_before_next_capture(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            boots = self.fake_boots(stage, statuses,
+                                     tamper=lambda: stage.kernel.write_bytes(b'drifted image'),
+                                     tamper_at=2)
+            with self.harness(stage, boots):
+                with self.assertRaisesRegex(ValueError, '^kernel image differs from bound image$'):
+                    capture_durability.execute(args)
+            self.assertEqual(boots.calls, [('readiness', 'capture'), ('readiness', 'recover')])
+
+    def test_aggregate_records_verified_status_per_scenario(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            # Mixed mock statuses prove per-scenario capture, not one copied flag.
+            statuses = {'readiness': 'absent', 'checkpoint': 'absent',
+                        'bytes-full': 'measured', 'inodes-full': 'measured'}
+            boots = self.fake_boots(stage, statuses)
+            with self.harness(stage, boots):
+                capture_durability.execute(args)
+            evidence = stage.root / 'out' / 'ev'
+            aggregate = json.loads((evidence / 'result.json').read_text())
+            self.assertEqual(aggregate['status'], 'PASS')
+            self.assertEqual(aggregate['scenarios'], list(capture_durability.SCENARIOS))
+            self.assertEqual(aggregate['identity']['config_status_by_scenario'], statuses)
+            self.assertTrue(aggregate['identity']['config_absent_approved'])
+            preboot = json.loads((evidence / 'identity.json').read_text())
+            self.assertNotIn('config_status_by_scenario', preboot)
+
+    def test_genuine_mocked_run_reaches_aggregate_pass(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            boots = self.fake_boots(stage, statuses)
+            with self.harness(stage, boots):
+                capture_durability.execute(args)
+            self.assertEqual(boots.calls, [('readiness', 'capture'), ('readiness', 'recover'),
+                                           ('checkpoint', 'capture'), ('checkpoint', 'recover'),
+                                           ('bytes-full', 'capture'), ('inodes-full', 'capture')])
+            aggregate = json.loads((stage.root / 'out' / 'ev' / 'result.json').read_text())
+            self.assertEqual(aggregate['status'], 'PASS')
+            self.assertEqual(aggregate['identity']['config_status_by_scenario'], statuses)
+            self.assertEqual(aggregate['identity']['modules_files'], stage.mods_files)
 
 
 if __name__ == '__main__':

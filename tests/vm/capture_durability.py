@@ -29,12 +29,14 @@ SCENARIOS = ('readiness', 'checkpoint', 'bytes-full', 'inodes-full')
 # Config-absent admission: this exact release's kernel is built without
 # IKCONFIG_PROC, so its guests expose no /proc/config.gz. Absence is accepted
 # ONLY on that release; any other row fails closed. The compensating binding
-# (verified image and modules manifest before boot; expected release plus
-# module manifest plus pinned live BTF before guest disk mutation) is
-# explicitly weaker than a direct config match: an image digest proves image
-# identity, not the exact build config. Receipts from this revision carry a
-# new evidence identity (this harness commit plus the config-absent row) and
-# require explicit downstream approval before any gate use.
+# (image and modules pins compared with the locked row, then the image and
+# the image-resolved module tree re-verified before every boot; expected
+# release plus module manifest plus pinned live BTF before guest disk
+# mutation) is explicitly weaker than a direct config match: an image digest
+# proves image identity, not the exact build config. Receipts from this
+# revision carry a new evidence identity (this harness commit plus the
+# config-absent row) and require explicit downstream approval before any gate
+# use.
 APPROVED_CONFIG_ABSENT_RELEASE = '7.0.14-070014-generic'
 
 
@@ -51,7 +53,11 @@ def check_kernel_binding(kernel, expected_sha256):
 
 def check_modules_binding(modules, expected_sha256):
     from kernel_matrix import modules_manifest_sha
+    if not os.path.isdir(modules):
+        raise ValueError('modules path is not a modules directory')
     observed, files = modules_manifest_sha(str(modules))
+    if files == 0:
+        raise ValueError('modules manifest is empty')
     if observed != expected_sha256:
         raise ValueError('modules manifest differs from bound modules')
     return observed, files
@@ -76,6 +82,63 @@ def check_bound_config(ident, config_sha, expected_release, messages):
             raise ValueError(absent_with_hash)
         return
     raise ValueError(unknown)
+
+
+def locked_row_pins(expected_release):
+    """Pinned image and modules shas for one exact locked release."""
+    try:
+        doc = json.loads((ROOT / 'tests/vm/kernels.lock.json').read_text())
+    except (OSError, ValueError):
+        raise ValueError('locked kernel rows unreadable')
+    rows = doc.get('kernels') if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError('locked kernel rows unreadable')
+    pairs = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get('release') != expected_release:
+            continue
+        source = row.get('source') or {}
+        image = source.get('vmlinuz_sha256') or source.get('bzimage_sha256')
+        mods = source.get('modules_manifest_sha256')
+        if image and mods:
+            pairs.add((image, mods))
+    if not pairs:
+        raise ValueError('expected release has no locked kernel row')
+    if len(pairs) > 1:
+        raise ValueError('expected release matches ambiguous locked rows')
+    return pairs.pop()
+
+
+def image_modules_dir(kernel, expected_release):
+    """Module tree the launcher derives from a kernel image path.
+
+    Mirrors the virtme-ng rootfs walk: the closest ancestor holding
+    lib/modules (or usr/lib/modules) becomes the root, and the guest
+    takes <root>/lib/modules/<release> from it. The launch argv carries
+    only the image path, so the supplied modules must be this tree.
+    """
+    path = os.path.dirname(os.path.abspath(str(kernel)))
+    while path and path != '/' and not os.path.exists(path + '/lib/modules'):
+        if os.path.exists(path + '/usr/lib/modules'):
+            path += '/usr'
+            break
+        path, _ = os.path.split(path)
+    return os.path.abspath(path) + '/lib/modules/' + expected_release
+
+
+def verify_boot_inputs(raw_kernel, raw_modules, expected_release,
+                       expected_kernel_sha256, expected_modules_sha256):
+    """Resolve and verify exactly what the next boot will use."""
+    kernel = Path(raw_kernel).resolve(strict=True)
+    modules = Path(raw_modules).resolve(strict=True)
+    kernel_sha = check_kernel_binding(kernel, expected_kernel_sha256)
+    modules_sha, modules_files = check_modules_binding(modules, expected_modules_sha256)
+    resolved = image_modules_dir(kernel, expected_release)
+    if not os.path.isdir(resolved):
+        raise ValueError('kernel image resolves to no module tree')
+    if os.path.realpath(resolved) != os.path.realpath(str(modules)):
+        raise ValueError('supplied modules are not the image-resolved module tree')
+    return kernel, kernel_sha, modules_sha, modules_files
 
 
 def validate_barrier(doc, nonce, scenario, inputs):
@@ -155,10 +218,14 @@ def execute(args):
     config['shim'] = str((ROOT / 'build/shim/capture_faults.so').resolve(strict=True))
     if digest(config['binary']) != args.binary_sha256:
         raise ValueError('candidate executable hash mismatch')
-    kernel = args.kernel.resolve(strict=True)
-    kernel_sha = check_kernel_binding(kernel, args.expected_kernel_sha256)
-    modules = args.modules.resolve(strict=True)
-    modules_sha, modules_files = check_modules_binding(modules, args.expected_modules_sha256)
+    locked_kernel_sha, locked_modules_sha = locked_row_pins(args.expected_release)
+    if args.expected_kernel_sha256 != locked_kernel_sha:
+        raise ValueError('supplied kernel pin differs from the locked row')
+    if args.expected_modules_sha256 != locked_modules_sha:
+        raise ValueError('supplied modules pin differs from the locked row')
+    kernel, kernel_sha, modules_sha, modules_files = verify_boot_inputs(
+        args.kernel, args.modules, args.expected_release,
+        args.expected_kernel_sha256, args.expected_modules_sha256)
     inputs = {key: digest(path) for key, path in config.items()}
     config['kernel_config'] = str(args.kernel_config.resolve(strict=True))
     config_sha = digest(config['kernel_config'])
@@ -188,6 +255,7 @@ def execute(args):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open('a+') as lease:
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        verified_config = {}
         for scenario in SCENARIOS:
             case = args.out / scenario
             case.mkdir(mode=0o700)
@@ -199,6 +267,9 @@ def execute(args):
             nonce = uuid.uuid4().hex
             with tempfile.TemporaryDirectory(prefix='mvfs-qmp-') as sockets:
                 qmp = Path(sockets) / 'monitor'
+                kernel, _, _, _ = verify_boot_inputs(
+                    args.kernel, args.modules, args.expected_release,
+                    args.expected_kernel_sha256, args.expected_modules_sha256)
                 child = boot(vng, config_path, kernel, scenario, nonce, disk, export, qmp, 'capture', case)
                 try:
                     if scenario in ('readiness', 'checkpoint'):
@@ -231,6 +302,9 @@ def execute(args):
                             barrier_sha256=digest(barrier))) + '\n')
                         if qmp.exists():
                             qmp.unlink()
+                        kernel, _, _, _ = verify_boot_inputs(
+                            args.kernel, args.modules, args.expected_release,
+                            args.expected_kernel_sha256, args.expected_modules_sha256)
                         child = boot(vng, config_path, kernel, scenario, nonce, disk, export, qmp, 'recover', case)
                     child.wait(timeout=150)
                     if child.returncode != 0:
@@ -251,10 +325,12 @@ def execute(args):
                         raise ValueError('result modules identity drift')
                     if result['identity']['inputs'] != inputs:
                         raise ValueError('result candidate identity drift')
+                    verified_config[scenario] = result['identity']['config_status']
                     (case / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
                 finally:
                     stop_owned(child)
-    (args.out / 'result.json').write_text(json.dumps(dict(status='PASS', scenarios=list(SCENARIOS), identity=identity), indent=2) + '\n')
+    aggregate = dict(identity, config_status_by_scenario=verified_config)
+    (args.out / 'result.json').write_text(json.dumps(dict(status='PASS', scenarios=list(SCENARIOS), identity=aggregate), indent=2) + '\n')
 
 
 def retain_owned_failure(path, identity, reason):
