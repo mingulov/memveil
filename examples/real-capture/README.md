@@ -9,7 +9,7 @@ the persisted detail exactly (event count and byte totals), with
 zero recorded detail and aggregate loss. Terminal settlement stays partial;
 not-applicable channels do not claim a zero loss count. This is a historical
 capture and profile decision (the recorded decision names the narrow
-profile that kernel was captured under; the 0.1.0 bundle ships reference
+profile that kernel was captured under; the 0.1.1 bundle ships reference
 profiles only), not qualification of a rebuilt package or the
 current reader host.
 

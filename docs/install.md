@@ -51,7 +51,7 @@ Install with no `--force` (the unforced install proves the
 `Depends` resolves on your system):
 
 
-    sudo dpkg -i memveil_0.1.0-1_amd64.deb
+    sudo dpkg -i memveil_0.1.1-1_amd64.deb
     dpkg -s memveil            # Status: install ok installed
     dpkg --verify memveil      # empty output, exit 0
 
@@ -102,7 +102,7 @@ contributor toolchain from [build](build.md) plus
     python3 scripts/package-rpm.py --out dist
 
 
-Expected: `Wrote: dist/memveil-0.1.0-1*.x86_64.rpm`
+Expected: `Wrote: dist/memveil-0.1.1-1*.x86_64.rpm`
 (the release may carry a distro suffix on Fedora
 builders). The packager assembles its Source0 from the
 owning checkout (tracked plus unignored-untracked files,
@@ -113,8 +113,8 @@ Install on Fedora (dependency resolution proves `Requires`
 holds on the target distro):
 
 
-    sudo dnf install ./memveil-0.1.0-1*.x86_64.rpm
-    rpm -q memveil            # memveil-0.1.0-1...
+    sudo dnf install ./memveil-0.1.1-1*.x86_64.rpm
+    rpm -q memveil            # memveil-0.1.1-1...
     rpm -V memveil            # empty output, exit 0
 
 

@@ -563,7 +563,7 @@ pub fn ensure_release_binary() -> PathBuf {
     binary
 }
 
-/// Engine version from the release binary (`0.1.0`).
+/// Engine version from the release binary (`0.1.1`).
 ///
 /// Candidate mode returns the manifest-bound version instead:
 /// no build may run behind a sealed qualification.

@@ -36,6 +36,14 @@ the rest.
   required) and the evolution and support
   policy.
 
+## v0.1.1 -- 2026-11-21
+
+- Rust userspace: collection, CLI, and
+  reporting now build from the Cargo
+  workspace, with the BPF loader statically
+  linked and the inspection objects embedded
+  in the binary.
+
 ## v0.1.0 -- 2026-10-24
 
 Development prerelease: attempt, lifecycle,

@@ -13,7 +13,7 @@
 #   cargo build --release --locked --offline   # at the root
 #   scripts/package-tarball.py --out dist
 #   scripts/package-rpm.py --work build/rpm --out dist \
-#       --bundle "$PWD/dist/memveil-0.1.0"
+#       --bundle "$PWD/dist/memveil-0.1.1"
 #
 # The Version tag tracks the engine version printed by
 # `memveil version` (bump together; the package gate fails
@@ -54,7 +54,7 @@ AutoReq: no
 %global __os_install_post %{nil}
 
 Name: memveil
-Version: 0.1.0
+Version: 0.1.1
 Release: 1%{?dist}
 Summary: swiotlb bounce-attempt capture and offline replay on x86-64 Linux
 # The two code licenses; every redistributed third-party text
@@ -261,6 +261,8 @@ EOF
 %dir /var/lib/memveil/receipts
 
 %changelog
+* Sat Nov 21 2026 Denis Mingulov <denis@mingulov.com> - 0.1.1-1
+- Version 0.1.1 release (Rust userspace, statically linked Aya loader).
 * Wed Nov 18 2026 Denis Mingulov <denis@mingulov.com> - 0.1.0-1
 - Third-party build: FHS layout matching the .deb, generated man pages and
   static shell completions (Rust userspace, statically linked Aya loader).

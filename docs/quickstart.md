@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# MemVeil quickstart (development bundle 0.1.0)
+# MemVeil quickstart (development bundle 0.1.1)
 
 MemVeil captures swiotlb bounce **attempts**, mapping **lifetimes**,
 and executed **copies** on x86-64 Linux and replays them offline as
@@ -28,9 +28,9 @@ extra lifecycle/copy channels.
 
 ## 1. Extract and check the version
 
-    tar -xzf memveil-0.1.0.tar.gz
-    cd memveil-0.1.0
-    ./bin/memveil version        # memveil-0.1.0, exit 0
+    tar -xzf memveil-0.1.1.tar.gz
+    cd memveil-0.1.1
+    ./bin/memveil version        # memveil-0.1.1, exit 0
     ./bin/memveil help           # verb list, exit 0
 
 `MANIFEST.json` records the sha256 of every payload file plus the

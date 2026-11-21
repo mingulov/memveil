@@ -37,7 +37,7 @@ pub struct CratePin {
 /// Manifest facts the SPDX builder consumes.
 #[derive(Debug)]
 pub struct ManifestFacts {
-    /// Engine version (`0.1.0`).
+    /// Engine version (`0.1.1`).
     pub engine: String,
     /// Source revision or `export`.
     pub revision: String,

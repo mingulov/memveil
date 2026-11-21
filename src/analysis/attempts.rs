@@ -2041,7 +2041,7 @@ mod tests {
         assert_eq!(rep.engine_version, ENGINE_VERSION);
         // Parity pin: the single-sourced version stays
         // byte-identical with Mojo's ENGINE_VERSION.
-        assert_eq!(crate::ENGINE_VERSION, "memveil-0.1.0");
+        assert_eq!(crate::ENGINE_VERSION, "memveil-0.1.1");
         assert_eq!(rep.metrics.len(), 14);
         let attempts = metric_by_name(&rep, "bounce_attempts", "");
         assert!(attempts.has_value);
