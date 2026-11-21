@@ -250,6 +250,154 @@ def test_extensionless_config_wins_same_level(
 
 
 @HELPERS
+def test_extensionless_without_flags_suppresses_toml(
+        module, isolated):
+    """The winner suppresses the loser wholesale, even flagless."""
+    env, build = isolated
+    cargo_dir = build / ".cargo"
+    _write(cargo_dir / "config", "[build]\njobs = 2\n")
+    _write(cargo_dir / "config.toml",
+           '[build]\nrustflags = ["--cfg", "ignored"]\n')
+    assert _remap(module, env, build) == _pair(env, build)
+
+
+@HELPERS
+def test_broken_losing_leaf_ignored(module, isolated):
+    """A broken config.toml stays unread where config wins."""
+    env, build = isolated
+    cargo_dir = build / ".cargo"
+    _write(cargo_dir / "config",
+           '[build]\nrustflags = ["--cfg", "plain"]\n')
+    _write(cargo_dir / "config.toml", "not = [valid\n")
+    assert _remap(module, env, build) == \
+        ["--cfg", "plain"] + _pair(env, build)
+
+
+@HELPERS
+def test_broken_symlink_counts_as_absent(module, isolated):
+    """A broken link is no leaf: the dotted file serves."""
+    env, build = isolated
+    cargo_dir = build / ".cargo"
+    cargo_dir.mkdir(parents=True)
+    os.symlink(str(build / "nowhere"), str(cargo_dir / "config"))
+    _write(cargo_dir / "config.toml",
+           '[build]\nrustflags = ["--cfg", "dotted"]\n')
+    assert _remap(module, env, build) == \
+        ["--cfg", "dotted"] + _pair(env, build)
+
+
+@HELPERS
+def test_directory_leaf_refuses(module, isolated):
+    """An extensionless directory refuses instead of falling through."""
+    env, build = isolated
+    cargo_dir = build / ".cargo"
+    (cargo_dir / "config").mkdir(parents=True)
+    _write(cargo_dir / "config.toml",
+           '[build]\nrustflags = ["--cfg", "dotted"]\n')
+    with pytest.raises(SystemExit):
+        _remap(module, env, build)
+
+
+@HELPERS
+def test_layered_strings_replace(
+        module, isolated, tmp_path, monkeypatch):
+    """A nearer string replaces the ancestor string outright."""
+    env, _build = isolated
+    parent = tmp_path / "outer"
+    parent.mkdir()
+    build = parent / "inner"
+    build.mkdir()
+    if module is DOCS:
+        monkeypatch.setattr(DOCS, "ROOT_DIR", str(build))
+    _write(parent / ".cargo" / "config.toml",
+           '[build]\nrustflags = "--cfg old"\n')
+    _write(build / ".cargo" / "config.toml",
+           '[build]\nrustflags = "--cfg new"\n')
+    assert _remap(module, env, build) == \
+        ["--cfg", "new"] + _pair(env, build)
+
+
+@HELPERS
+@pytest.mark.parametrize("outer,inner", [
+    ('[build]\nrustflags = "--cfg old"\n',
+     '[build]\nrustflags = ["--cfg", "new"]\n'),
+    ('[build]\nrustflags = ["--cfg", "old"]\n',
+     '[build]\nrustflags = "--cfg new"\n'),
+])
+def test_mixed_string_array_refuses(
+        module, isolated, tmp_path, monkeypatch, outer, inner):
+    """A string meeting an array across files refuses, either way round."""
+    env, _build = isolated
+    parent = tmp_path / "outer"
+    parent.mkdir()
+    build = parent / "inner"
+    build.mkdir()
+    if module is DOCS:
+        monkeypatch.setattr(DOCS, "ROOT_DIR", str(build))
+    _write(parent / ".cargo" / "config.toml", outer)
+    _write(build / ".cargo" / "config.toml", inner)
+    with pytest.raises(SystemExit):
+        _remap(module, env, build)
+
+
+@HELPERS
+def test_home_ancestor_overlap_loads_once(
+        module, isolated, tmp_path, monkeypatch):
+    """A home overlapping an ancestor loads once, at the ancestor."""
+    env, _build = isolated
+    parent = tmp_path / "outer"
+    build = parent / "inner"
+    build.mkdir(parents=True)
+    if module is DOCS:
+        monkeypatch.setattr(DOCS, "ROOT_DIR", str(build))
+    env["CARGO_HOME"] = str(parent / ".cargo")
+    _write(parent / ".cargo" / "config.toml",
+           '[build]\nrustflags = ["--cfg", "dup"]\n')
+    _write(build / ".cargo" / "config.toml",
+           '[build]\nrustflags = ["--cfg", "child"]\n')
+    flags = _remap(module, env, build)
+    assert flags == ["--cfg", "dup", "--cfg", "child"] \
+        + _pair(env, build)
+    assert flags.count("dup") == 1
+
+
+@HELPERS
+def test_home_ancestor_overlap_symlink_loads_once(
+        module, isolated, tmp_path, monkeypatch):
+    """Overlap through a symlinked spelling loads once too."""
+    env, _build = isolated
+    parent = tmp_path / "outer"
+    build = parent / "inner"
+    build.mkdir(parents=True)
+    if module is DOCS:
+        monkeypatch.setattr(DOCS, "ROOT_DIR", str(build))
+    (parent / ".cargo").mkdir(parents=True)
+    link = tmp_path / "cargo-link"
+    os.symlink(str(parent / ".cargo"), str(link))
+    env["CARGO_HOME"] = str(link)
+    _write(parent / ".cargo" / "config.toml",
+           '[build]\nrustflags = ["--cfg", "dup"]\n')
+    flags = _remap(module, env, build)
+    assert flags == ["--cfg", "dup"] + _pair(env, build)
+    assert flags.count("dup") == 1
+
+
+@HELPERS
+@pytest.mark.parametrize("dotted,want", [
+    ("--cfg dotted", ["--cfg", "dotted"]),
+    ("", []),
+])
+def test_dotted_env_replaces_file_string(
+        module, isolated, dotted, want):
+    """The dotted spelling replaces a file string, even when empty."""
+    env, build = isolated
+    _write(build / ".cargo" / "config.toml",
+           '[build]\nrustflags = "--cfg file"\n')
+    env["CARGO_BUILD_RUSTFLAGS"] = dotted
+    assert _remap(module, env, build) == want + _pair(env, build)
+
+
+@HELPERS
 def test_unrelated_config_keys_ignored(module, isolated):
     """Non-flag settings never trip the reader."""
     env, build = isolated

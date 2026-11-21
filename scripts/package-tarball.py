@@ -770,11 +770,12 @@ def select_built_binary(stdout, bin_name, target_dir):
 def config_file_rustflags(path):
     """build.rustflags from one Cargo config file, else None.
 
-    A string value splits on whitespace (Cargo keeps
-    quotes literal); an array passes through verbatim.
-    Fails closed on anything this reader cannot reproduce
-    exactly: an include list, target-specific rustflags
-    (those shadow build.rustflags), or a mistyped value.
+    Returns the raw string or array: merging across files
+    needs the type, since a nearer string replaces while
+    arrays join. Fails closed on anything this reader cannot
+    reproduce exactly: an include list, target-specific
+    rustflags (those shadow build.rustflags), or a mistyped
+    value.
     """
     try:
         with open(path, "rb") as handle:
@@ -805,7 +806,7 @@ def config_file_rustflags(path):
         return None
     value = build["rustflags"]
     if isinstance(value, str):
-        return value.split()
+        return value
     if isinstance(value, list) \
             and all(isinstance(item, str) for item in value):
         return list(value)
@@ -819,12 +820,15 @@ def config_layer_rustflags(build_dir, env):
     Only consulted when neither CARGO_ENCODED_RUSTFLAGS nor
     RUSTFLAGS is set: Cargo checks the encoded spelling,
     then RUSTFLAGS, then the config layer, and a set-but-
-    empty channel still shadows everything below it. Joins
+    empty channel still shadows everything below it. Merges
     the home config first, then each ancestor config down
     to the build directory, then CARGO_BUILD_RUSTFLAGS
-    last; at one directory the extensionless config wins
-    over config.toml for the key. Fails closed rather than
-    shadowing flags it cannot see.
+    last: a nearer string replaces, arrays join, and a
+    string meeting an array across files refuses like Cargo
+    does. A home directory that overlaps an ancestor loads
+    once at the ancestor; at one directory the extensionless
+    config wins over config.toml wholesale. Fails closed
+    rather than shadowing flags it cannot see.
     """
     for name in env:
         if name.startswith("CARGO_TARGET_") \
@@ -836,38 +840,54 @@ def config_layer_rustflags(build_dir, env):
     if home is None:
         parent = env.get("HOME", "")
         home = os.path.join(parent, ".cargo") if parent else ""
-    if home and not os.path.isabs(home):
-        home = os.path.join(os.path.abspath(build_dir), home)
-    flag_dirs = []
-    if home:
-        flag_dirs.append(home)
     build_dir = os.path.abspath(build_dir)
+    if home and not os.path.isabs(home):
+        home = os.path.join(build_dir, home)
     chain = [build_dir]
     while True:
         parent = os.path.dirname(chain[-1])
         if parent == chain[-1]:
             break
         chain.append(parent)
-    for ancestor in reversed(chain):
-        flag_dirs.append(os.path.join(ancestor, ".cargo"))
-    flags = []
+    flag_dirs = [os.path.join(ancestor, ".cargo")
+                 for ancestor in reversed(chain)]
+    if home and os.path.realpath(home) not in set(
+            os.path.realpath(flag) for flag in flag_dirs):
+        flag_dirs.insert(0, home)
+    merged = None
     for flag_dir in flag_dirs:
-        values = []
-        for leaf in ("config", "config.toml"):
-            path = os.path.join(flag_dir, leaf)
-            if os.path.isfile(path):
-                values.append(config_file_rustflags(path))
-            elif os.path.lexists(path):
-                fail("cargo config %s is not a readable file"
-                     % path)
-        for value in values:
-            if value is not None:
-                flags.extend(value)
-                break
+        plain = os.path.join(flag_dir, "config")
+        dotted = os.path.join(flag_dir, "config.toml")
+        if os.path.exists(plain):
+            path = plain
+        elif os.path.exists(dotted):
+            path = dotted
+        else:
+            continue
+        value = config_file_rustflags(path)
+        if value is None:
+            continue
+        if merged is None:
+            merged = value
+        elif isinstance(merged, str) and isinstance(value, str):
+            merged = value
+        elif isinstance(merged, list) and isinstance(value, list):
+            merged = merged + value
+        else:
+            fail("cargo config %s mixes string and array "
+                 "build.rustflags across files: pass its flags "
+                 "through RUSTFLAGS instead" % path)
     dotted = env.get("CARGO_BUILD_RUSTFLAGS")
     if dotted is not None:
-        flags.extend(dotted.split())
-    return flags
+        if merged is None or isinstance(merged, str):
+            merged = dotted
+        else:
+            merged = merged + dotted.split()
+    if merged is None:
+        return []
+    if isinstance(merged, str):
+        return merged.split()
+    return merged
 
 
 def split_rustflags(text):

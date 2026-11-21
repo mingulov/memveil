@@ -24,7 +24,7 @@
 //! every value stays on one logical line.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Process environment as UTF-8 pairs for flag selection.
 ///
@@ -182,11 +182,14 @@ fn split_rustflags(text: &str) -> Vec<String> {
 ///
 /// Only consulted when neither `CARGO_ENCODED_RUSTFLAGS` nor `RUSTFLAGS` is
 /// set: Cargo checks the encoded spelling, then `RUSTFLAGS`, then the config
-/// layer. Joins the home config first, then each ancestor config down to the
-/// build directory, then `CARGO_BUILD_RUSTFLAGS` last; at one directory the
-/// extensionless config wins over config.toml for the key. Fails closed
-/// rather than shadowing flags it cannot see. Returns the probed config
-/// paths alongside, read or not.
+/// layer. Merges the home config first, then each ancestor config down to
+/// the build directory, then `CARGO_BUILD_RUSTFLAGS` last: a nearer string
+/// replaces, arrays join, and a string meeting an array across files
+/// refuses like Cargo does. A home directory that overlaps an ancestor
+/// loads once at the ancestor; at one directory the extensionless config
+/// wins over config.toml wholesale. Fails closed rather than shadowing
+/// flags it cannot see. Returns the probed config paths alongside, read
+/// or not.
 fn config_layer_rustflags(
     build_dir: &Path,
     env: &BTreeMap<String, String>,
@@ -206,58 +209,127 @@ fn config_layer_rustflags(
         },
     };
     let build_dir = abspath(build_dir);
-    let mut flag_dirs = Vec::new();
-    if !home.as_os_str().is_empty() {
-        flag_dirs.push(if home.is_absolute() {
-            home
-        } else {
-            build_dir.join(&home)
-        });
-    }
+    let home = if home.as_os_str().is_empty() || home.is_absolute() {
+        home
+    } else {
+        build_dir.join(&home)
+    };
     let mut chain = Vec::new();
     let mut cursor = Some(build_dir);
     while let Some(dir) = cursor {
         chain.push(dir.clone());
         cursor = dir.parent().map(Path::to_path_buf);
     }
-    for ancestor in chain.iter().rev() {
-        flag_dirs.push(ancestor.join(".cargo"));
+    let mut flag_dirs: Vec<PathBuf> = chain
+        .iter()
+        .rev()
+        .map(|ancestor| ancestor.join(".cargo"))
+        .collect();
+    if !home.as_os_str().is_empty() {
+        let key = dir_key(&home);
+        if !flag_dirs.iter().any(|dir| dir_key(dir) == key) {
+            flag_dirs.insert(0, home);
+        }
     }
-    let mut flags = Vec::new();
+    let mut merged: Option<FlagsValue> = None;
     let mut probed = Vec::new();
     for flag_dir in &flag_dirs {
-        // Both leaves parse when both exist, so a broken config.toml
-        // refuses even where the extensionless config wins.
-        let mut values = Vec::new();
-        for leaf in ["config", "config.toml"] {
-            let path = flag_dir.join(leaf);
-            probed.push(path.clone());
-            if path.is_file() {
-                values.push(config_file_rustflags(&path)?);
-            } else if path.symlink_metadata().is_ok() {
+        let plain = flag_dir.join("config");
+        let dotted = flag_dir.join("config.toml");
+        probed.push(plain.clone());
+        probed.push(dotted.clone());
+        // At one directory the extensionless config wins wholesale:
+        // when it exists the dotted leaf stays unread, even when the
+        // winner carries no flags. Existence follows symlinks, so a
+        // broken link counts as absent.
+        let path = if plain.exists() {
+            Some(plain)
+        } else if dotted.exists() {
+            Some(dotted)
+        } else {
+            None
+        };
+        let Some(path) = path else {
+            continue;
+        };
+        let Some(value) = config_file_rustflags(&path)? else {
+            continue;
+        };
+        match (merged, value) {
+            (None, value) => merged = Some(value),
+            (Some(FlagsValue::Str(_)), FlagsValue::Str(text)) => {
+                merged = Some(FlagsValue::Str(text));
+            }
+            (Some(FlagsValue::Arr(mut prior)), FlagsValue::Arr(mut more)) => {
+                prior.append(&mut more);
+                merged = Some(FlagsValue::Arr(prior));
+            }
+            _ => {
                 return Err(format!(
-                    "cargo config {} is not a readable file",
+                    "cargo config {} mixes string and array build.rustflags across files: \
+                     pass its flags through RUSTFLAGS instead",
                     path.display()
                 ));
             }
         }
-        if let Some(value) = values.into_iter().flatten().next() {
-            flags.extend(value);
-        }
     }
     if let Some(dotted) = env.get("CARGO_BUILD_RUSTFLAGS") {
-        flags.extend(dotted.split_whitespace().map(str::to_string));
+        match merged {
+            None | Some(FlagsValue::Str(_)) => {
+                merged = Some(FlagsValue::Str(dotted.clone()));
+            }
+            Some(FlagsValue::Arr(mut flags)) => {
+                flags.extend(dotted.split_whitespace().map(str::to_string));
+                merged = Some(FlagsValue::Arr(flags));
+            }
+        }
     }
+    let flags = match merged {
+        None => Vec::new(),
+        Some(FlagsValue::Str(text)) => text.split_whitespace().map(str::to_string).collect(),
+        Some(FlagsValue::Arr(flags)) => flags,
+    };
     Ok((flags, probed))
+}
+
+/// Canonical identity of a config directory: resolved symlinks when
+/// the directory exists, lexical cleanup otherwise, so overlapping
+/// spellings of one directory compare equal.
+fn dir_key(dir: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(dir) {
+        return canonical;
+    }
+    let mut out = PathBuf::new();
+    for comp in dir.components() {
+        match comp {
+            Component::Prefix(part) => out.push(part.as_os_str()),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() || out.as_os_str().is_empty() {
+                    out = PathBuf::from("/");
+                }
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+/// A `build.rustflags` value as read: merging across files needs the
+/// type, since a nearer string replaces while arrays join.
+enum FlagsValue {
+    Str(String),
+    Arr(Vec<String>),
 }
 
 /// `build.rustflags` from one Cargo config file, else None.
 ///
-/// A string value splits on whitespace (Cargo keeps quotes literal); an
-/// array passes through verbatim. Fails closed on anything this reader
-/// cannot reproduce exactly: an include entry, target-specific rustflags
-/// (those shadow `build.rustflags`), or a mistyped value.
-fn config_file_rustflags(path: &Path) -> Result<Option<Vec<String>>, String> {
+/// Returns the raw string or array for the merge. Fails closed on
+/// anything this reader cannot reproduce exactly: an include entry,
+/// target-specific rustflags (those shadow `build.rustflags`), or a
+/// mistyped value.
+fn config_file_rustflags(path: &Path) -> Result<Option<FlagsValue>, String> {
     let bytes = std::fs::read(path)
         .map_err(|err| format!("cannot read cargo config {}: {err}", path.display()))?;
     let text = std::str::from_utf8(&bytes).map_err(|_| {
@@ -384,11 +456,11 @@ fn mistype(path: &Path) -> String {
     )
 }
 
-/// A `rustflags` value as flags: strings split on whitespace, arrays pass
-/// through verbatim, anything else refuses.
-fn flags_value(value: &Value, path: &Path) -> Result<Vec<String>, String> {
+/// A `rustflags` value as read: strings stay whole for the merge,
+/// arrays pass through verbatim, anything else refuses.
+fn flags_value(value: &Value, path: &Path) -> Result<FlagsValue, String> {
     match value {
-        Value::Str(text) => Ok(text.split_whitespace().map(str::to_string).collect()),
+        Value::Str(text) => Ok(FlagsValue::Str(text.clone())),
         Value::Arr(items) => {
             let mut flags = Vec::new();
             for item in items {
@@ -397,7 +469,7 @@ fn flags_value(value: &Value, path: &Path) -> Result<Vec<String>, String> {
                     _ => return Err(mistype(path)),
                 }
             }
-            Ok(flags)
+            Ok(FlagsValue::Arr(flags))
         }
         _ => Err(mistype(path)),
     }
@@ -1300,16 +1372,192 @@ mod tests {
         assert_eq!(fx.remap(), want);
     }
 
-    /// A broken config.toml refuses even where the extensionless config
-    /// wins: both leaves parse when both exist.
+    /// A broken config.toml stays unread where the extensionless
+    /// config wins: the winner suppresses the loser wholesale.
     #[test]
-    fn broken_losing_leaf_still_refuses() {
+    fn broken_losing_leaf_ignored() {
         let mut fx = Fixture::fresh("losing-leaf");
         fx.write(
             ".cargo/config",
             "[build]\nrustflags = [\"--cfg\", \"plain\"]\n",
         );
         fx.write(".cargo/config.toml", "not = [valid\n");
+        let mut want = vec!["--cfg".to_string(), "plain".to_string()];
+        want.extend(fx.pair());
+        assert_eq!(fx.remap(), want);
+    }
+
+    /// The extensionless winner suppresses the dotted leaf even when
+    /// the winner itself carries no flags.
+    #[test]
+    fn extensionless_without_flags_suppresses_toml() {
+        let mut fx = Fixture::fresh("wholesale");
+        fx.write(".cargo/config", "[build]\njobs = 2\n");
+        fx.write(
+            ".cargo/config.toml",
+            "[build]\nrustflags = [\"--cfg\", \"ignored\"]\n",
+        );
+        assert_eq!(fx.remap(), fx.pair());
+    }
+
+    /// A nearer string replaces the ancestor string outright.
+    #[test]
+    fn layered_strings_replace() {
+        let mut fx = Fixture::fresh("replace");
+        fx.nest("outer/inner");
+        Fixture::write_at(
+            &fx._dir.dir.join("outer"),
+            ".cargo/config.toml",
+            "[build]\nrustflags = \"--cfg old\"\n",
+        );
+        fx.write(".cargo/config.toml", "[build]\nrustflags = \"--cfg new\"\n");
+        let mut want = vec!["--cfg".to_string(), "new".to_string()];
+        want.extend(fx.pair());
+        assert_eq!(fx.remap(), want);
+    }
+
+    /// A string meeting an array across files refuses, either way
+    /// round: Cargo cannot merge the two shapes.
+    #[test]
+    fn mixed_string_array_refuses() {
+        for (n, (outer, inner)) in [
+            (
+                "[build]\nrustflags = \"--cfg old\"\n",
+                "[build]\nrustflags = [\"--cfg\", \"new\"]\n",
+            ),
+            (
+                "[build]\nrustflags = [\"--cfg\", \"old\"]\n",
+                "[build]\nrustflags = \"--cfg new\"\n",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut fx = Fixture::fresh(&format!("mixed-{n}"));
+            fx.nest("outer/inner");
+            Fixture::write_at(&fx._dir.dir.join("outer"), ".cargo/config.toml", outer);
+            fx.write(".cargo/config.toml", inner);
+            let err = remap_build_paths(&mut fx.env, &fx.build).expect_err("must refuse");
+            assert!(err.contains("mixes string and array"), "{err}");
+        }
+    }
+
+    /// A home directory that overlaps an ancestor loads once, at the
+    /// ancestor: the flag appears a single time.
+    #[test]
+    fn home_ancestor_overlap_loads_once() {
+        let mut fx = Fixture::fresh("overlap");
+        fx.nest("outer/inner");
+        let outer_cargo = fx._dir.dir.join("outer").join(".cargo");
+        fx.env.insert(
+            "CARGO_HOME".to_string(),
+            outer_cargo.to_str().expect("UTF-8").to_string(),
+        );
+        Fixture::write_at(
+            &fx._dir.dir.join("outer"),
+            ".cargo/config.toml",
+            "[build]\nrustflags = [\"--cfg\", \"dup\"]\n",
+        );
+        fx.write(
+            ".cargo/config.toml",
+            "[build]\nrustflags = [\"--cfg\", \"child\"]\n",
+        );
+        let mut want = vec![
+            "--cfg".to_string(),
+            "dup".to_string(),
+            "--cfg".to_string(),
+            "child".to_string(),
+        ];
+        want.extend(fx.pair());
+        let flags = fx.remap();
+        assert_eq!(flags, want);
+        assert_eq!(
+            flags.iter().filter(|flag| flag.as_str() == "dup").count(),
+            1
+        );
+    }
+
+    /// Overlap through a symlinked spelling loads once too.
+    #[test]
+    fn home_ancestor_overlap_symlink_loads_once() {
+        let mut fx = Fixture::fresh("overlap-link");
+        fx.nest("outer/inner");
+        let outer_cargo = fx._dir.dir.join("outer").join(".cargo");
+        std::fs::create_dir_all(&outer_cargo).expect("outer cargo dir");
+        let link = fx._dir.dir.join("cargo-link");
+        std::os::unix::fs::symlink(&outer_cargo, &link).expect("link home");
+        fx.env.insert(
+            "CARGO_HOME".to_string(),
+            link.to_str().expect("UTF-8").to_string(),
+        );
+        Fixture::write_at(
+            &fx._dir.dir.join("outer"),
+            ".cargo/config.toml",
+            "[build]\nrustflags = [\"--cfg\", \"dup\"]\n",
+        );
+        let mut want = vec!["--cfg".to_string(), "dup".to_string()];
+        want.extend(fx.pair());
+        let flags = fx.remap();
+        assert_eq!(flags, want);
+        assert_eq!(
+            flags.iter().filter(|flag| flag.as_str() == "dup").count(),
+            1
+        );
+    }
+
+    /// The dotted spelling replaces a file string, even when empty.
+    #[test]
+    fn dotted_env_replaces_file_string() {
+        let mut fx = Fixture::fresh("dotted-replace");
+        fx.write(
+            ".cargo/config.toml",
+            "[build]\nrustflags = \"--cfg file\"\n",
+        );
+        fx.env.insert(
+            "CARGO_BUILD_RUSTFLAGS".to_string(),
+            "--cfg dotted".to_string(),
+        );
+        let mut want = vec!["--cfg".to_string(), "dotted".to_string()];
+        want.extend(fx.pair());
+        assert_eq!(fx.remap(), want);
+        let mut fx = Fixture::fresh("dotted-empty-replace");
+        fx.write(
+            ".cargo/config.toml",
+            "[build]\nrustflags = \"--cfg file\"\n",
+        );
+        fx.env
+            .insert("CARGO_BUILD_RUSTFLAGS".to_string(), String::new());
+        assert_eq!(fx.remap(), fx.pair());
+    }
+
+    /// A broken link counts as absent: the dotted leaf serves.
+    #[test]
+    fn broken_symlink_counts_as_absent() {
+        let mut fx = Fixture::fresh("broken-link");
+        let cargo_dir = fx.build.join(".cargo");
+        std::fs::create_dir_all(&cargo_dir).expect("cargo dir");
+        std::os::unix::fs::symlink(fx.build.join("nowhere"), cargo_dir.join("config"))
+            .expect("broken link");
+        fx.write(
+            ".cargo/config.toml",
+            "[build]\nrustflags = [\"--cfg\", \"dotted\"]\n",
+        );
+        let mut want = vec!["--cfg".to_string(), "dotted".to_string()];
+        want.extend(fx.pair());
+        assert_eq!(fx.remap(), want);
+    }
+
+    /// An extensionless directory refuses like the unreadable file it
+    /// is: Cargo fails the read instead of falling through.
+    #[test]
+    fn directory_leaf_refuses() {
+        let mut fx = Fixture::fresh("dir-leaf");
+        let dir = fx.build.join(".cargo/config");
+        std::fs::create_dir_all(&dir).expect("config dir");
+        fx.write(
+            ".cargo/config.toml",
+            "[build]\nrustflags = [\"--cfg\", \"dotted\"]\n",
+        );
         remap_build_paths(&mut fx.env, &fx.build).expect_err("must refuse");
     }
 
