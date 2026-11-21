@@ -991,15 +991,26 @@ def stage_scenario_files(export, job, neg_shas, deb=None,
 # reviewed amendment or next-seal integration plus an affected-gate
 # rerun.
 #
-# Guest share placement: the shares sit under /tmp/mv/* because
-# /mv/* lies outside every vng overlay, so the read-only guest
-# root could never create those mountpoints (EROFS, shares absent,
-# vng.exit 2); /tmp is in vng's default overlay set in both its rw
-# and non-rw branches, so mkdir -p lands on the overlay upper. The
-# guest command runs a mount guard first that fails fast with the
-# exact missing share (exit 42) instead of a bare python ENOENT.
-SCENARIO_GUEST_REPO = "/tmp/mv/repo"
-SCENARIO_GUEST_DEBDIR = "/tmp/mv/deb"
+# Guest share placement: flat depth-1 siblings directly under
+# /tmp (/tmp/mv-repo for the repo, /tmp/mv-deb for the staged
+# deb), never nested under a shared intermediate parent. The vng
+# guest init only materializes a share whose parent directory
+# already exists: a nested guest path with an absent
+# intermediate parent is skipped silently - no mountpoint is
+# created, no 9p session starts, nothing is logged, and later
+# shares still mount. Diagnosed live: a nested two-level guest
+# path never mounted while a flat sibling in the same boot did (mount
+# diagnosis boots 1, 2, and 4; 9p session counts matched the
+# mounted shares exactly, with no EROFS anywhere). /tmp itself
+# stays required: it is in vng's default overlay set in both
+# its rw and non-rw branches, so the mountpoint lands on the
+# overlay upper. A shared parent would also collide with the
+# guest's local evidence staging in that same directory. The guest
+# command runs a mount guard first that fails fast with the
+# exact missing share (exit 42) instead of a bare python
+# ENOENT.
+SCENARIO_GUEST_REPO = "/tmp/mv-repo"
+SCENARIO_GUEST_DEBDIR = "/tmp/mv-deb"
 SCENARIO_GUEST_EXPORT = "/tmp/export"
 SCENARIO_GUEST_SCRIPT = "tests/vm/kernel_scenarios_guest.py"
 SCENARIO_MOUNT_GUARD_EXIT = 42

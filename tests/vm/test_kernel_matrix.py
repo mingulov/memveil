@@ -6923,13 +6923,13 @@ def test_row_receipt_scenarios_failure_without_guest(
         "cache.txt": "hit /cache\n",
         "vng.exit": "42",
         "console.txt": "9p mounts\nscenario mounts "
-                       "missing: /tmp/mv/repo\n",
+                       "missing: /tmp/mv-repo\n",
         "FAIL.txt": "scenario mounts missing: "
-                    "/tmp/mv/repo\n",
+                    "/tmp/mv-repo\n",
     })
     rec = {"id": "6.6", "mode": "scenarios", "ok": False,
            "detail": "0 ok; guest FAIL: scenario mounts "
-                     "missing: /tmp/mv/repo",
+                     "missing: /tmp/mv-repo",
            "run_id": "20261030T000000Z",
            "vng_version": "v6.6.160",
            "release": "6.6.160-0606160-generic",

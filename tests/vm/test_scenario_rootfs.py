@@ -171,8 +171,8 @@ def test_verify_mismatch_refuses(tmp_path):
 # --- guest command + vng argv builders ---
 
 def test_scenario_guest_cmd_exact():
-    tail = "python3 /tmp/mv/repo/tests/vm/" \
-        "kernel_scenarios_guest.py /tmp/export /tmp/mv/repo"
+    tail = "python3 /tmp/mv-repo/tests/vm/" \
+        "kernel_scenarios_guest.py /tmp/export /tmp/mv-repo"
     assert kmt.scenario_guest_cmd() == \
         kmt.scenario_mount_guard() + ";" + tail
 
@@ -183,8 +183,8 @@ def test_rootfs_vng_args_exact(tmp_path):
     assert kmt.scenario_rootfs_vng_args(mount, stage) == [
         "--root", mount,
         "--cwd", mount,
-        "--rodir=/tmp/mv/repo=%s" % kmt.ROOT,
-        "--rodir=/tmp/mv/deb=%s" % stage]
+        "--rodir=/tmp/mv-repo=%s" % kmt.ROOT,
+        "--rodir=/tmp/mv-deb=%s" % stage]
 
 
 def test_rootfs_vng_guest_paths_under_overlay(tmp_path):
@@ -195,7 +195,7 @@ def test_rootfs_vng_guest_paths_under_overlay(tmp_path):
         for arg in kmt.scenario_rootfs_vng_args(mount,
                                                 stage)
         if arg.startswith("--rodir=")]
-    assert guests == ["/tmp/mv/repo", "/tmp/mv/deb"]
+    assert guests == ["/tmp/mv-repo", "/tmp/mv-deb"]
     for guest in guests:
         assert guest.startswith("/tmp/")
 
@@ -551,7 +551,7 @@ def test_stage_rootfs(tmp_path, monkeypatch):
     staged = os.path.join(export, "ro-deb",
                           "memveil-test.deb")
     assert Path(staged).read_bytes() == b"deb-bytes"
-    assert job["deb"] == "/tmp/mv/deb/memveil-test.deb"
+    assert job["deb"] == "/tmp/mv-deb/memveil-test.deb"
     assert job["deb_host"] == str(deb)
     assert job["rootfs"] == {"image": "r.img",
                              "sha256": "ab" * 32,
@@ -906,13 +906,26 @@ def test_rootfs_relative_vng_unresolved(tmp_path,
 
 def test_mount_guard_bakes_guest_paths():
     guard = kmt.scenario_mount_guard()
-    for baked in ("SCENARIO_REPO:-/tmp/mv/repo",
-                  "SCENARIO_DEBDIR:-/tmp/mv/deb",
+    for baked in ("SCENARIO_REPO:-/tmp/mv-repo",
+                  "SCENARIO_DEBDIR:-/tmp/mv-deb",
                   "SCENARIO_EXPORT:-/tmp/export",
                   "SCENARIO_MOUNTS_FILE:-/proc/mounts",
                   "tests/vm/kernel_scenarios_guest.py",
                   "FAIL.txt", "exit 42"):
         assert baked in guard
+
+
+def test_guest_share_paths_are_flat_depth_one():
+    shares = (kmt.SCENARIO_GUEST_REPO,
+              kmt.SCENARIO_GUEST_DEBDIR)
+    assert len(set(shares)) == 2
+    for guest in shares:
+        assert guest.startswith("/tmp/")
+        assert "/" not in guest[len("/tmp/"):]
+    for local in ("/tmp/mv", "/tmp/mv-btf-empty",
+                  "/tmp/mv-btf-half",
+                  kmt.SCENARIO_GUEST_EXPORT):
+        assert local not in shares
 
 
 def test_mount_guard_deb_marker_opt_in():
@@ -924,17 +937,17 @@ def test_mount_guard_deb_marker_opt_in():
 
 def test_guest_cmd_deb_marker_selection():
     assert "$b/memveil-test.deb" in kmt.scenario_guest_cmd(
-        "/tmp/mv/deb/memveil-test.deb")
-    for deb in (None, "host.deb", "/tmp/mv/deb/../x.deb",
-                "/tmp/mv/deb/x .deb",
-                "/tmp/mv/deb/x.deb/extra",
-                "/tmp/mv/deb/x.tar.gz"):
+        "/tmp/mv-deb/memveil-test.deb")
+    for deb in (None, "host.deb", "/tmp/mv-deb/../x.deb",
+                "/tmp/mv-deb/x .deb",
+                "/tmp/mv-deb/x.deb/extra",
+                "/tmp/mv-deb/x.tar.gz"):
         assert "$b/" not in kmt.scenario_guest_cmd(deb)
 
 
 def test_guest_cmd_stays_within_cmdline_budget():
     cmd = kmt.scenario_guest_cmd(
-        "/tmp/mv/deb/memveil_0.1.1-1_amd64.deb")
+        "/tmp/mv-deb/memveil_0.1.1-1_amd64.deb")
     assert len(cmd) < 800
 
 
@@ -1173,7 +1186,7 @@ def _collect_export(tmp_path, artifacts=None):
         "id": "7.0", "release": "7.0-test",
         "negatives": dict(NEG_SHAS)}))
     (export / "FAIL.txt").write_text(
-        "scenario mounts missing: /tmp/mv/repo\n")
+        "scenario mounts missing: /tmp/mv-repo\n")
     if artifacts is not None:
         (export / "artifacts.json").write_text(
             json.dumps(artifacts))
@@ -1194,7 +1207,7 @@ def test_collect_scenarios_absent_artifacts_empties_negatives(
     assert rec["binary_sha256"] is None
     assert rec["ok"] is False
     assert "guest FAIL" in rec["detail"]
-    assert "scenario mounts missing: /tmp/mv/repo" in \
+    assert "scenario mounts missing: /tmp/mv-repo" in \
         rec["detail"]
     assert json.loads((export / "job.json").read_text())[
         "negatives"] == NEG_SHAS
@@ -1722,11 +1735,11 @@ def _e2e_guard_row(tmp_path):
     (row / "job.json").write_text(json.dumps(
         _e2e_job({"renamed_field": "1" * 64})))
     (row / "FAIL.txt").write_text(
-        "scenario mounts missing: /tmp/mv/repo\n")
+        "scenario mounts missing: /tmp/mv-repo\n")
     (row / "vng.exit").write_text("42")
     (row / "console.txt").write_text(
         "virtme.initmount0 on /tmp/export type 9p\n"
-        "scenario mounts missing: /tmp/mv/repo\n")
+        "scenario mounts missing: /tmp/mv-repo\n")
     (row / "cache.txt").write_text("hit /cache\n")
     return row
 
@@ -1771,7 +1784,7 @@ def test_collector_guard_trip_row_receipts(
     assert rec["ok"] is False
     assert rec["negatives"] == {}
     assert "scenario mounts missing: " \
-        "/tmp/mv/repo" in rec["detail"]
+        "/tmp/mv-repo" in rec["detail"]
     assert len(rec["scenarios"]) == 12
     doc = km.write_row_receipt(
         row, rec, entry, _e2e_ctx())
