@@ -535,7 +535,115 @@ pub fn candidate_stage(rels: &[&str]) -> PathBuf {
     staged
 }
 
+/// Split space-separated flags the way a Unix shell words them.
+///
+/// Single quotes, double quotes, and backslash escapes (the
+/// backslash stays literal inside single quotes); an
+/// unterminated quote or a trailing backslash panics naming
+/// the input, since cargo would refuse the same value
+/// outright.
+fn split_shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if let Some(mark) = quote {
+            if ch == mark {
+                quote = None;
+            } else if mark == '"' && ch == '\\' {
+                match chars.next() {
+                    Some(next) => word.push(next),
+                    None => panic!("cannot split RUSTFLAGS {text:?}: trailing backslash"),
+                }
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            '\\' => match chars.next() {
+                Some(next) => {
+                    word.push(next);
+                    in_word = true;
+                }
+                None => panic!("cannot split RUSTFLAGS {text:?}: trailing backslash"),
+            },
+            ch if ch.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            _ => {
+                word.push(ch);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        panic!("cannot split RUSTFLAGS {text:?}: unterminated quote");
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
+/// `cargo build` with build-machine paths remapped out of the output.
+///
+/// Appends the home/checkout `--remap-path-prefix` pair to the encoded
+/// flags (home first, checkout last, so checkout paths land under
+/// /build-root — the same pair the BPF build script applies to the
+/// objects it compiles). The encoded spelling wins over RUSTFLAGS when
+/// both reach cargo, so an ambient RUSTFLAGS is merged in and dropped
+/// rather than clobbered. A missing or empty HOME contributes no
+/// remap.
+fn cargo_build_remapped(args: &[&str]) -> Output {
+    let root = rust_dir();
+    let mut flags: Vec<String> = Vec::new();
+    if let Ok(encoded) = std::env::var("CARGO_ENCODED_RUSTFLAGS") {
+        flags.extend(
+            encoded
+                .split('\u{1f}')
+                .filter(|flag| !flag.is_empty())
+                .map(str::to_string),
+        );
+    }
+    if let Ok(rustflags) = std::env::var("RUSTFLAGS") {
+        flags.extend(split_shell_words(&rustflags));
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        flags.push(format!("--remap-path-prefix={home}=/build-prefix"));
+    }
+    flags.push(format!(
+        "--remap-path-prefix={}=/build-root",
+        root.display()
+    ));
+    let mut command = Command::new("cargo");
+    command.args(args);
+    command.env_remove("RUSTUP_TOOLCHAIN");
+    command.env("CARGO_ENCODED_RUSTFLAGS", flags.join("\u{1f}"));
+    command.env_remove("RUSTFLAGS");
+    command.current_dir(&root);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    spawn_output(&mut command, "cargo")
+}
+
 /// Ensure the release binary exists (builds it when missing).
+///
+/// A build here carries the build-machine path remap, so the packaged
+/// binary names no checkout, home, user, or host path; a prebuilt
+/// binary from a plain `cargo build --release` is reused as-is and
+/// stays dirty, so a stale one must go before the packaging suites
+/// (a clean target dir is the reliable remedy).
 pub fn ensure_release_binary() -> PathBuf {
     let binary = release_binary();
     let stale = !binary.is_file() || (rebuild_requested() && !BINARY_READY.load(Ordering::SeqCst));
@@ -544,11 +652,7 @@ pub fn ensure_release_binary() -> PathBuf {
         let stale =
             !binary.is_file() || (rebuild_requested() && !BINARY_READY.load(Ordering::SeqCst));
         if stale {
-            let out = run_unpinned(
-                "cargo",
-                &["build", "--release", "--locked", "--offline"],
-                Some(&rust_dir()),
-            );
+            let out = cargo_build_remapped(&["build", "--release", "--locked", "--offline"]);
             assert!(
                 out.status.success(),
                 "cargo build --release failed: {}",

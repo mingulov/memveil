@@ -79,6 +79,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import struct
@@ -766,6 +767,37 @@ def select_built_binary(stdout, bin_name, target_dir):
     return binary
 
 
+def remap_build_paths(env, rust_dir):
+    """Append path remaps so shipped bytes name no build machine.
+
+    Home directory first, then the checkout root last, so
+    checkout paths land under /build-root (the BPF build
+    script applies the same pair to the objects it compiles).
+    Extends the encoded flags: that spelling wins over
+    RUSTFLAGS when both reach cargo, so merge RUSTFLAGS in
+    and drop it rather than clobber it. A missing or empty
+    HOME contributes no remap.
+    """
+    flags = []
+    encoded = env.get("CARGO_ENCODED_RUSTFLAGS", "")
+    if encoded:
+        flags.extend(flag for flag in encoded.split("\x1f")
+                     if flag)
+    rustflags = env.get("RUSTFLAGS", "")
+    if rustflags:
+        try:
+            flags.extend(shlex.split(rustflags))
+        except ValueError as exc:
+            fail("cannot parse RUSTFLAGS: %s" % exc)
+    home = env.get("HOME", "")
+    if home:
+        flags.append("--remap-path-prefix=%s=/build-prefix" % home)
+    flags.append("--remap-path-prefix=%s=/build-root"
+                 % os.path.abspath(rust_dir))
+    env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
+    env.pop("RUSTFLAGS", None)
+
+
 def build_release_binary(rust_dir, target_dir,
                          bin_name="memveil"):
     """Build release in-flow, return cargo's own binary path.
@@ -773,7 +805,8 @@ def build_release_binary(rust_dir, target_dir,
     The caller passes a fresh per-build target dir; the
     build pins --target-dir plus a CLI build.build-dir
     override (both beat environment and config files),
-    scrubs every redirect variable, and consumes only the
+    scrubs every redirect variable, remaps build-machine
+    paths out of the shipped bytes, and consumes only the
     JSON artifact paths, so exactly this invocation's bytes
     are packaged. Fails closed on any build error or path
     surprise.
@@ -786,6 +819,7 @@ def build_release_binary(rust_dir, target_dir,
     env.pop("RUSTUP_TOOLCHAIN", None)
     for name in BUILD_REDIRECT_ENV:
         env.pop(name, None)
+    remap_build_paths(env, rust_dir)
     try:
         proc = subprocess.run(
             ["cargo",

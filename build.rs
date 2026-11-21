@@ -89,6 +89,9 @@ fn main() {
     // the caller actually changed.
     println!("cargo::rerun-if-env-changed=RUSTFLAGS");
     println!("cargo::rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    // The home-directory remap below derives from HOME, so a HOME change
+    // must rebuild the BPF objects too.
+    println!("cargo::rerun-if-env-changed=HOME");
 
     // Preflight: fail early with an actionable message when the linker is
     // missing or the wrong version. Local probe only, so it cannot break
@@ -179,7 +182,13 @@ fn main() {
     // floors (attempts 6.0, lifecycle/copy 6.11) are all above that, so
     // v3 is matrix-compatible; non-fetch add/or and CAS lower on any CPU.
     let mut flags = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    for flag in [
+    // Debug paths baked into the shipped objects must not name the build
+    // machine: remap the home directory first, then the checkout root
+    // last, so checkout paths land under /build-root. Same pair the
+    // offline fixtures are rebuilt with (see
+    // tests/vm/fixtures/aya/README.md); a missing or empty HOME
+    // contributes no remap.
+    let mut extra: Vec<String> = [
         "-C",
         "linker=bpf-linker",
         "-C",
@@ -188,7 +197,20 @@ fn main() {
         "link-arg=--btf",
         "-C",
         "target-cpu=v3",
-    ] {
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if let Ok(home) = env::var("HOME")
+        && !home.is_empty()
+    {
+        extra.push(format!("--remap-path-prefix={home}=/build-prefix"));
+    }
+    extra.push(format!(
+        "--remap-path-prefix={}=/build-root",
+        manifest_dir.display()
+    ));
+    for flag in &extra {
         if !flags.is_empty() {
             flags.push('\u{1f}');
         }

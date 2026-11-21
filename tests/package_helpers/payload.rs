@@ -135,8 +135,13 @@ pub fn collect_full(
     memveil_release_entry::collect_full(bundle, deb, rpm, manifest_text)
 }
 
-/// Hash the 12 payload members of a package set.
-pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String, String>, String> {
+/// Extract the three archives; package tag -> payload root.
+fn extract_roots(
+    deb: &Path,
+    rpm: &Path,
+    bundle: &Path,
+    scratch_label: &str,
+) -> Result<BTreeMap<&'static str, PathBuf>, String> {
     for (path, label) in [(deb, "--deb"), (rpm, "--rpm"), (bundle, "--bundle")] {
         if !path.is_file() {
             return Err(format!(
@@ -150,17 +155,22 @@ pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String,
             return Err(format!("payload-gate: {tool} not found"));
         }
     }
-    let tmp = scratch("payload-collect");
+    let tmp = scratch(scratch_label);
     let deb_root = extract_deb(deb, &tmp);
     let rpm_root = extract_rpm(rpm, &tmp)?;
     let bundle_root = extract_bundle(bundle, &tmp)?;
-    let roots: BTreeMap<&str, PathBuf> = [
+    Ok([
         ("deb", deb_root),
         ("rpm", rpm_root),
         ("bundle", bundle_root),
     ]
     .into_iter()
-    .collect();
+    .collect())
+}
+
+/// Hash the 12 payload members of a package set.
+pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String, String>, String> {
+    let roots = extract_roots(deb, rpm, bundle, "payload-collect")?;
     let mut entries = BTreeMap::new();
     for (logical, pkg, member) in spec() {
         let path = roots[pkg.as_str()].join(&member);
@@ -170,6 +180,26 @@ pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String,
         entries.insert(logical, sha256_file(&path));
     }
     Ok(entries)
+}
+
+/// Read the 12 payload members of a package set; logical path -> bytes.
+pub fn member_bytes(
+    deb: &Path,
+    rpm: &Path,
+    bundle: &Path,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let roots = extract_roots(deb, rpm, bundle, "payload-bytes")?;
+    let mut members = Vec::new();
+    for (logical, pkg, member) in spec() {
+        let path = roots[pkg.as_str()].join(&member);
+        if !path.is_file() {
+            return Err(format!("payload-gate: {pkg} lacks payload member {member}"));
+        }
+        let bytes =
+            fs::read(&path).map_err(|err| format!("payload-gate: cannot read {logical}: {err}"))?;
+        members.push((logical, bytes));
+    }
+    Ok(members)
 }
 
 /// Parse manifest text; `Err` names malformed lines and duplicates.
