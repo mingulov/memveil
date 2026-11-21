@@ -212,11 +212,27 @@ def doctor_argv(mv, load_check, cp_object=None):
     return argv
 
 
-def record_argv(mv, dest, duration, cp_object=None):
+def record_strict(name):
+    """Finalizing legs run record under --strict.
+
+    Base and the three degrading negatives finalize a
+    capture whose session verdict is never complete, so
+    strict record exits 4 there; the eight refusal legs
+    cannot start and exit 3 without the flag. The strict
+    set is exactly the workload set: only a finalizing
+    leg runs the workload.
+    """
+    return name in WORKLOAD_SCENARIOS
+
+
+def record_argv(mv, dest, duration, cp_object=None,
+                strict=False):
     argv = [mv, "record", "--output", dest, "--duration",
            str(duration), "--capability", ALL_CAPS]
     if cp_object:
         argv += ["--cp-object", cp_object]
+    if strict:
+        argv.append("--strict")
     return argv
 
 
@@ -250,13 +266,14 @@ def run_doctor(sdir, mv, name, load_check, cp_object,
 
 
 def run_record(sdir, mv, cap, duration, cp_object, wrap,
-               with_workload, load, dev):
+               with_workload, load, dev, strict):
     rec_stdout = open(os.path.join(sdir, "record.stdout"),
                       "w")
     rec_stderr = open(os.path.join(sdir, "record.stderr"),
                       "w")
     proc = subprocess.Popen(
-        wrap(record_argv(mv, cap, duration, cp_object)),
+        wrap(record_argv(mv, cap, duration, cp_object,
+                         strict=strict)),
         stdout=rec_stdout, stderr=rec_stderr,
         start_new_session=True)
     if with_workload:
@@ -363,7 +380,7 @@ def scenario_base(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 10,
                None, ctx["plain"], True, ctx["load"],
-               ctx["dev"])
+               ctx["dev"], strict=record_strict("base"))
     teardown_proof(sdir, mv)
 
 
@@ -386,7 +403,7 @@ def scenario_negative(ctx, name):
     run_record(sdir, mv, os.path.join(sdir, "cap"),
                10 if with_workload else 5, cp_object,
                ctx["plain"], with_workload, ctx["load"],
-               ctx["dev"])
+               ctx["dev"], strict=record_strict(name))
     if name in REPORT_SCENARIOS:
         run_reports(sdir, mv, os.path.join(sdir, "cap"))
     teardown_proof(sdir, mv)
@@ -436,7 +453,8 @@ def scenario_nonroot(ctx):
                wrap_nonroot)
     run_record(sdir, mv,
                os.path.join(nobody_dir, "rec"), 5, None,
-               wrap_nonroot, False, ctx["load"], ctx["dev"])
+               wrap_nonroot, False, ctx["load"], ctx["dev"],
+               strict=record_strict("nonroot"))
     teardown_proof(sdir, mv)
 
 
@@ -463,7 +481,7 @@ def scenario_nocaps(ctx):
                wrap_nocaps)
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, wrap_nocaps, False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"], strict=record_strict("nocaps"))
     teardown_proof(sdir, mv)
 
 
@@ -488,7 +506,8 @@ def scenario_ftrace_off(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("ftrace-off"))
     restored = None
     if orig is not None:
         try:
@@ -545,7 +564,8 @@ def scenario_tracefs_unmounted(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("tracefs-unmounted"))
     mount_log = []
     for entry in sorted(found,
                         key=lambda e: e["point"]):
@@ -609,7 +629,8 @@ def scenario_btf_empty(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("btf-empty"))
     sh(["umount", BTF_PATH], timeout=60)
     _, restored_sha = _btf_orig()
     teardown_proof(sdir, mv)
@@ -650,7 +671,8 @@ def scenario_btf_truncated(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("btf-truncated"))
     sh(["umount", BTF_PATH], timeout=60)
     _, restored_sha = _btf_orig()
     teardown_proof(sdir, mv)
@@ -729,7 +751,8 @@ def scenario_memcg(ctx):
                    ctx["plain"])
         run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                    None, ctx["plain"], False, ctx["load"],
-                   ctx["dev"])
+                   ctx["dev"],
+                   strict=record_strict("memcg"))
         teardown_proof(sdir, mv)
         return
     for num in range(2):
@@ -840,7 +863,8 @@ def _memcg_attempt(ctx, sdir, num):
                wrap)
     run_doctor(attdir, mv, "doctor-load", True, None, wrap)
     run_record(attdir, mv, os.path.join(attdir, "cap"), 5,
-               None, wrap, False, ctx["load"], ctx["dev"])
+               None, wrap, False, ctx["load"], ctx["dev"],
+               strict=record_strict("memcg"))
     oom_after = _cg_oom(MC_GROUP)
     exits = []
     for leaf in ("doctor-passive.exit", "doctor-load.exit",
