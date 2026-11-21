@@ -33,12 +33,15 @@
 # mode routes before this check and never touches the
 # build tree, so qualification works with an empty dev
 # build tree.
-# MEMVEIL_BIN overrides the binary under test: when set
-# to an executable file the runner uses it verbatim (no
-# rebuild, no relink of build/memveil); a set-but-missing
-# or non-executable value fails closed with exit 1. The
-# CLI Python drivers resolve the same knob through
-# tests/cli/memveil_bin.py (docs/sanitizer-lane.md).
+# MEMVEIL_BIN overrides the binary under test: a value
+# containing a slash must name an executable file, used
+# verbatim (no rebuild, no relink of build/memveil); a
+# bare name is looked up on PATH and resolves to an
+# absolute path. A set-but-unusable value (missing, not
+# executable, or unresolvable on PATH) fails closed with
+# exit 1. The CLI Python drivers resolve the same knob
+# through tests/cli/memveil_bin.py
+# (docs/sanitizer-lane.md).
 # LMB_SANITIZE=1 exports fail-fast UBSan options for
 # sanitizer-instrumented runs (plain binaries ignore this).
 #
@@ -122,13 +125,61 @@ asan_preload() {
     fi
 }
 
+memveil_knob_resolved() {
+    # Resolve a MEMVEIL_BIN value to the binary to run: a
+    # value containing a slash prints verbatim (the caller
+    # checks it names an executable file); a bare name is
+    # looked up on PATH, left to right, and prints as an
+    # absolute canonical path. The lookup is explicit so
+    # validation and dispatch cannot disagree about which
+    # file a bare name means: an executed bare name would
+    # otherwise search PATH while a plain file test checks
+    # the current directory. An empty PATH entry means the
+    # current directory; an unset or empty PATH refuses
+    # every bare name. Prints nothing and returns 1 when a
+    # bare name resolves to nothing usable.
+    knob=$1
+    case $knob in
+        */*)
+            printf '%s\n' "$knob"
+            return 0
+            ;;
+    esac
+    search=${PATH-}
+    if [ -z "$search" ]; then
+        return 1
+    fi
+    search=$search:
+    while [ -n "$search" ]; do
+        dir=${search%%:*}
+        search=${search#*:}
+        if [ -z "$dir" ]; then
+            dir=.
+        fi
+        cand=$dir/$knob
+        if [ -f "$cand" ] && [ -x "$cand" ]; then
+            # command -p: canonicalize with the default utility
+            # path, since PATH itself is the search input here
+            # and may not cover coreutils.
+            resolved=$(command -p readlink -f "$cand" \
+                2>/dev/null) || return 1
+            if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+                printf '%s\n' "$resolved"
+                return 0
+            fi
+            return 1
+        fi
+    done
+    return 1
+}
+
 memveil_bin() {
-    # Binary under test: the Rust release build, or
-    # $MEMVEIL_BIN verbatim when set (sanitizer-lane
-    # override; rust_bin_setup refuses an unusable value
-    # before any suite runs).
+    # Binary under test: the Rust release build, or the
+    # $MEMVEIL_BIN resolution (sanitizer-lane override;
+    # rust_bin_setup refuses an unusable value before any
+    # suite runs, so dispatch always sees a resolved path).
     if [ "${MEMVEIL_BIN+x}" = x ]; then
-        printf '%s\n' "$MEMVEIL_BIN"
+        memveil_knob_resolved "$MEMVEIL_BIN"
         return
     fi
     printf '%s\n' "$ROOT/target/release/memveil"
@@ -140,14 +191,27 @@ memveil_build_hint() {
 }
 
 rust_bin_setup() {
-    # MEMVEIL_BIN override: use the named binary verbatim
-    # (no rebuild, no relink of build/memveil), failing
-    # closed unless it names an executable file.
+    # MEMVEIL_BIN override: use the named binary (no
+    # rebuild, no relink of build/memveil), failing
+    # closed unless it names an executable file — a bare
+    # name must resolve on PATH.
     if [ "${MEMVEIL_BIN+x}" = x ]; then
-        if [ ! -f "$MEMVEIL_BIN" ] || [ ! -x "$MEMVEIL_BIN" ]; then
-            echo "test: MEMVEIL_BIN=$MEMVEIL_BIN missing or not executable" >&2
-            return 1
-        fi
+        case $MEMVEIL_BIN in
+            */*)
+                if [ ! -f "$MEMVEIL_BIN" ] || \
+                   [ ! -x "$MEMVEIL_BIN" ]; then
+                    echo "test: MEMVEIL_BIN=$MEMVEIL_BIN missing or not executable" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                if ! memveil_knob_resolved "$MEMVEIL_BIN" \
+                        >/dev/null 2>&1; then
+                    echo "test: MEMVEIL_BIN=$MEMVEIL_BIN missing or not executable" >&2
+                    return 1
+                fi
+                ;;
+        esac
         return 0
     fi
     # The release binary must exist, and the build/memveil

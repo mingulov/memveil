@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""MEMVEIL_BIN contract: the blessed binary is the executed binary (R82).
+"""MEMVEIL_BIN contract: the blessed binary is the executed binary.
 
-Closes the R81 divergence Codex proved: tools/test blessed the knob
-binary while the CLI drivers ran build/memveil. Every driver now
-resolves the same selector (memveil_bin.resolve_memveil_bin), so
-the knob binary provably equals the executed binary:
+The runner blesses one binary and every CLI driver resolves the
+same selector (memveil_bin.resolve_memveil_bin), so the knob
+binary provably equals the executed binary:
 
-- set+executable resolves verbatim; unset resolves the
-  build/memveil default; bogus (missing, not-a-file,
-  non-executable, empty) refuses before dispatch.
+- set+usable resolves: a slash path verbatim, a bare name via
+  PATH to an absolute path; unset resolves the build/memveil
+  default; bogus (missing, not-a-file, non-executable, empty,
+  unresolvable-on-PATH) refuses before dispatch.
 - identity: every CLI driver resolves the knob to the identical
-  string, and a wrapper-knob end-to-end run proves the executed
-  binary is the knob binary (marker check).
+  string, and wrapper-knob end-to-end runs prove the executed
+  binary is the knob binary (marker checks, both for slash
+  paths and for bare names found on PATH).
 - refusal: a bogus knob fails the runner (exit 1, before dispatch)
   and a directly-invoked driver (nonzero, names MEMVEIL_BIN).
 """
@@ -87,8 +88,9 @@ class KnobContract(unittest.TestCase):
             os.symlink(sentinel, link)
             old = os.environ.get("MEMVEIL_BIN")
             try:
-                # Verbatim, not normalized: even a symlink resolves
-                # to the knob string itself, like tools/test.
+                # Verbatim, not normalized: even a slash-path
+                # symlink resolves to the knob string itself,
+                # like tools/test.
                 for knob in (sentinel, link):
                     os.environ["MEMVEIL_BIN"] = knob
                     self.assertEqual(resolve_memveil_bin(), knob)
@@ -124,6 +126,109 @@ class KnobContract(unittest.TestCase):
                     os.environ.pop("MEMVEIL_BIN", None)
                 else:
                     os.environ["MEMVEIL_BIN"] = old
+
+    def test_bare_name_resolves_via_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = os.path.join(tmp, "first")
+            second = os.path.join(tmp, "second")
+            linkdir = os.path.join(tmp, "linkdir")
+            os.mkdir(first)
+            os.mkdir(second)
+            os.mkdir(linkdir)
+            hit = make_executable(os.path.join(first, "mv-bare-probe"))
+            make_executable(os.path.join(second, "mv-bare-probe"))
+            target = make_executable(os.path.join(tmp, "mv-real-probe"))
+            os.symlink(target, os.path.join(linkdir, "mv-link-probe"))
+            old_path = os.environ.get("PATH", "")
+            old_knob = os.environ.get("MEMVEIL_BIN")
+            try:
+                # First hit on PATH wins, as an absolute path.
+                os.environ["PATH"] = first + os.pathsep + second
+                os.environ["MEMVEIL_BIN"] = "mv-bare-probe"
+                self.assertEqual(resolve_memveil_bin(),
+                                 os.path.realpath(hit))
+                # A symlink on PATH resolves to its target.
+                os.environ["PATH"] = linkdir
+                os.environ["MEMVEIL_BIN"] = "mv-link-probe"
+                self.assertEqual(resolve_memveil_bin(),
+                                 os.path.realpath(target))
+                # An empty PATH refuses every bare name.
+                os.environ["PATH"] = ""
+                os.environ["MEMVEIL_BIN"] = "mv-bare-probe"
+                with self.assertRaises(SystemExit) as raised:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        resolve_memveil_bin()
+                self.assertEqual(raised.exception.code, 1)
+            finally:
+                os.environ["PATH"] = old_path
+                if old_knob is None:
+                    os.environ.pop("MEMVEIL_BIN", None)
+                else:
+                    os.environ["MEMVEIL_BIN"] = old_knob
+
+    def test_bare_name_unresolvable_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_path = os.environ.get("PATH", "")
+            old_knob = os.environ.get("MEMVEIL_BIN")
+            try:
+                # The bare name resolves nowhere on PATH (the
+                # empty tmp dir leads, the system entries stay
+                # so the runner below can still exec).
+                os.environ["PATH"] = tmp + os.pathsep + old_path
+                os.environ["MEMVEIL_BIN"] = "mv-no-such-bare-probe"
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as raised:
+                        resolve_memveil_bin()
+                self.assertEqual(raised.exception.code, 1)
+                self.assertIn("MEMVEIL_BIN", err.getvalue())
+                # The runner refuses before dispatch, like any
+                # other bogus knob (no recursion: bogus knobs
+                # exit in rust_bin_setup).
+                env = dict(os.environ)
+                proc = subprocess.run(
+                    [str(ROOT / "tools/test"), "reader-adversarial"],
+                    env=env, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 1, proc.stderr[-2000:])
+                self.assertIn("MEMVEIL_BIN", proc.stderr)
+                self.assertIn("missing or not executable", proc.stderr)
+            finally:
+                os.environ["PATH"] = old_path
+                if old_knob is None:
+                    os.environ.pop("MEMVEIL_BIN", None)
+                else:
+                    os.environ["MEMVEIL_BIN"] = old_knob
+
+    def test_bare_knob_dispatched_via_runner(self):
+        # End to end through the real runner: a bare knob found
+        # on PATH must dispatch the found file, proving the
+        # shell selector resolves bare names identically. Runs
+        # from a directory without the wrapper, so a
+        # current-directory check would refuse instead. Uses
+        # the top suite (never reader-adversarial: that leg
+        # runs this contract file, so a usable knob there
+        # would recurse).
+        real = resolve_memveil_bin()
+        if not (os.path.isfile(real) and os.access(real, os.X_OK)):
+            self.skipTest("no usable binary under test: %s" % real)
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = os.path.join(tmp, "bindir")
+            os.mkdir(bindir)
+            marker = os.path.join(tmp, "bare-executed")
+            wrapper = os.path.join(bindir, "mv-bare-wrapper")
+            Path(wrapper).write_text(
+                "#!/bin/sh\ntouch %s\nexec %s \"$@\"\n" % (marker, real))
+            os.chmod(wrapper, 0o755)
+            env = dict(os.environ)
+            env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+            env["MEMVEIL_BIN"] = "mv-bare-wrapper"
+            proc = subprocess.run(
+                [str(ROOT / "tools/test"), "top"],
+                env=env, capture_output=True, text=True, cwd=tmp)
+            self.assertEqual(proc.returncode, 0,
+                             proc.stdout[-2000:] + proc.stderr[-2000:])
+            self.assertTrue(os.path.isfile(marker),
+                            "PATH-resolved bare knob was not executed")
 
     def test_all_drivers_resolve_knob_verbatim(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -63,12 +63,14 @@ $LANE test --locked -Zbuild-std --target x86_64-unknown-linux-gnu --test wire_co
 
 Reader-adversarial on the instrumented binary: route this
 leg through `tools/test` with `MEMVEIL_BIN` set to the
-lane binary. When `MEMVEIL_BIN` names an executable file,
-`tools/test` uses it verbatim: `memveil_bin` returns it
-and `rust_bin_setup` skips its release relink
-(`tools/test:142-166`, called at `tools/test:2030-2032`);
-a set-but-missing or non-executable value fails closed.
-The CLI Python drivers resolve the same knob through
+lane binary. When `MEMVEIL_BIN` holds a slash path naming
+an executable file, `tools/test` uses it verbatim:
+`memveil_bin` returns it and `rust_bin_setup` skips its
+release relink (`tools/test:193-230`, called at
+`tools/test:2094-2096`); a set-but-missing or
+non-executable value fails closed, as does a bare name
+that resolves to nothing on PATH. The CLI Python drivers
+resolve the same knob through
 `tests/cli/memveil_bin.py`, so the blessed binary is the
 executed binary by construction — no manual
 `build/memveil` pre-pointing (retired with R82).
@@ -83,6 +85,8 @@ Prove the instrumented binary actually ran (all required):
 
 ```sh
 MEMVEIL_BIN="$LANE_BIN" python3 tests/cli/test_memveil_bin.py   # knob contract: knob binary == executed binary
+readlink -f "$LANE_BIN"   # canonical path of the executed file
+sha256sum "$LANE_BIN"     # identity of the executed bytes
 nm "$LANE_BIN" | grep -c __asan   # nonzero (__asan symbols linked into the lane binary)
 ```
 
