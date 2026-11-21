@@ -1657,7 +1657,7 @@ impl KernelSource for AyaKernel {
         // any wrap breaks the collector identities and fails the run
         // closed, never silently.
         // Deviation: Mojo traps on these sums; Rust fails the read
-        // closed per the R14 precedent (loud, fail-closed, never a
+        // closed per project precedent (loud, fail-closed, never a
         // silent wrapped total).
         let mut received = 0u64;
         let mut delivered = 0u64;

@@ -584,10 +584,10 @@ def test_seal_requires_clean_tree_receipt(workshop, tmp_path):
 
 def test_seal_rejects_prebuilt_receipt(workshop, tmp_path):
     m, fix = seal_paths(workshop, tmp_path)
-    # Codex's miss, replayed: stale prebuilt bytes repackaged at
-    # C carry a fresh, self-consistent receipt naming C and the
-    # staged bytes — but the packager recorded it outside
-    # candidate mode, so the seal must still refuse.
+    # Stale prebuilt bytes repackaged at C carry a fresh,
+    # self-consistent receipt naming C and the staged bytes —
+    # but the packager recorded it outside candidate mode, so
+    # the seal must still refuse.
     manifest_path = fix["bundle_dir"] / "MANIFEST.json"
     doc = json.loads(manifest_path.read_text())
     assert doc["build_receipt"]["built_from_source"] is True

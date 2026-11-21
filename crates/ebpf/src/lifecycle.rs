@@ -51,7 +51,7 @@ const MV_RING_BYTES: u32 = 33_554_432;
 const MV_CAS_RETRIES: u32 = 8;
 
 /// `enum dma_data_direction` encodings (`dma-direction.h` values 0/1/2).
-/// Hardcoding is an approved deviation (controller ruling R13): aya offers
+/// Hardcoding is an approved deviation: aya offers
 /// no CO-RE enum relocation, the values are stable across 6.0-7.3, and any
 /// renumbering fails closed — unknown values map to `wdir=3`, which the
 /// emit gate below rejects with `BYTE_COVERAGE` (never silently emitted).
