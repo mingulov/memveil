@@ -1286,51 +1286,145 @@ def run_topwalk(gate):
     print(f"guest_lifecycle: topwalk exported top_exit={rc}")
 
 
+BUNDLE_VERSION = "0.1.1"
+
+
+def bundle_run_inputs(repo, candidate):
+    """Execution inputs for the bundle leg.
+
+    Dev (candidate None): the dist tarball plus the extract
+    root name. Sealed: the binary, BPF objects, and runtime
+    member under the verified root; the dev tree is never
+    consulted, so a missing sealed member raises instead of
+    falling back to dev objects.
+    """
+    if candidate is None:
+        return {
+            "mode": "dev",
+            "tarball": os.path.join(
+                repo, "dist",
+                "memveil-%s.tar.gz" % BUNDLE_VERSION),
+            "root_name": "memveil-" + BUNDLE_VERSION,
+        }
+    return {
+        "mode": "sealed",
+        "tarball": str(candidate.bundle),
+        "tarball_name": candidate.bundle.name,
+        "tarball_sha": sha_file(str(candidate.bundle)),
+        "root": str(candidate.root),
+        "bin": str(candidate.path("bin/memveil")),
+        "attempt": str(candidate.path(
+            "bpf/swiotlb_attempt.bpf.o")),
+        "lc": str(candidate.path(
+            "bpf/swiotlb_lifecycle.bpf.o")),
+        "cp": str(candidate.path(
+            "bpf/swiotlb_copy.bpf.o")),
+        "libgcc": str(candidate.path(
+            "lib/memveil/libgcc_s.so.1")),
+        "manifest_sha":
+            candidate.manifest["bundle_manifest_sha256"],
+        "files": dict(candidate.manifest["files"]),
+        "files_verified": len(candidate.manifest["files"]),
+    }
+
+
+def bundle_record_argv(bundle_bin, objects, profile, cap):
+    """Record argv for the bundle leg.
+
+    The statically linked loader runs without --bridge; the
+    bundle carries no bridge library in either mode.
+    """
+    return [bundle_bin, "record",
+            "--duration", "150",
+            "--output", cap,
+            "--object", objects["attempt"],
+            "--lc-object", objects["lc"],
+            "--cp-object", objects["cp"],
+            "--profile", profile,
+            "--capability",
+            "attempt-trace,mapping-lifecycle,copy-actual"]
+
+
 def run_bundle(gate):
     """Shipped bundle, three phases, extracted-binary report.
 
-    Extracts dist/memveil-0.1.0.tar.gz, verifies every file
-    against MANIFEST.json (no symlinks, exact set, exact
-    hashes), and runs the extracted record with all three
-    channels through oracle-exact, outer-failure, and
-    block+vnet phases in one capture. The extracted report
-    renders the capture; bundle.json retains phases, hashes,
-    and the console tail.
+    Dev: extracts dist/memveil-0.1.1.tar.gz, verifies every
+    file against MANIFEST.json (no symlinks, exact set, exact
+    hashes), and proves the shipped BPF copies equal the
+    build. Sealed: serves the verified candidate root
+    directly (already verified at load; the manifest bytes
+    are re-pinned here) with no dev-tree consultation. Both
+    modes run the bundle record with all three channels
+    through oracle-exact, outer-failure, and block+vnet phases
+    in one capture. The extracted report renders the capture;
+    bundle.json retains phases, hashes, and the console tail.
     """
-    tarball = os.path.join(gate.repo, "dist",
-                           "memveil-0.1.0.tar.gz")
     profile = os.path.join(
         gate.repo, "build", "vm", "record3-profile.json")
-    for path in (tarball, profile):
-        if not os.path.isfile(path):
-            fail(f"missing {path}")
+    run = bundle_run_inputs(gate.repo, gate.candidate)
+    if run["mode"] == "sealed":
+        tarball = run["tarball"]
+        for path in (tarball, profile):
+            if not os.path.isfile(path):
+                fail(f"missing {path}")
+        root = run["root"]
+        if sha_file(os.path.join(
+                root, "MANIFEST.json")) != run["manifest_sha"]:
+            fail("sealed bundle manifest differs")
+        tarball_name = run["tarball_name"]
+        tarball_sha = run["tarball_sha"]
+        manifest_sha = run["manifest_sha"]
+        files_verified = run["files_verified"]
+        bundle_bin = run["bin"]
+        bundle_objs = {
+            "attempt": run["attempt"],
+            "lc": run["lc"],
+            "cp": run["cp"],
+        }
+        libgcc = run["libgcc"]
+    else:
+        tarball = run["tarball"]
+        for path in (tarball, profile):
+            if not os.path.isfile(path):
+                fail(f"missing {path}")
+        extract = os.path.join(gate.work, "extract")
+        os.makedirs(extract)
+        r = sh(["tar", "xzf", tarball, "-C", extract])
+        if r.returncode != 0:
+            fail("bundle extract failed: "
+                 f"{r.stderr.strip()[-200:]}")
+        root = os.path.join(extract, run["root_name"])
+        manifest = verify_extracted_bundle(root)
+        bundle_bin = os.path.join(root, "bin", "memveil")
+        bundle_objs = {
+            "attempt": os.path.join(root, "bpf",
+                                    "swiotlb_attempt.bpf.o"),
+            "lc": os.path.join(root, "bpf",
+                               "swiotlb_lifecycle.bpf.o"),
+            "cp": os.path.join(root, "bpf",
+                               "swiotlb_copy.bpf.o"),
+        }
+        libgcc = os.path.join(root, "lib", "memveil",
+                              "libgcc_s.so.1")
+        if not os.path.isfile(libgcc):
+            fail(f"missing {libgcc}")
+        build_objs = {
+            "attempt": os.path.join(
+                gate.repo, "build", "bpf",
+                "swiotlb_attempt.bpf.o"),
+            "lc": gate.lc_obj,
+            "cp": gate.cp_obj,
+        }
+        for key in ("attempt", "lc", "cp"):
+            if sha_file(bundle_objs[key]) != sha_file(
+                    build_objs[key]):
+                fail(f"bundle {key} object differs from build")
+        tarball_name = os.path.basename(tarball)
+        tarball_sha = sha_file(tarball)
+        manifest_sha = sha_file(os.path.join(
+            root, "MANIFEST.json"))
+        files_verified = len(manifest["files"])
     gate.write_json("identity.json", gate.identity())
-    extract = os.path.join(gate.work, "extract")
-    os.makedirs(extract)
-    r = sh(["tar", "xzf", tarball, "-C", extract])
-    if r.returncode != 0:
-        fail(f"bundle extract failed: {r.stderr.strip()[-200:]}")
-    root = os.path.join(extract, "memveil-0.1.0")
-    manifest = verify_extracted_bundle(root)
-    bundle_bin = os.path.join(root, "bin", "memveil")
-    bundle_bridge = os.path.join(root, "lib", "libbpf_mojo.so.1")
-    bundle_objs = {
-        "attempt": os.path.join(root, "bpf",
-                                "swiotlb_attempt.bpf.o"),
-        "lc": os.path.join(root, "bpf",
-                           "swiotlb_lifecycle.bpf.o"),
-        "cp": os.path.join(root, "bpf", "swiotlb_copy.bpf.o"),
-    }
-    build_objs = {
-        "attempt": os.path.join(
-            gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o"),
-        "lc": gate.lc_obj,
-        "cp": gate.cp_obj,
-    }
-    for key in ("attempt", "lc", "cp"):
-        if sha_file(bundle_objs[key]) != sha_file(
-                build_objs[key]):
-            fail(f"bundle {key} object differs from build")
     iface = find_pcnet()
     configure_net(iface)
     gate.write_json("identity.json",
@@ -1339,16 +1433,8 @@ def run_bundle(gate):
     used_before = gate.io_tlb_samples()
     cap = os.path.join(gate.work, "cap")
     rec = subprocess.Popen(
-        [bundle_bin, "record",
-         "--duration", "150",
-         "--output", cap,
-         "--object", bundle_objs["attempt"],
-         "--lc-object", bundle_objs["lc"],
-         "--cp-object", bundle_objs["cp"],
-         "--bridge", bundle_bridge,
-         "--profile", profile,
-         "--capability",
-         "attempt-trace,mapping-lifecycle,copy-actual"],
+        bundle_record_argv(
+            bundle_bin, bundle_objs, profile, cap),
         stdout=subprocess.PIPE,
         stderr=open(os.path.join(gate.work, "record.stderr"),
                     "wb"),
@@ -1454,17 +1540,16 @@ def run_bundle(gate):
         shutil.copyfile(
             src, os.path.join(gate.work, "cap-" + name))
     gate.write_json("bundle.json", {
-        "tarball": "memveil-0.1.0.tar.gz",
-        "tarball_sha": sha_file(tarball),
-        "manifest_sha": sha_file(
-            os.path.join(root, "MANIFEST.json")),
-        "files_verified": len(manifest["files"]),
+        "tarball": tarball_name,
+        "tarball_sha": tarball_sha,
+        "manifest_sha": manifest_sha,
+        "files_verified": files_verified,
         "verified": True,
         "bin_sha": sha_file(bundle_bin),
         "attempt_sha": sha_file(bundle_objs["attempt"]),
         "lc_sha": sha_file(bundle_objs["lc"]),
         "cp_sha": sha_file(bundle_objs["cp"]),
-        "bridge_sha": sha_file(bundle_bridge),
+        "libgcc_sha": sha_file(libgcc),
         "report_exit": rep.returncode,
         "phases": phases,
         "console_tail": (ready + "\n" + tail())[-2048:],

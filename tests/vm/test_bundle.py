@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """F2-6: the extracted shipping bundle through three phases.
 
-Extracts dist/memveil-0.1.0.tar.gz in the guest, verifies every
+Extracts dist/memveil-0.1.1.tar.gz in the guest, verifies every
 file against MANIFEST.json, and runs the extracted record with
 all three channels through oracle-exact, outer-failure, and
 block+vnet phases in one capture, rendered by the extracted
@@ -17,12 +17,16 @@ direction, paired or not; attribution stays a separate scope.
 import hashlib
 import json
 import os
+import pytest
+import shutil
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from consume import parse_oracle_log
 import gate_kernel  # noqa: E402
+import guest_lifecycle  # noqa: E402
 from lifecycle_env import (BRIDGE, COPY_PROBE, LIFECYCLE_PROBE,
                            ensure_oracle_module,
                            require_lifecycle_env)
@@ -35,9 +39,56 @@ from vm_boot import cleanup, run_guest, verify_exports
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-TARBALL = os.path.join(REPO, "dist", "memveil-0.1.0.tar.gz")
-MANIFEST = os.path.join(REPO, "dist", "memveil-0.1.0",
+BUNDLE_VERSION = "0.1.1"
+TARBALL = os.path.join(REPO, "dist",
+                       "memveil-%s.tar.gz" % BUNDLE_VERSION)
+MANIFEST = os.path.join(REPO, "dist",
+                        "memveil-%s" % BUNDLE_VERSION,
                         "MANIFEST.json")
+
+BUNDLE_CLOSURE = ("bin/memveil",
+                  "bpf/swiotlb_attempt.bpf.o",
+                  "bpf/swiotlb_lifecycle.bpf.o",
+                  "bpf/swiotlb_copy.bpf.o",
+                  "lib/memveil/libgcc_s.so.1")
+
+
+def _require_closure(files, where):
+    missing = [rel for rel in BUNDLE_CLOSURE
+               if rel not in files]
+    if missing:
+        raise ValueError("bundle closure lacks %s (%s)"
+                         % (", ".join(missing), where))
+
+
+def host_bundle_inputs(env=None):
+    """(tarball, files, manifest_sha, selected) for the leg.
+
+    Sealed inputs (MV_BUNDLE_TARBALL/MV_CANDIDATE_MANIFEST)
+    resolve the verified candidate tarball and closure;
+    without them the dev dist/ bundle resolves. Both modes
+    require the full closure; nothing falls back to dev
+    objects.
+    """
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    selected = load(env)
+    if selected is None:
+        with open(MANIFEST) as handle:
+            files = json.load(handle)["files"]
+        _require_closure(files, "dev " + MANIFEST)
+        return (TARBALL, files, _sha(MANIFEST), None)
+    try:
+        files = dict(selected.manifest["files"])
+        _require_closure(
+            files, "sealed " + str(selected.manifest_path))
+    except BaseException:
+        if env is not None:
+            selected.close()
+        raise
+    return (str(selected.bundle), files,
+            selected.manifest["bundle_manifest_sha256"],
+            selected)
 
 
 def _sha(path):
@@ -252,8 +303,9 @@ def check_report(report, events, bundle, tag, drained=True):
 def test_bundle_three_phase_capture():
     require_lifecycle_env(LIFECYCLE_PROBE, COPY_PROBE,
                           ATTEMPT_PROBE, BRIDGE)
-    assert os.path.isfile(TARBALL), "missing %s" % TARBALL
-    assert os.path.isfile(MANIFEST), "missing %s" % MANIFEST
+    tarball, files, manifest_sha, _selected = \
+        host_bundle_inputs()
+    assert os.path.isfile(tarball), "missing %s" % tarball
     ensure_oracle_module()
     _mint_profile()
     with open(SPEC) as handle:
@@ -279,18 +331,19 @@ def test_bundle_three_phase_capture():
         ident = json.loads(got["identity.json"].read_text())
         assert ident["release"] == gate_kernel.selected().release, ident
         bundle = json.loads(got["bundle.json"].read_text())
-        assert bundle["tarball_sha"] == _sha(TARBALL), bundle
-        manifest = json.load(open(MANIFEST))
-        assert bundle["files_verified"] == len(
-            manifest["files"]), bundle
-        assert bundle["manifest_sha"] == _sha(MANIFEST), bundle
+        assert bundle["tarball"] == os.path.basename(
+            tarball), bundle
+        assert bundle["tarball_sha"] == _sha(tarball), bundle
+        assert bundle["files_verified"] == len(files), bundle
+        assert bundle["manifest_sha"] == manifest_sha, bundle
         for key, rel in (("bin_sha", "bin/memveil"),
                          ("attempt_sha",
                           "bpf/swiotlb_attempt.bpf.o"),
                          ("lc_sha", "bpf/swiotlb_lifecycle.bpf.o"),
                          ("cp_sha", "bpf/swiotlb_copy.bpf.o"),
-                         ("bridge_sha", "lib/libbpf_mojo.so.1")):
-            assert bundle[key] == manifest["files"][rel], key
+                         ("libgcc_sha",
+                          "lib/memveil/libgcc_s.so.1")):
+            assert bundle[key] == files[rel], key
         workload = json.loads(got["workload.json"].read_text())
         assert workload["ping_tx"] == 200, workload
         assert workload["ping_rx"] == 200, workload
@@ -378,3 +431,242 @@ def test_bundle_three_phase_capture():
                             files_verified=bundle[
                                 "files_verified"]),
                 expected=expected)
+
+
+def _freeze_stub_binaries(dest):
+    """Compile freeze-version stub bytes for the wire seal.
+
+    The fixture stub still reports the pre-freeze version
+    while the tree spec moved on, which the packaging guard
+    refuses; compile the equivalent bytes from a patched copy
+    (the tree sources stay untouched) so the wire seal runs
+    the real scripts. Once the fixture stub reports the
+    freeze version this normalize step is a no-op.
+    """
+    package_dir = os.path.join(REPO, "tests", "package")
+    sys.path.insert(0, package_dir)
+    import sealed_fixture as fixture
+    for tool in ("rustc", "readelf"):
+        fixture.require_tool(tool)
+    dest.mkdir(parents=True, exist_ok=True)
+    with open(os.path.join(package_dir, "stub_engine.rs")) as fh:
+        text = fh.read()
+    want = 'const VERSION: &str = "%s";' % BUNDLE_VERSION
+    patched = [want if line.strip().startswith(
+        "const VERSION") else line
+        for line in text.splitlines()]
+    src = dest / "stub_engine.rs"
+    src.write_text("\n".join(patched) + "\n")
+    lib_src = dest / "stub_lib.rs"
+    shutil.copy2(os.path.join(package_dir, "stub_lib.rs"),
+                 lib_src)
+    env = {key: value for key, value in os.environ.items()
+           if key != "RUSTUP_TOOLCHAIN"}
+    engine = dest / "wire-engine"
+    proc = subprocess.run(
+        ["rustc", "--edition=2021", "-O", str(src),
+         "-o", str(engine)],
+        cwd=REPO, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    lib = dest / "wire-lib.so"
+    proc = subprocess.run(
+        ["rustc", "--edition=2021", "-O",
+         "--crate-type=cdylib", str(lib_src),
+         "-o", str(lib)],
+        cwd=REPO, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    proc = subprocess.run(
+        [str(engine), "version"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0 and proc.stdout.strip() == \
+        "memveil-" + BUNDLE_VERSION, proc.stderr[-1000:]
+    proc = subprocess.run(
+        ["readelf", "-V", str(lib)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True)
+    assert proc.returncode == 0, \
+        "wire lib is not well-formed ELF"
+    return (engine.read_bytes(), lib.read_bytes())
+
+
+def _seal_wire_bundle(tmp_path, name, libgcc=True):
+    """Seal a synthetic bundle through the real candidate protocol.
+
+    libgcc=True upgrades the fixture through the shaped seal
+    (real packaging scripts, lib/memveil/libgcc_s.so.1 member)
+    and binds it as the memveil-0.1.1 artifact the freeze
+    serves; libgcc=False keeps the minimal seal (a differently
+    named runtime lib) for the refusal leg. Names, bytes, and
+    bindings are synthetic; only the protocol is real.
+    """
+    package_dir = os.path.join(REPO, "tests", "package")
+    sys.path.insert(0, package_dir)
+    sys.path.insert(0, os.path.join(REPO, "tools"))
+    import sealed_fixture as fixture
+    from test_candidate import deterministic_tar_gz
+    import candidate as protocol
+    shop = fixture.workshop()
+    fix = shop.fresh(tmp_path / name)
+    if libgcc:
+        # The packaging guards require spec, manifest, and
+        # binary to agree; stage the freeze version in the
+        # manifest before the shaped seal reads it. The
+        # fixture-global override is saved and restored, so
+        # other seals in this process keep their own bytes.
+        manifest_path = fix["bundle_dir"] / "MANIFEST.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["engine_version"] = BUNDLE_VERSION
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True)
+            + "\n")
+        saved_version = fixture.STUB_VERSION
+        fixture.STUB_VERSION = BUNDLE_VERSION
+        saved = fixture._stub_binaries
+        fixture._stub_binaries = _freeze_stub_binaries(
+            tmp_path / (name + "-stub"))
+        try:
+            fixture._shape_bundle(
+                fix, tmp_path / (name + "-shape"))
+        finally:
+            fixture._stub_binaries = saved
+            fixture.STUB_VERSION = saved_version
+        manifest = json.loads(manifest_path.read_text())
+        manifest["bundle"] = "memveil-" + BUNDLE_VERSION
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True)
+            + "\n")
+        old_tarball, _arc = fixture._bundle_tarball(
+            fix["artifacts"])
+        engine = fix["bundle_dir"] / "bin" / "memveil"
+        engine.chmod(0o755)
+        new_tarball = fix["artifacts"] / (
+            "memveil-" + BUNDLE_VERSION + ".tar.gz")
+        deterministic_tar_gz(fix["bundle_dir"],
+                             "memveil-" + BUNDLE_VERSION,
+                             new_tarball)
+        old_tarball.unlink()
+    else:
+        fixture._make_executable_bundle(fix)
+    fixture._regenerate_seal_bindings(fix, shop.harness_bin())
+    manifest = protocol.create_manifest(
+        fix["bundle_dir"], fix["artifacts"], fix["policy"],
+        {"root": str(fix["root"]),
+         "harness_bin": shop.harness_bin()})
+    out = fix["artifacts"] / "candidate.json"
+    protocol.seal_manifest(manifest, out)
+    roles = {entry["role"]: fix["artifacts"] / entry["name"]
+             for entry in manifest["artifacts"]}
+    assert roles["deb"].is_file() and roles["rpm"].is_file()
+    assert roles["bundle"].is_file()
+    return {"manifest_path": out, "manifest": manifest,
+            "bundle": roles["bundle"], "deb": roles["deb"],
+            "rpm": roles["rpm"],
+            "bundle_dir": fix["bundle_dir"],
+            "root": fix["root"]}
+
+
+def _wire_env(sealed):
+    return {"MV_BUNDLE_TARBALL": str(sealed["bundle"]),
+            "MV_CANDIDATE_MANIFEST":
+            str(sealed["manifest_path"])}
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_inputs_wiring(tmp_path):
+    """Sealed inputs resolve the sealed 0.1.1 bundle both sides.
+
+    Host and guest resolvers agree on the sealed tarball
+    identity; the guest record line carries no --bridge and no
+    dev-tree path, every resolved byte matches its sealed pin,
+    and the dev defaults name 0.1.1 on both sides. Pure
+    resolution: no VM boots.
+    """
+    assert os.path.basename(TARBALL) == \
+        "memveil-0.1.1.tar.gz", TARBALL
+    assert os.path.basename(os.path.dirname(MANIFEST)) == \
+        "memveil-0.1.1", MANIFEST
+    dev = guest_lifecycle.bundle_run_inputs(REPO, None)
+    assert dev["mode"] == "dev", dev
+    assert os.path.basename(dev["tarball"]) == \
+        "memveil-0.1.1.tar.gz", dev
+    assert dev["root_name"] == "memveil-0.1.1", dev
+    sealed = _seal_wire_bundle(tmp_path, "bundlewire",
+                               libgcc=True)
+    assert sealed["bundle"].name == \
+        "memveil-0.1.1.tar.gz", sealed["bundle"]
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    env = _wire_env(sealed)
+    selected = load(env=env, required=True)
+    tarball, files, manifest_sha, host_selected = \
+        host_bundle_inputs(env)
+    try:
+        assert tarball == str(sealed["bundle"]), tarball
+        assert files == selected.manifest["files"], files
+        assert manifest_sha == selected.manifest[
+            "bundle_manifest_sha256"], manifest_sha
+        run = guest_lifecycle.bundle_run_inputs(
+            "/nonexistent-repo", selected)
+        assert run["mode"] == "sealed", run
+        assert run["tarball_name"] == \
+            "memveil-0.1.1.tar.gz", run
+        assert run["tarball"] == str(sealed["bundle"]), run
+        assert run["root"] == str(selected.root), run
+        for key, rel in (("bin", "bin/memveil"),
+                         ("attempt",
+                          "bpf/swiotlb_attempt.bpf.o"),
+                         ("lc",
+                          "bpf/swiotlb_lifecycle.bpf.o"),
+                         ("cp", "bpf/swiotlb_copy.bpf.o"),
+                         ("libgcc",
+                          "lib/memveil/libgcc_s.so.1")):
+            assert run[key] == str(selected.path(rel)), \
+                (key, run[key])
+            assert _sha(run[key]) == files[rel], key
+            assert run[key].startswith(
+                str(selected.root)), (key, run[key])
+        argv = guest_lifecycle.bundle_record_argv(
+            run["bin"],
+            {"attempt": run["attempt"], "lc": run["lc"],
+             "cp": run["cp"]},
+            "/nonexistent-repo/build/vm/record3-profile.json",
+            "/tmp/vmgate-work/cap")
+        assert "--bridge" not in argv, argv
+        assert all("libbpf_mojo" not in arg
+                   for arg in argv), argv
+        assert all("libbpf_mojo" not in value
+                   for value in run.values()
+                   if isinstance(value, str)), run
+        assert run["tarball_sha"] == _sha(tarball), run
+        assert run["manifest_sha"] == manifest_sha, run
+        assert run["files_verified"] == len(files), run
+    finally:
+        selected.close()
+        host_selected.close()
+
+
+@pytest.mark.dev_fixture
+def test_bundle_sealed_inputs_refuse_dev_fallback(tmp_path):
+    """A sealed closure without libgcc refuses outright.
+
+    The bundle runner never falls back to dev-tree objects:
+    sealed resolution raises instead of serving build/ bytes.
+    """
+    sealed = _seal_wire_bundle(tmp_path, "bundlerefuse",
+                               libgcc=False)
+    sys.path.insert(0, os.path.join(REPO, "tests"))
+    from support.candidate_input import load
+    env = _wire_env(sealed)
+    selected = load(env=env, required=True)
+    try:
+        assert "lib/memveil/libgcc_s.so.1" not in \
+            selected.manifest["files"]
+        with pytest.raises(ValueError):
+            guest_lifecycle.bundle_run_inputs(REPO, selected)
+        with pytest.raises(ValueError):
+            host_bundle_inputs(env)
+    finally:
+        selected.close()
