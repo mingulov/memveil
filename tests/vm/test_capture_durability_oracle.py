@@ -579,6 +579,103 @@ class HostBindingTests(unittest.TestCase):
                     capture_durability.execute(args)
             self.assertEqual(launches.call_count, 0)
 
+    def test_shell_rewritten_kernel_spelling_refused_before_boot(self):
+        import capture_durability
+        from kernel_matrix import modules_manifest_sha
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            # Exact launcher-handoff repro: the locked image and module
+            # tree live under a directory literally named staged"copy",
+            # while sibling stagedcopy carries the same image with a
+            # DIFFERENT module tree. The wrapper strips the quotes, so
+            # without the pre-boot refusal it would boot the sibling.
+            quoted = stage.root / 'staged"copy"'
+            (quoted / 'boot').mkdir(parents=True)
+            kernel = quoted / 'boot' / ('vmlinuz-' + self.APPROVED)
+            kernel.write_bytes(b'genuine kernel image')
+            mods = quoted / 'lib' / 'modules' / self.APPROVED
+            (mods / 'kernel').mkdir(parents=True)
+            (mods / 'kernel' / 'mod.ko').write_bytes(b'module bytes')
+            (mods / 'modules.order').write_bytes(b'order\n')
+            sibling = stage.root / 'stagedcopy'
+            (sibling / 'boot').mkdir(parents=True)
+            (sibling / 'boot' / ('vmlinuz-' + self.APPROVED)).write_bytes(b'genuine kernel image')
+            other = sibling / 'lib' / 'modules' / self.APPROVED
+            (other / 'kernel').mkdir(parents=True)
+            (other / 'kernel' / 'mod.ko').write_bytes(b'sibling module bytes')
+            (other / 'modules.order').write_bytes(b'sibling\n')
+            self.assertNotEqual(modules_manifest_sha(str(other))[0], stage.mods_sha)
+            args = self.make_args(stage, kernel=kernel, modules=mods)
+            launches = Mock(side_effect=AssertionError('unexpected boot'))
+            with self.harness(stage, launches):
+                with self.assertRaises(ValueError) as refused:
+                    capture_durability.execute(args)
+            self.assertEqual(str(refused.exception),
+                             'kernel path contains characters the launcher shell rewrites: '
+                             + str(kernel.resolve()))
+            self.assertEqual(launches.call_count, 0)
+            # The spelling refusal precedes hash verification: tampered
+            # bytes under the quoted dir still refuse on the spelling.
+            kernel.write_bytes(b'tampered image')
+            with self.harness(stage, launches):
+                with self.assertRaises(ValueError) as refused:
+                    capture_durability.execute(args)
+            self.assertEqual(str(refused.exception),
+                             'kernel path contains characters the launcher shell rewrites: '
+                             + str(kernel.resolve()))
+            self.assertEqual(launches.call_count, 0)
+
+    def test_shell_metacharacters_refused_and_real_cache_paths_accepted(self):
+        from capture_durability import check_shell_inert_path
+        rejected = ['"', "'", '`', '$', ';', '&', '|', '<', '>', '(', ')',
+                    '{', '}', '[', ']', '*', '?', '#', '~', ' ', '\t', '\n',
+                    '\\', '!', '^']
+        for char in rejected:
+            with self.subTest(char=repr(char)):
+                probe = '/tmp/stage/part-' + char + '-x/boot/vmlinuz-test'
+                with self.assertRaises(ValueError) as refused:
+                    check_shell_inert_path(probe, 'kernel path')
+                self.assertEqual(str(refused.exception),
+                                 'kernel path contains characters the launcher shell rewrites: ' + probe)
+        home = str(Path.home())
+        for accepted in (
+                home + '/.cache/virtme-ng/v7.0.14/amd64/boot/vmlinuz-7.0.14-070014-generic',
+                home + '/.cache/virtme-ng/v7.0.14/amd64/usr/lib/modules/7.0.14-070014-generic',
+                '/tmp/mv12-evidence_2026-11-21+run,1/out:v2/ev'):
+            with self.subTest(path=accepted):
+                check_shell_inert_path(accepted, 'kernel path')
+                check_shell_inert_path(accepted, 'modules path')
+                check_shell_inert_path(accepted, 'evidence path')
+
+    def test_shell_rewritten_evidence_and_socket_paths_refused(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            quoted_out = stage.root / 'o"ut'
+            quoted_out.mkdir()
+            args = self.make_args(stage, out=quoted_out / 'ev')
+            launches = Mock(side_effect=AssertionError('unexpected boot'))
+            with self.harness(stage, launches):
+                with self.assertRaises(ValueError) as refused:
+                    capture_durability.execute(args)
+            self.assertEqual(str(refused.exception),
+                             'evidence path contains characters the launcher shell rewrites: '
+                             + str(quoted_out.resolve() / 'ev'))
+            self.assertEqual(launches.call_count, 0)
+            quoted_tmp = stage.root / 't"mp'
+            quoted_tmp.mkdir()
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            boots = self.fake_boots(stage, statuses)
+            with self.harness(stage, boots), patch.dict(os.environ, TMPDIR=str(quoted_tmp)), \
+                 patch.object(tempfile, 'tempdir', None):
+                with self.assertRaises(ValueError) as refused:
+                    capture_durability.execute(args)
+            self.assertTrue(str(refused.exception).startswith(
+                'QMP socket path contains characters the launcher shell rewrites: '))
+            self.assertIn(str(quoted_tmp.resolve()), str(refused.exception))
+            self.assertEqual(boots.calls, [])
+
     def test_kernel_drift_after_first_capture_refused(self):
         import capture_durability
         with tempfile.TemporaryDirectory() as tmp:

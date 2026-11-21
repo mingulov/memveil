@@ -39,6 +39,34 @@ SCENARIOS = ('readiness', 'checkpoint', 'bytes-full', 'inodes-full')
 # use.
 APPROVED_CONFIG_ABSENT_RELEASE = '7.0.14-070014-generic'
 
+# Shell-inert path characters. The launcher interpolates the verified
+# kernel path, the export dir, and the disk/QMP socket paths into one
+# shell command without quoting (virtme_ng/run.py: kimg at :1058, rwdir
+# at :1015, qemu-opts at :1356, executed via shell=True at :1470), so
+# any spelling the shell rewrites would boot something other than the
+# verified inputs. Quoting for the wrapper is too fragile, so paths
+# reaching that command are restricted to characters the shell leaves
+# alone: letters, digits, and _@%+=:,./- (the real cache trees need
+# only letters, digits, /, ., -, _). Each shell rewrite class stays
+# inert: quote removal has no ' or " to strip; word splitting has no
+# whitespace; globbing has no *, ?, or [ (nor ] to close one); tilde,
+# brace, command, parameter, and arithmetic expansion have no ~, {, },
+# `, $, (, or ); chaining, redirection, pipelines, and comments have
+# no ;, &, |, <, >, or #; escaping has no backslash; and ! and ^ are
+# refused although a non-interactive shell would leave them alone.
+# Resolved paths start with /, so = can never begin an assignment and
+# - can never begin an option; the remaining signs (: , % @ + .) are
+# ordinary shell word characters.
+SHELL_INERT_CHARS = frozenset(
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@%+=:,./-')
+
+
+def check_shell_inert_path(path, label):
+    """Refuse a path the launcher shell would rewrite before it is used."""
+    text = str(path)
+    if any(char not in SHELL_INERT_CHARS for char in text):
+        raise ValueError(label + ' contains characters the launcher shell rewrites: ' + text)
+
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -136,6 +164,8 @@ def verify_boot_inputs(raw_kernel, raw_modules, expected_release,
     """Resolve and verify exactly what the next boot will use."""
     kernel = Path(raw_kernel).resolve(strict=True)
     modules = Path(raw_modules).resolve(strict=True)
+    check_shell_inert_path(kernel, 'kernel path')
+    check_shell_inert_path(modules, 'modules path')
     kernel_sha = check_kernel_binding(kernel, expected_kernel_sha256)
     modules_sha, modules_files = check_modules_binding(modules, expected_modules_sha256)
     resolved = image_modules_dir(kernel, expected_release)
@@ -240,6 +270,7 @@ def execute(args):
     args.out = args.out.parent.resolve(strict=True) / args.out.name
     if any(c.isspace() or c == ',' for c in str(args.out)):
         raise ValueError('evidence path contains ambiguous QEMU separators')
+    check_shell_inert_path(args.out, 'evidence path')
     if shutil.disk_usage(args.out.parent).free < 2 * 1024**3:
         raise ValueError('insufficient host space for bounded owned images')
     args.out.mkdir(mode=0o700)
@@ -272,6 +303,7 @@ def execute(args):
             nonce = uuid.uuid4().hex
             with tempfile.TemporaryDirectory(prefix='mvfs-qmp-') as sockets:
                 qmp = Path(sockets) / 'monitor'
+                check_shell_inert_path(qmp, 'QMP socket path')
                 kernel, _, _, _ = verify_boot_inputs(
                     args.kernel, args.modules, args.expected_release,
                     args.expected_kernel_sha256, args.expected_modules_sha256)
