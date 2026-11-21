@@ -723,6 +723,43 @@ def self_test_manifest(tmp, pairs):
 
 # -- Unarmed self-test: guest oracle --------------------------
 
+# Caps for the rebuild-failure detail: the verdict words
+# always lead the message, so a truncation marker can
+# only ever cut the command/stderr tails, never the
+# verdict itself.
+REBUILD_CMD_CAP = 500
+REBUILD_TAIL_CAP = 2000
+
+
+def _rebuild_failure_detail(exc):
+    """Audit detail: verdict first, forensics after.
+
+    TimeoutExpired keeps its command and partials as
+    attributes, outside str(); spell the verdict out
+    and append the stderr tail so a head truncation
+    can lose neither. ValueError text already leads
+    with its verdict, so it keeps a head-preserving
+    cap instead.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        cmd = "%r" % (exc.cmd,)
+        if len(cmd) > REBUILD_CMD_CAP:
+            cmd = cmd[:REBUILD_CMD_CAP] + " [...]"
+        tail = exc.stderr or ""
+        if isinstance(tail, bytes):
+            tail = tail.decode("utf-8", "replace")
+        tail = tail.strip()
+        cut = "[...] " if len(tail) > REBUILD_TAIL_CAP else ""
+        return ("oracle rebuild timed out after %s seconds "
+                "(%s); stderr tail: %s%s"
+                % (exc.timeout, cmd, cut,
+                   tail[-REBUILD_TAIL_CAP:]))
+    detail = str(exc)
+    if len(detail) > REBUILD_TAIL_CAP:
+        detail = detail[:REBUILD_TAIL_CAP] + " [...]"
+    return detail
+
+
 def self_test_guest_oracle(tmp, pairs):
     """Guest-targeted oracle fixture: pinned bytes bind, drift refuses."""
     ok = True
@@ -825,7 +862,8 @@ def self_test_guest_oracle(tmp, pairs):
         ok = check("oracle-rebuild", same,
                    "rebuilt bytes differ") and ok
     except (ValueError, subprocess.TimeoutExpired) as exc:
-        ok = check("oracle-rebuild", False, str(exc)[:200]) and ok
+        ok = check("oracle-rebuild", False,
+                   _rebuild_failure_detail(exc)) and ok
     return ok
 
 
@@ -1667,6 +1705,230 @@ def self_test_forensics(tmp):
                     signal.SIGKILL)
         except (OSError, ValueError):
             pass
+    # High-numbered pipes must not cost payloads: with
+    # every fd below 1024 occupied, fresh pipes land at
+    # 1024+, past select()'s fd_set ceiling. A child that
+    # writes both streams and exits 0 still delivers both
+    # payloads on every runner.
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < 1040 and hard >= 1040:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE,
+                               (1040, hard))
+            soft = 1040
+        except (OSError, ValueError):
+            pass
+    if soft < 1040:
+        print("ok forensics-fd1024 SKIP (fds capped)")
+    else:
+        both_script = ("import os;"
+                       "os.write(1,b'hi-out');"
+                       "os.write(2,b'hi-err\\xff')")
+        ok_build = os.path.join(tmp, "rebuild-fdok")
+        ok_tree = os.path.join(
+            ok_build, "tree", "usr", "src",
+            "linux-headers-7.0.14-070014-generic")
+        os.makedirs(os.path.join(ok_tree, "include",
+                                 "config"))
+        Path(ok_tree, "Makefile").write_text("# fake\n")
+        Path(ok_tree, "include", "config",
+             "kernel.release").write_text(
+            guest_oracle.GUEST_RELEASE + "\n")
+        make_ok = ("import sys,pathlib;"
+                   "d=[a[2:] for a in sys.argv if "
+                   "a.startswith('M=')][0];"
+                   "pathlib.Path(d,'memveil_dma_oracle.ko')"
+                   ".write_bytes(b'fake-ko');"
+                   "print('make-ok-out',flush=True);"
+                   "import os;os.write(2,b'make-ok-err\\xff')")
+
+        class HighFdMake(real_popen):
+            """An audit make that exits 0 with markers."""
+
+            def __init__(self, args, **kwargs):
+                super().__init__([sys.executable, "-c",
+                                  make_ok] + list(args),
+                                 **kwargs)
+
+        fillers = []
+        try:
+            while True:
+                fd = os.open("/dev/null", os.O_RDONLY)
+                fillers.append(fd)
+                if fd >= 1023:
+                    break
+            hi_r, hi_w = os.pipe()
+            try:
+                pipes_high = (hi_r >= 1024
+                              and hi_w >= 1024)
+            finally:
+                os.close(hi_r)
+                os.close(hi_w)
+            ok = check("forensics-fd1024-pipes-high",
+                       pipes_high,
+                       "pipe=(%d,%d)"
+                       % (hi_r, hi_w)) and ok
+            try:
+                proc = stress_guest.sh(
+                    [sys.executable, "-c", both_script],
+                    timeout=30)
+                ok = check("forensics-fd1024-sh",
+                           pipes_high
+                           and proc.returncode == 0
+                           and "hi-out" in proc.stdout
+                           and "hi-err" in proc.stderr,
+                           "%r %r" % (proc.stdout,
+                                      proc.stderr)) and ok
+            except stress_guest.StepTimeout as exc:
+                ok = check("forensics-fd1024-sh", False,
+                           "false timeout %r %r"
+                           % (exc.out, exc.err)) and ok
+            try:
+                proc = core.run(
+                    [sys.executable, "-c", both_script],
+                    timeout=30)
+                ok = check("forensics-fd1024-run",
+                           pipes_high
+                           and proc.returncode == 0
+                           and "hi-out" in proc.stdout
+                           and "hi-err" in proc.stderr,
+                           "%r %r" % (proc.stdout,
+                                      proc.stderr)) and ok
+            except subprocess.TimeoutExpired as exc:
+                ok = check("forensics-fd1024-run", False,
+                           "false timeout %r %r"
+                           % (exc.output,
+                              exc.stderr)) and ok
+            try:
+                proc = run_owned_guest(
+                    [sys.executable, "-c", both_script],
+                    timeout=30)
+                ok = check("forensics-fd1024-owned",
+                           pipes_high
+                           and proc.returncode == 0
+                           and "hi-out" in proc.stdout
+                           and "hi-err" in proc.stderr,
+                           "%r %r" % (proc.stdout,
+                                      proc.stderr)) and ok
+            except subprocess.TimeoutExpired as exc:
+                ok = check("forensics-fd1024-owned",
+                           False,
+                           "false timeout %r %r"
+                           % (exc.output,
+                              exc.stderr)) and ok
+            try:
+                with mock.patch.object(
+                        guest_oracle.subprocess, "Popen",
+                        HighFdMake):
+                    made = guest_oracle.rebuild_from_kbuild(
+                        os.path.join(ok_build, "scratch"),
+                        kbuild=ok_build)
+                blob = open(made, "rb").read()
+                ok = check("forensics-fd1024-rebuild",
+                           pipes_high
+                           and blob == b"fake-ko",
+                           "%r %r" % (made, blob)) and ok
+            except subprocess.TimeoutExpired as exc:
+                ok = check("forensics-fd1024-rebuild",
+                           False,
+                           "false timeout %s" % exc) and ok
+            except ValueError as exc:
+                ok = check("forensics-fd1024-rebuild",
+                           False, str(exc)) and ok
+        finally:
+            for fd in fillers:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    # The audit failure message keeps the verdict and the
+    # forensics: a make stand-in that writes one stderr
+    # line, then stalls with a separate-session holder on
+    # its pipes, must surface `timed out` plus the stderr
+    # bytes through the same detail the check prints.
+    stall_build = os.path.join(tmp, "rebuild-stallmsg")
+    stall_tree = os.path.join(
+        stall_build, "tree", "usr", "src",
+        "linux-headers-7.0.14-070014-generic")
+    os.makedirs(os.path.join(stall_tree, "include",
+                             "config"))
+    Path(stall_tree, "Makefile").write_text("# fake\n")
+    Path(stall_tree, "include", "config",
+         "kernel.release").write_text(
+        guest_oracle.GUEST_RELEASE + "\n")
+    stallmsg_pid = os.path.join(tmp, "rebuild-stallmsg.pid")
+    stallmsg = ("import os,subprocess,sys,time,pathlib;"
+                "os.write(1,b'standin-out');"
+                "os.write(2,b'standin-err\\xff');"
+                "p=subprocess.Popen([sys.executable,'-c',"
+                "'import os,time;os.setsid();time.sleep(30)']);"
+                "pathlib.Path(%r).write_text(str(p.pid));"
+                "time.sleep(30)" % stallmsg_pid)
+
+    class StallMsgMake(real_popen):
+        """A make that writes, then stalls past deadline."""
+
+        def __init__(self, args, **kwargs):
+            super().__init__([sys.executable, "-c",
+                              stallmsg] + list(args),
+                             **kwargs)
+
+    start = time.monotonic()
+    try:
+        with mock.patch.object(guest_oracle.subprocess,
+                               "Popen", StallMsgMake):
+            with mock.patch.object(guest_oracle,
+                                   "REBUILD_TIMEOUT", 2):
+                guest_oracle.rebuild_from_kbuild(
+                    os.path.join(stall_build, "scratch"),
+                    kbuild=stall_build)
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-detail", False,
+                   "%.1fs returned" % elapsed) and ok
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.monotonic() - start
+        detail = _rebuild_failure_detail(exc)
+        ok = check("forensics-rebuild-detail",
+                   6.5 <= elapsed < 10
+                   and "timed out" in detail
+                   and "standin-err" in detail
+                   and "\ufffd" in detail,
+                   "%.1fs %r" % (elapsed, detail)) and ok
+    except ValueError as exc:
+        elapsed = time.monotonic() - start
+        ok = check("forensics-rebuild-detail", False,
+                   "%.1fs %s" % (elapsed, exc)) and ok
+    finally:
+        try:
+            os.kill(int(open(stallmsg_pid).read()),
+                    signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    # Detail edges: an empty command with no partials
+    # still spells the verdict, and over-long inputs
+    # truncate with a marker behind the verdict words.
+    bare = _rebuild_failure_detail(
+        subprocess.TimeoutExpired([], 600))
+    long_err = _rebuild_failure_detail(
+        subprocess.TimeoutExpired("make", 1,
+                                  stderr="y" * 3000))
+    long_val = _rebuild_failure_detail(
+        ValueError("z" * 3000))
+    byte_err = _rebuild_failure_detail(
+        subprocess.TimeoutExpired("make", 1,
+                                  stderr=b"e\xff"))
+    ok = check("forensics-rebuild-detail-edges",
+               "timed out" in bare
+               and long_err.startswith(
+                   "oracle rebuild timed out")
+               and "[...] " in long_err
+               and "y" * 2000 in long_err
+               and len(long_val) == 2006
+               and long_val.endswith(" [...]")
+               and "\ufffd" in byte_err,
+               "%r %r %r %r" % (bare, long_err[-60:],
+                             long_val[-8:], byte_err)) and ok
     return ok
 
 

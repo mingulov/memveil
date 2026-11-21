@@ -13,7 +13,7 @@ unit-tested on synthetic logs; live boots stay in the runner.
 import hashlib
 import json
 import os
-import select
+import selectors
 import subprocess
 import sys
 import tarfile
@@ -136,8 +136,10 @@ def _collect(proc, timeout):
     already read (communicate raises its final wait
     timeout with empty output fields, discarding
     them). EOF'd streams are closed, as with
-    communicate. No stdin pipe: every caller here
-    leaves stdin inherited.
+    communicate. Readiness waits use the default
+    selector, which has no fd-number ceiling
+    (unlike select()'s 1024 fd_set). No stdin
+    pipe: every caller here leaves stdin inherited.
     """
     want = {}
     for key, name in (("out", "stdout"),
@@ -153,18 +155,30 @@ def _collect(proc, timeout):
             pass
     open_streams = list(want)
     end = time.monotonic() + timeout
+    selector = selectors.DefaultSelector()
     try:
+        for stream in open_streams:
+            try:
+                selector.register(stream,
+                                  selectors.EVENT_READ)
+            except (OSError, ValueError):
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+        open_streams = [stream for stream in open_streams
+                        if not stream.closed]
         while open_streams:
             remaining = end - time.monotonic()
             if remaining <= 0:
                 break
             try:
-                ready, _, _ = select.select(
-                    open_streams, [], [],
+                events = selector.select(
                     min(remaining, 0.5))
             except (OSError, ValueError):
                 break
-            for stream in ready:
+            for key, _mask in events:
+                stream = key.fileobj
                 try:
                     data = os.read(stream.fileno(),
                                    65536)
@@ -176,11 +190,16 @@ def _collect(proc, timeout):
                     chunks[want[stream]].append(data)
                     continue
                 try:
+                    selector.unregister(stream)
+                except (OSError, ValueError, KeyError):
+                    pass
+                try:
                     stream.close()
                 except (OSError, ValueError):
                     pass
                 open_streams.remove(stream)
     finally:
+        selector.close()
         for stream in open_streams:
             try:
                 os.set_blocking(stream.fileno(), True)
