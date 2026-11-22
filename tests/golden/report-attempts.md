@@ -1,5 +1,9 @@
 # Memveil report `attempts-3-session`
 
+- summary: attempts 3, requested bytes 9 KiB (9216 bytes) in 3.00 s
+- summary devices: dev-1 (testdev0): attempts 3, requested bytes 9 KiB (9216 bytes)
+- summary pool: used unavailable of unavailable capacity
+- summary scope: proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded
 - synthetic: yes
 - engine: memveil-0.1.1
 - integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld

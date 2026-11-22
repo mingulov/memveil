@@ -118,16 +118,210 @@ pub fn verdict_line(rep: &Report) -> String {
     out
 }
 
-fn global_metric_text(rep: &Report, name: &str) -> String {
+/// Value of a global (dimension-free) metric, when measured.
+///
+/// Same row the compact headlines read; unknown stays unknown,
+/// never zero.
+fn global_metric_value(rep: &Report, name: &str) -> Option<u64> {
     for m in &rep.metrics {
-        if m.name == name && !m.has_device_id && !m.has_pool_id {
-            if m.has_value {
-                return format_u64(m.value);
-            }
-            return "withheld".to_string();
+        if m.name == name && !m.has_device_id && !m.has_pool_id && m.has_value {
+            return Some(m.value);
         }
     }
-    "withheld".to_string()
+    None
+}
+
+fn global_metric_text(rep: &Report, name: &str) -> String {
+    match global_metric_value(rep, name) {
+        Some(v) => format_u64(v),
+        None => "withheld".to_string(),
+    }
+}
+
+/// Value of one device's metric row, when measured.
+fn device_metric_value(rep: &Report, name: &str, device_id: &str) -> Option<u64> {
+    for m in &rep.metrics {
+        if m.name == name
+            && m.has_device_id
+            && !m.has_pool_id
+            && m.device_id == device_id
+            && m.has_value
+        {
+            return Some(m.value);
+        }
+    }
+    None
+}
+
+/// Human-readable byte count with the exact value in parentheses.
+///
+/// Exact multiples print without a fraction (`64 MiB (67108864
+/// bytes)`); anything else rounds to one decimal place (`1.5 KiB
+/// (1536 bytes)`). Counts below one kibibyte print bare (`900
+/// bytes`). The parenthesized integer is the measured value, so
+/// the rounded headline can never stand alone.
+pub fn human_bytes(n: u64) -> String {
+    const UNITS: [(u64, &str); 7] = [
+        (1, "bytes"),
+        (1024, "KiB"),
+        (1048576, "MiB"),
+        (1073741824, "GiB"),
+        (1099511627776, "TiB"),
+        (1125899906842624, "PiB"),
+        (1152921504606846976, "EiB"),
+    ];
+    let mut unit = UNITS[0];
+    for cand in UNITS {
+        if n >= cand.0 {
+            unit = cand;
+        } else {
+            break;
+        }
+    }
+    if unit.0 == 1 {
+        return format!("{n} bytes");
+    }
+    let q = n / unit.0;
+    let r = n % unit.0;
+    if r == 0 {
+        return format!("{} {} ({n} bytes)", format_u64(q), unit.1);
+    }
+    let mut tenths = ((r as u128 * 10 + (unit.0 as u128) / 2) / unit.0 as u128) as u64;
+    let mut q = q;
+    if tenths == 10 {
+        q += 1;
+        tenths = 0;
+    }
+    format!("{}.{tenths} {} ({n} bytes)", format_u64(q), unit.1)
+}
+
+/// Human-readable seconds, rounded to centiseconds (`10.03 s`).
+pub fn human_seconds(ns: u64) -> String {
+    let rem = ns % 1_000_000_000;
+    let mut secs = ns / 1_000_000_000;
+    let mut centis = (rem + 5_000_000) / 10_000_000;
+    if centis == 100 {
+        // secs tops out at 18446744073, so +1 cannot overflow.
+        secs += 1;
+        centis = 0;
+    }
+    format!("{}.{:02} s", format_u64(secs), centis)
+}
+
+fn fmt_count(v: Option<u64>) -> String {
+    match v {
+        Some(n) => format_u64(n),
+        None => "unavailable".to_string(),
+    }
+}
+
+fn fmt_bytes(v: Option<u64>) -> String {
+    match v {
+        Some(n) => human_bytes(n),
+        None => "unavailable".to_string(),
+    }
+}
+
+/// Total pool use and capacity across every pool row.
+///
+/// Pool gauges carry per-pool dimensions only, so the headline
+/// sums each half over the measured rows; a half with no
+/// measured row stays unavailable. Saturating: hostile totals
+/// clamp instead of wrapping.
+fn pool_totals(rep: &Report) -> (Option<u64>, Option<u64>) {
+    let mut used: Option<u64> = None;
+    let mut cap: Option<u64> = None;
+    for m in &rep.metrics {
+        if !m.has_pool_id || !m.has_value {
+            continue;
+        }
+        if m.name == "pool_used_bytes" {
+            used = Some(used.unwrap_or(0).saturating_add(m.value));
+        } else if m.name == "pool_capacity_bytes" {
+            cap = Some(cap.unwrap_or(0).saturating_add(m.value));
+        }
+    }
+    (used, cap)
+}
+
+/// Plain 4-5 line summary answering bouncing, how much, which device.
+///
+/// The headlines reuse the compact data (global attempt rows),
+/// humanized for prose renderers only; JSON keeps raw integers.
+/// `esc` neutralizes device text for the calling format. The
+/// copies line appears only when a copy channel measured
+/// something; the scope line always states what the numbers do
+/// and do not prove. Whole-capture truth: the display device
+/// filter does not narrow these lines.
+pub fn summary_lines<E: Fn(&str) -> String>(rep: &Report, esc: E) -> Vec<String> {
+    let attempts = global_metric_text(rep, "bounce_attempts");
+    let attempts_known = global_metric_value(rep, "bounce_attempts").is_some();
+    let bytes = match global_metric_value(rep, "requested_bounce_bytes") {
+        Some(n) => human_bytes(n),
+        None => "withheld".to_string(),
+    };
+    let mut lines = Vec::new();
+    if rep.window_end_ns < rep.window_start_ns {
+        lines.push(format!(
+            "summary: attempts {attempts}, requested bytes {bytes} (window unavailable: invalid recorded window)"
+        ));
+    } else {
+        lines.push(format!(
+            "summary: attempts {attempts}, requested bytes {bytes} in {}",
+            human_seconds(rep.window_end_ns - rep.window_start_ns)
+        ));
+    }
+    if rep.devices.is_empty() {
+        lines.push("summary devices: none recorded".to_string());
+    } else {
+        let mut parts = Vec::new();
+        for d in &rep.devices {
+            let a = fmt_count(device_metric_value(rep, "bounce_attempts", &d.device_id));
+            let b = fmt_bytes(device_metric_value(
+                rep,
+                "requested_bounce_bytes",
+                &d.device_id,
+            ));
+            parts.push(format!(
+                "{} ({}): attempts {a}, requested bytes {b}",
+                esc(&d.device_id),
+                esc(&d.name)
+            ));
+        }
+        lines.push(format!("summary devices: {}", parts.join("; ")));
+    }
+    let to_bounce = global_metric_value(rep, "copy_original_to_bounce_bytes");
+    let to_original = global_metric_value(rep, "copy_bounce_to_original_bytes");
+    let copies_known = to_bounce.is_some() || to_original.is_some();
+    if copies_known {
+        lines.push(format!(
+            "summary copies: original-to-bounce {}, bounce-to-original {}",
+            fmt_bytes(to_bounce),
+            fmt_bytes(to_original)
+        ));
+    }
+    let (used, cap) = pool_totals(rep);
+    lines.push(format!(
+        "summary pool: used {} of {} capacity",
+        fmt_bytes(used),
+        fmt_bytes(cap)
+    ));
+    let scope = match (attempts_known, copies_known) {
+        (true, false) => {
+            "proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded"
+        }
+        (true, true) => {
+            "proves bounce attempts were counted and executed copies were observed; does not prove DMA success"
+        }
+        (false, true) => {
+            "proves executed copies were observed (attempts uncounted); does not prove DMA success"
+        }
+        (false, false) => {
+            "proves nothing (attempts uncounted); does not prove bouncing occurred, bytes moved, or DMA ran"
+        }
+    };
+    lines.push(format!("summary scope: {scope}"));
+    lines
 }
 
 /// Render the per-refresh summary: verdict plus headlines.
@@ -138,7 +332,7 @@ pub fn render_compact(rep: &Report) -> String {
     out.push('\n');
     out.push_str("attempts: ");
     out.push_str(&global_metric_text(rep, "bounce_attempts"));
-    out.push_str("  bytes: ");
+    out.push_str("  requested bytes: ");
     out.push_str(&global_metric_text(rep, "requested_bounce_bytes"));
     out.push('\n');
     out.push_str("detail: ");
@@ -176,7 +370,12 @@ pub fn render_compact(rep: &Report) -> String {
 /// Render the report as plain text, one trailing newline.
 pub fn render_text(rep: &Report, device_filter: &str) -> String {
     let filt = resolve_device_filter(&rep.devices, device_filter);
-    let mut out = verdict_line(rep);
+    let mut out = String::new();
+    for line in summary_lines(rep, escape_text) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str(&verdict_line(rep));
     out.push('\n');
     out.push_str(&integrity_line(rep));
     out.push('\n');
@@ -366,6 +565,7 @@ pub fn integrity_line(rep: &Report) -> String {
 mod tests {
     use super::super::{analyze_fixture, golden};
     use super::*;
+    use crate::model::metric::Metric;
     use crate::model::report::ReportCap;
     use crate::model::session::DeviceEntry;
 
@@ -508,7 +708,7 @@ mod tests {
         let rep = analyze_fixture("tests/fixtures/attempts");
         let doc = render_text(&rep, "");
         assert!(doc.starts_with(
-            "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\nintegrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\nmemveil report "
+            "summary: attempts 3, requested bytes 9 KiB (9216 bytes) in 3.00 s\nsummary devices: dev-1 (testdev0): attempts 3, requested bytes 9 KiB (9216 bytes)\nsummary pool: used unavailable of unavailable capacity\nsummary scope: proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded\nverdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\nintegrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\nmemveil report "
         ));
     }
 
@@ -517,7 +717,7 @@ mod tests {
         let rep = analyze_fixture("tests/fixtures/attempts");
         assert_eq!(
             render_compact(&rep),
-            "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\nintegrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\nattempts: 3  bytes: 9216\ndetail: partial, loss 0\nterminal: partial\nfindings: none\n"
+            "verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)\nintegrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\nattempts: 3  requested bytes: 9216\ndetail: partial, loss 0\nterminal: partial\nfindings: none\n"
         );
     }
 
@@ -526,7 +726,7 @@ mod tests {
         let rep = analyze_fixture("tests/fixtures/reader/detail-gap");
         assert_eq!(
             render_compact(&rep),
-            "verdict: partial_unknown_loss (loss >=50.00%, 2 delivered)\nintegrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\nattempts: 2  bytes: 5120\ndetail: partial, loss 2\nterminal: partial\nfindings: 1: CAPTURE_INCOMPLETE(warning)\n"
+            "verdict: partial_unknown_loss (loss >=50.00%, 2 delivered)\nintegrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld\nattempts: 2  requested bytes: 5120\ndetail: partial, loss 2\nterminal: partial\nfindings: 1: CAPTURE_INCOMPLETE(warning)\n"
         );
     }
 
@@ -580,5 +780,212 @@ mod tests {
         assert!(!text.contains("complete_for_scope"));
         rep.integrity_context = "replay prefix".to_string();
         assert!(render_text(&rep, "").contains("integrity: unverified replay prefix"));
+    }
+
+    #[test]
+    fn human_bytes_shapes() {
+        assert_eq!(human_bytes(0), "0 bytes");
+        assert_eq!(human_bytes(900), "900 bytes");
+        assert_eq!(human_bytes(1023), "1023 bytes");
+        assert_eq!(human_bytes(1024), "1 KiB (1024 bytes)");
+        assert_eq!(human_bytes(1536), "1.5 KiB (1536 bytes)");
+        assert_eq!(human_bytes(9216), "9 KiB (9216 bytes)");
+        assert_eq!(human_bytes(67108864), "64 MiB (67108864 bytes)");
+        assert_eq!(human_bytes(1048575), "1024.0 KiB (1048575 bytes)");
+        assert_eq!(
+            human_bytes(18446744073709551615),
+            "16.0 EiB (18446744073709551615 bytes)"
+        );
+    }
+
+    #[test]
+    fn human_seconds_shapes() {
+        assert_eq!(human_seconds(0), "0.00 s");
+        assert_eq!(human_seconds(7), "0.00 s");
+        assert_eq!(human_seconds(3_000_000_000), "3.00 s");
+        assert_eq!(human_seconds(10_030_000_000), "10.03 s");
+        assert_eq!(human_seconds(999_999_999_999), "1000.00 s");
+        assert_eq!(human_seconds(u64::MAX), "18446744073.71 s");
+    }
+
+    fn valued_metric(name: &str, value: u64) -> Metric {
+        Metric {
+            name: name.to_string(),
+            has_value: true,
+            value,
+            ..Metric::default()
+        }
+    }
+
+    fn scoped_metric(name: &str, value: u64, device_id: &str) -> Metric {
+        Metric {
+            name: name.to_string(),
+            has_value: true,
+            value,
+            has_device_id: true,
+            device_id: device_id.to_string(),
+            ..Metric::default()
+        }
+    }
+
+    fn pooled_metric(name: &str, value: u64, pool_id: &str) -> Metric {
+        Metric {
+            name: name.to_string(),
+            has_value: true,
+            value,
+            has_pool_id: true,
+            pool_id: pool_id.to_string(),
+            ..Metric::default()
+        }
+    }
+
+    #[test]
+    fn summary_copies_line_needs_a_measured_copy() {
+        let rep = analyze_fixture("tests/fixtures/lifecycle/copy-before-failure");
+        let lines = summary_lines(&rep, escape_text);
+        assert_eq!(lines.len(), 5);
+        // A measured zero is a value, not an unknown.
+        assert_eq!(
+            lines[2],
+            "summary copies: original-to-bounce 4 KiB (4096 bytes), bounce-to-original 0 bytes"
+        );
+        assert_eq!(
+            lines[4],
+            "summary scope: proves bounce attempts were counted and executed copies were observed; does not prove DMA success"
+        );
+        let plain = analyze_fixture("tests/fixtures/attempts");
+        let lines = summary_lines(&plain, escape_text);
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|l| !l.starts_with("summary copies:")));
+    }
+
+    #[test]
+    fn summary_pool_sums_measured_pool_rows() {
+        let rep = analyze_fixture("tests/fixtures/pools/pressure");
+        let lines = summary_lines(&rep, escape_text);
+        assert!(lines.contains(&"summary pool: used 900 bytes of 1000 bytes capacity".to_string()));
+        let mut two = Report::default();
+        two.metrics
+            .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
+        two.metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
+        two.metrics
+            .push(pooled_metric("pool_used_bytes", 50, "pool-1"));
+        two.metrics
+            .push(pooled_metric("pool_capacity_bytes", 500, "pool-1"));
+        let lines = summary_lines(&two, escape_text);
+        assert!(lines.contains(
+            &"summary pool: used 150 bytes of 1.5 KiB (1500 bytes) capacity".to_string()
+        ));
+        let mut half = Report::default();
+        half.metrics
+            .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
+        let lines = summary_lines(&half, escape_text);
+        assert!(
+            lines.contains(&"summary pool: used 100 bytes of unavailable capacity".to_string())
+        );
+    }
+
+    #[test]
+    fn summary_scope_matrix() {
+        let mut both = Report::default();
+        both.metrics.push(valued_metric("bounce_attempts", 2));
+        both.metrics
+            .push(valued_metric("copy_original_to_bounce_bytes", 64));
+        let lines = summary_lines(&both, escape_text);
+        assert_eq!(
+            lines[lines.len() - 1],
+            "summary scope: proves bounce attempts were counted and executed copies were observed; does not prove DMA success"
+        );
+        let mut copies_only = Report::default();
+        copies_only
+            .metrics
+            .push(valued_metric("copy_original_to_bounce_bytes", 64));
+        let lines = summary_lines(&copies_only, escape_text);
+        assert_eq!(
+            lines[0],
+            "summary: attempts withheld, requested bytes withheld in 0.00 s"
+        );
+        assert_eq!(
+            lines[lines.len() - 1],
+            "summary scope: proves executed copies were observed (attempts uncounted); does not prove DMA success"
+        );
+        let lines = summary_lines(&Report::default(), escape_text);
+        assert_eq!(
+            lines[lines.len() - 1],
+            "summary scope: proves nothing (attempts uncounted); does not prove bouncing occurred, bytes moved, or DMA ran"
+        );
+    }
+
+    #[test]
+    fn summary_devices_cover_every_catalog_entry() {
+        let mut rep = Report::default();
+        rep.window_start_ns = 0;
+        rep.window_end_ns = 10_030_000_000;
+        rep.metrics.push(valued_metric("bounce_attempts", 3));
+        rep.metrics
+            .push(valued_metric("requested_bounce_bytes", 67108864));
+        for (id, name) in [("d1", "eth0"), ("d2", "eth1")] {
+            rep.devices.push(DeviceEntry {
+                device_id: id.to_string(),
+                name: name.to_string(),
+                ..DeviceEntry::default()
+            });
+        }
+        rep.metrics.push(scoped_metric("bounce_attempts", 3, "d1"));
+        rep.metrics
+            .push(scoped_metric("requested_bounce_bytes", 67108864, "d1"));
+        let lines = summary_lines(&rep, escape_text);
+        assert_eq!(
+            lines[0],
+            "summary: attempts 3, requested bytes 64 MiB (67108864 bytes) in 10.03 s"
+        );
+        assert_eq!(
+            lines[1],
+            "summary devices: d1 (eth0): attempts 3, requested bytes 64 MiB (67108864 bytes); d2 (eth1): attempts unavailable, requested bytes unavailable"
+        );
+        let bare = summary_lines(&Report::default(), escape_text);
+        assert_eq!(bare[1], "summary devices: none recorded");
+    }
+
+    #[test]
+    fn summary_escapes_hostile_device_text() {
+        let mut rep = Report::default();
+        rep.devices.push(DeviceEntry {
+            device_id: "d1".to_string(),
+            name: "a\nb|c\x1bd".to_string(),
+            ..DeviceEntry::default()
+        });
+        let lines = summary_lines(&rep, escape_text);
+        assert_eq!(
+            lines[1],
+            "summary devices: d1 (a\\nb|c�d): attempts unavailable, requested bytes unavailable"
+        );
+        assert!(!lines[1].contains('\x1b'));
+        assert!(!lines[1].contains('\n'));
+    }
+
+    #[test]
+    fn summary_marks_an_inverted_window() {
+        let rep = Report {
+            window_start_ns: 200,
+            window_end_ns: 100,
+            ..Report::default()
+        };
+        let lines = summary_lines(&rep, escape_text);
+        assert_eq!(
+            lines[0],
+            "summary: attempts withheld, requested bytes withheld (window unavailable: invalid recorded window)"
+        );
+    }
+
+    #[test]
+    fn summary_ignores_the_display_filter() {
+        let rep = analyze_fixture("tests/fixtures/attempts");
+        let filtered = render_text(&rep, "nope");
+        assert!(filtered.contains(
+            "summary devices: dev-1 (testdev0): attempts 3, requested bytes 9 KiB (9216 bytes)"
+        ));
+        assert!(!filtered.contains("{device="));
     }
 }
