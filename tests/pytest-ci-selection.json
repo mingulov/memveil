@@ -92,6 +92,7 @@
     "tests/vm/test_pool_read_oracle.py",
     "tests/vm/test_profile_semantics.py",
     "tests/vm/test_scenario_rootfs.py",
+    "tests/vm/test_seal_swap.py",
     "tests/vm/test_workflow_results.py"
   ],
   "schema": "memveil-pytest-ci-selection/1",

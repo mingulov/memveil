@@ -20,7 +20,9 @@ manifest (manifest digest, source commit/tree, bundle
 manifest digest, bundle digest/size, member digests),
 refresh the Aya fixtures via their README procedure so
 the committed bytes equal the new seal's objects, and
-re-run the offline suites plus the probe-seal check. When
+re-run the offline suites plus the seal-swap check
+(`python3 tests/vm/test_seal_swap.py` from the repo
+root). When
 the new seal's profile member differs, the reviewed
 profile doc moves with it (battery profile pin plus the
 faults profile pin are a paired edit, enforced by the
