@@ -264,3 +264,51 @@ fn t35_help_verb_routes() {
     assert_eq!(bogus.status.code(), Some(0));
     assert_eq!(bogus.stdout, top.stdout);
 }
+
+// --- T3.7: doctor next step ---
+
+#[test]
+fn t37_doctor_text_next_and_grouped_remedy() {
+    // Live admission decides the exit; the shape rides along: an
+    // unavailable doctor ends with exactly one next: line, remedy
+    // blocks never repeat, and a ready doctor carries no next:.
+    let out = run(&bin(), &["doctor", "--profiles-dir", "profiles"]);
+    assert!(out.status.code() == Some(0) || out.status.code() == Some(3));
+    assert!(out.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.ends_with('\n'));
+    let fixes: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("    fix "))
+        .collect();
+    let mut unique = fixes.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(fixes.len(), unique.len(), "remedy blocks repeat: {fixes:?}");
+    let nexts: Vec<&str> = stdout.lines().filter(|l| l.starts_with("next: ")).collect();
+    if out.status.code() == Some(3) {
+        assert_eq!(nexts.len(), 1, "{stdout}");
+        assert!(
+            stdout.ends_with("next: sudo memveil record --output /tmp/cap1 --duration 10\n")
+                || stdout.ends_with("next: memveil report examples/real-capture\n"),
+            "{stdout}"
+        );
+    } else {
+        assert!(nexts.is_empty(), "{stdout}");
+    }
+}
+
+#[test]
+fn t37_doctor_json_carries_no_text_additions() {
+    // The text-only additions (next:, translations, guest note)
+    // never leak into the JSON report.
+    let out = run(&bin(), &["doctor", "--json", "--profiles-dir", "profiles"]);
+    assert!(out.status.code() == Some(0) || out.status.code() == Some(3));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("next: "), "{stdout}");
+    assert!(
+        !stdout.contains("not attested, not a platform qualification"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("guest device "), "{stdout}");
+}
