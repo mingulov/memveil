@@ -1620,15 +1620,17 @@ suite_examples() {
 
 
 suite_doctor() {
-    if [ ! -f "$ROOT/build/test-tmp/doctor2.json" ]; then
-        echo "doctor: missing build/test-tmp/doctor2.json" >&2
-        return 1
-    fi
-    if ! "$ROOT/tools/validate-schemas" --check-doctor \
-        "$ROOT/build/test-tmp/doctor2.json" >/dev/null 2>&1; then
-        echo "doctor: oracle rejected doctor2.json" >&2
-        return 1
-    fi
+    # No fixture prerequisite: the suite judges the built
+    # binary live. A previous revision required a
+    # unit-test-written JSON sidecar; the producer went
+    # away with the Mojo tests while the check stayed,
+    # failing every clean checkout. The fixture render is
+    # pinned by the doctor unit tests and the schema
+    # oracle still judges every live JSON below, so the
+    # sidecar carried no unique coverage. Every input
+    # here is generated fresh in $TMP from the binary
+    # under test, never read from ambient build
+    # leftovers, so a stale file cannot mask a break.
     BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
         echo "doctor: missing $BIN (run $(memveil_build_hint) first)" >&2
