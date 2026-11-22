@@ -2081,6 +2081,18 @@ pub fn run_collector_with<W: WriterSource>(
             out.diagnostic += &format!("\n{line}");
         }
     }
+    stamp_load_refusal_code(&mut out);
+    out
+}
+
+/// Stamp a load/attach refusal code onto a codeless refusal.
+///
+/// The collector reports the diagnostic without a machine
+/// code; a load or attach errno in the text selects the code
+/// (and its remedy) so record agrees with the load-check
+/// doctor. Non-refusals and already-coded results pass
+/// through untouched.
+fn stamp_load_refusal_code(out: &mut RunResult) {
     if out.exit_code == EXIT_REFUSAL && out.code.is_empty() {
         let lcode = load_refusal_code(&out.diagnostic);
         if !lcode.is_empty() {
@@ -2089,7 +2101,6 @@ pub fn run_collector_with<W: WriterSource>(
             out.fix = remedy_for(&code);
         }
     }
-    out
 }
 
 /// Warn-once line for a failed ownership repair, with newline.
@@ -2125,12 +2136,18 @@ mod tests {
         ExtraChannel, RecordOptions, ScanDecision, attempt_loss_evidence, decide_record,
         loadcheck_bridge_sha, ownership_warning, parse_requested_caps, render_provenance,
         repair_warning_for, resolve_bridge, resolve_channel_object, resolve_object,
-        run_collector_with, split_site,
+        run_collector_with, split_site, stamp_load_refusal_code,
     };
     use crate::capture::collector::EXIT_REFUSAL;
+    use crate::capture::collector::script::{
+        ScriptClock, ScriptKernel, ScriptSignal, ScriptWriter, zeros,
+    };
+    use crate::capture::collector::{Collector, CollectorConfig, EXIT_OK, RunResult};
     use crate::capture::live::WriterSource;
+    use crate::cli::report::refusal_stderr_lines;
     use crate::platform::evidence::KernelInfo;
     use crate::platform::narrow::LiveValue;
+    use crate::platform::outcome::OpOut;
     use crate::platform::profiles::load_profiles;
     use crate::platform::test_support::{TestDir, repo_root};
 
@@ -2614,5 +2631,163 @@ mod tests {
         let c = ExtraChannel::default();
         assert!(!c.present);
         assert!(c.elf.is_empty());
+    }
+
+    fn failed_out(message: &str) -> OpOut {
+        OpOut {
+            ok: false,
+            message: message.to_string(),
+        }
+    }
+
+    /// Drive one scripted refusal through the collector and the
+    /// refusal-code stamp: the offline shape of the record
+    /// refusal path.
+    fn run_scripted_refusal(tmp: &TestDir, load_out: OpOut, attach_out: OpOut) -> RunResult {
+        let cfg = CollectorConfig {
+            duration_s: 60,
+            max_events_bytes: 134217728,
+            output: format!("{}/cap", tmp.as_str()),
+            profile_id: "refuse-probe".to_string(),
+            pid: 4242,
+            ..Default::default()
+        };
+        let mut kernel = ScriptKernel::new();
+        kernel.load_out = load_out;
+        kernel.attach_out = attach_out;
+        zeros(&mut kernel, 2, 2);
+        let mut clock = ScriptClock::new();
+        clock.add(1000000000);
+        let mut signal = ScriptSignal::new();
+        let mut writer = ScriptWriter::new();
+        let mut collector = Collector::new(cfg);
+        let mut result = collector.run(&mut kernel, &mut clock, &mut signal, &mut writer);
+        stamp_load_refusal_code(&mut result);
+        result
+    }
+
+    fn ok_out() -> OpOut {
+        OpOut {
+            ok: true,
+            message: String::new(),
+        }
+    }
+
+    /// The exact attach-path nested-load diagnostic the kernel
+    /// layer reports when the verifier rejects a program load
+    /// during attach.
+    fn nested_attach_failure() -> String {
+        "ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: load for swiotlb_bounce failed: Permission denied (os error 13)".to_string()
+    }
+
+    #[test]
+    fn attach_nested_refusal_emits_code_line() {
+        // Attach-path nested load rejection: exit 3, no
+        // capture, and the exact verifier-rejected code line.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = nested_attach_failure();
+        let result = run_scripted_refusal(&tmp, ok_out(), failed_out(&failed));
+        assert_eq!(result.exit_code, EXIT_REFUSAL);
+        assert_eq!(result.end_reason, "unknown");
+        assert_eq!(result.outcome, "refused");
+        assert_eq!(result.diagnostic, format!("attach: {failed}"));
+        assert!(
+            !std::path::Path::new(&format!("{}/cap", tmp.as_str())).exists(),
+            "a refused record leaves no capture"
+        );
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the kernel verifier rejected the object; see the verifier lines above\n"
+        );
+    }
+
+    #[test]
+    fn attach_link_refusal_emits_code_line() {
+        // Ordinary link failure, same errno: classified by the
+        // errno, not by nested-load wording.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = "ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Permission denied (os error 13)".to_string();
+        let result = run_scripted_refusal(&tmp, ok_out(), failed_out(&failed));
+        assert_eq!(result.exit_code, EXIT_REFUSAL);
+        assert_eq!(result.outcome, "refused");
+        assert_eq!(result.diagnostic, format!("attach: {failed}"));
+        assert!(
+            !std::path::Path::new(&format!("{}/cap", tmp.as_str())).exists(),
+            "a refused record leaves no capture"
+        );
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+    }
+
+    #[test]
+    fn load_phase_refusal_emits_code_line() {
+        // Load-phase refusal with the same errno: the
+        // precedent pin for the attach-path contract.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = "ch0 op=2 domain=2 code=-13 EACCES: verifier rejected, see log: attempt channel: load failed: Permission denied (os error 13)".to_string();
+        let result = run_scripted_refusal(&tmp, failed_out(&failed), ok_out());
+        assert_eq!(result.exit_code, EXIT_REFUSAL);
+        assert_eq!(result.outcome, "refused");
+        assert_eq!(result.diagnostic, format!("load: {failed}"));
+        assert!(
+            !std::path::Path::new(&format!("{}/cap", tmp.as_str())).exists(),
+            "a refused record leaves no capture"
+        );
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+    }
+
+    #[test]
+    fn refusal_stamp_base_control() {
+        // Base control: finalized runs stay codeless and print
+        // no code line; coded and unclassified refusals pass
+        // through untouched.
+        let mut done = RunResult {
+            exit_code: EXIT_OK,
+            end_reason: "complete".to_string(),
+            outcome: "finalized".to_string(),
+            diagnostic: String::new(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut done);
+        assert!(done.code.is_empty());
+        assert!(done.fix.is_empty());
+        let lines = refusal_stderr_lines("record", "ready", &done.code, &done.fix);
+        assert_eq!(lines, vec!["memveil record: ready\n".to_string()]);
+        let mut coded = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic: "tracefs hidden".to_string(),
+            fix: "check the lockdown state".to_string(),
+            code: "tracefs-hidden".to_string(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut coded);
+        assert_eq!(coded.code, "tracefs-hidden");
+        assert_eq!(coded.fix, "check the lockdown state");
+        let mut other_op = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic: "op=4 domain=2 code=-13: poll failed".to_string(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut other_op);
+        assert!(other_op.code.is_empty());
+        assert!(other_op.fix.is_empty());
     }
 }

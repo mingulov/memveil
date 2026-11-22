@@ -28,6 +28,8 @@ use aya::{EbpfLoader, VerifierLogLevel};
 
 /// Retired bridge ABI load op: kept for diagnostic parsing.
 const OP_LOAD: u32 = 2;
+/// Retired bridge ABI attach op: kept for diagnostic parsing.
+const OP_ATTACH: u32 = 3;
 /// Verifier log capture cap in bytes (kept with the tail rule).
 const DIAG_LOG_CAP: usize = 65536;
 /// Verifier tail line count.
@@ -91,21 +93,33 @@ fn find_from(raw: &[u8], word: &[u8], start: usize) -> Option<usize> {
     None
 }
 
-/// Machine code for a load refusal diagnostic, else `""`.
+/// Machine code for a load/attach refusal diagnostic, else `""`.
 ///
-/// Reads the first load segment as the kernel layer writes
-/// it (`op=<OP_LOAD>` then `code=-<n>` ended by a space
-/// or a colon); other operations, positive codes, and
-/// out-of-range magnitudes stay unclassified.
+/// Reads the first load or attach segment as the kernel layer
+/// writes it (`op=2`/`op=3`, then `code=-<n>` ended by a space
+/// or a colon): the loader verifies programs while attaching,
+/// so an attach-path load errno classifies exactly like a
+/// load-phase one, and record agrees with the load-check
+/// doctor. Other operations, positive codes, and out-of-range
+/// magnitudes stay unclassified.
 pub fn load_refusal_code(diagnostic: &str) -> String {
     let raw = diagnostic.as_bytes();
-    let op_key = format!("op={OP_LOAD} ");
+    let load_key = format!("op={OP_LOAD} ");
+    let attach_key = format!("op={OP_ATTACH} ");
     let code_key = " code=-";
     let op_word = "op=";
     let key_len = code_key.len();
     let mut pos = 0;
     loop {
-        let Some(hit) = find_from(raw, op_key.as_bytes(), pos) else {
+        let load_hit = find_from(raw, load_key.as_bytes(), pos);
+        let attach_hit = find_from(raw, attach_key.as_bytes(), pos);
+        let hit = match (load_hit, attach_hit) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some(hit) = hit else {
             return String::new();
         };
         let seg_end = find_from(raw, op_word.as_bytes(), hit + 1).unwrap_or(raw.len());
@@ -586,14 +600,14 @@ mod tests {
         assert_eq!(load_refusal_code(&load_msg(-22)), "verifier-rejected");
         assert_eq!(load_refusal_code(&load_msg(-13)), "verifier-rejected");
         assert_eq!(load_refusal_code(&load_msg(-95)), "load-failed");
-        // Other operations stay unclassified.
-        assert_eq!(load_refusal_code("op=3 domain=2 code=-1: x"), "");
+        // Operations outside load/attach stay unclassified.
+        assert_eq!(load_refusal_code("op=4 domain=2 code=-1: x"), "");
         // Positive codes stay unclassified.
         assert_eq!(load_refusal_code(&load_msg(3)), "");
         // Undiagnosed text stays unclassified.
         assert_eq!(load_refusal_code("lmb_load: object load failed"), "");
-        // The first load segment classifies inside a join.
-        let both = format!("ch0 op=3 domain=2 code=-1: x; ch1 {}", load_msg(-1));
+        // The first load/attach segment wins inside a join.
+        let both = format!("ch0 op=4 domain=2 code=-1: x; ch1 {}", load_msg(-1));
         assert_eq!(load_refusal_code(&both), "load-eperm");
         // A colon ends the code segment too.
         assert_eq!(
@@ -603,6 +617,83 @@ mod tests {
         // Out-of-range magnitudes stay unclassified.
         assert_eq!(load_refusal_code(&load_msg(-5000)), "");
         assert_eq!(load_refusal_code("op=2 domain=2 code=-0 x"), "");
+    }
+
+    /// Attach-path nested program-load refusal: the loader
+    /// verifies programs while attaching, so a verifier
+    /// rejection surfaces as an op=3 attach failure.
+    fn attach_nested_msg() -> String {
+        "attach: ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: load for swiotlb_bounce failed: Permission denied (os error 13)".to_string()
+    }
+
+    /// Ordinary attach-path link failure with the same errno.
+    fn attach_link_msg() -> String {
+        "attach: ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Permission denied (os error 13)".to_string()
+    }
+
+    /// Load-phase refusal with the same errno.
+    fn load_phase_msg() -> String {
+        "load: ch0 op=2 domain=2 code=-13 EACCES: verifier rejected, see log: attempt channel: load failed: Permission denied (os error 13)".to_string()
+    }
+
+    #[test]
+    fn attach_nested_load_rejection_classifies() {
+        // The attach-path nested load refusal carries the
+        // load errno's code, agreeing with the load-check
+        // doctor's verdict on the same errno.
+        assert_eq!(load_refusal_code(&attach_nested_msg()), "verifier-rejected");
+        assert_eq!(load_code_for("EACCES"), "verifier-rejected");
+    }
+
+    #[test]
+    fn attach_link_failure_same_errno_classifies() {
+        // Classification keys on the errno, not on nested-load
+        // wording: an ordinary link failure with the same
+        // errno carries the same code.
+        assert_eq!(load_refusal_code(&attach_link_msg()), "verifier-rejected");
+    }
+
+    #[test]
+    fn load_phase_refusal_classifies() {
+        // The load-phase precedent the attach path mirrors.
+        assert_eq!(load_refusal_code(&load_phase_msg()), "verifier-rejected");
+    }
+
+    #[test]
+    fn attach_errno_table_mirrors_load() {
+        // The attach path shares the load errno table exactly,
+        // so record and the load-check doctor agree per errno.
+        assert_eq!(load_refusal_code("op=3 domain=2 code=-1: x"), "load-eperm");
+        assert_eq!(load_code_for("EPERM"), "load-eperm");
+        assert_eq!(
+            load_refusal_code("op=3 domain=2 code=-12: x"),
+            "load-enomem"
+        );
+        assert_eq!(load_code_for("ENOMEM"), "load-enomem");
+        assert_eq!(
+            load_refusal_code("op=3 domain=2 code=-95: x"),
+            "load-failed"
+        );
+        assert_eq!(load_code_for("EOPNOTSUPP"), "load-failed");
+        // The first load/attach segment wins inside a join.
+        assert_eq!(
+            load_refusal_code("ch2 op=3 domain=2 code=-13: x; ch0 op=2 domain=2 code=-1: y"),
+            "verifier-rejected"
+        );
+    }
+
+    #[test]
+    fn other_op_refusals_stay_unclassified() {
+        // Every retired op outside load/attach keeps its
+        // codeless shape, whatever errno rides along.
+        for op in [1, 4, 5, 6, 7, 9, 10] {
+            let msg = format!("op={op} domain=2 code=-13: x");
+            assert_eq!(load_refusal_code(&msg), "", "op={op} classifies");
+        }
+        // Positive and out-of-range attach codes stay out too.
+        assert_eq!(load_refusal_code("op=3 domain=2 code=3: x"), "");
+        assert_eq!(load_refusal_code("op=3 domain=2 code=-5000: x"), "");
+        assert_eq!(load_refusal_code("op=3 domain=2 code=-0 x"), "");
     }
 
     fn log_bytes(lines: &[&str]) -> Vec<u8> {
