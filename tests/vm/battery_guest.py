@@ -11,9 +11,9 @@ consumer, object, binary, profile, and oracle bytes
 from the run manifest before attaching, then runs one
 battery case: the consumer legs (matrix/copy/canonical/
 saturation/stop/skipsync) drive the test-only Rust consumer
-with digest-pinned C9 objects, while the record legs
-(faults/record3) run the sealed C9 record directly with
-the bound reference profile and no bridge.
+with digest-pinned candidate objects, while the record
+legs (faults/record3) run the sealed candidate record
+directly with the bound reference profile and no bridge.
 
 Exit 0 means the choreography completed (the host judges
 every case from the exports and never trusts guest
@@ -879,7 +879,7 @@ def run_skipsync(gate):
 
 
 def record_argv(gate, duration, caps, cap):
-    """Record argv for the sealed C9 binary.
+    """Record argv for the sealed candidate binary.
 
     The statically linked loader runs without --bridge;
     explicit object paths win verbatim over the embedded
@@ -1007,7 +1007,7 @@ def export_profile(gate):
 def run_record3(gate):
     """Three-channel product record over nested oracle traffic.
 
-    Runs the sealed C9 record with attempt, lifecycle, and
+    Runs the sealed candidate record with attempt, lifecycle, and
     copy channels against scenario 1 (nested 4096+1024)
     under the bound reference profile, then exports the
     capture plus the oracle log for host-side comparison.

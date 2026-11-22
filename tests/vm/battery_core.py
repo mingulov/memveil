@@ -6,12 +6,14 @@ Ports the blocked scenario-battery legs onto the reviewed
 test-only Rust consumer (tests/vm/stress-consumer/) and the
 guest-targeted oracle fixture: the consumer legs
 (matrix/copy/canonical/saturation/stop/skipsync) drive the
-same consumer binary with digest-pinned C9 objects, while the
-record legs (faults/record3) run the sealed C9 record
-directly with the bound reference profile and no bridge.
+same consumer binary with digest-pinned candidate
+objects, while the record legs (faults/record3) run the
+sealed candidate record directly with the bound
+reference profile and no bridge.
 
-This module binds every executed byte (C9 seal, objects,
-oracle fixture, pinned guest kernel, profile), writes and
+This module binds every executed byte (candidate seal
+and objects, oracle fixture, pinned guest kernel,
+profile), writes and
 re-verifies the battery input manifest, and judges battery
 legs with the existing battery predicates plus the two
 battery-only additions: per-channel loss reconcile for the
@@ -33,6 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "stress-consumer"))
 
 import battery_guest  # noqa: E402
+import candidate_pins as pins  # noqa: E402
 from consume import (check_conservation, check_oracle_script,  # noqa: E402
                      compare_scripted, parse_consume_file,
                      parse_oracle_log)
@@ -233,7 +236,7 @@ def guest_binding(repo):
 
 
 def materialize(repo, work, candidate_path, bundle_path):
-    """Write the sealed C9 bytes under work, verified.
+    """Write the sealed candidate bytes under work, verified.
 
     Verifies the explicit candidate seal (manifest digest,
     source, bundle bytes, inner manifest, all three BPF
@@ -255,7 +258,7 @@ def materialize(repo, work, candidate_path, bundle_path):
     except (OSError, ValueError) as exc:
         raise ValueError("candidate manifest unreadable: %s"
                          % exc)
-    if sha_file(candidate_path) != core.C9_CANDIDATE_SHA:
+    if sha_file(candidate_path) != pins.CANDIDATE_SHA256:
         raise ValueError("candidate manifest drift on reread")
     try:
         binary_sha = manifest_doc["files"]["bin/memveil"]
@@ -325,12 +328,12 @@ def materialize(repo, work, candidate_path, bundle_path):
                  "attempt": "attempt.bpf.o"}[channel]][
                 "sha256"]:
             raise ValueError("aya fixture drift: %s" % fixture)
-    pins = profile_pins(repo)
+    prof = profile_pins(repo)
     prof_dir = os.path.join(work, "profiles")
     os.makedirs(prof_dir, exist_ok=True)
     prof_dst = os.path.join(prof_dir, "battery-profile.json")
     with open(prof_dst, "wb") as handle:
-        handle.write(open(pins["path"], "rb").read())
+        handle.write(open(prof["path"], "rb").read())
     # Record loads its profiles dir for the scan order even
     # with an explicit --profile: the dir carries a manifest
     # naming exactly the bound bytes.
@@ -344,8 +347,8 @@ def materialize(repo, work, candidate_path, bundle_path):
         "lc": out["lifecycle.bpf.o"],
         "cp": out["copy.bpf.o"],
         "profile": {"path": prof_dst,
-                    "sha256": pins["sha256"],
-                    "profile_id": pins["profile_id"]},
+                    "sha256": prof["sha256"],
+                    "profile_id": prof["profile_id"]},
         "candidate": candidate,
         "oracle": {
             "ko": guest_oracle.FIXTURE_KO,
@@ -516,12 +519,12 @@ def verify_input_manifest(manifest, consumer_path=None):
             continue
         if got != entry.get("sha256"):
             bad.append("%s bytes differ from manifest" % label)
-    want = {"attempt": core.C9_ATTEMPT_SHA,
-            "lc": core.C9_LC_SHA, "cp": core.C9_CP_SHA}
+    want = {"attempt": pins.ATTEMPT_SHA256,
+            "lc": pins.LC_SHA256, "cp": pins.CP_SHA256}
     for channel, digest in want.items():
         if manifest["objects"].get(channel, {}).get("sha256") \
                 != digest:
-            bad.append("%s object is not the sealed C9 bytes"
+            bad.append("%s object is not the sealed candidate bytes"
                        % channel)
     candidate = manifest.get("candidate", {})
     files = candidate.get("files", {})
@@ -537,13 +540,13 @@ def verify_input_manifest(manifest, consumer_path=None):
             bad.append("%s object differs from the seal"
                        % channel)
     if candidate.get("source", {}).get("commit") \
-            != core.C9_SOURCE_COMMIT:
+            != pins.SOURCE_COMMIT:
         bad.append("candidate source drift")
     if candidate.get("bundle_manifest_sha256") \
-            != core.C9_BUNDLE_MANIFEST_SHA:
+            != pins.BUNDLE_MANIFEST_SHA256:
         bad.append("candidate bundle manifest drift")
     if candidate.get("bundle", {}).get("sha256") \
-            != core.C9_BUNDLE_SHA:
+            != pins.BUNDLE_SHA256:
         bad.append("candidate bundle drift")
     if manifest["profile"].get("profile_id") != PROFILE_ID:
         bad.append("profile id drift")

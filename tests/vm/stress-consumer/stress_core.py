@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from consume import check_conservation, check_identity_closure  # noqa: E402
+import candidate_pins as pins  # noqa: E402
 import guest_oracle  # noqa: E402
 from stress_guest import EXPECT_RELEASE  # noqa: E402,E401
 
@@ -56,18 +57,12 @@ BASELINE_CP_BLOB_ID = "467ba8235d1ae0e0478946ab056beb57e6891e15"
 BASELINE_LC_SHA = "3eec845b8e47fc34f031bfbb24cb209f06b3bece55ace67765648c570ea575c2"
 BASELINE_CP_SHA = "ae91c9f35676b54ef8b0c5561ebb33bcdd7f6e7c22bc76584c26605b42361154"
 
-# Current candidate objects, manifest-exact (dist/candidate.json
-# wins over any remembered prefix).
-C9_CANDIDATE_SHA = "ac2503a3ef4269826ae3f9512ca2402d45e767be2601c289" \
-    "3e812ebb6df929a7"
-C9_LC_SHA = "32f6a353779778981e727f311fe5d1b2c21fc92ae9918765f86bc4f81f58df34"
-C9_CP_SHA = "526a6726e24f7725a0e88e28d6994f0475a1589c3de10c7ebef703a03dfa73e8"
-C9_ATTEMPT_SHA = "ded931289c83713f62cdb5479fbf8aab03fe344d91a91bdeeee7e76f106979eb"
-C9_SOURCE_COMMIT = "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
-C9_SOURCE_TREE = "ac316ebc57a7b9d1aaf91bfcac8b1de410a6f614"
-C9_BUNDLE_MANIFEST_SHA = "b2ba73f2d2ad02c8957171c08e4fbf4a9e6895bec0a7d3074ad5c687e07ad820"
-C9_BUNDLE_SHA = "389f1d358e9eb8896c6033ec9ce18f74a1adda10d2502f4a9e2d7f2943cb05ea"
-C9_BUNDLE_SIZE = 1797674
+# Current candidate seal, manifest-exact: the expected
+# values live in candidate_pins (the single pin file for
+# the repeat runners) and every guard below reads them
+# from there. The explicit manifest/bundle files win at
+# runtime; their bytes are re-checked against the pins
+# and any drift refuses.
 
 # Gate constants mirrored from the identity-races gate
 # (tests/vm/test_identity_races.py) and the guest workload
@@ -320,9 +315,14 @@ def materialize(repo, work):
     """
     os.makedirs(work, exist_ok=True)
     pairs = {}
+    # The "c9" pair slot name is frozen runner/CLI schema
+    # (manifest pairs key, --inputs name, receipt fields):
+    # only the pinned bytes it carries re-point at seal.
     c9 = {
-        "lc": ("tests/vm/fixtures/aya/swiotlb_lifecycle.bpf.o", C9_LC_SHA),
-        "cp": ("tests/vm/fixtures/aya/swiotlb_copy.bpf.o", C9_CP_SHA),
+        "lc": ("tests/vm/fixtures/aya/swiotlb_lifecycle.bpf.o",
+               pins.LC_SHA256),
+        "cp": ("tests/vm/fixtures/aya/swiotlb_copy.bpf.o",
+               pins.CP_SHA256),
     }
     for channel, (rel, want) in c9.items():
         src = os.path.join(repo, rel)
@@ -369,20 +369,7 @@ def materialize(repo, work):
 
 def candidate_pins():
     """The pinned seal this runner binds (explicit-path inputs)."""
-    return {
-        "candidate_sha256": C9_CANDIDATE_SHA,
-        "schema": "memveil-candidate/2",
-        "source_commit": C9_SOURCE_COMMIT,
-        "source_tree": C9_SOURCE_TREE,
-        "bundle_manifest_sha256": C9_BUNDLE_MANIFEST_SHA,
-        "files": {
-            "bpf/swiotlb_lifecycle.bpf.o": C9_LC_SHA,
-            "bpf/swiotlb_copy.bpf.o": C9_CP_SHA,
-            "bpf/swiotlb_attempt.bpf.o": C9_ATTEMPT_SHA,
-        },
-        "bundle_sha256": C9_BUNDLE_SHA,
-        "bundle_size": C9_BUNDLE_SIZE,
-    }
+    return pins.candidate_pins()
 
 
 def verify_candidate_binding(candidate_path, bundle_path, pins=None):
@@ -645,7 +632,7 @@ def verify_input_manifest(manifest, consumer_path=None):
         return sorted(bad + ["manifest pairs %r" % sorted(pairs.keys())])
     want = {
         "baseline": {"lc": BASELINE_LC_SHA, "cp": BASELINE_CP_SHA},
-        "c9": {"lc": C9_LC_SHA, "cp": C9_CP_SHA},
+        "c9": {"lc": pins.LC_SHA256, "cp": pins.CP_SHA256},
     }
     for name in ("baseline", "c9"):
         for channel in ("lc", "cp"):
@@ -670,14 +657,15 @@ def verify_input_manifest(manifest, consumer_path=None):
     if base.get("cp_blob_id") != BASELINE_CP_BLOB_ID:
         bad.append("baseline cp blob drift")
     candidate = pairs["c9"].get("binding", {}).get("candidate", {})
-    if candidate.get("source", {}).get("commit") != C9_SOURCE_COMMIT:
+    if candidate.get("source", {}).get("commit") != pins.SOURCE_COMMIT:
         bad.append("candidate source drift")
-    if candidate.get("bundle_manifest_sha256") != C9_BUNDLE_MANIFEST_SHA:
+    if candidate.get("bundle_manifest_sha256") \
+            != pins.BUNDLE_MANIFEST_SHA256:
         bad.append("candidate bundle manifest drift")
     files = candidate.get("files", {})
-    if files.get("bpf/swiotlb_lifecycle.bpf.o") != C9_LC_SHA:
+    if files.get("bpf/swiotlb_lifecycle.bpf.o") != pins.LC_SHA256:
         bad.append("candidate lc file drift")
-    if files.get("bpf/swiotlb_copy.bpf.o") != C9_CP_SHA:
+    if files.get("bpf/swiotlb_copy.bpf.o") != pins.CP_SHA256:
         bad.append("candidate cp file drift")
     oracle = manifest.get("oracle", {})
     if oracle.get("ko_sha256") != guest_oracle.KO_SHA256:

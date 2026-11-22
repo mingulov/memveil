@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "stress-consumer"))
 
+import candidate_pins as pins  # noqa: E402
 from consume import parse_oracle_log  # noqa: E402
 import guest_lifecycle  # noqa: E402
 import guest_oracle  # noqa: E402
@@ -64,7 +65,7 @@ def test_seal_objects_match_committed_fixtures():
             ("tests/vm/fixtures/aya/swiotlb_lifecycle.bpf.o",
              "bpf/swiotlb_lifecycle.bpf.o")):
         assert faults.sha_file(os.path.join(REPO, rel)) == \
-            faults.SEAL_MEMBERS[key], rel
+            pins.seal_files()[key], rel
 
 
 def test_profile_pin_matches_checkout_doc():
@@ -119,14 +120,21 @@ def test_release_single_sourced_across_runners():
         battery_tests.core.VMLINUZ_SHA256
     assert faults.MODULES_MANIFEST_SHA256 == \
         battery_tests.core.MODULES_MANIFEST_SHA256
-    assert faults.SEAL_MEMBERS["bpf/swiotlb_lifecycle.bpf.o"] == \
-        battery_tests.score.C9_LC_SHA
-    assert faults.SEAL_MEMBERS["bpf/swiotlb_copy.bpf.o"] == \
-        battery_tests.score.C9_CP_SHA
-    assert faults.SEAL_MEMBERS["bpf/swiotlb_attempt.bpf.o"] == \
-        battery_tests.score.C9_ATTEMPT_SHA
-    assert faults.SEAL_CANDIDATE_SHA == \
-        battery_tests.score.C9_CANDIDATE_SHA
+    assert pins.seal_files()["bpf/swiotlb_lifecycle.bpf.o"] == \
+        pins.LC_SHA256
+    assert pins.seal_files()["bpf/swiotlb_copy.bpf.o"] == \
+        pins.CP_SHA256
+    assert pins.seal_files()["bpf/swiotlb_attempt.bpf.o"] == \
+        pins.ATTEMPT_SHA256
+    assert pins.seal_files()["bin/memveil"] == pins.BINARY_SHA256
+    assert pins.seal_files()[
+        "profiles/linux-x86_64-7.0-reference.json"] == \
+        pins.PROFILE_SHA256
+    assert pins.PROFILE_SHA256 == \
+        battery_tests.core.PROFILE_SHA256
+    assert faults.seal_pins() == pins.seal_pins()
+    assert battery_tests.score.candidate_pins() == \
+        pins.candidate_pins()
 
 
 def test_decision_shape_matches_product():
@@ -189,7 +197,7 @@ def test_faults_flow_invokes_record_directly():
 
 
 def test_seal_members_carry_no_bridge():
-    for name in faults.SEAL_MEMBERS:
+    for name in pins.seal_files():
         assert "mojo" not in name, name
         assert not name.endswith(".so"), name
         assert ".so." not in name, name
@@ -311,9 +319,9 @@ def make_seal_pair(tmp, tag="pair", member_over=None, omit=(),
 @needs_seal
 def test_seal_accepts_retained_pair():
     binding = faults.verify_seal(DIST_MANIFEST, DIST_BUNDLE)
-    assert binding["files"] == faults.SEAL_MEMBERS
-    assert binding["bundle"]["sha256"] == faults.SEAL_BUNDLE_SHA
-    assert binding["source"]["commit"] == faults.SEAL_SOURCE_COMMIT
+    assert binding["files"] == pins.seal_files()
+    assert binding["bundle"]["sha256"] == pins.BUNDLE_SHA256
+    assert binding["source"]["commit"] == pins.SOURCE_COMMIT
 
 
 def test_seal_accepts_synthetic_pair(tmp_path):
@@ -646,7 +654,7 @@ def test_kernel_lock_refuses_per_field(tmp_path):
 
 def real_binding():
     """Binding from the pins, without the dist/ seal."""
-    files = faults.SEAL_MEMBERS
+    files = pins.seal_files()
     return {
         "objects": {
             "lc": {"sha256": files[

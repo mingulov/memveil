@@ -50,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "stress-consumer"))
+import candidate_pins as pins
 import stress_core as core
 import stress_guest
 import guest_oracle
@@ -177,10 +178,10 @@ def self_test_pins():
                    and got == want, got[:16]) and ok
     for rel, want in [
             ("tests/vm/fixtures/aya/swiotlb_lifecycle.bpf.o",
-             core.C9_LC_SHA),
-            ("tests/vm/fixtures/aya/swiotlb_copy.bpf.o", core.C9_CP_SHA),
+             pins.LC_SHA256),
+            ("tests/vm/fixtures/aya/swiotlb_copy.bpf.o", pins.CP_SHA256),
             ("tests/vm/fixtures/aya/swiotlb_attempt.bpf.o",
-             core.C9_ATTEMPT_SHA)]:
+             pins.ATTEMPT_SHA256)]:
         got = sha_file(str(REPO / rel))
         ok = check("pins-%s" % rel.rsplit("/", 1)[1].split(".")[0],
                    got == want, got[:16]) and ok
@@ -193,11 +194,11 @@ def self_test_pins():
         try:
             binding = core.load_candidate_binding(str(REPO))
             ok = check("pins-candidate",
-                       binding["bundle"]["sha256"] == core.C9_BUNDLE_SHA
+                       binding["bundle"]["sha256"] == pins.BUNDLE_SHA256
                        and binding["source"]["commit"]
-                       == core.C9_SOURCE_COMMIT
+                       == pins.SOURCE_COMMIT
                        and binding["source"]["tree"]
-                       == core.C9_SOURCE_TREE) and ok
+                       == pins.SOURCE_TREE) and ok
         except (ValueError, OSError, KeyError) as exc:
             ok = check("pins-candidate", False, str(exc)) and ok
     try:
@@ -272,7 +273,7 @@ def self_test_consumer_build():
     ok = check("build-sha-agrees",
                parsed["sha256"] == sha_file(
                    str(REPO / "tests/vm/fixtures/aya/swiotlb_lifecycle.bpf.o"))
-               == core.C9_LC_SHA) and ok
+               == pins.LC_SHA256) and ok
     return ok
 
 
@@ -910,15 +911,15 @@ def self_test_guest_oracle(tmp, pairs):
         ok = check("oracle-vermagic-trunc", True) and ok
     # The manifest binds the fixture digest; drift refuses.
     candidate = {"schema": "memveil-candidate/2",
-                 "source": {"commit": core.C9_SOURCE_COMMIT,
-                            "tree": core.C9_SOURCE_TREE},
-                 "bundle_manifest_sha256": core.C9_BUNDLE_MANIFEST_SHA,
+                 "source": {"commit": pins.SOURCE_COMMIT,
+                            "tree": pins.SOURCE_TREE},
+                 "bundle_manifest_sha256": pins.BUNDLE_MANIFEST_SHA256,
                  "files": {
-                     "bpf/swiotlb_lifecycle.bpf.o": core.C9_LC_SHA,
-                     "bpf/swiotlb_copy.bpf.o": core.C9_CP_SHA,
-                     "bpf/swiotlb_attempt.bpf.o": core.C9_ATTEMPT_SHA},
-                 "bundle": {"sha256": core.C9_BUNDLE_SHA,
-                            "size": core.C9_BUNDLE_SIZE}}
+                     "bpf/swiotlb_lifecycle.bpf.o": pins.LC_SHA256,
+                     "bpf/swiotlb_copy.bpf.o": pins.CP_SHA256,
+                     "bpf/swiotlb_attempt.bpf.o": pins.ATTEMPT_SHA256},
+                 "bundle": {"sha256": pins.BUNDLE_SHA256,
+                            "size": pins.BUNDLE_SIZE}}
     consumer = {"sha256": sha_file(core.CONSUMER_RELEASE),
                 "build": {"profile": "release"}}
     try:
@@ -2471,9 +2472,9 @@ def self_test_candidate_flags(tmp, pairs):
     # never A's.
     cases.append(("mixed-manifest", cand_b, bundle_a, pins_a))
     cases.append(("mixed-bundle", cand_a, bundle_b, pins_a))
-    for case, cand, bundle, pins in cases:
+    for case, cand, bundle, case_pins in cases:
         try:
-            core.verify_candidate_binding(cand, bundle, pins)
+            core.verify_candidate_binding(cand, bundle, case_pins)
             ok = check("candidate-flags-%s" % case, False,
                        "accepted") and ok
         except ValueError:
@@ -2529,15 +2530,15 @@ def self_test_candidate_flags(tmp, pairs):
     # copy bytes presented as the lifecycle pair are not
     # the pinned pair bytes.
     candidate = {"schema": "memveil-candidate/2",
-                 "source": {"commit": core.C9_SOURCE_COMMIT,
-                            "tree": core.C9_SOURCE_TREE},
-                 "bundle_manifest_sha256": core.C9_BUNDLE_MANIFEST_SHA,
+                 "source": {"commit": pins.SOURCE_COMMIT,
+                            "tree": pins.SOURCE_TREE},
+                 "bundle_manifest_sha256": pins.BUNDLE_MANIFEST_SHA256,
                  "files": {
-                     "bpf/swiotlb_lifecycle.bpf.o": core.C9_LC_SHA,
-                     "bpf/swiotlb_copy.bpf.o": core.C9_CP_SHA,
-                     "bpf/swiotlb_attempt.bpf.o": core.C9_ATTEMPT_SHA},
-                 "bundle": {"sha256": core.C9_BUNDLE_SHA,
-                            "size": core.C9_BUNDLE_SIZE}}
+                     "bpf/swiotlb_lifecycle.bpf.o": pins.LC_SHA256,
+                     "bpf/swiotlb_copy.bpf.o": pins.CP_SHA256,
+                     "bpf/swiotlb_attempt.bpf.o": pins.ATTEMPT_SHA256},
+                 "bundle": {"sha256": pins.BUNDLE_SHA256,
+                            "size": pins.BUNDLE_SIZE}}
     consumer = {"sha256": sha_file(core.CONSUMER_RELEASE),
                 "build": {"profile": "release"}}
     oracle = core.oracle_run_binding(str(REPO))
@@ -3711,7 +3712,7 @@ def self_test_guest_inputs(tmp, pairs):
                    and doc["baseline_lc"]["sha256"]
                    == core.BASELINE_LC_SHA
                    and doc["c9_cp"]["sha256"]
-                   == core.C9_CP_SHA
+                   == pins.CP_SHA256
                    and doc["expect_release"]
                    == core.EXPECT_RELEASE,
                    blob[:120].decode("utf-8",
@@ -3746,7 +3747,7 @@ def self_test_guest_inputs(tmp, pairs):
                    fields["mode"] == "full"
                    and fields["ko_sha"]
                    == guest_oracle.KO_SHA256
-                   and fields["c9_lc_sha"] == core.C9_LC_SHA
+                   and fields["c9_lc_sha"] == pins.LC_SHA256
                    and fields["manifest"] == manifest_path
                    and observed == sha_file(staged_copy),
                    observed[:16]) and ok

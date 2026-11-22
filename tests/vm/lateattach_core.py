@@ -14,8 +14,8 @@ consumer at build/vm/mv_consume, and writes and
 re-verifies the late-attach input manifest. The object
 supply points are shared with the battery core: the seal
 pins live in exactly one pin file
-(tests/vm/stress-consumer/stress_core.py C9_* plus the
-battery profile/guest pins), so the re-pin at seal is a
+(tests/vm/candidate_pins.py plus the battery
+profile/guest pins), so the re-pin at seal is a
 pin-file change there, documented in the port report.
 All judging stays with the kept late-attach judges
 (tests/vm/test_late_attach.py), imported verbatim by the
@@ -33,9 +33,9 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "stress-consumer"))
 
 import battery_core as bcore  # noqa: E402
+import candidate_pins as pins  # noqa: E402
 import lateattach_guest  # noqa: E402
 import guest_oracle  # noqa: E402
-import stress_core as score  # noqa: E402
 
 SCHEMA = "memveil-lateattach-inputs/1"
 
@@ -280,12 +280,12 @@ def verify_input_manifest(manifest, consumer_path=None):
             continue
         if got != entry.get("sha256"):
             bad.append("%s bytes differ from manifest" % label)
-    want = {"attempt": score.C9_ATTEMPT_SHA,
-            "lc": score.C9_LC_SHA, "cp": score.C9_CP_SHA}
+    want = {"attempt": pins.ATTEMPT_SHA256,
+            "lc": pins.LC_SHA256, "cp": pins.CP_SHA256}
     for channel, digest in want.items():
         if manifest["objects"].get(channel, {}).get("sha256") \
                 != digest:
-            bad.append("%s object is not the sealed C9 bytes"
+            bad.append("%s object is not the sealed candidate bytes"
                        % channel)
     candidate = manifest.get("candidate", {})
     files = candidate.get("files", {})
@@ -301,13 +301,13 @@ def verify_input_manifest(manifest, consumer_path=None):
             bad.append("%s object differs from the seal"
                        % channel)
     if candidate.get("source", {}).get("commit") \
-            != score.C9_SOURCE_COMMIT:
+            != pins.SOURCE_COMMIT:
         bad.append("candidate source drift")
     if candidate.get("bundle_manifest_sha256") \
-            != score.C9_BUNDLE_MANIFEST_SHA:
+            != pins.BUNDLE_MANIFEST_SHA256:
         bad.append("candidate bundle manifest drift")
     if candidate.get("bundle", {}).get("sha256") \
-            != score.C9_BUNDLE_SHA:
+            != pins.BUNDLE_SHA256:
         bad.append("candidate bundle drift")
     if manifest["profile"].get("profile_id") \
             != bcore.PROFILE_ID:

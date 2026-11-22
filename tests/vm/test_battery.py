@@ -3,8 +3,9 @@
 """Scenario-battery runner for the blocked legs, case-selectable.
 
 Unarmed (default) the runner self-tests offline: pinned-seal
-verification, consumer build plus decoder vectors, C9
-layouts, wrong-pair and malformed-wire refusals, manifest
+verification, consumer build plus decoder vectors,
+candidate layouts, wrong-pair and malformed-wire
+refusals, manifest
 checks, per-leg judge preservation on synthetic logs built
 through the real consumer replay path, and refusal paths
 for every selection and input error. No boot, no
@@ -47,6 +48,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "stress-consumer"))
 import battery_core as core
 import battery_guest
+import candidate_pins as pins
 import guest_oracle
 import stress_core as score
 from capture_durability import check_shell_inert_path
@@ -725,11 +727,11 @@ def self_test_pins():
     ok = True
     for rel, want in [
             ("tests/vm/fixtures/aya/swiotlb_lifecycle.bpf.o",
-             score.C9_LC_SHA),
+             pins.LC_SHA256),
             ("tests/vm/fixtures/aya/swiotlb_copy.bpf.o",
-             score.C9_CP_SHA),
+             pins.CP_SHA256),
             ("tests/vm/fixtures/aya/swiotlb_attempt.bpf.o",
-             score.C9_ATTEMPT_SHA),
+             pins.ATTEMPT_SHA256),
             ("tests/vm/fixtures/aya-test/"
              "swiotlb_lifecycle-test.bpf.o",
              core.TEST_LC_SHA256),
@@ -753,11 +755,11 @@ def self_test_pins():
         ok = check("pins-oracle-fixture", False,
                    str(exc)[:200]) and ok
     try:
-        pins = core.profile_pins(str(REPO))
+        prof = core.profile_pins(str(REPO))
         ok = check("pins-profile",
-                   pins["sha256"] == core.PROFILE_SHA256
-                   and pins["profile_id"] == core.PROFILE_ID,
-                   pins["sha256"][:16]) and ok
+                   prof["sha256"] == core.PROFILE_SHA256
+                   and prof["profile_id"] == core.PROFILE_ID,
+                   prof["sha256"][:16]) and ok
     except (ValueError, OSError) as exc:
         ok = check("pins-profile", False, str(exc)) and ok
     seal = [REPO / "dist" / "candidate.json",
@@ -770,11 +772,11 @@ def self_test_pins():
             ok = check(
                 "pins-candidate",
                 binding["bundle"]["sha256"]
-                == score.C9_BUNDLE_SHA
+                == pins.BUNDLE_SHA256
                 and binding["source"]["commit"]
-                == score.C9_SOURCE_COMMIT
+                == pins.SOURCE_COMMIT
                 and binding["source"]["tree"]
-                == score.C9_SOURCE_TREE) and ok
+                == pins.SOURCE_TREE) and ok
         except (ValueError, OSError, KeyError) as exc:
             ok = check("pins-candidate", False,
                        str(exc)) and ok
@@ -951,7 +953,7 @@ def self_test_consumer_build():
                parsed["sha256"] == sha_file(
                    str(REPO / "tests/vm/fixtures/aya/"
                              "swiotlb_lifecycle.bpf.o"))
-               == score.C9_LC_SHA) and ok
+               == pins.LC_SHA256) and ok
     return ok
 
 
@@ -1028,7 +1030,7 @@ LAYOUT_WANT = {
 
 
 def self_test_layouts(tmp, pairs):
-    """C9 and test layouts verified against pinned bytes, offline."""
+    """Candidate and test layouts verified against pinned bytes, offline."""
     rings = {"lc": "mv_lifecycle", "cp": "mv_copies"}
     ok = True
     for (name, channel), want in sorted(LAYOUT_WANT.items()):
@@ -1098,7 +1100,7 @@ def self_test_wrong_pair(pairs):
           core.LC_SITES, "1", never],
          "digest mismatch"),
         ("digest-test-as-c9",
-         ["--expect-sha256", score.C9_LC_SHA, test_lc,
+         ["--expect-sha256", pins.LC_SHA256, test_lc,
           "mv_lifecycle", core.LC_SITES, "1", never],
          "digest mismatch"),
         ("digest-c9-as-test",
@@ -1207,9 +1209,9 @@ def synth_manifest():
     manifest = {
         "oracle": {"ko_sha256": guest_oracle.KO_SHA256},
         "objects": {
-            "lc": {"sha256": score.C9_LC_SHA},
-            "cp": {"sha256": score.C9_CP_SHA},
-            "attempt": {"sha256": score.C9_ATTEMPT_SHA},
+            "lc": {"sha256": pins.LC_SHA256},
+            "cp": {"sha256": pins.CP_SHA256},
+            "attempt": {"sha256": pins.ATTEMPT_SHA256},
         },
         "binary": {"sha256": "syn-binary"},
         "profile": {"sha256": core.PROFILE_SHA256,
@@ -1222,10 +1224,10 @@ def synth_manifest():
 def synth_identity(record=False):
     """Self-consistent guest identity for synthetic judgments."""
     digests = {"ko": guest_oracle.KO_SHA256,
-               "lc": score.C9_LC_SHA,
-               "cp": score.C9_CP_SHA}
+               "lc": pins.LC_SHA256,
+               "cp": pins.CP_SHA256}
     if record:
-        digests["attempt"] = score.C9_ATTEMPT_SHA
+        digests["attempt"] = pins.ATTEMPT_SHA256
         digests["binary"] = "syn-binary"
         digests["profile"] = core.PROFILE_SHA256
     return {"release": core.EXPECT_RELEASE,
@@ -3139,10 +3141,10 @@ def self_test_guest_argv(tmp):
 def synth_inputs():
     """Self-consistent inputs dict for offline doc tests."""
     return {
-        "lc": {"path": "/w/lc.o", "sha256": score.C9_LC_SHA},
-        "cp": {"path": "/w/cp.o", "sha256": score.C9_CP_SHA},
+        "lc": {"path": "/w/lc.o", "sha256": pins.LC_SHA256},
+        "cp": {"path": "/w/cp.o", "sha256": pins.CP_SHA256},
         "attempt": {"path": "/w/at.o",
-                    "sha256": score.C9_ATTEMPT_SHA},
+                    "sha256": pins.ATTEMPT_SHA256},
         "binary": {"path": "/w/memveil", "sha256": "b" * 64},
         "profile": {"path": "/w/prof.json",
                     "sha256": core.PROFILE_SHA256},
@@ -3215,7 +3217,7 @@ def self_test_guest_inputs(tmp):
                    == core.GUEST_INPUTS_SCHEMA
                    and doc["case"] == "matrix"
                    and doc["lc"]["sha256"]
-                   == score.C9_LC_SHA
+                   == pins.LC_SHA256
                    and doc["ko"]["sha256"]
                    == guest_oracle.KO_SHA256
                    and doc["test_lc"] == {"path": "",
@@ -3276,7 +3278,7 @@ def self_test_guest_inputs(tmp):
             export, core.GUEST_INPUTS_FILE)
         ok = check("inputs-parse",
                    fields["case"] == "matrix"
-                   and fields["lc_sha"] == score.C9_LC_SHA
+                   and fields["lc_sha"] == pins.LC_SHA256
                    and fields["manifest"] == manifest_path
                    and observed == sha_file(staged_copy),
                    observed[:16]) and ok
@@ -3618,8 +3620,8 @@ def self_test_receipt_drift(tmp):
             digests["test-lc"] = core.TEST_LC_SHA256
             digests["test-cp"] = core.TEST_CP_SHA256
         else:
-            digests["lc"] = score.C9_LC_SHA
-            digests["cp"] = score.C9_CP_SHA
+            digests["lc"] = pins.LC_SHA256
+            digests["cp"] = pins.CP_SHA256
         blob["identity.json"] = (json.dumps(
             {"release": core.EXPECT_RELEASE,
              "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
@@ -3899,28 +3901,28 @@ def self_test_inputs_manifest(tmp):
                    "sha256": binary_sha},
         "attempt": {"path": str(
             aya / "swiotlb_attempt.bpf.o"),
-            "sha256": score.C9_ATTEMPT_SHA},
+            "sha256": pins.ATTEMPT_SHA256},
         "lc": {"path": str(
             aya / "swiotlb_lifecycle.bpf.o"),
-            "sha256": score.C9_LC_SHA},
+            "sha256": pins.LC_SHA256},
         "cp": {"path": str(
             aya / "swiotlb_copy.bpf.o"),
-            "sha256": score.C9_CP_SHA},
+            "sha256": pins.CP_SHA256},
         "profile": {"path": str(REPO / core.PROFILE_REL),
                     "sha256": core.PROFILE_SHA256,
                     "profile_id": core.PROFILE_ID},
         "candidate": {
-            "source": {"commit": score.C9_SOURCE_COMMIT},
+            "source": {"commit": pins.SOURCE_COMMIT},
             "bundle_manifest_sha256":
-                score.C9_BUNDLE_MANIFEST_SHA,
-            "bundle": {"sha256": score.C9_BUNDLE_SHA},
+                pins.BUNDLE_MANIFEST_SHA256,
+            "bundle": {"sha256": pins.BUNDLE_SHA256},
             "files": {
                 "bin/memveil": binary_sha,
                 "bpf/swiotlb_attempt.bpf.o":
-                    score.C9_ATTEMPT_SHA,
+                    pins.ATTEMPT_SHA256,
                 "bpf/swiotlb_lifecycle.bpf.o":
-                    score.C9_LC_SHA,
-                "bpf/swiotlb_copy.bpf.o": score.C9_CP_SHA,
+                    pins.LC_SHA256,
+                "bpf/swiotlb_copy.bpf.o": pins.CP_SHA256,
             },
         },
         "oracle": {
@@ -4146,11 +4148,11 @@ def run_self_test(work=None):
             "lc": {"path": str(
                 REPO / "tests/vm/fixtures/aya/"
                        "swiotlb_lifecycle.bpf.o"),
-                "sha256": score.C9_LC_SHA},
+                "sha256": pins.LC_SHA256},
             "cp": {"path": str(
                 REPO / "tests/vm/fixtures/aya/"
                        "swiotlb_copy.bpf.o"),
-                "sha256": score.C9_CP_SHA}},
+                "sha256": pins.CP_SHA256}},
             "test": {
                 "lc": {"path": str(
                     REPO / "tests/vm/fixtures/aya-test/"

@@ -16,7 +16,7 @@ traffic, and the boot pins the locked 7.0.14 row through
 the vng version token with cache verification.
 
 Unarmed (default, no lease): the offline self-test —
-pinned-byte verification, consumer build, both C9 layouts,
+pinned-byte verification, consumer build, both candidate layouts,
 wrong-pair refusals, the kept judges over the retired mock
 pair plus its five mutations, manifest round-trips, and
 the staged-inputs wiring. Armed
@@ -49,6 +49,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "stress-consumer"))
 
+import candidate_pins as pins  # noqa: E402
 import guest_oracle  # noqa: E402
 import lateattach_core as core  # noqa: E402
 import lateattach_guest  # noqa: E402
@@ -164,8 +165,8 @@ def synth_manifest():
         "schema": core.SCHEMA,
         "runner_commit": "self-test",
         "objects": {
-            "lc": {"sha256": score.C9_LC_SHA},
-            "cp": {"sha256": score.C9_CP_SHA},
+            "lc": {"sha256": pins.LC_SHA256},
+            "cp": {"sha256": pins.CP_SHA256},
         },
         "oracle": {
             "ko_sha256": guest_oracle.KO_SHA256,
@@ -181,8 +182,8 @@ def synth_identity():
         "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
         "digests": {
             "consumer": "c" * 64,
-            "lc": score.C9_LC_SHA,
-            "cp": score.C9_CP_SHA,
+            "lc": pins.LC_SHA256,
+            "cp": pins.CP_SHA256,
             "ko": guest_oracle.KO_SHA256,
         },
     }
@@ -194,11 +195,11 @@ def synth_inputs():
         "binary": {"path": "/w/memveil",
                    "sha256": "b" * 64},
         "attempt": {"path": "/w/attempt.bpf.o",
-                    "sha256": score.C9_ATTEMPT_SHA},
+                    "sha256": pins.ATTEMPT_SHA256},
         "lc": {"path": "/w/lifecycle.bpf.o",
-               "sha256": score.C9_LC_SHA},
+               "sha256": pins.LC_SHA256},
         "cp": {"path": "/w/copy.bpf.o",
-               "sha256": score.C9_CP_SHA},
+               "sha256": pins.CP_SHA256},
         "profile": {"path": "/w/profiles/lateattach.json",
                     "sha256": "9" * 64,
                     "profile_id": "synth"},
@@ -212,11 +213,11 @@ def self_test_pins():
     ok = True
     for rel, want in [
             ("tests/vm/fixtures/aya/swiotlb_lifecycle.bpf.o",
-             score.C9_LC_SHA),
+             pins.LC_SHA256),
             ("tests/vm/fixtures/aya/swiotlb_copy.bpf.o",
-             score.C9_CP_SHA),
+             pins.CP_SHA256),
             ("tests/vm/fixtures/aya/swiotlb_attempt.bpf.o",
-             score.C9_ATTEMPT_SHA)]:
+             pins.ATTEMPT_SHA256)]:
         got = sha_file(str(REPO / rel))
         ok = check("pins-%s" % rel.rsplit("/", 1)[1].split(
             ".")[0], got == want, got[:16]) and ok
@@ -234,13 +235,13 @@ def self_test_pins():
         ok = check("pins-oracle-fixture", False,
                    str(exc)[:200]) and ok
     try:
-        pins = core.profile_pins(str(REPO))
+        prof = core.profile_pins(str(REPO))
         import battery_core as bcore
         ok = check("pins-profile",
-                   pins["sha256"] == bcore.PROFILE_SHA256
-                   and pins["profile_id"]
+                   prof["sha256"] == bcore.PROFILE_SHA256
+                   and prof["profile_id"]
                    == bcore.PROFILE_ID,
-                   pins["sha256"][:16]) and ok
+                   prof["sha256"][:16]) and ok
     except (ValueError, OSError) as exc:
         ok = check("pins-profile", False, str(exc)) and ok
     seal = [REPO / "dist" / "candidate.json",
@@ -253,11 +254,11 @@ def self_test_pins():
             ok = check(
                 "pins-candidate",
                 binding["bundle"]["sha256"]
-                == score.C9_BUNDLE_SHA
+                == pins.BUNDLE_SHA256
                 and binding["source"]["commit"]
-                == score.C9_SOURCE_COMMIT
+                == pins.SOURCE_COMMIT
                 and binding["source"]["tree"]
-                == score.C9_SOURCE_TREE) and ok
+                == pins.SOURCE_TREE) and ok
         except (ValueError, OSError, KeyError) as exc:
             ok = check("pins-candidate", False,
                        str(exc)) and ok
@@ -510,7 +511,7 @@ def self_test_consumer_build():
                parsed["sha256"] == sha_file(
                    str(REPO / "tests/vm/fixtures/aya/"
                              "swiotlb_lifecycle.bpf.o"))
-               == score.C9_LC_SHA) and ok
+               == pins.LC_SHA256) and ok
     # The retired --bridge contract stays refused: the Gate
     # argv shape exits 2 with the usage text, exactly the
     # blocker the port removes from the guest path.
@@ -563,7 +564,7 @@ LAYOUT_WANT = {
 
 
 def self_test_layouts(tmp, pairs):
-    """C9 layouts verified against pinned bytes, offline."""
+    """Candidate layouts verified against pinned bytes, offline."""
     from test_battery import LAYOUT_WANT as battery_layouts
     rings = {"lc": "mv_lifecycle", "cp": "mv_copies"}
     ok = True
@@ -641,7 +642,7 @@ def self_test_wrong_pair(pairs):
           core.LC_SITES, "1", never],
          "digest mismatch"),
         ("digest-swapped-channels",
-         ["--expect-sha256", score.C9_LC_SHA, c9_cp,
+         ["--expect-sha256", pins.LC_SHA256, c9_cp,
           "mv_copies", core.CP_SITES, "1", never],
          "digest mismatch"),
         ("sites-short",
@@ -770,9 +771,9 @@ def build_guest_argv():
 # -- Unarmed self-test: manifest and wiring -----------------
 
 def sealed_inputs_for_manifest(tmp):
-    """Inputs dict over committed C9 bytes (no dist/ seal).
+    """Inputs dict over committed candidate bytes (no dist/ seal).
 
-    The committed Aya fixtures ARE the sealed C9 object
+    The committed Aya fixtures ARE the sealed candidate object
     bytes, the bound profile is committed, and the oracle
     fixture carries its own binding: only the sealed binary
     has no committed bytes, so a scratch stand-in fills its
@@ -784,11 +785,11 @@ def sealed_inputs_for_manifest(tmp):
     with open(binary, "wb") as handle:
         handle.write(b"lateattach stand-in binary\n")
     os.chmod(binary, 0o755)
-    pins = core.profile_pins(str(REPO))
+    prof = core.profile_pins(str(REPO))
     prof_dir = os.path.join(tmp, "profiles")
     os.makedirs(prof_dir, exist_ok=True)
     prof_dst = os.path.join(prof_dir, "lateattach.json")
-    shutil.copyfile(pins["path"], prof_dst)
+    shutil.copyfile(prof["path"], prof_dst)
     with open(os.path.join(prof_dir, "manifest.txt"),
               "w") as handle:
         handle.write("lateattach.json\n")
@@ -797,32 +798,32 @@ def sealed_inputs_for_manifest(tmp):
         "attempt": {
             "path": str(REPO / "tests/vm/fixtures/aya/"
                               "swiotlb_attempt.bpf.o"),
-            "sha256": score.C9_ATTEMPT_SHA},
+            "sha256": pins.ATTEMPT_SHA256},
         "lc": {"path": str(REPO / "tests/vm/fixtures/aya/"
                                    "swiotlb_lifecycle.bpf.o"),
-               "sha256": score.C9_LC_SHA},
+               "sha256": pins.LC_SHA256},
         "cp": {"path": str(REPO / "tests/vm/fixtures/aya/"
                                   "swiotlb_copy.bpf.o"),
-               "sha256": score.C9_CP_SHA},
+               "sha256": pins.CP_SHA256},
         "profile": {"path": prof_dst,
-                    "sha256": pins["sha256"],
-                    "profile_id": pins["profile_id"]},
+                    "sha256": prof["sha256"],
+                    "profile_id": prof["profile_id"]},
         "candidate": {
             "schema": "memveil-candidate/2",
-            "source": {"commit": score.C9_SOURCE_COMMIT,
-                       "tree": score.C9_SOURCE_TREE},
+            "source": {"commit": pins.SOURCE_COMMIT,
+                       "tree": pins.SOURCE_TREE},
             "bundle_manifest_sha256":
-                score.C9_BUNDLE_MANIFEST_SHA,
+                pins.BUNDLE_MANIFEST_SHA256,
             "files": {
                 "bin/memveil": sha_file(binary),
                 "bpf/swiotlb_attempt.bpf.o":
-                    score.C9_ATTEMPT_SHA,
+                    pins.ATTEMPT_SHA256,
                 "bpf/swiotlb_lifecycle.bpf.o":
-                    score.C9_LC_SHA,
-                "bpf/swiotlb_copy.bpf.o": score.C9_CP_SHA,
+                    pins.LC_SHA256,
+                "bpf/swiotlb_copy.bpf.o": pins.CP_SHA256,
             },
-            "bundle": {"sha256": score.C9_BUNDLE_SHA,
-                       "size": score.C9_BUNDLE_SIZE},
+            "bundle": {"sha256": pins.BUNDLE_SHA256,
+                       "size": pins.BUNDLE_SIZE},
         },
         "oracle": {
             "ko": guest_oracle.FIXTURE_KO,
@@ -971,10 +972,10 @@ def self_test_manifest_seal(tmp):
                inputs["binary"]["sha256"]
                == inputs["candidate"]["files"][
                    "bin/memveil"]
-               and inputs["lc"]["sha256"] == score.C9_LC_SHA
-               and inputs["cp"]["sha256"] == score.C9_CP_SHA
+               and inputs["lc"]["sha256"] == pins.LC_SHA256
+               and inputs["cp"]["sha256"] == pins.CP_SHA256
                and inputs["attempt"]["sha256"]
-               == score.C9_ATTEMPT_SHA) and ok
+               == pins.ATTEMPT_SHA256) and ok
     return ok
 
 
@@ -1053,7 +1054,7 @@ def self_test_guest_inputs(tmp):
                    and doc["consumer"]["path"]
                    == "/w/build/vm/mv_consume"
                    and doc["lc"]["sha256"]
-                   == score.C9_LC_SHA
+                   == pins.LC_SHA256
                    and doc["ko"]["sha256"]
                    == guest_oracle.KO_SHA256,
                    blob[:120].decode("utf-8",
@@ -1087,7 +1088,7 @@ def self_test_guest_inputs(tmp):
                 export, core.GUEST_INPUTS_FILE)
         ok = check("inputs-parse",
                    fields["case"] == "lateattach"
-                   and fields["lc_sha"] == score.C9_LC_SHA
+                   and fields["lc_sha"] == pins.LC_SHA256
                    and fields["consumer"]
                    == "/w/build/vm/mv_consume"
                    and fields["manifest"] == manifest_path
@@ -1390,11 +1391,11 @@ def run_self_test(work=None):
             "lc": {"path": str(
                 REPO / "tests/vm/fixtures/aya/"
                        "swiotlb_lifecycle.bpf.o"),
-                "sha256": score.C9_LC_SHA},
+                "sha256": pins.LC_SHA256},
             "cp": {"path": str(
                 REPO / "tests/vm/fixtures/aya/"
                        "swiotlb_copy.bpf.o"),
-                "sha256": score.C9_CP_SHA}}}
+                "sha256": pins.CP_SHA256}}}
         ok = self_test_layouts(tmp, pairs) and ok
         ok = self_test_wrong_pair(pairs) and ok
         ok = self_test_stage(tmp) and ok

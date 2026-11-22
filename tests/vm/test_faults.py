@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "stress-consumer"))
 
+import candidate_pins as pins  # noqa: E402
 from consume import parse_oracle_log, scripted_expectation
 from evidence_retention import (VerifiedExports, expected_from_verified,
                                 retain_failure, snapshot_exports)
@@ -57,31 +58,10 @@ FAULTS_TIMEOUT = 1500
 
 # Retained seal this gate binds: every digest is re-checked
 # against the named files before boot; drift refuses. The
-# object and profile pins also match the committed fixtures,
-# cross-checked by the unarmed suite.
-SEAL_CANDIDATE_SHA = "ac2503a3ef4269826ae3f9512ca2402d45e767" \
-    "be2601c2893e812ebb6df929a7"
-SEAL_SCHEMA = "memveil-candidate/2"
-SEAL_SOURCE_COMMIT = "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
-SEAL_SOURCE_TREE = "ac316ebc57a7b9d1aaf91bfcac8b1de410a6f614"
-SEAL_BUNDLE_MANIFEST_SHA = "b2ba73f2d2ad02c8957171c08e4fbf4a9e689" \
-    "5bec0a7d3074ad5c687e07ad820"
-SEAL_BUNDLE_SHA = "389f1d358e9eb8896c6033ec9ce18f74a1adda10d" \
-    "2502f4a9e2d7f2943cb05ea"
-SEAL_BUNDLE_SIZE = 1797674
-SEAL_MEMBERS = {
-    "bin/memveil": "df6b37665220adf72ccc5dd29a36bcd9e91165d0"
-                   "d814de13c6ce5008c5532d7f",
-    "bpf/swiotlb_attempt.bpf.o": "ded931289c83713f62cdb5479fbf8a"
-                                 "ab03fe344d91a91bdeeee7e76f106979eb",
-    "bpf/swiotlb_copy.bpf.o": "526a6726e24f7725a0e88e28d6994f0"
-                              "475a1589c3de10c7ebef703a03dfa73e8",
-    "bpf/swiotlb_lifecycle.bpf.o": "32f6a353779778981e727f311fe5d1"
-                                   "b2c21fc92ae9918765f86bc4f81f58df34",
-    "profiles/linux-x86_64-7.0-reference.json":
-        "9cce54cd23d6310bf617cc3689045f134748e9806d9c397cad"
-        "5c5cc0a2523a27",
-}
+# expected values live in candidate_pins (the single pin
+# file for the repeat runners); the object and profile
+# pins also match the committed fixtures, cross-checked
+# by the unarmed suite.
 
 # Locked guest kernel, mirrored from the frozen
 # tests/vm/kernels.lock.json row "7.0": the vng version tag
@@ -102,8 +82,11 @@ MODULES_MANIFEST_SHA256 = "921ffc5864bff7d52b128f907d8f439" \
 PROFILE_REL = os.path.join(
     "profiles", "linux-x86_64-7.0-reference.json")
 PROFILE_ID = "linux-x86_64-7.0-reference"
-PROFILE_SHA256 = SEAL_MEMBERS[
-    "profiles/linux-x86_64-7.0-reference.json"]
+# Reviewed profile doc pin (checkout bytes, seal-independent
+# owner like the battery's): must equal the seal's profile
+# member, enforced by the pin cross-check test.
+PROFILE_SHA256 = "9cce54cd23d6310bf617cc3689045f134" \
+    "748e9806d9c397cad5c5cc0a2523a27"
 PROFILE_DECISION = ("candidate linux-x86_64-7.0-reference: "
                     "live interfaces verified "
                     "(profile unvalidated)")
@@ -123,16 +106,7 @@ def sha_file(path):
 
 def seal_pins():
     """The retained seal this gate binds, as a pins dict."""
-    return {
-        "candidate_sha256": SEAL_CANDIDATE_SHA,
-        "schema": SEAL_SCHEMA,
-        "source_commit": SEAL_SOURCE_COMMIT,
-        "source_tree": SEAL_SOURCE_TREE,
-        "bundle_manifest_sha256": SEAL_BUNDLE_MANIFEST_SHA,
-        "files": dict(SEAL_MEMBERS),
-        "bundle_sha256": SEAL_BUNDLE_SHA,
-        "bundle_size": SEAL_BUNDLE_SIZE,
-    }
+    return pins.seal_pins()
 
 
 def verify_seal(candidate_path, bundle_path, pins=None):
