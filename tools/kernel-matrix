@@ -885,9 +885,12 @@ def sealed_fixture_sha(commit, channel):
         proc = None
     if proc is not None and proc.returncode == 0 \
             and proc.stdout:
+        try:
+            want_blob = SEALED_FIXTURE_BLOBS.get(channel)
+        except TypeError:
+            want_blob = None
         if commit != SEALED_SOURCE_COMMIT \
-                or sealed_blob_id(proc.stdout) == \
-                SEALED_FIXTURE_BLOBS.get(channel):
+                or sealed_blob_id(proc.stdout) == want_blob:
             return hashlib.sha256(
                 proc.stdout).hexdigest()
     if commit == SEALED_SOURCE_COMMIT:
