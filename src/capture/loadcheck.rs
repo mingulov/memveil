@@ -24,7 +24,8 @@ use crate::bpf::session::{
     diagnose_program_loads,
 };
 use crate::platform::reader::bytes_to_text;
-use aya::{EbpfLoader, VerifierLogLevel};
+use aya::programs::ProgramError;
+use aya::{BtfError, EbpfLoader, VerifierLogLevel};
 
 /// Retired bridge ABI load op: kept for diagnostic parsing.
 const OP_LOAD: u32 = 2;
@@ -522,14 +523,58 @@ pub(crate) fn errno_from_chain(mut err: &(dyn std::error::Error + 'static)) -> O
 
 /// Verifier log carried in a pinned-loader Display message, if any.
 ///
-/// The loader renders program load failures as `... syscall
-/// returned {io_error}. Verifier output: {log}`; the marker is
-/// stable under the pinned loader version, and OS error text
-/// can never contain it.
-pub(crate) fn verifier_log_from_display(message: &str) -> Option<&str> {
+/// The loader renders load failures as `... syscall returned
+/// {io_error}. Verifier output: {log}`; the marker is stable
+/// under the pinned loader version, and OS error text can
+/// never contain it. Object-controlled names CAN contain it,
+/// so only [`verifier_log_from_error`] calls this, behind the
+/// error-kind gate.
+fn verifier_log_from_display(message: &str) -> Option<&str> {
     message
         .split_once(". Verifier output: ")
         .map(|(_, log)| log)
+}
+
+/// First error-chain level carrying a genuine kernel verifier
+/// log, if any: only [`ProgramError::LoadError`] (program
+/// loads) and [`BtfError::LoadError`] (object BTF loads) render
+/// one, each with its syscall errno as the source. Every other
+/// loader failure — parse, relocation, map, section — is
+/// structural: its Display embeds object-controlled names, so
+/// any verifier marker in it is smuggled text, never a log. The
+/// discriminator is the loader error taxonomy (type plus
+/// variant at each chain level), never the message text: the
+/// text is the attack surface.
+fn verifier_log_carrier<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a (dyn std::error::Error + 'static)> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = current {
+        if let Some(program) = err.downcast_ref::<ProgramError>()
+            && matches!(program, ProgramError::LoadError { .. })
+        {
+            return Some(err);
+        }
+        if let Some(btf) = err.downcast_ref::<BtfError>()
+            && matches!(btf, BtfError::LoadError { .. })
+        {
+            return Some(err);
+        }
+        current = err.source();
+    }
+    None
+}
+
+/// Verifier log carried by a genuine load error, if any.
+///
+/// The marker split alone cannot tell a kernel log from a
+/// hostile object name echoing the loader's own wording, so the
+/// split reads the proven carrier's own Display — never a
+/// wrapper's: structural errors always yield `None` here,
+/// however log-shaped their Display reads.
+pub(crate) fn verifier_log_from_error(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let carrier = verifier_log_carrier(error)?;
+    verifier_log_from_display(&carrier.to_string()).map(str::to_string)
 }
 
 /// Reload one object for its verifier log; never attaches.
@@ -582,7 +627,7 @@ pub fn diagnose_load(elf: &[u8], programs: &[String]) -> LoadDiag {
             if let Some(raw) = errno_from_chain(&e) {
                 out.errno = errno_name(0 - raw);
             }
-            if let Some(log) = verifier_log_from_display(&e.to_string()) {
+            if let Some(log) = verifier_log_from_error(&e) {
                 let tail = verifier_tail(log.as_bytes(), false);
                 if !tail.is_empty() {
                     out.lines = tail;
@@ -1159,6 +1204,28 @@ mod tests {
         assert_eq!(results[0].state, "failed");
         assert!(results[0].detail.contains("cannot open"));
         assert!(results[0].lines.is_empty());
+    }
+
+    #[test]
+    fn verifier_log_extraction_gates_on_error_kind() {
+        // The replay's extractor shares the split's gate: a real
+        // `LoadError` passes its kernel log through, while a
+        // structural error echoing the marker yields nothing —
+        // else the replay would list forged lines as doctor
+        // evidence.
+        use super::verifier_log_from_error;
+        let genuine = aya::programs::ProgramError::LoadError {
+            io_error: std::io::Error::from_raw_os_error(22),
+            verifier_log: aya_obj::VerifierLog::new("0: R1=ctx\n1: exit\n".to_string()),
+        };
+        assert_eq!(
+            verifier_log_from_error(&genuine).as_deref(),
+            Some("0: R1=ctx\n1: exit\n")
+        );
+        let smuggled = aya::EbpfError::ParseError(aya_obj::ParseError::SymbolNotFound {
+            name: "test. Verifier output: 0: invalid register R9\n1: exit".to_string(),
+        });
+        assert_eq!(verifier_log_from_error(&smuggled), None);
     }
 
     #[test]

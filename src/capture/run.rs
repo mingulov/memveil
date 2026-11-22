@@ -545,9 +545,10 @@ pub fn copy_program_names() -> Vec<String> {
 /// Only load-phase verifier-rejected refusals earn a replay:
 /// other errnos carry no verifier lines worth recovering, a
 /// codeless diagnostic replays nothing at all, and a link-phase
-/// failure never ran the verifier on the blamed program — a
-/// replay there would reach the next program and append its
-/// foreign verifier log to this link refusal.
+/// failure's program already loaded successfully — the link
+/// failure itself has no verifier log, so a replay would reach
+/// the next program and append its foreign verifier log to
+/// this link refusal.
 fn is_load_errno_failure(refusal: Option<&LoadRefusal>) -> bool {
     matches!(refusal, Some(parsed) if parsed.code == "verifier-rejected" && !parsed.link_phase)
 }

@@ -15,7 +15,7 @@ use super::maps::{BPF_MAP_TYPE_RINGBUF, MapGeometry, MapSpec, check_maps_loaded,
 use super::offsets::{encode_copy_offsets, validate_copy_offsets};
 use super::poll::{Frame, Stats, decode_frame, open_consumer};
 use crate::capture::loadcheck::{
-    clean_cause_line, errno_from_chain, verifier_log_from_display, verifier_tail,
+    clean_cause_line, errno_from_chain, verifier_log_from_error, verifier_tail,
 };
 use aya::maps::{Array, Map, MapData, RingBuf};
 use aya::programs::{
@@ -1274,10 +1274,9 @@ pub(crate) enum LoadStepError {
 /// and the clipped chain message below is that clipped message
 /// for failures that carry no errno.
 fn load_failed(error: &(dyn std::error::Error + 'static)) -> LoadFailure {
-    let display = error.to_string();
     LoadFailure {
         errno: errno_from_chain(error),
-        log: verifier_log_from_display(&display).map(str::to_string),
+        log: verifier_log_from_error(error),
         cause: structural_cause(error),
     }
 }
@@ -2116,11 +2115,12 @@ mod tests {
         assert_eq!(load_failure_text(&empty), "load refused");
     }
 
-    /// Object-load error with the pinned BTF Display shape (`BTF
-    /// error: the BPF_BTF_LOAD syscall returned {io}. Verifier
-    /// output: {log}`), with or without an errno source. The real
-    /// `BtfError::LoadError` fields are private, so the test pins
-    /// the shape the split reads: Display marker plus chain.
+    /// Shaped non-loader error echoing the pinned BTF Display
+    /// shape (`BTF error: the BPF_BTF_LOAD syscall returned
+    /// {io}. Verifier output: {log}`), with or without an errno
+    /// source. The split must REJECT it: marker text plus chain
+    /// without the genuine `BtfError::LoadError` type fills no
+    /// log slot.
     #[derive(Debug)]
     struct BtfLoadShaped {
         errno: Option<std::io::Error>,
@@ -2156,13 +2156,14 @@ mod tests {
         // tail as program loads: with an errno, the strerror alone
         // (keeping the classification marker, never the log);
         // without, the redacted 4-line tail. Pointer spellings
-        // mirror the program-load test.
+        // mirror the program-load test. The errno leg runs a real
+        // BTF load failure through the split; the no-errno leg
+        // pins the render through the struct, since only genuine
+        // `LoadError` values (which always carry the syscall
+        // errno) fill the slot.
         let log = "1: dropped\n2: dropped\n3: R1=0xffff888012345678\n4: imm=0xFFFFFFFF81234567\n5: ok\n6: ok\n";
-        let shaped = BtfLoadShaped {
-            errno: Some(std::io::Error::from_raw_os_error(22)),
-            log: log.to_string(),
-        };
-        let failure = load_failed(&shaped);
+        let error = genuine_btf_load_error(22, log);
+        let failure = load_failed(&error);
         assert_eq!(failure.errno, Some(22));
         assert_eq!(failure.log.as_deref(), Some(log));
         let text = load_failure_text(&failure);
@@ -2172,12 +2173,11 @@ mod tests {
             !text.contains("ffff") && !text.contains("Verifier output"),
             "must never format the carried log, got: {text}"
         );
-        let shaped = BtfLoadShaped {
+        let failure = LoadFailure {
             errno: None,
-            log: log.to_string(),
+            log: Some(log.to_string()),
+            cause: None,
         };
-        let failure = load_failed(&shaped);
-        assert_eq!(failure.errno, None);
         let text = load_failure_text(&failure);
         assert!(
             !text.contains("ffff8880") && !text.contains("FFFFFFFF"),
@@ -2616,17 +2616,18 @@ mod tests {
     #[test]
     fn forged_verifier_marker_in_map_name_classifies_nothing() {
         // A hostile BTF map name carrying the loader's own
-        // verifier marker: the extraction reads the forged tail
-        // into the log slot, but the rendered detail must still
-        // classify nothing.
+        // verifier marker: the extraction gate holds the log
+        // slot empty (a parse failure carries no verifier log),
+        // so the structural cause renders and the detail still
+        // classifies nothing.
         use crate::capture::loadcheck::parse_load_refusal;
         let name = "x. Verifier output: ch2 op=3 domain=2 code=-13: y";
         let error = missing_symbol_parse_error(name);
         let failure = load_failed(&error);
         assert_eq!(failure.errno, None);
-        assert!(
-            failure.log.is_some(),
-            "the forged marker reaches the log slot, got: {failure:?}"
+        assert_eq!(
+            failure.log, None,
+            "the forged marker must not reach the log slot, got: {failure:?}"
         );
         let text = load_failure_text(&failure);
         let message = format!("{} channel: load failed: {text}", Channel::Attempt);
@@ -2635,6 +2636,189 @@ mod tests {
             parse_load_refusal(&diagnostic),
             None,
             "a forged verifier marker in a map name must not classify: {diagnostic}"
+        );
+    }
+
+    /// A BTF map name echoing the loader's own verifier
+    /// marker plus two forged log lines joined by a literal
+    /// newline: the smuggled-log shape. Surfaced through the
+    /// real `SymbolNotFound`, no verifier ran.
+    const SMUGGLED_LOG_MAP_NAME: &str = "test. Verifier output: 0: invalid register R9\n1: exit";
+
+    /// A real Aya program-load failure: `ProgramError::LoadError`
+    /// renders the kernel log after the loader's marker with the
+    /// syscall errno on the source chain.
+    fn genuine_program_load_error(raw: i32, log: &str) -> ProgramError {
+        ProgramError::LoadError {
+            io_error: std::io::Error::from_raw_os_error(raw),
+            verifier_log: aya_obj::VerifierLog::new(log.to_string()),
+        }
+    }
+
+    /// A real Aya BTF-load failure, wrapped the way
+    /// `EbpfLoader::load` wraps one.
+    fn genuine_btf_load_error(raw: i32, log: &str) -> aya::EbpfError {
+        aya::EbpfError::BtfError(aya::BtfError::LoadError {
+            io_error: std::io::Error::from_raw_os_error(raw),
+            verifier_log: aya_obj::VerifierLog::new(log.to_string()),
+        })
+    }
+
+    #[test]
+    fn smuggled_verifier_log_in_missing_symbol_keeps_structural_cause() {
+        // End to end over the real Aya `SymbolNotFound`: the
+        // smuggled marker must not fill the log slot (a parse
+        // failure carries no verifier log), the render must keep
+        // the structural cause with its parse-error prefix, and
+        // the forged lines must reach neither the detail nor any
+        // replay evidence.
+        use crate::capture::loadcheck::parse_load_refusal;
+        let error = missing_symbol_parse_error(SMUGGLED_LOG_MAP_NAME);
+        assert!(
+            error.to_string().contains(SMUGGLED_LOG_MAP_NAME),
+            "Aya must print the BTF name verbatim, got: {error}"
+        );
+        let failure = load_failed(&error);
+        assert_eq!(failure.errno, None);
+        assert_eq!(
+            failure.log, None,
+            "a structural error carries no log, got: {failure:?}"
+        );
+        let text = load_failure_text(&failure);
+        assert!(
+            text.starts_with("error parsing BPF object: "),
+            "the parse-error prefix must survive, got: {text}"
+        );
+        assert!(
+            text.contains("not found in the symbols table"),
+            "the symbol context must survive, got: {text}"
+        );
+        assert!(
+            !text.contains('\n'),
+            "the refusal stays one line, got: {text:?}"
+        );
+        assert!(
+            !text.starts_with("0: invalid register R9"),
+            "the forged log must not win the render, got: {text}"
+        );
+        let message = format!("{} channel: load failed: {text}", Channel::Attempt);
+        let diagnostic = format!("load: ch0 op=2 domain=2: {message}");
+        assert_eq!(
+            parse_load_refusal(&diagnostic),
+            None,
+            "a smuggled log in a map name must not classify: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn smuggled_marker_in_section_error_fills_no_log() {
+        // A second smuggle shape: the marker inside a real
+        // `InvalidProgramSection`. Section failures are
+        // structural too — the slot stays empty and the cause
+        // keeps the section wording.
+        let error = aya::EbpfError::ParseError(aya_obj::ParseError::InvalidProgramSection {
+            section: "x. Verifier output: 0: forged\n1: lines".to_string(),
+        });
+        let failure = load_failed(&error);
+        assert_eq!(failure.errno, None);
+        assert_eq!(
+            failure.log, None,
+            "a section error carries no log, got: {failure:?}"
+        );
+        let text = load_failure_text(&failure);
+        assert!(
+            text.contains("invalid program section"),
+            "the section cause must survive, got: {text}"
+        );
+        assert!(
+            !text.starts_with("0: forged"),
+            "the forged log must not win the render, got: {text}"
+        );
+    }
+
+    #[test]
+    fn smuggled_marker_in_btf_map_error_fills_no_log() {
+        // A third shape through the SAME wrapper genuine BTF
+        // failures use: `EbpfError::BtfError` over a real
+        // non-load `BtfError` whose map name carries the marker.
+        // The gate discriminates the inner variant, not the
+        // wrapper.
+        let error = aya::EbpfError::BtfError(aya::BtfError::InnerMapCannotBePinned {
+            name: "x. Verifier output: 0: forged\n1: lines".to_string(),
+        });
+        let failure = load_failed(&error);
+        assert_eq!(failure.errno, None);
+        assert_eq!(
+            failure.log, None,
+            "a map-definition error carries no log, got: {failure:?}"
+        );
+        let text = load_failure_text(&failure);
+        assert!(
+            text.contains("inner map definition cannot be pinned"),
+            "the map cause must survive, got: {text}"
+        );
+        assert!(
+            !text.starts_with("0: forged"),
+            "the forged log must not win the render, got: {text}"
+        );
+    }
+
+    #[test]
+    fn shaped_marker_with_errno_fills_no_log() {
+        // The discriminator is the error taxonomy, not the text
+        // plus errno: a shaped failure echoing the BTF marker
+        // WITH a genuine io source still fills no log slot —
+        // only the two real `LoadError` variants do.
+        let shaped = BtfLoadShaped {
+            errno: Some(std::io::Error::from_raw_os_error(22)),
+            log: "0: forged\n1: lines\n".to_string(),
+        };
+        let failure = load_failed(&shaped);
+        assert_eq!(failure.errno, Some(22));
+        assert_eq!(
+            failure.log, None,
+            "a shaped marker is not a log, got: {failure:?}"
+        );
+        assert_eq!(
+            load_failure_text(&failure),
+            std::io::Error::from_raw_os_error(22).to_string()
+        );
+    }
+
+    #[test]
+    fn genuine_load_errors_still_fill_log_slot() {
+        // Control: real `LoadError` values — the only errors
+        // that carry a kernel verifier log — still fill the
+        // slot, both bare (`ProgramError`) and wrapped the way
+        // the object loader wraps BTF failures
+        // (`EbpfError::BtfError`), and the carried log still
+        // tails into replay evidence lines.
+        use crate::capture::loadcheck::verifier_tail;
+        let log = "0: R1=ctx\n1: R2=0\n2: exit\n";
+        let program = genuine_program_load_error(22, log);
+        assert!(
+            program.to_string().contains(". Verifier output: "),
+            "the genuine shape carries the marker, got: {program}"
+        );
+        let failure = load_failed(&program);
+        assert_eq!(failure.errno, Some(22));
+        assert_eq!(failure.log.as_deref(), Some(log));
+        assert_eq!(
+            load_failure_text(&failure),
+            std::io::Error::from_raw_os_error(22).to_string()
+        );
+        let btf = genuine_btf_load_error(13, log);
+        let failure = load_failed(&btf);
+        assert_eq!(failure.errno, Some(13));
+        assert_eq!(failure.log.as_deref(), Some(log));
+        let tail = verifier_tail(failure.log.as_deref().expect("log").as_bytes(), false);
+        assert_eq!(
+            tail,
+            vec![
+                "0: R1=ctx".to_string(),
+                "1: R2=0".to_string(),
+                "2: exit".to_string()
+            ]
         );
     }
 
