@@ -37,6 +37,8 @@ sys.path.insert(0, str(ROOT / 'tests' / 'fuzz'))
 from sigkill_verify import (SCENARIOS, validate_barrier, validate_result,
                             validate_export_inventory, recompute_prefix,
                             load_json)
+from capture_durability import check_shell_inert_path
+from kernel_matrix import validate_vng_token
 import sigkill_guest
 import sigkill_mock
 
@@ -53,8 +55,7 @@ def digest(path):
 
 
 def boot(vng, config_path, kernel, scenario, nonce, export, logs):
-    if '/' in kernel or kernel[:1] == '-' or not kernel:
-        raise ValueError('kernel is not a plain vng release token')
+    validate_vng_token(kernel, 'kernel')
     command = [vng, '--run', kernel, '-m', '2G', '--append',
                'swiotlb=force memveil_sigkill_gate=' + nonce,
                '--disable-microvm', '--network', 'user',
@@ -128,6 +129,7 @@ def execute(args):
     args.out = args.out.parent.resolve(strict=True) / args.out.name
     if any(c.isspace() or c == ',' for c in str(args.out)):
         raise ValueError('evidence path contains ambiguous QEMU separators')
+    check_shell_inert_path(args.out, 'evidence path')
     if shutil.disk_usage(args.out.parent).free < 2 * 1024**3:
         raise ValueError('insufficient host space for bounded owned images')
     args.out.mkdir(mode=0o700)
@@ -755,6 +757,128 @@ class SigkillSelfTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             boot('vng', Path('/tmp/config'), '../evil', 'readiness',
                  'f' * 32, Path('/tmp/export'), Path('/tmp/logs'))
+        for evil in ('v7.0.14;touch x', 'v7.0.14 x',
+                     'v7.0.14$(touch x)', 'v7.0.14`touch x`',
+                     'v7.0.14"x', "v7.0.14'x", 'v7.0.14|x',
+                     'v7.0.14&x', '-evil', '', 'v7.0.14/x'):
+            with self.subTest(kernel=evil), \
+                    self.assertRaises(ValueError):
+                boot('vng', Path('/tmp/config'), evil, 'readiness',
+                     'f' * 32, Path('/tmp/export'), Path('/tmp/logs'))
+
+    def test_boot_accepts_plain_release_token(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / 'logs'
+            logs.mkdir()
+            with mock.patch.object(subprocess, 'Popen') as launched:
+                boot('vng', Path(tmp) / 'config', 'v7.0.14',
+                     'readiness', 'f' * 32, Path(tmp) / 'export',
+                     logs)
+            self.assertEqual(launched.call_count, 1)
+            command = launched.call_args[0][0]
+            self.assertEqual(
+                command[command.index('--run') + 1], 'v7.0.14')
+
+    def test_shell_rewritten_evidence_path_refused_before_boot(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        real_access = os.access
+
+        def fake_access(path, mode):
+            if str(path) == '/dev/kvm':
+                return True
+            return real_access(path, mode)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            staged = root / 'inputs'
+            staged.mkdir()
+            binary = staged / 'binary'
+            binary.write_bytes(b'fake candidate')
+            for name in ('object', 'profile', 'shim'):
+                (staged / name).write_bytes(b'fake ' + name.encode())
+
+            def make_args(out):
+                return SimpleNamespace(
+                    binary=binary, object=staged / 'object',
+                    profile=staged / 'profile', bridge=None,
+                    shim=staged / 'shim', kernel='v7.0.14',
+                    expect_release='7.0.14-test',
+                    binary_sha256=digest(binary), out=out,
+                    owned_out_ids=None)
+
+            for evil in ('staged"copy"', 'o$(touch_x)'):
+                with self.subTest(out=evil):
+                    parent = root / evil
+                    parent.mkdir()
+                    args = make_args(parent / 'ev')
+                    launches = mock.Mock(
+                        side_effect=AssertionError('unexpected boot'))
+                    with mock.patch('shutil.which',
+                                    return_value='/fake/vng'), \
+                         mock.patch('os.access',
+                                    side_effect=fake_access), \
+                         mock.patch('harness_env.check_harness_versions',
+                                    return_value={'vng': 'fake'}), \
+                         mock.patch('subprocess.check_output',
+                                    return_value='f' * 40), \
+                         mock.patch.object(sys.modules[__name__],
+                                           'boot', launches):
+                        with self.assertRaises(ValueError) as refused:
+                            execute(args)
+                    self.assertEqual(
+                        str(refused.exception),
+                        'evidence path contains characters the launcher '
+                        'shell rewrites: '
+                        + str(parent.resolve() / 'ev'))
+                    self.assertEqual(launches.call_count, 0)
+                    self.assertFalse((parent / 'ev').exists())
+
+    def test_honest_evidence_path_reaches_boot(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        real_access = os.access
+
+        def fake_access(path, mode):
+            if str(path) == '/dev/kvm':
+                return True
+            return real_access(path, mode)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            staged = root / 'inputs'
+            staged.mkdir()
+            binary = staged / 'binary'
+            binary.write_bytes(b'fake candidate')
+            for name in ('object', 'profile', 'shim'):
+                (staged / name).write_bytes(b'fake ' + name.encode())
+            parent = root / 'ok'
+            parent.mkdir()
+            args = SimpleNamespace(
+                binary=binary, object=staged / 'object',
+                profile=staged / 'profile', bridge=None,
+                shim=staged / 'shim', kernel='v7.0.14',
+                expect_release='7.0.14-test',
+                binary_sha256=digest(binary), out=parent / 'ev',
+                owned_out_ids=None)
+            launches = mock.Mock(
+                side_effect=ValueError('sentinel-reached-boot'))
+            with mock.patch('shutil.which',
+                            return_value='/fake/vng'), \
+                 mock.patch('os.access',
+                            side_effect=fake_access), \
+                 mock.patch('harness_env.check_harness_versions',
+                            return_value={'vng': 'fake'}), \
+                 mock.patch('subprocess.check_output',
+                            return_value='f' * 40), \
+                 mock.patch.object(sys.modules[__name__],
+                                   'boot', launches):
+                with self.assertRaises(ValueError) as reached:
+                    execute(args)
+            self.assertEqual(str(reached.exception),
+                             'sentinel-reached-boot')
+            self.assertEqual(launches.call_count, 1)
 
 
 def main():

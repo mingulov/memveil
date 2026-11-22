@@ -235,11 +235,64 @@ def run_self_test(work=None):
         ok = self_test_epipe_control(tmp) and ok
         ok = self_test_judge_cases() and ok
         ok = self_test_capture_cases(tmp) and ok
+        ok = self_test_boot_guards(tmp) and ok
     finally:
         if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
     print("output-stall self-test: %s"
           % ("PASS" if ok else "FAIL"))
+    return ok
+
+
+def self_test_boot_guards(tmp):
+    """Boot assembly refuses shell rewrites before spawning."""
+    from types import SimpleNamespace
+    from unittest import mock
+    ok = True
+
+    def make_args(kver):
+        return SimpleNamespace(
+            duration=15, capability="attempt-trace",
+            profiles_dir="", no_stimulus=False, kver=kver,
+            timeout=900, binary_sha256="ab" * 32)
+
+    flight = {"prefix": ["vng"], "harness": {}}
+    for num, evil in enumerate(("v7.0.14 x", "v7.0.14;touch x",
+                                "v7.0.14$(touch x)", "../evil")):
+        with mock.patch("vm_process.run_owned_guest") as spawned:
+            try:
+                armed_boot(make_args(evil), "/tmp/x/memveil",
+                           flight)
+                ok = check("boot-kver-%d" % num, False,
+                           "accepted %r" % evil) and ok
+            except ValueError:
+                ok = check("boot-kver-%d" % num,
+                           spawned.call_count == 0,
+                           "spawned") and ok
+    hostile = os.path.join(tmp, 't"mp')
+    os.mkdir(hostile)
+    with mock.patch("vm_process.run_owned_guest") as spawned, \
+         mock.patch.dict(os.environ, {"TMPDIR": hostile}), \
+         mock.patch.object(tempfile, "tempdir", None):
+        try:
+            armed_boot(make_args("v7.0.14"), "/tmp/x/memveil",
+                       flight)
+            ok = check("boot-tmpdir", False, "accepted") and ok
+        except ValueError:
+            ok = check("boot-tmpdir", spawned.call_count == 0,
+                       "spawned") and ok
+    with mock.patch("vm_process.run_owned_guest") as spawned:
+        spawned.side_effect = ValueError("sentinel-reached-boot")
+        try:
+            armed_boot(make_args("v7.0.14"), "/tmp/x/memveil",
+                       flight)
+            ok = check("boot-honest", False,
+                       "no sentinel") and ok
+        except ValueError as exc:
+            ok = check("boot-honest",
+                       str(exc) == "sentinel-reached-boot"
+                       and spawned.call_count == 1,
+                       str(exc)) and ok
     return ok
 
 
@@ -347,9 +400,14 @@ def armed_run(args):
 
 def armed_boot(args, binary, flight):
     from vm_process import run_owned_guest
+    from capture_durability import check_shell_inert_path
+    from kernel_matrix import validate_vng_token
     tmp = Path(tempfile.mkdtemp(prefix="vmgate-outstall-"))
     export = tmp / "export"
     export.mkdir()
+    # The export reaches the launcher command raw, so its
+    # spelling is gated before the boot is assembled.
+    check_shell_inert_path(export, "export path")
     work = "/tmp/vmgate-work"
     bpftrace = shutil.which("bpftrace") or ""
     bpftool = shutil.which("bpftool") or ""
@@ -366,6 +424,9 @@ def armed_boot(args, binary, flight):
         guest_argv += ["--no-stimulus"]
     run = ["--run"]
     if args.kver:
+        # An empty selector keeps the bare-host --run shape;
+        # anything else must be a plain release token.
+        validate_vng_token(args.kver, "kernel selector")
         run += [args.kver]
     cmd = flight["prefix"] + run + [
         "-m", "6G",

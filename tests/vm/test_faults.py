@@ -489,6 +489,10 @@ def boot_faults_guest(binding, candidate_path, bundle_path):
     work = "/tmp/vmgate-work"
     export = tmp / "export"
     export.mkdir()
+    from capture_durability import check_shell_inert_path
+    # The export reaches the launcher command raw, so its
+    # spelling is gated before the boot is assembled.
+    check_shell_inert_path(export, "export path")
     cmd = prefix + ["--run", VNG_TAG, "-m", "6G",
                     "--append", "swiotlb=force",
                     "--disable-microvm", "--network", "user",
@@ -871,6 +875,64 @@ def judge_faults_capture(got, expect_decision=None):
     print("ft-f6: attach race clean, oracle slice exact, "
           "%d ambient" % len(ambient))
     return sorted(bad)
+
+
+def _faults_boot_seams(monkeypatch, selected):
+    monkeypatch.syspath_prepend(TESTS)
+    monkeypatch.setattr('test_attempt_capture.gate_prefix',
+                        lambda: (['vng'], {}))
+    monkeypatch.setattr('harness_env.check_harness_versions',
+                        lambda vng: {})
+    monkeypatch.setattr('kernel_matrix.verify_entry_cache',
+                        lambda home, entry: (True, 'cached',
+                                             '/fake/ref'))
+    monkeypatch.setattr('support.candidate_input.load',
+                        lambda: selected)
+
+
+def test_boot_faults_guest_rewritten_tmpdir_refused(tmp_path,
+                                                    monkeypatch):
+    import tempfile
+    from types import SimpleNamespace
+    from unittest import mock
+    manifest = tmp_path / 'candidate.json'
+    manifest.write_text('{}')
+    bundle = tmp_path / 'bundle.tar.gz'
+    bundle.write_bytes(b'fake')
+    selected = SimpleNamespace(
+        manifest_path=manifest.absolute(),
+        bundle=bundle.absolute(), digest='f' * 64)
+    _faults_boot_seams(monkeypatch, selected)
+    hostile = tmp_path / 't"mp'
+    hostile.mkdir()
+    monkeypatch.setenv('TMPDIR', str(hostile))
+    monkeypatch.setattr(tempfile, 'tempdir', None)
+    binding = {'guest': verify_kernel_lock(REPO)}
+    with mock.patch('vm_process.run_owned_guest') as spawned:
+        with pytest.raises(ValueError, match='launcher shell'):
+            boot_faults_guest(binding, str(manifest), str(bundle))
+    assert spawned.call_count == 0
+
+
+def test_boot_faults_guest_honest_tmpdir_reaches_boot(tmp_path,
+                                                      monkeypatch):
+    from types import SimpleNamespace
+    from unittest import mock
+    manifest = tmp_path / 'candidate.json'
+    manifest.write_text('{}')
+    bundle = tmp_path / 'bundle.tar.gz'
+    bundle.write_bytes(b'fake')
+    selected = SimpleNamespace(
+        manifest_path=manifest.absolute(),
+        bundle=bundle.absolute(), digest='f' * 64)
+    _faults_boot_seams(monkeypatch, selected)
+    binding = {'guest': verify_kernel_lock(REPO)}
+    with mock.patch('vm_process.run_owned_guest') as spawned:
+        spawned.side_effect = ValueError('sentinel-reached-boot')
+        with pytest.raises(ValueError,
+                           match='sentinel-reached-boot'):
+            boot_faults_guest(binding, str(manifest), str(bundle))
+    assert spawned.call_count == 1
 
 
 def test_faults_multi_channel():

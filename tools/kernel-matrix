@@ -631,7 +631,8 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
                                          + "\n")
     for label, value, name in (
             ("evidence dir", export, "evidence_path"),
-            ("disk image", disk_img, "disk_path")):
+            ("disk image", disk_img, "disk_path"),
+            ("boot target", target, "boot_target")):
         try:
             km.validate_shell_path(value, label)
         except ValueError as exc:
@@ -646,6 +647,7 @@ def run_one(entry, args, kind, source, disk_img, tools, run_id,
             shlex.quote(script), shlex.quote(str(ROOT)))
     try:
         scratch_img = ensure_scratch(disk_img, ident)
+        km.validate_shell_path(scratch_img, "scratch image")
     except ValueError as exc:
         return stage_fail("scratch", "scratch-failed",
                           str(exc), t0)

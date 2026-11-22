@@ -745,6 +745,43 @@ def test_matrix_argv_exact(tmp_path, monkeypatch):
         _legacy_guest_cmd(script))
 
 
+def test_run_one_rejects_rewritten_boot_target(tmp_path,
+                                               monkeypatch):
+    captured = {}
+    _mock_pre_spawn(monkeypatch, tmp_path, captured)
+    monkeypatch.setattr(
+        kmt, "verify_cache",
+        lambda entry: (True, "cached", str(tmp_path),
+                       "/tmp/k\"q/boot/vmlinuz-6.8"))
+    out = tmp_path / "out"
+    disk = str(tmp_path / "disk.img")
+    rec = kmt.run_one(_run_entry(), _run_args(out), "bundle",
+                      "b", disk, {}, "t", ["/abs/vng"],
+                      _receipt_base())
+    assert rec["ok"] is False
+    assert rec["checks"][0]["name"] == "boot_target"
+    assert rec["checks"][0]["detail"] == "path-rejected"
+    assert "boot target" in rec["detail"]
+    assert "vng_args" not in captured
+
+
+def test_run_one_rejects_rewritten_scratch(tmp_path, monkeypatch):
+    captured = {}
+    _mock_pre_spawn(monkeypatch, tmp_path, captured)
+    monkeypatch.setattr(
+        kmt, "ensure_scratch",
+        lambda disk_img, ident: str(tmp_path / "scratch-k x.img"))
+    out = tmp_path / "out"
+    disk = str(tmp_path / "disk.img")
+    rec = kmt.run_one(_run_entry(), _run_args(out), "bundle",
+                      "b", disk, {}, "t", ["/abs/vng"],
+                      _receipt_base())
+    assert rec["ok"] is False
+    assert rec["checks"][0]["name"] == "scratch"
+    assert "scratch image" in rec["detail"]
+    assert "vng_args" not in captured
+
+
 def test_matrix_ignores_scenario_flags(tmp_path, monkeypatch):
     captured = {}
     _mock_pre_spawn(monkeypatch, tmp_path, captured)

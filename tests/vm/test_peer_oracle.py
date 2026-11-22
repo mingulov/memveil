@@ -1489,6 +1489,10 @@ def run_peer_guest(kver, release, pci, cand_env):
     tmp = Path(tempfile.mkdtemp(prefix="vmgate-peer-"))
     export = tmp / "export"
     export.mkdir()
+    from capture_durability import check_shell_inert_path
+    # The export reaches the launcher command raw, so its
+    # spelling is gated before the boot is assembled.
+    check_shell_inert_path(export, "export path")
     (tmp / "kernel.txt").write_text(
         "%s %s\n" % (kver, release))
     guest = shlex.join(
@@ -1518,6 +1522,49 @@ def run_peer_guest(kver, release, pci, cand_env):
     finally:
         lease.close()
     return tmp, proc
+
+
+def _peer_boot_seams(monkeypatch, tmp_path):
+    import sys
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "REPO", tmp_path)
+    monkeypatch.setattr("test_attempt_capture.gate_prefix",
+                        lambda: (["vng"], {}))
+
+
+def test_run_peer_guest_rewritten_tmpdir_refused(tmp_path,
+                                                 monkeypatch):
+    import tempfile
+    from unittest import mock
+    _peer_boot_seams(monkeypatch, tmp_path)
+    hostile = tmp_path / 't"mp'
+    hostile.mkdir()
+    monkeypatch.setenv("TMPDIR", str(hostile))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    cand_env = {"manifest": str(tmp_path / "m.json"),
+                "bundle": str(tmp_path / "b.tar.gz"),
+                "digest": "d" * 64}
+    with mock.patch("vm_process.run_owned_guest") as spawned:
+        with pytest.raises(ValueError, match="launcher shell"):
+            run_peer_guest("v7.0.14", "7.0.14-test",
+                           "0000:00:1f.0", cand_env)
+    assert spawned.call_count == 0
+
+
+def test_run_peer_guest_honest_tmpdir_reaches_boot(tmp_path,
+                                                   monkeypatch):
+    from unittest import mock
+    _peer_boot_seams(monkeypatch, tmp_path)
+    cand_env = {"manifest": str(tmp_path / "m.json"),
+                "bundle": str(tmp_path / "b.tar.gz"),
+                "digest": "d" * 64}
+    with mock.patch("vm_process.run_owned_guest") as spawned:
+        spawned.side_effect = ValueError("sentinel-reached-boot")
+        with pytest.raises(ValueError,
+                           match="sentinel-reached-boot"):
+            run_peer_guest("v7.0.14", "7.0.14-test",
+                           "0000:00:1f.0", cand_env)
+    assert spawned.call_count == 1
 
 
 def test_peer_leg():

@@ -4059,6 +4059,60 @@ def test_qemu_drive_opt_doubles_commas():
     assert ",," in km.qemu_drive_opt("/tmp/a,b.img")
 
 
+def test_qemu_drive_opt_rejects_shell_rewrites():
+    for bad in ("/tmp/a b.img", "/tmp/x\"y.img",
+                "/tmp/o$(touch x).img", "/tmp/a;b.img",
+                "/tmp/a`b.img", "/tmp/a'b.img"):
+        with pytest.raises(ValueError):
+            km.qemu_drive_opt(bad)
+    for bad_id in ("d 0", "d;0", "d$0", 'd"0'):
+        with pytest.raises(ValueError):
+            km.qemu_drive_opt("/tmp/disk.img", drive_id=bad_id)
+    for bad_serial in ("mv 0", "mv;0", "mv$0", "mv`0"):
+        with pytest.raises(ValueError):
+            km.qemu_drive_opt("/tmp/disk.img", serial=bad_serial)
+    # Honest spellings, including the comma QEMU needs
+    # doubled, still build the exact same option text.
+    assert km.qemu_drive_opt("/tmp/a,b.img") == \
+        ("-drive file=/tmp/a,,b.img,if=none,id=d0,format=raw,"
+         "cache=none,readonly=on"
+         " -device nvme,serial=mv0,drive=d0")
+
+
+def test_qemu_drive_opt_rejects_joined_scratch_spelling():
+    evil = km.scratch_img_path("/tmp/disk.img", "k$(touch x)")
+    with pytest.raises(ValueError):
+        km.qemu_drive_opt(evil)
+    clean = km.scratch_img_path("/tmp/disk.img", "7.0")
+    assert "scratch-7.0.img" in km.qemu_drive_opt(clean)
+
+
+def test_validate_vng_token_accepts_release_tokens():
+    for good in ("v7.0.14", "v7.3-rc3", "v6.12", "6.12.114",
+                 "7.0.14-070014-generic", "a_b.c-d"):
+        km.validate_vng_token(good, "kernel selector")
+
+
+def test_validate_vng_token_rejects_rewrites():
+    for bad in ("", "-evil", "../evil", "v7.0.14 x",
+                "v7.0.14;touch x", "v7.0.14$(touch x)",
+                "v7.0.14`touch x`", 'v7.0.14"x', "v7.0.14'x",
+                "v7.0.14|x", "v7.0.14&x", "v7.0.14*x",
+                "v7.0.14?x", "v7.0.14#x", "v7.0.14~x",
+                "v7.0.14\\x", "v7.0.14/x"):
+        with pytest.raises(ValueError):
+            km.validate_vng_token(bad, "kernel selector")
+
+
+def test_vng_download_cmd_rejects_rewrites():
+    assert km.vng_download_cmd("/usr/bin/vng", "v7.0.14") == \
+        ["/usr/bin/vng", "--run", "v7.0.14", "--dry-run"]
+    for bad in ("v7.0.14 x", "v7.0.14;touch x",
+                "v7.0.14$(touch x)", "../evil", ""):
+        with pytest.raises(ValueError):
+            km.vng_download_cmd("/usr/bin/vng", bad)
+
+
 def test_persisted_counts_strict():
     lines = ['{"kind": "bounce_attempt"}\n', "\n",
              '{"kind": "map_result"}\n']

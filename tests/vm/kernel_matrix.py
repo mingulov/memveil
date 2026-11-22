@@ -2521,9 +2521,35 @@ def validate_shell_path(value, what):
                          % (what, value))
 
 
+VNG_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def validate_vng_token(value, what):
+    """Reject vng selectors the launcher paste would rewrite.
+
+    A --run value that is not an upstream tag reaches the
+    launcher command raw, so only plain release tokens pass:
+    letters, digits, dots, underscores, and dashes. Anything
+    else refuses, including an empty value and a leading dash
+    that vng would parse as a flag.
+    """
+    if not value or value[:1] == "-" \
+            or not VNG_TOKEN_RE.fullmatch(value):
+        raise ValueError("%s is not a plain vng release token: %r"
+                         % (what, value))
+
+
 def qemu_drive_opt(disk_img, drive_id="d0", serial="mv0",
                    readonly=True):
-    """NVMe drive options, commas doubled for QEMU."""
+    """NVMe drive options, commas doubled for QEMU.
+
+    The caller embeds the result in --qemu-opts, which the
+    launcher pastes raw, so every interpolated value must be
+    shell-inert first.
+    """
+    validate_shell_path(disk_img, "disk image")
+    validate_shell_path(drive_id, "drive id")
+    validate_shell_path(serial, "drive serial")
     mode = ",readonly=on" if readonly else ""
     return "-drive file=%s,if=none,id=%s,format=raw," \
         "cache=none%s -device nvme,serial=%s,drive=%s" \
@@ -2878,7 +2904,12 @@ def vmlinuz_for_release(base, release):
 
 
 def vng_download_cmd(vng, ver):
-    """Populate one cache entry through vng itself."""
+    """Populate one cache entry through vng itself.
+
+    ver reaches the launcher command raw unless it is an
+    upstream tag, so only plain release tokens pass.
+    """
+    validate_vng_token(ver, "vng version")
     return [vng, "--run", ver, "--dry-run"]
 
 

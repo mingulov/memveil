@@ -411,6 +411,52 @@ def drop_lc_seq(path, victim):
     path.write_text("\n".join(out) + "\n")
 
 
+def selftest_boot_tmpdir_guard(tmp):
+    """Boot assembly refuses rewritten TMPDIR before spawning."""
+    from unittest import mock
+    bad = []
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    hostile = tmp / 't"mp'
+    hostile.mkdir()
+    with mock.patch.object(sys.modules[__name__], 'REPO',
+                           str(tmp)), \
+         mock.patch('test_attempt_capture.gate_prefix',
+                    return_value=(['vng'], {})), \
+         mock.patch('harness_env.check_harness_versions',
+                    return_value={}), \
+         mock.patch('lifecycle_env.ensure_oracle_module',
+                    return_value=None), \
+         mock.patch('support.candidate_input.load',
+                    return_value=None):
+        with mock.patch('vm_process.run_owned_guest') as spawned, \
+             mock.patch.dict(os.environ,
+                             {'TMPDIR': str(hostile)}), \
+             mock.patch.object(tempfile, 'tempdir', None):
+            try:
+                boot_lateattach()
+                bad.append('tmpdir guard accepted rewritten TMPDIR')
+            except ValueError as exc:
+                if 'launcher shell' not in str(exc):
+                    bad.append('tmpdir guard wrong refusal: %s'
+                               % exc)
+                elif spawned.call_count != 0:
+                    bad.append('tmpdir guard spawned before refusing')
+        with mock.patch('vm_process.run_owned_guest') as spawned:
+            spawned.side_effect = ValueError('sentinel-reached-boot')
+            try:
+                boot_lateattach()
+                bad.append('tmpdir guard blocked honest TMPDIR')
+            except ValueError as exc:
+                if str(exc) != 'sentinel-reached-boot':
+                    bad.append('tmpdir guard wrong honest error: %s'
+                               % exc)
+                elif spawned.call_count != 1:
+                    bad.append('tmpdir guard honest spawned %d'
+                               % spawned.call_count)
+    return bad
+
+
 def run_selftest():
     """Unarmed proof: good mocks pass, five mutations fail."""
     bad = []
@@ -466,6 +512,7 @@ def run_selftest():
 
         bad += selftest_case(tmp, "neg-order-swap",
                              swap_order, None, True)
+        bad += selftest_boot_tmpdir_guard(tmp)
     if bad:
         print("FAIL lateattach selftest:")
         for line in bad:
@@ -566,6 +613,10 @@ def boot_lateattach(timeout=900):
     tmp = Path(tempfile.mkdtemp(prefix="vmgate-lateattach-"))
     export = tmp / "export"
     export.mkdir()
+    from capture_durability import check_shell_inert_path
+    # The export reaches the launcher command raw, so its
+    # spelling is gated before the boot is assembled.
+    check_shell_inert_path(export, "export path")
     cmd = prefix + [
         "--run", "-m", "6G",
         "--append", "swiotlb=force",

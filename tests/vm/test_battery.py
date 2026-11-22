@@ -49,6 +49,7 @@ import battery_core as core
 import battery_guest
 import guest_oracle
 import stress_core as score
+from capture_durability import check_shell_inert_path
 from consume import (parse_consume_file, parse_oracle_log,
                      scripted_expectation)
 from test_canonical import (check_clamp_extras,
@@ -4036,6 +4037,30 @@ def self_test_inputs_manifest(tmp):
     return ok
 
 
+def self_test_export_spelling_guard():
+    """Boot wiring refuses rewritten exports, keeps honest ones."""
+    ok = True
+    flight = {"prefix": ["vng"], "harness": {}}
+    try:
+        argv = build_vng_argv("matrix", flight, "/tmp/x",
+                             "exec payload")
+        ok = check("export-spelling-honest",
+                   "--rwdir=/tmp/export=/tmp/x" in argv,
+                   " ".join(argv[-2:])) and ok
+    except ValueError as exc:
+        ok = check("export-spelling-honest", False,
+                   str(exc)) and ok
+    for num, evil in enumerate(('/tmp/x"y', "/tmp/has space",
+                                "/tmp/o$(touch_x)", "/tmp/a;b")):
+        try:
+            build_vng_argv("matrix", flight, evil, "exec payload")
+            ok = check("export-spelling-%d" % num, False,
+                       "accepted %r" % evil) and ok
+        except ValueError:
+            ok = check("export-spelling-%d" % num, True) and ok
+    return ok
+
+
 def self_test_console_capture(tmp):
     """Boots stay verbose and transcripts land in receipts."""
     ok = True
@@ -4158,6 +4183,7 @@ def run_self_test(work=None):
         ok = self_test_inputs_binding(tmp) and ok
         ok = self_test_receipt_drift(tmp) and ok
         ok = self_test_inputs_manifest(tmp) and ok
+        ok = self_test_export_spelling_guard() and ok
         ok = self_test_console_capture(tmp) and ok
         ok = self_test_identity() and ok
     finally:
@@ -4253,7 +4279,11 @@ def build_vng_argv(case, flight, export, exec_str):
     captured stderr instead of /dev/null, so a boot that
     never reaches the guest flow still leaves a console
     transcript in the case's host-guest.stderr.
+
+    The export reaches the launcher command raw, so its
+    spelling is gated first.
     """
+    check_shell_inert_path(export, "export path")
     cmd = flight["prefix"] + ["--run", core.VNG_TAG, "-m",
                               "6G", "--append",
                               "swiotlb=force", "--verbose"]

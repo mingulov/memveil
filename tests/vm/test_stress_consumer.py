@@ -53,6 +53,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import stress_core as core
 import stress_guest
 import guest_oracle
+from capture_durability import check_shell_inert_path
+from kernel_matrix import validate_vng_token
 from consume import (check_conservation, check_identity_closure,
                      check_oracle_script, compare_scripted,
                      parse_consume_file, parse_oracle_log)
@@ -4313,6 +4315,42 @@ def self_test_receipt_drift(tmp):
     return ok
 
 
+def self_test_vng_spelling_guards():
+    """Boot wiring refuses shell rewrites, keeps honest shapes."""
+    ok = True
+    flight = {"prefix": ["vng"], "harness": {}}
+    try:
+        tagged = build_vng_argv(flight, "/tmp/x", "exec payload",
+                                "v7.0.14")
+        bare = build_vng_argv(flight, "/tmp/x", "exec payload", "")
+        ok = check("spelling-honest",
+                   "v7.0.14" in tagged
+                   and tagged.count("--run") == 1
+                   and bare.count("--run") == 1
+                   and "v7.0.14" not in bare,
+                   " ".join(tagged[:4])) and ok
+    except ValueError as exc:
+        ok = check("spelling-honest", False, str(exc)) and ok
+    for num, evil in enumerate(("v7.0.14 x", "v7.0.14;touch x",
+                                "v7.0.14$(touch x)", "../evil",
+                                "-evil")):
+        try:
+            build_vng_argv(flight, "/tmp/x", "exec payload", evil)
+            ok = check("spelling-kver-%d" % num, False,
+                       "accepted %r" % evil) and ok
+        except ValueError:
+            ok = check("spelling-kver-%d" % num, True) and ok
+    for num, evil in enumerate(('/tmp/x"y', "/tmp/has space",
+                                "/tmp/o$(touch_x)")):
+        try:
+            build_vng_argv(flight, evil, "exec payload", "v7.0.14")
+            ok = check("spelling-export-%d" % num, False,
+                       "accepted %r" % evil) and ok
+        except ValueError:
+            ok = check("spelling-export-%d" % num, True) and ok
+    return ok
+
+
 def self_test_console_capture(tmp):
     """Boots stay verbose and transcripts land in receipts."""
     ok = True
@@ -4419,6 +4457,7 @@ def run_self_test(work=None):
         ok = self_test_oracle_capacity(tmp) and ok
         ok = self_test_inputs_binding(tmp) and ok
         ok = self_test_receipt_drift(tmp) and ok
+        ok = self_test_vng_spelling_guards() and ok
         ok = self_test_console_capture(tmp) and ok
         if pairs is not None:
             ok = self_test_guest_inputs(tmp, pairs) and ok
@@ -4957,7 +4996,14 @@ def build_vng_argv(flight, export, exec_str, kver):
     captured stderr instead of /dev/null, so a boot that
     never reaches the guest flow still leaves a console
     transcript in the boot's host-guest.stderr.
+
+    The selector and the export reach the launcher command
+    raw, so both are spelling-gated first; an empty selector
+    keeps the bare-host --run shape.
     """
+    if kver:
+        validate_vng_token(kver, "kernel selector")
+    check_shell_inert_path(export, "export path")
     cmd = flight["prefix"] + ["--run"]
     if kver:
         cmd += [kver]
