@@ -358,7 +358,7 @@ document for a new host follows the same skeleton:
 
 Never write `status` as `validated`: that promotion
 belongs to evidence gates behind a qualified narrow
-profile, never to this recipe. The 0.1.1 bundle ships
+profile, never to this recipe. The 0.2.0 bundle ships
 reference profiles only. Check the shape with the
 independent oracle before registering:
 
@@ -628,7 +628,7 @@ host.
   offset-only moves are the one tolerated drift,
   probed into the load-time table and flagged.
 - Receipts never claim `validated`, and this recipe
-  never mints that grade. The 0.1.1 bundle ships
+  never mints that grade. The 0.2.0 bundle ships
   reference profiles only; a narrow profile earns
   `validated` only through gate evidence behind
   `tools/emit-gate-profiles`, the maintainer path for

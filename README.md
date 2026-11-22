@@ -10,7 +10,7 @@ requested bytes; actual copies come from the copy channel.
 Pool pressure and diagnostic findings reduce offline over
 captures that carry the corresponding events.
 
-Status: attempt/lifecycle/copy development bundle 0.1.1, with runnable
+Status: attempt/lifecycle/copy development bundle 0.2.0, with runnable
 build, test, and tarball packaging wrappers. The shipping collector
 records attempts, mapping lifetimes, and executed copies on the
 admitted profile, plus optional readable default-pool samples at
@@ -40,14 +40,14 @@ separately linked binaries that were not matrix-run (see
 [Known issues](docs/release-notes.md#known-issues) and
 [installed packages](docs/install.md)).
 
-    sudo dpkg -i memveil_0.1.1-1_amd64.deb
+    sudo dpkg -i memveil_0.2.0-1_amd64.deb
     memveil doctor                            # passive host check
     sudo memveil record --output /tmp/cap1 --duration 10
     memveil report --format text /tmp/cap1   # unprivileged replay
 
 ## Use (from the tarball)
 
-    tar -xzf memveil-0.1.1.tar.gz && cd memveil-0.1.1
+    tar -xzf memveil-0.2.0.tar.gz && cd memveil-0.2.0
     ./bin/memveil doctor                            # passive host check
     sudo ./bin/memveil record --output /tmp/cap1 --duration 10
     # BPF objects are embedded in the binary with the loader

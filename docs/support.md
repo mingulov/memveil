@@ -1,9 +1,9 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# MemVeil support envelope (development bundle 0.1.1)
+# MemVeil support envelope (development bundle 0.2.0)
 
 ## Capabilities by mode
 
-This is an attempt/lifecycle/copy development preview. `0.1.1`
+This is an attempt/lifecycle/copy development preview. `0.2.0`
 is a development version; it does not mean the original
 lifecycle-qualified preview or full confidential first release
 has passed its gates.
@@ -307,7 +307,7 @@ existing evidence dir, so start from a fresh one):
 cargo build --release --locked
 python3 scripts/package-deb.py --out dist
 rm -rf build/vm/kernels
-MV_DEB=dist/memveil_0.1.1-1_amd64.deb \
+MV_DEB=dist/memveil_0.2.0-1_amd64.deb \
   MEMVEIL_VM_KERNELS=1 ./tools/test vm-kernels
 ```
 
