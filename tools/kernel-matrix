@@ -773,6 +773,18 @@ def deb_copy_object_sha(deb):
 BPF_CHANNELS = ("attempt", "lifecycle", "copy")
 AYA_FIXTURE_BLOB = "tests/vm/fixtures/aya/swiotlb_%s.bpf.o"
 MANIFEST_BPF_ENTRY = "bpf/swiotlb_%s.bpf.o"
+# The sealed source commit whose Aya fixture bytes anchor
+# scenario staging, plus their git blob ids. The blob pins
+# let shallow checkouts (which lack the sealed objects)
+# verify the worktree bytes before trusting them; dirt
+# fails the pin exactly as a missing object would.
+SEALED_SOURCE_COMMIT = \
+    "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
+SEALED_FIXTURE_BLOBS = {
+    "attempt": "1c27ff4c6860704f5ffbaf0fef599b27acfc9fdb",
+    "lifecycle": "80bdecbcccbc13ce4782a79ba3464e972bdfa005",
+    "copy": "927d44dfc017966a21dea6e70c407b7123541f0d",
+}
 
 
 def scenario_manifest():
@@ -806,11 +818,48 @@ def manifest_bpf_sha(manifest, channel):
             % channel)
 
 
+def sealed_blob_id(data):
+    """Git blob id (sha1 over the framed bytes) of data."""
+    return hashlib.sha1(
+        b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def verified_sealed_fixture_sha(channel, spec):
+    """Sha256 of one sealed-commit fixture from verified bytes.
+
+    Reads the worktree bytes only after their blob id matches
+    the sealed pin, so dirt fails exactly as a missing object
+    would. Raises ValueError on any gap.
+    """
+    try:
+        want_blob = SEALED_FIXTURE_BLOBS[channel]
+    except (KeyError, TypeError):
+        raise ValueError(
+            "sealed fixture unreadable %s: unknown "
+            "channel" % spec)
+    try:
+        with open(str(ROOT / (AYA_FIXTURE_BLOB % channel)),
+                  "rb") as handle:
+            data = handle.read()
+    except OSError:
+        raise ValueError(
+            "sealed fixture unreadable %s: worktree "
+            "bytes missing" % spec)
+    if sealed_blob_id(data) != want_blob:
+        raise ValueError(
+            "sealed fixture worktree bytes differ from "
+            "the sealed pin (refusing dirt): %s" % spec)
+    return hashlib.sha256(data).hexdigest()
+
+
 def sealed_fixture_sha(commit, channel):
     """Sha256 of one sealed-commit Aya fixture blob.
 
-    Reads the bytes straight from the git object store, never from
-    the worktree, so worktree dirt cannot bless staged bytes.
+    Reads the bytes straight from the git object store while the
+    sealed objects are present, so worktree dirt cannot bless
+    staged bytes. Checkouts lacking the sealed objects (shallow
+    clones) fall back to the worktree bytes only after they
+    verify against the sealed blob pin, which dirt cannot pass.
     Raises ValueError when the blob is unreadable.
     """
     spec = "%s:%s" % (commit, AYA_FIXTURE_BLOB % channel)
@@ -822,15 +871,21 @@ def sealed_fixture_sha(commit, channel):
     except subprocess.TimeoutExpired:
         raise ValueError(
             "sealed fixture read timed out: %s" % spec)
-    except OSError as exc:
+    except OSError:
+        proc = None
+    if proc is not None and proc.returncode == 0 \
+            and proc.stdout:
+        return hashlib.sha256(proc.stdout).hexdigest()
+    if commit == SEALED_SOURCE_COMMIT:
+        return verified_sealed_fixture_sha(channel, spec)
+    if proc is None:
         raise ValueError(
-            "cannot read the sealed fixture: %s" % exc)
-    if proc.returncode != 0 or not proc.stdout:
-        detail = (proc.stderr or b"").decode(
-            "utf-8", "replace").strip()[:200]
-        raise ValueError("sealed fixture unreadable %s: %s"
-                         % (spec, detail or "empty blob"))
-    return hashlib.sha256(proc.stdout).hexdigest()
+            "cannot read the sealed fixture: git "
+            "unavailable (%s)" % spec)
+    detail = (proc.stderr or b"").decode(
+        "utf-8", "replace").strip()[:200]
+    raise ValueError("sealed fixture unreadable %s: %s"
+                     % (spec, detail or "empty blob"))
 
 
 def release_set_shas(base):

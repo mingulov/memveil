@@ -564,7 +564,7 @@ def test_verify_exports_matches_armed_guest_shape(tmp_path):
 def test_armed_output_stall():
     import pytest
     if os.environ.get(ARM_ENV) != "1":
-        pytest.skip("output-stall armed run needs %s=1" % ARM_ENV)
+        pytest.skip("output-stall armed run needs MEMVEIL_VM_OUTPUT_STALL=1")
 
     class Args:
         pass

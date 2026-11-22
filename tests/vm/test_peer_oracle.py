@@ -1530,6 +1530,8 @@ def test_peer_leg():
     leg. Executor duties (lease idle check, warm vng cache
     with no downloads) follow the standard live procedure.
     """
+    if os.environ.get(peer_oracle.PEER_ENV) != "1":
+        pytest.skip("peer leg needs MEMVEIL_VM_PEER=1")
     peer_oracle.require_peer_env()
     from evidence_retention import expected_from_verified, \
         retain_failure

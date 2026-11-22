@@ -4658,7 +4658,7 @@ def test_self_test_unarmed(tmp_path):
 def test_armed_battery():
     import pytest
     if os.environ.get(ARM_ENV) != "1":
-        pytest.skip("battery armed run needs %s=1" % ARM_ENV)
+        pytest.skip("battery armed run needs MEMVEIL_VM_BATTERY=1")
 
     class Args:
         pass

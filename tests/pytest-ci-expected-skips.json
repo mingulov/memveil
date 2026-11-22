@@ -13,6 +13,11 @@
     },
     {
       "count": 1,
+      "id": "tests/vm/test_battery.py",
+      "reason": "battery armed run needs MEMVEIL_VM_BATTERY=1"
+    },
+    {
+      "count": 1,
       "id": "tests/vm/test_bundle.py",
       "reason": "lifecycle VM gates need MEMVEIL_VM_LIFECYCLE=1 with qualified probes"
     },
@@ -45,6 +50,16 @@
       "count": 15,
       "id": "tests/vm/test_mint_record3.py",
       "reason": "needs built lifecycle/copy objects"
+    },
+    {
+      "count": 1,
+      "id": "tests/vm/test_output_stall.py",
+      "reason": "output-stall armed run needs MEMVEIL_VM_OUTPUT_STALL=1"
+    },
+    {
+      "count": 1,
+      "id": "tests/vm/test_peer_oracle.py",
+      "reason": "peer leg needs MEMVEIL_VM_PEER=1"
     }
   ]
 }

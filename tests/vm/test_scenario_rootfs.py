@@ -376,6 +376,56 @@ def test_sealed_fixture_bogus_refuses():
         kmt.sealed_fixture_sha(SEALED_COMMIT, "nope")
 
 
+def _missing_objects(*args, **kwargs):
+    return types.SimpleNamespace(returncode=128, stdout=b"",
+                                 stderr=b"fatal: bad object")
+
+
+def test_sealed_fixture_shallow_fallback_verifies(monkeypatch):
+    monkeypatch.setattr(kmt.subprocess, "run",
+                        _missing_objects)
+    assert kmt.sealed_fixture_sha(SEALED_COMMIT, "copy") == \
+        SEALED_COPY
+
+
+def test_sealed_fixture_shallow_bogus_refuses(monkeypatch):
+    monkeypatch.setattr(kmt.subprocess, "run",
+                        _missing_objects)
+    with pytest.raises(ValueError, match="unreadable"):
+        kmt.sealed_fixture_sha("f" * 40, "copy")
+    with pytest.raises(ValueError, match="unreadable"):
+        kmt.sealed_fixture_sha(SEALED_COMMIT, "nope")
+
+
+def _no_git(*args, **kwargs):
+    raise OSError("no git on PATH")
+
+
+def test_sealed_fixture_shallow_edges(monkeypatch, tmp_path):
+    monkeypatch.setattr(kmt.subprocess, "run", _no_git)
+    assert kmt.sealed_fixture_sha(SEALED_COMMIT, "copy") == \
+        SEALED_COPY
+    monkeypatch.setattr(kmt, "ROOT", tmp_path)
+    with pytest.raises(ValueError,
+                       match="worktree bytes missing"):
+        kmt.sealed_fixture_sha(SEALED_COMMIT, "copy")
+    blob = tmp_path / "tests" / "vm" / "fixtures" / "aya"
+    blob.mkdir(parents=True)
+    (blob / "swiotlb_copy.bpf.o").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="refusing dirt"):
+        kmt.sealed_fixture_sha(SEALED_COMMIT, "copy")
+
+
+def test_sealed_blob_pin_matches_fixture():
+    path = Path(kmt.ROOT) / (
+        kmt.AYA_FIXTURE_BLOB % "copy")
+    data = path.read_bytes()
+    assert kmt.sealed_blob_id(data) == \
+        kmt.SEALED_FIXTURE_BLOBS["copy"]
+    assert kmt.sealed_blob_id(b"tampered") != \
+        kmt.SEALED_FIXTURE_BLOBS["copy"]
+
+
 def test_old_target_authority_gone():
     assert not hasattr(kmt, "rust_copy_object_sha")
 
