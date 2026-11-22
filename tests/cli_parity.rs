@@ -912,10 +912,14 @@ fn top_live_mode_refusals() {
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("replay") && err.contains("live"), "{err}");
-    // Live durations parse through the shared record parser.
+    // Live durations parse through the shared record parser: one
+    // duration grammar everywhere, so the error matches report/top.
     let out = run(&bin(), &["top", "--output", live_str, "--duration", "nope"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("bad decimal: nope"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("--duration DurationError(message=bad duration: nope)")
+    );
     // Replay refuses live-only flags.
     let out = run(&bin(), &["top", &nested, "--profiles-dir", "/alt/profiles"]);
     assert_eq!(out.status.code(), Some(2));
@@ -1056,7 +1060,10 @@ fn doctor_usage_errors() {
             "profiles",
         ],
     );
-    assert_eq!(out.stderr, b"memveil doctor: unknown capability: nope\n");
+    assert_eq!(
+        out.stderr,
+        b"memveil doctor: unknown capability: nope; valid capabilities: attempt-trace, mapping-lifecycle, copy-actual, conversion-observe, conversion-journal, all\n"
+    );
 }
 
 #[test]

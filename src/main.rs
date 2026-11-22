@@ -3,14 +3,15 @@
 
 use memveil::ENGINE_VERSION;
 use memveil::capture::collector::EXIT_REFUSAL;
-use memveil::cli::bind::run_bind;
-use memveil::cli::doctor::run_doctor_os;
-use memveil::cli::qualify::run_qualify;
-use memveil::cli::record::run_record;
+use memveil::cli::bind::{bind_usage, run_bind};
+use memveil::cli::doctor::{doctor_usage, run_doctor_os};
+use memveil::cli::qualify::{qualify_usage, run_qualify};
+use memveil::cli::record::{record_usage, run_record};
 use memveil::cli::report::{
-    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report_os, write_stderr, write_stderr_trusted,
+    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, report_usage, run_report_os, write_stderr,
+    write_stderr_trusted,
 };
-use memveil::cli::top::{run_top, run_top_os};
+use memveil::cli::top::{run_top, run_top_os, top_usage as top_verb_usage};
 use memveil::platform::runtime::embedded_manifest;
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
 use memveil::platform::stdout::write_stdout;
@@ -55,6 +56,11 @@ enum Dispatch {
     InvalidUsage,
     /// Print usage to stdout; exit 0.
     Help,
+    /// Print one verb's usage to stdout; exit 0.
+    VerbHelp {
+        /// One of the six verbs with usage text.
+        verb: String,
+    },
     /// Print the engine version to stdout; exit 0.
     Version,
     /// Print the embedded BPF manifest to stdout; exit 0.
@@ -81,8 +87,10 @@ enum Dispatch {
 /// Linux passes arbitrary bytes, and `std::env::args()` panics on
 /// undecodable words. The dispatcher compares byte-wise like the Mojo
 /// original: an undecodable verb matches nothing and falls through to
-/// usage (exit 2), while `help` and `version` ignore trailing words
-/// before any further decoding, undecodable ones included. `report`
+/// usage (exit 2), while `version` ignores trailing words before any
+/// further decoding, undecodable ones included. `help` routes a
+/// second word naming a verb to that verb's usage and otherwise
+/// prints the top-level text, ignoring the rest. `report`
 /// and `doctor` take raw words and handle undecodable bytes the way
 /// Mojo does (open the raw path, silence an unrenderable echo);
 /// `top` replays raw words the same way but keeps live
@@ -108,6 +116,19 @@ fn dispatch(raw: &[OsString]) -> Dispatch {
         Some(word) => word,
     };
     if verb == "help" || verb == "--help" || verb == "-h" {
+        // `help <verb>` routes to the verb's own usage; anything else
+        // (bare help, unknown words, undecodable bytes) keeps the
+        // top-level text.
+        if let Some(second) = raw.get(1).and_then(|w| w.to_str()) {
+            match second {
+                "record" | "report" | "top" | "doctor" | "qualify" | "bind-profile" => {
+                    return Dispatch::VerbHelp {
+                        verb: second.to_string(),
+                    };
+                }
+                _ => {}
+            }
+        }
         return Dispatch::Help;
     }
     // `version` ignores trailing arguments and always prints the
@@ -180,6 +201,20 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::from(EXIT_OK as u8),
             Err(_) => stdout_failed(),
         },
+        Dispatch::VerbHelp { verb } => {
+            let text = match verb.as_str() {
+                "record" => record_usage(),
+                "report" => report_usage(),
+                "top" => top_verb_usage(),
+                "doctor" => doctor_usage(),
+                "qualify" => qualify_usage(),
+                _ => bind_usage(),
+            };
+            match write_stdout(&text) {
+                Ok(()) => ExitCode::from(EXIT_OK as u8),
+                Err(_) => stdout_failed(),
+            }
+        }
         Dispatch::Version => match write_stdout(&format!("{ENGINE_VERSION}\n")) {
             Ok(()) => ExitCode::from(EXIT_OK as u8),
             Err(_) => stdout_failed(),
@@ -310,6 +345,37 @@ mod tests {
             assert!(is_help(&os(&[verb])));
             assert!(is_help(&os(&[verb, b"extra"])));
             assert!(is_help(&os(&[verb, b"\xff"])));
+        }
+    }
+
+    #[test]
+    fn help_verb_routes_to_verb_help() {
+        // `help <verb>` prints that verb's usage; unknown and
+        // undecodable second words keep the top-level text, and
+        // extra words past the verb are ignored.
+        for verb in [
+            "record",
+            "report",
+            "top",
+            "doctor",
+            "qualify",
+            "bind-profile",
+        ] {
+            for flag in [b"help".as_slice(), b"--help", b"-h"] {
+                match dispatch(&os(&[flag, verb.as_bytes()])) {
+                    Dispatch::VerbHelp { verb: v } => assert_eq!(v, verb),
+                    _ => panic!("help {verb} must dispatch to VerbHelp"),
+                }
+                match dispatch(&os(&[flag, verb.as_bytes(), b"extra"])) {
+                    Dispatch::VerbHelp { verb: v } => assert_eq!(v, verb),
+                    _ => panic!("help {verb} extra must dispatch to VerbHelp"),
+                }
+            }
+        }
+        for flag in [b"help".as_slice(), b"--help", b"-h"] {
+            assert!(is_help(&os(&[flag, b"bogus"])));
+            assert!(is_help(&os(&[flag, b"version"])));
+            assert!(is_help(&os(&[flag, b"\xff"])));
         }
     }
 

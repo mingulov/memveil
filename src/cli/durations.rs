@@ -83,6 +83,14 @@ pub fn parse_duration_ns(text: &str) -> Result<u64, DurationError> {
     Ok(v * mult)
 }
 
+/// Parse DURATION to whole seconds.
+///
+/// The grammar only yields whole-second multiples, so the division is
+/// exact; second counts that fit in nanoseconds always fit in `u64`.
+pub fn parse_duration_s(text: &str) -> Result<u64, DurationError> {
+    Ok(parse_duration_ns(text)? / NS_PER_S)
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_duration_ns;
@@ -158,6 +166,25 @@ mod tests {
             parse_duration_ns("18446744073s").expect("max second parses"),
             18_446_744_073_000_000_000
         );
+    }
+
+    #[test]
+    fn seconds_share_the_grammar() {
+        use super::parse_duration_s;
+        assert_eq!(parse_duration_s("60").expect("bare parses"), 60);
+        assert_eq!(parse_duration_s("10s").expect("seconds parse"), 10);
+        assert_eq!(parse_duration_s("2m").expect("minutes parse"), 120);
+        assert_eq!(parse_duration_s("1h").expect("hours parse"), 3600);
+        for bad in ["", "0", "10x", "bad duration: nope"] {
+            assert!(parse_duration_s(bad).is_err(), "{bad:?} must reject");
+        }
+        // The largest representable second count survives the round
+        // trip; one past it overflows nanoseconds first.
+        assert_eq!(
+            parse_duration_s("18446744073s").expect("max second parses"),
+            18_446_744_073
+        );
+        assert!(parse_duration_s("18446744074s").is_err());
     }
 
     #[test]

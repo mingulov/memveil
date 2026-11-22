@@ -289,7 +289,8 @@ def main():
             env=live_env)
     check("live-bad-duration", p.returncode == 2,
           "exit %d" % p.returncode)
-    check("live-bad-duration-msg", "bad decimal: nope" in p.stderr,
+    check("live-bad-duration-msg",
+          "--duration DurationError(message=bad duration: nope)" in p.stderr,
           repr(p.stderr[:160]))
 
     p = run(["top", NESTED, "--profiles-dir", "/alt/profiles"])

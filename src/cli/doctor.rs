@@ -24,8 +24,9 @@ use crate::capture::run::{
     loadcheck_bridge_sha, parse_requested_caps, resolve_channel_object, resolve_object,
 };
 use crate::cli::report::{
-    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, no_profiles_lines,
-    profiles_manifest_missing, sanitize_diagnostic, write_stderr, write_stderr_trusted,
+    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, expand_flag_eq, expand_flag_eq_os,
+    invalid_capability_message, no_profiles_lines, profiles_manifest_missing, sanitize_diagnostic,
+    write_stderr, write_stderr_trusted,
 };
 use crate::platform::btf::read_object_map_bytes;
 use crate::platform::capabilities::attempt_loss_exact;
@@ -44,6 +45,24 @@ use std::os::unix::ffi::OsStrExt;
 
 /// Unavailable collection: the requested set is not ready.
 pub const EXIT_UNAVAILABLE: i64 = EXIT_REFUSAL;
+/// Value-taking doctor flags: the `--flag=value` set.
+const DOCTOR_VALUE_FLAGS: &[&str] = &[
+    "--profiles-dir",
+    "--capability",
+    "--object",
+    "--lc-object",
+    "--cp-object",
+    "--bridge",
+];
+/// Byte-wise [`DOCTOR_VALUE_FLAGS`] for the raw parser.
+const DOCTOR_VALUE_FLAGS_OS: &[&[u8]] = &[
+    b"--profiles-dir",
+    b"--capability",
+    b"--object",
+    b"--lc-object",
+    b"--cp-object",
+    b"--bridge",
+];
 const ZLIB: &str = "libz.so.1";
 const OBJECT_BYTES_CAP: usize = 67108864;
 const CMDLINE_CAP: usize = 65536;
@@ -658,7 +677,7 @@ pub fn assess_doctor(opts: &DoctorOptions) -> DoctorReport2 {
     out.profile_reason = decision.reason.clone();
     let ask = parse_requested_caps(&opts.capabilities);
     if !ask.ok {
-        out.summary = format!("unavailable: {}", ask.err);
+        out.summary = format!("unavailable: {}", invalid_capability_message(&ask.err));
         return out;
     }
     out.requested.clone_from(&ask.caps);
@@ -1255,7 +1274,7 @@ pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
     }
     let ask = parse_requested_caps(&opts.capabilities);
     if !ask.ok {
-        return doctor_failed(&ask.err);
+        return doctor_failed(&invalid_capability_message(&ask.err));
     }
     let drep = assess_doctor(opts);
     let ready = drep.verdict == "ready" || drep.verdict == "ready-load-unchecked";
@@ -1287,6 +1306,8 @@ pub fn run_doctor(args: &[String]) -> i64 {
             }
         }
     }
+    let expanded = expand_flag_eq(args, DOCTOR_VALUE_FLAGS);
+    let args = &expanded;
     let mut as_json = false;
     let mut profiles_dir = String::new();
     let mut has_profiles_dir = false;
@@ -1348,6 +1369,12 @@ pub fn run_doctor(args: &[String]) -> i64 {
             return doctor_failed(&format!("unknown option: {tok}"));
         }
     }
+    // Argv validates before the world is probed: a malformed list
+    // fails here (exit 2) even when profiles are also missing.
+    let ask = parse_requested_caps(&capabilities);
+    if !ask.ok {
+        return doctor_failed(&invalid_capability_message(&ask.err));
+    }
     if !has_profiles_dir {
         match resolve_profiles_dir() {
             Ok(dir) => profiles_dir = dir,
@@ -1402,6 +1429,8 @@ enum OsDoctorFail {
 /// position silences the run: the unknown-option refusal would
 /// echo it.
 fn parse_doctor_args_os(args: &[OsString]) -> Result<DoctorOptions, OsDoctorFail> {
+    let expanded = expand_flag_eq_os(args, DOCTOR_VALUE_FLAGS_OS);
+    let args = &expanded;
     let mut as_json = false;
     let mut profiles_dir = String::new();
     let mut has_profiles_dir = false;
@@ -2672,6 +2701,61 @@ mod tests {
             .iter()
             .map(|w| std::ffi::OsString::from_vec(w.to_vec()))
             .collect()
+    }
+
+    #[test]
+    fn doctor_os_flag_eq_forms() {
+        // Inline values match the spaced spelling, including the
+        // non-UTF-8 routing: paths route as the stand-in and
+        // capabilities as the empty-segment list.
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--profiles-dir=qd".as_slice(),
+            b"--capability=attempt-trace".as_slice(),
+            b"--object=o.o".as_slice(),
+            b"--lc-object=lc.o".as_slice(),
+            b"--cp-object=cp.o".as_slice(),
+            b"--bridge=br.so".as_slice(),
+        ]))
+        .expect("eq forms parse");
+        assert_eq!(opts.profiles_dir, "qd");
+        assert_eq!(opts.capabilities, "attempt-trace");
+        assert_eq!(opts.object, "o.o");
+        assert_eq!(opts.lc_object, "lc.o");
+        assert_eq!(opts.cp_object, "cp.o");
+        assert_eq!(opts.bridge, "br.so");
+        assert!(opts.has_bridge);
+        let opts = super::parse_doctor_args_os(&os(&[b"--object=\xff".as_slice()]))
+            .expect("raw path parses");
+        assert_eq!(opts.object, super::UNREADABLE_PATH);
+        let opts = super::parse_doctor_args_os(&os(&[b"--capability=\xff".as_slice()]))
+            .expect("raw list parses");
+        assert_eq!(opts.capabilities, ",");
+        match super::parse_doctor_args_os(&os(&[b"--json=x".as_slice()])) {
+            Err(super::OsDoctorFail::Message(detail)) => {
+                assert_eq!(detail, "unknown option: --json=x");
+            }
+            other => panic!("bool eq must fail loudly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctor_flag_eq_and_capability_list() {
+        // The text path accepts --flag=value and validates the
+        // capability list at parse (exit 2), before probing profiles.
+        let code = run_doctor(&args(&[
+            &format!("--profiles-dir={}", fx("profiles-test")),
+            "--capability=attempt-trace",
+        ]));
+        assert_ne!(code, 2);
+        let code = run_doctor(&args(&["--capability=bogus"]));
+        assert_eq!(code, 2);
+        // Argv validates before the world: a bad list wins over a
+        // missing profiles tree.
+        let code = run_doctor(&args(&[
+            "--profiles-dir=no-such-profiles",
+            "--capability=bogus",
+        ]));
+        assert_eq!(code, 2);
     }
 
     #[test]
