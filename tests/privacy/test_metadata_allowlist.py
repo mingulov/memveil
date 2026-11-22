@@ -37,6 +37,19 @@ FORBIDDEN_PROPS = {
     "username", "ip_address", "mac_address",
 }
 
+# comm/pid/tgid reviewed 2026-11-22: the event schema's
+# reserved observer_context block names the observing
+# execution context (cpu/pid/tgid/comm/cgroup_id under
+# relation execution_context_only). The shipped collector
+# never sets it, no renderer emits it (pinned by the canary
+# suites), and foreign captures re-persist it verbatim, so
+# these three names are allowed ONLY inside that block. Any
+# new identity-shaped name, any of these names outside the
+# block, or any change to the block's frozen shape fails
+# review here.
+REVIEWED_ALLOWED_PROPS = {"comm", "pid", "tgid"}
+OBSERVER_FROZEN_PROPS = {"cpu", "pid", "tgid", "comm", "cgroup_id", "relation"}
+
 # --profiles-dir reviewed 2026-10-11: a profile/receipt
 # directory selector (read by doctor/record, read and
 # written by qualify). It adds no data source, no
@@ -135,6 +148,36 @@ def schema_props(path):
     return names
 
 
+def schema_blocks(doc):
+    """Every (path, property-name set) for object schemas
+    carrying properties, so identity-shaped names can be
+    contained to their reviewed block."""
+    found = []
+    def walk(o, path):
+        if isinstance(o, dict):
+            if isinstance(o.get("properties"), dict):
+                found.append((path, set(o["properties"].keys())))
+            for k, v in o.items():
+                walk(v, "%s/%s" % (path, k))
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                walk(v, "%s/%d" % (path, i))
+    walk(doc, "")
+    return found
+
+
+def observer_frozen_ok(blocks):
+    return all(props == OBSERVER_FROZEN_PROPS
+               for where, props in blocks
+               if where.endswith("/observer_context"))
+
+
+def observer_leaked(blocks):
+    return sorted({n for where, props in blocks
+                   if not where.endswith("/observer_context")
+                   for n in props & REVIEWED_ALLOWED_PROPS})
+
+
 def audit_flags(flags):
     check("flags-frozen", flags == ALLOWED_FLAGS,
           "extra %s missing %s"
@@ -152,6 +195,24 @@ def self_check_flag_audit():
         check('flags-sensitivity', rejected, 'flag inventory mutation was accepted')
 
 
+def self_check_observer_audit():
+    frozen = {"properties": {n: {} for n in OBSERVER_FROZEN_PROPS}}
+    clean = {"properties": {"observer_context": frozen,
+                            "data": {"properties": {"device_id": {}}}}}
+    check("observer-clean-accepted",
+          observer_frozen_ok(schema_blocks(clean))
+          and observer_leaked(schema_blocks(clean)) == [])
+    grown = {"properties": {"observer_context":
+                            {"properties": dict(frozen["properties"],
+                                                uid={})}}}
+    check("observer-growth-rejected",
+          not observer_frozen_ok(schema_blocks(grown)))
+    stray = {"properties": {"observer_context": frozen,
+                            "data": {"properties": {"comm": {}}}}}
+    check("observer-stray-rejected",
+          observer_leaked(schema_blocks(stray)) == ["comm"])
+
+
 def strip_line_comments(text):
     return "\n".join(
         line for line in text.split("\n")
@@ -161,6 +222,7 @@ def strip_line_comments(text):
 def main():
     self_check_extractor()
     self_check_flag_audit()
+    self_check_observer_audit()
     schemas = sorted(glob.glob(os.path.join(REPO, "schemas", "*.json")))
     check("schemas-present", len(schemas) >= 5, "%d files" % len(schemas))
     for path in schemas:
@@ -168,6 +230,12 @@ def main():
         bad = sorted(props & FORBIDDEN_PROPS)
         check("schema-%s" % os.path.basename(path), not bad,
               "forbidden %s" % bad)
+        blocks = schema_blocks(json.load(open(path)))
+        check("schema-observer-frozen-%s" % os.path.basename(path),
+              observer_frozen_ok(blocks), "observer_context drifted")
+        leaked = observer_leaked(blocks)
+        check("schema-identity-contained-%s" % os.path.basename(path),
+              not leaked, "reviewed names outside observer_context: %s" % leaked)
 
     progs = sorted(glob.glob(os.path.join(
         RUST, "crates", "ebpf", "src", "*.rs")) + glob.glob(os.path.join(

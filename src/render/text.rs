@@ -97,6 +97,15 @@ fn bps_percent(bps: i64) -> String {
     out
 }
 
+/// Attestation value with its honesty qualifier, no trailing newline.
+///
+/// The value is recorded capture data: memveil performs no
+/// attestation itself, so every prose rendering says the value
+/// was recorded, not verified. JSON keeps the bare value.
+pub fn attestation_text(value: &str) -> String {
+    format!("{} (recorded, not verified by memveil)", escape_text(value))
+}
+
 /// One-line verdict header, no trailing newline.
 ///
 /// Unknown verdicts carry a lower-bound marker: the ratio bounds
@@ -401,7 +410,7 @@ pub fn render_text(rep: &Report, device_filter: &str) -> String {
     out.push_str(" detection=");
     out.push_str(&escape_text(&rep.env.detection));
     out.push_str(" attestation=");
-    out.push_str(&escape_text(&rep.env.attestation));
+    out.push_str(&attestation_text(&rep.env.attestation));
     if rep.env.has_asserted_mode {
         out.push_str(" asserted=");
         out.push_str(&escape_text(&rep.env.asserted_mode));
@@ -977,6 +986,18 @@ mod tests {
             lines[0],
             "summary: attempts withheld, requested bytes withheld (window unavailable: invalid recorded window)"
         );
+    }
+
+    #[test]
+    fn attested_capture_marks_attestation_unverified() {
+        let rep = analyze_fixture("tests/fixtures/reader/attested-external");
+        let doc = render_text(&rep, "");
+        assert!(doc.contains("attestation=external_verified (recorded, not verified by memveil)"));
+        assert!(!doc.contains("attestation=external_verified evidence="));
+        // Machine data keeps the bare recorded value.
+        let json = super::super::json::render_json(&rep, "");
+        assert!(json.contains("\"attestation\": \"external_verified\""));
+        assert!(!json.contains("recorded, not verified"));
     }
 
     #[test]
