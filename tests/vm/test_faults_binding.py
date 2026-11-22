@@ -905,3 +905,318 @@ def test_verifier_schema_gate_wired(tmp_path):
     with pytest.raises(ValueError,
                        match="unexpected oracle export line"):
         faults.verify_faults_exports(work, names, synth_binding())
+
+
+# -- Lifecycle f4 staging pins -------------------------------
+#
+# f4 is mid-capture fullness, not pre-readiness refusal: its
+# output filesystem must admit the writer's pre-readiness
+# finalization reserve, the filler may grow only after the
+# ready line, and the honest error session (exit 1,
+# finalized, outcome error) must reach the host export with
+# the drained run verdict on the ledger.
+
+def _f4_calls_in_order(node):
+    """Call nodes under node in execution order (post-order walk)."""
+    found = []
+    for child in ast.iter_child_nodes(node):
+        found.extend(_f4_calls_in_order(child))
+    if isinstance(node, ast.Call):
+        found.append(node)
+    return found
+
+
+class _LifecycleFakeRec:
+    """Minimal Popen stand-in for readiness tests."""
+    def __init__(self, stdout_fh, exits):
+        self.stdout = stdout_fh
+        self._exits = list(exits)
+        self.returncode = None
+        self.killed = False
+
+    def poll(self):
+        if self._exits:
+            self.returncode = self._exits.pop(0)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+class _LifecycleBoundedFile:
+    """Fake bounded-filesystem file: N writes, then err."""
+    def __init__(self, budget, err=None):
+        import errno as errno_mod
+        self.left = budget
+        self.writes = 0
+        self.errno = err if err is not None \
+            else errno_mod.ENOSPC
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write(self, chunk):
+        if self.left <= 0:
+            raise OSError(self.errno, "injected")
+        self.left -= 1
+        self.writes += 1
+        return len(chunk)
+
+
+class _LifecycleZeroFile:
+    """Fake file whose writes report zero without error."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write(self, chunk):
+        return 0
+
+
+def _lifecycle_pipe_with(text):
+    """Pipe read end serving text, write end closed (EOF)."""
+    rd, wr = os.pipe()
+    if text:
+        os.write(wr, text.encode())
+    os.close(wr)
+    return os.fdopen(rd, "r", buffering=1)
+
+
+def test_lifecycle_f4_staging_admits_reserve():
+    """The f4 filesystem admits the reserve plus headroom."""
+    writer = Path(REPO, "src", "capture",
+                  "writer.rs").read_text()
+    assert "FINALIZE_RESERVE_BYTES: u64 = " \
+        "17 * 1024 * 1024" in writer
+    assert guest_lifecycle.FINALIZE_RESERVE_BYTES == \
+        17 * 1024 * 1024
+    collector = Path(REPO, "src", "capture",
+                     "collector.rs").read_text()
+    assert "pub const EXIT_REFUSAL: i64 = 3;" in collector
+    assert guest_lifecycle.EXIT_REFUSAL == 3
+    reserve = guest_lifecycle.FINALIZE_RESERVE_BYTES
+    headroom = guest_lifecycle.F4_HEADROOM_BYTES
+    size = guest_lifecycle.f4_fs_bytes()
+    assert size == reserve + headroom
+    assert size % 1024 == 0
+    assert headroom >= 4096 + 64 * 1024
+    assert guest_lifecycle.f4_admits_start(size)
+    for starved in (65536, 8192, reserve - 1, reserve):
+        assert not guest_lifecycle.f4_admits_start(starved), \
+            starved
+
+
+def test_lifecycle_f4_no_starved_staging():
+    """No 64k pre-filled staging survives on the faults path."""
+    node, _ = _guest_function("run_faults")
+    dump = ast.dump(node)
+    assert "size=64k" not in dump
+    assert "57344" not in dump
+
+
+def test_lifecycle_f4_fill_after_ready():
+    """Mount, readiness, then fill; verdict and session wired."""
+    node, source = _guest_function("run_faults")
+
+    def kind(call):
+        func = call.func
+        if isinstance(func, ast.Name):
+            if func.id == "sh" and call.args \
+                    and isinstance(call.args[0], ast.List) \
+                    and call.args[0].elts \
+                    and isinstance(call.args[0].elts[0],
+                                   ast.Constant) \
+                    and call.args[0].elts[0].value == "mount":
+                return "mount"
+            if func.id == "await_record_ready":
+                for arg in call.args:
+                    if isinstance(arg, ast.Constant) \
+                            and arg.value == "f4-record.stderr":
+                        return "await-f4"
+                return "await"
+            if func.id == "fill_to_full":
+                return "fill"
+            if func.id == "drain_done_line":
+                return "done"
+        return ""
+    calls = _f4_calls_in_order(node)
+    kinds = [kind(call) for call in calls]
+
+    def pos(want):
+        return [i for i, got in enumerate(kinds)
+                if got == want]
+    mounts, awaits, fills, dones = \
+        pos("mount"), pos("await-f4"), pos("fill"), pos("done")
+    assert len(mounts) == 1, kinds
+    assert len(awaits) == 1, kinds
+    assert len(fills) == 1, kinds
+    assert mounts[0] < awaits[0] < fills[0], kinds
+    denied = False
+    for word in calls[awaits[0]].keywords:
+        if word.arg == "allow_refusal" \
+                and isinstance(word.value, ast.Constant):
+            denied = word.value.value is False
+    assert denied, "f4 must stage readiness explicitly"
+    assert len(dones) == 1, kinds
+    # No caller anywhere in the guest silently ledgers a
+    # refusal: allow_refusal=True must not appear.
+    whole = ast.parse(Path(
+        guest_lifecycle.__file__).read_text())
+    for child in ast.walk(whole):
+        if isinstance(child, ast.keyword) \
+                and child.arg == "allow_refusal":
+            assert isinstance(child.value, ast.Constant) \
+                and child.value.value is False, \
+                ast.dump(child)
+    consts = [child.value for child in ast.walk(node)
+              if isinstance(child, ast.Constant)
+              and isinstance(child.value, str)]
+    assert "done" in consts
+    assert "f4-session.json" in consts
+    assert "f4-events.ndjson" in consts
+    segment = ast.get_source_segment(source, node)
+    assert "f4_fs_bytes()" in segment
+
+
+def test_lifecycle_f4_await_branches(tmp_path):
+    """Every pre-readiness death shape reports distinctly."""
+    from unittest import mock
+    work = str(tmp_path / "f4-await")
+    os.makedirs(work)
+    errname = "t-record.stderr"
+    with open(os.path.join(work, errname), "wb") as handle:
+        handle.write(b"tail-bytes")
+
+    def fails_quietly(fn):
+        with mock.patch.object(sys, "stderr",
+                               io.StringIO()) as err:
+            try:
+                fn()
+            except SystemExit:
+                return err.getvalue()
+        return None
+    stdout = _lifecycle_pipe_with(
+        "noise\nready session=t start_ns=1\n")
+    try:
+        ready, tail = guest_lifecycle.await_record_ready(
+            _LifecycleFakeRec(stdout, []), work, errname)
+    finally:
+        stdout.close()
+    assert ready == "ready session=t start_ns=1"
+    assert tail() == "tail-bytes"
+    stdout = _lifecycle_pipe_with("")
+    try:
+        state = guest_lifecycle.await_record_ready(
+            _LifecycleFakeRec(stdout, [3]), work, errname,
+            allow_refusal=True)
+    finally:
+        stdout.close()
+    assert state[0] is None
+    assert state[1]() == "tail-bytes"
+    for tag, exits, allow, want in (
+            ("denied", [3], False,
+             "refused pre-readiness"),
+            ("died", [1], False,
+             "died pre-readiness (exit 1)"),
+            ("signal", [-15], False,
+             "died pre-readiness (signal 15)")):
+        stdout = _lifecycle_pipe_with("")
+        try:
+            text = fails_quietly(
+                lambda: guest_lifecycle.await_record_ready(
+                    _LifecycleFakeRec(stdout, exits), work,
+                    errname, allow_refusal=allow))
+        finally:
+            stdout.close()
+        assert text is not None and want in text, (tag, text)
+    stdout = _lifecycle_pipe_with("")
+    rec = _LifecycleFakeRec(stdout, [])
+    try:
+        with mock.patch("time.monotonic",
+                        side_effect=[100.0, 161.0]):
+            text = fails_quietly(
+                lambda: guest_lifecycle.await_record_ready(
+                    rec, work, errname))
+    finally:
+        stdout.close()
+    assert text is not None \
+        and "never reached readiness" in text, text
+    assert rec.killed
+
+
+def test_lifecycle_f4_fill_growth():
+    """The filler stops quietly at full, loudly otherwise."""
+    from unittest import mock
+    import errno as errno_mod
+    seen = {}
+    fake_file = []
+
+    def fake_open(path, mode="r", buffering=-1, **kw):
+        seen["mode"] = mode
+        seen["buffering"] = buffering
+        return fake_file[0]
+
+    def fails_quietly(fn):
+        with mock.patch.object(sys, "stderr",
+                               io.StringIO()) as err:
+            try:
+                fn()
+            except SystemExit:
+                return err.getvalue()
+        return None
+    fake_file.append(_LifecycleBoundedFile(3))
+    with mock.patch("builtins.open", fake_open):
+        guest_lifecycle.fill_to_full("filler")
+    assert fake_file[0].writes == 3
+    assert seen.get("buffering") == 0
+    assert seen.get("mode") == "ab"
+    fake_file[0] = _LifecycleBoundedFile(0)
+    with mock.patch("builtins.open", fake_open):
+        guest_lifecycle.fill_to_full("filler")
+    assert fake_file[0].writes == 0
+    fake_file[0] = _LifecycleBoundedFile(3, errno_mod.EIO)
+    with mock.patch("builtins.open", fake_open):
+        text = fails_quietly(
+            lambda: guest_lifecycle.fill_to_full("filler"))
+    assert text is not None and "filler failed" in text, text
+    fake_file[0] = _LifecycleZeroFile()
+    with mock.patch("builtins.open", fake_open):
+        text = fails_quietly(
+            lambda: guest_lifecycle.fill_to_full("filler"))
+    assert text is not None and "zero bytes" in text, text
+
+    def raise_open(path, mode="r", buffering=-1, **kw):
+        raise OSError(open_errno[0], "injected")
+    open_errno = [errno_mod.ENOSPC]
+    with mock.patch("builtins.open", raise_open):
+        text = fails_quietly(
+            lambda: guest_lifecycle.fill_to_full("filler"))
+    assert text is None, text
+    open_errno[0] = errno_mod.EACCES
+    with mock.patch("builtins.open", raise_open):
+        text = fails_quietly(
+            lambda: guest_lifecycle.fill_to_full("filler"))
+    assert text is not None and "filler failed" in text, text
+
+
+def test_lifecycle_f4_names_inventory():
+    """Host and guest agree the error session is exported."""
+    tree = ast.parse(Path(faults.__file__).read_text())
+    entry = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) \
+                and node.name == "test_faults_multi_channel":
+            entry = node
+            break
+    assert entry is not None
+    consts = [child.value for child in ast.walk(entry)
+              if isinstance(child, ast.Constant)
+              and isinstance(child.value, str)]
+    assert "f4-session.json" in consts, consts
+    assert "f4-events.ndjson" in consts, consts

@@ -895,7 +895,8 @@ def test_faults_multi_channel():
         assert proc.returncode == 0, \
             "guest failed: %s" % proc.stderr[-2000:]
         names = ["identity.json", "profile.json", "faults.json",
-                 "f4-oracle.log", "f3b-report.json",
+                 "f4-oracle.log", "f4-session.json",
+                 "f4-events.ndjson", "f3b-report.json",
                  "f3a-cut-oracle.log", "f3b-cut-oracle.log"]
         for tag in CAPTURES:
             names += [f"{tag}-record.json", f"{tag}-session.json",

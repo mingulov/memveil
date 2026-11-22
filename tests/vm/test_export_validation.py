@@ -275,6 +275,14 @@ def test_faults_ledger_valid(tmp_path):
     faults_export(tmp_path, {'faults.json': json.dumps(rows)})
 
 
+def test_faults_ledger_done_verdict(tmp_path):
+    rows = [faults_row(
+        'f4', 1, True, events_kept=True,
+        ready='ready session=x',
+        done='record: end=error outcome=error exit=1')]
+    faults_export(tmp_path, {'faults.json': json.dumps(rows)})
+
+
 # --- Owned-directory evidence retention ---
 #
 # Gates verify exports in a temporary directory that success-path
@@ -826,6 +834,11 @@ def test_evidence_receipt_detail_tokens_control():
     lambda rows: rows[0].update(settle_s=-1),
     lambda rows: rows[0].update(settle_s=31),
     lambda rows: rows[0].pop('settle_s'),
+    lambda rows: rows[0].update(done=''),
+    lambda rows: rows[0].update(done='bogus verdict'),
+    lambda rows: rows[0].update(
+        done='record: end=error outcome=error exit=x'),
+    lambda rows: rows[0].update(done=1),
 ])
 def test_faults_ledger_refused(tmp_path, change):
     rows = [faults_row()]

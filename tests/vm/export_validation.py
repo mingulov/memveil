@@ -624,7 +624,7 @@ def validate_lifecycle_exports(got,sub):
             for row in rows:
                 keys(row,('scenario','exit','stderr','progs_before','progs_after',
                           'maps_before','maps_after','settle_s','cap'),
-                     ('events_kept','ready','window'))
+                     ('events_kept','ready','window','done'))
                 if row['scenario'] not in ('f1','f2','f3a','f3b','f3b-report','f4',
                                            'f5a','f5b','f5c','f6'):
                     raise ValueError('unknown fault scenario')
@@ -641,6 +641,8 @@ def validate_lifecycle_exports(got,sub):
                     raise ValueError('invalid events_kept flag')
                 if 'ready' in row and (type(row['ready']) is not str or 'ready session=' not in row['ready']):
                     raise ValueError('invalid fault readiness')
+                if 'done' in row and (type(row['done']) is not str or not re.fullmatch(r'record: end=[A-Za-z_]+ outcome=[A-Za-z_]+ exit=-?[0-9]+',row['done'])):
+                    raise ValueError('invalid fault run verdict')
                 if 'window' in row:
                     window=row['window']
                     if type(window) is not list or len(window) != 2:

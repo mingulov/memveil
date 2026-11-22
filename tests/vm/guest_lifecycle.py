@@ -11,6 +11,7 @@ Exports carry .sha256 sidecars; the exact inventory is
 checked host-side. No DMA addresses ever cross: consumer
 files hold decoded facts only.
 """
+import errno
 import hashlib
 import json
 import os
@@ -29,6 +30,30 @@ CP_SITES = ("mv_sync_device:__swiotlb_sync_single_for_device,"
             "mv_sync_cpu:__swiotlb_sync_single_for_cpu,"
             "mv_bounce:swiotlb_bounce,"
             "mv_bounce_exit:swiotlb_bounce")
+
+# Pre-readiness finalization reserve the record writer
+# fallocates before signaling readiness, mirrored from
+# the product's src/capture/writer.rs
+# FINALIZE_RESERVE_BYTES (EventWriter::prepare refuses
+# pre-readiness with ENOSPC when the output filesystem
+# cannot grant it). The f4 staging derives its size from
+# this, never from a bare number; the host pins
+# re-check the mirror against the product source.
+FINALIZE_RESERVE_BYTES = 17 * 1024 * 1024
+
+# f4 capture headroom past the reserve: the staging
+# files plus the baseline line and the few events a
+# slow guest persists between the ready line and the
+# post-readiness fill. 1 MiB is orders past the modeled
+# ~68 KiB need and noise against the 6 GiB guest.
+F4_HEADROOM_BYTES = 1024 * 1024
+
+# Exit the record binary reports for a cannot-start
+# refusal (product: src/capture/collector.rs
+# EXIT_REFUSAL): a pre-readiness death with this exit
+# is a classified refusal; any other pre-readiness
+# death is unexpected.
+EXIT_REFUSAL = 3
 
 
 def fail(msg):
@@ -1219,8 +1244,18 @@ def verify_extracted_bundle(root):
     return manifest
 
 
-def await_record_ready(rec, work, errname="record.stderr"):
-    """Wait for the record readiness line; fail with stderr tail."""
+def await_record_ready(rec, work, errname="record.stderr",
+                       allow_refusal=False):
+    """Wait for the record readiness line; classify early death.
+
+    Returns (ready, tail) on the ready line. A
+    pre-readiness death with the refusal exit returns
+    (None, tail) only with allow_refusal; any other
+    pre-readiness death (wrong exit, signal, timeout)
+    fails loudly, as does a refusal where readiness was
+    staged. Callers that staged readiness keep the
+    default and never silently ledger a refusal.
+    """
     def tail():
         try:
             with open(os.path.join(work, errname),
@@ -1239,13 +1274,72 @@ def await_record_ready(rec, work, errname="record.stderr"):
                 break
         if rec.poll() is not None:
             break
-    if ready is None:
+    if ready is not None:
+        return ready, tail
+    rc = rec.poll()
+    if rc is None:
         try:
             rec.kill()
         except OSError:
             pass
         fail("record never reached readiness: " + tail())
-    return ready, tail
+    if rc == EXIT_REFUSAL:
+        if allow_refusal:
+            return None, tail
+        fail("record refused pre-readiness, readiness "
+             "staged: " + tail())
+    if rc < 0:
+        fail(f"record died pre-readiness (signal {-rc}): {tail()}")
+    fail(f"record died pre-readiness (exit {rc}): {tail()}")
+
+
+def drain_done_line(rec):
+    """Last non-empty stdout line past the ready line.
+
+    Record prints exactly one stdout summary at exit,
+    so past the consumed ready line the remainder
+    holds only that run verdict (plus blank padding,
+    if any). Empty when record printed nothing past
+    readiness; the host judge refuses the empty line.
+    """
+    done = ""
+    for line in rec.stdout.read().splitlines():
+        if line.strip():
+            done = line.strip()
+    return done
+
+
+def f4_fs_bytes():
+    """f4 output filesystem size: reserve plus headroom."""
+    return FINALIZE_RESERVE_BYTES + F4_HEADROOM_BYTES
+
+
+def f4_admits_start(fs_bytes):
+    """True when a filesystem admits the f4 reserve plus headroom."""
+    return fs_bytes >= f4_fs_bytes()
+
+
+def fill_to_full(path):
+    """Grow a filler file until its filesystem reports full.
+
+    Unbuffered 4 KiB writes so each ENOSPC surfaces at
+    the failing write rather than at close, leaving
+    under a page free. ENOSPC anywhere (open, write,
+    close) means the postcondition already holds and
+    returns quietly; any other errno, or a zero-byte
+    write without error, fails loudly: a filler that
+    stops any other way proves nothing about fullness.
+    """
+    chunk = b"x" * 4096
+    try:
+        with open(path, "ab", buffering=0) as handle:
+            while True:
+                if handle.write(chunk) == 0:
+                    fail("filler wrote zero bytes "
+                         "without error")
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            fail(f"filler failed: {exc}")
 
 
 def _read_int_file(path):
@@ -1674,8 +1768,8 @@ def run_faults(gate):
     refuse with exit 3 and zero BPF residue; SIGTERM mid-capture
     (1ch and 3ch) must stop bounded with a signal end reason,
     with a cut oracle snapshot proving the flood was mid-flight;
-    a full output filesystem must fail honestly without a
-    masquerading session; paced and burst 300-op floods compare
+    a full output filesystem must publish an honest error
+    session; paced and burst 300-op floods compare
     1ch against 3ch capture; background flood during attach must
     not leak pre-window records. The faults.json ledger carries
     every scenario's exit, stderr tail, BPF inventory pair, and
@@ -1864,15 +1958,25 @@ def run_faults(gate):
     })
     names.append("f3b-report.json")
 
+    # f4: mid-capture fullness. The filesystem admits
+    # the writer's pre-readiness reserve plus headroom,
+    # and the filler grows only AFTER the ready line
+    # proves the reserve landed and capture started:
+    # ENOSPC must strike mid-capture (honest exit 1,
+    # events kept), never pre-readiness (exit 3
+    # refusal, no capture). The ready line is
+    # program-order proof: the product prints it after
+    # the reserve fallocate, attach, and baseline
+    # append, and the fill below runs strictly after
+    # this call returns that line.
     mnt = os.path.join(gate.work, "full")
     os.makedirs(mnt)
-    r = sh(["mount", "-t", "tmpfs", "-o", "size=64k",
+    r = sh(["mount", "-t", "tmpfs", "-o",
+            f"size={f4_fs_bytes() // 1024}k",
             "memveil-full", mnt])
     if r.returncode != 0:
         fail(f"tmpfs mount failed: {r.stderr.strip()}")
     try:
-        with open(os.path.join(mnt, "filler"), "wb") as fh:
-            fh.write(b"x" * 57344)
         before = gate.bpf_inventory()
         gate.clear_dmesg()
         cap = os.path.join(mnt, "cap")
@@ -1895,7 +1999,9 @@ def run_faults(gate):
             start_new_session=True,
         )
         ready, _ = await_record_ready(
-            rec, gate.work, "f4-record.stderr")
+            rec, gate.work, "f4-record.stderr",
+            allow_refusal=False)
+        fill_to_full(os.path.join(mnt, "filler"))
         gate.insmod(["mv_oracle_witness=1",
                      "mv_oracle_delay_ms=100",
                      "mv_oracle_scenario=1"])
@@ -1907,11 +2013,18 @@ def run_faults(gate):
             rec.kill()
             rec.wait()
             fail("f4: record did not exit")
+        done = drain_done_line(rec)
         gate.oracle_log("f4-oracle.log")
         with open(os.path.join(gate.work, "f4-record.stderr"),
                   "rb") as fh:
             err = fh.read()[-512:].decode("utf-8", "replace")
         after, settle = gate.settled_inventory(before)
+        for name in ("session.json", "events.ndjson"):
+            src = os.path.join(cap, name)
+            if not os.path.isfile(src):
+                fail(f"f4: capture lacks {name}")
+            shutil.copyfile(
+                src, os.path.join(gate.work, "f4-" + name))
         ledger.append({
             "scenario": "f4", "exit": rc, "stderr": err,
             "progs_before": before["progs"],
@@ -1924,8 +2037,10 @@ def run_faults(gate):
             "events_kept": os.path.isfile(
                 os.path.join(cap, "events.ndjson")),
             "ready": ready,
+            "done": done,
         })
-        names.append("f4-oracle.log")
+        names += ["f4-oracle.log", "f4-session.json",
+                  "f4-events.ndjson"]
     finally:
         r = sh(["umount", mnt])
         if r.returncode != 0:
