@@ -46,13 +46,13 @@ kmt = _load_tool()
 
 # Documented 4-way equality bytes (deb, manifest, sealed fixture,
 # release set) for the sealed source.
-SEALED_COMMIT = "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
-SEALED_ATTEMPT = "ded931289c83713f62cdb5479fbf8aab03fe344d91a91" \
-    "bdeeee7e76f106979eb"
-SEALED_LIFECYCLE = "32f6a353779778981e727f311fe5d1b2c21fc92ae" \
-    "9918765f86bc4f81f58df34"
-SEALED_COPY = "526a6726e24f7725a0e88e28d6994f0475a1589c3de10" \
-    "c7ebef703a03dfa73e8"
+SEALED_COMMIT = "3a3d6cb8c8acc1295efdff6df44f2d89d327cc9c"
+SEALED_ATTEMPT = "8ee4903f6de717d013ae797e7963fefdb28549f4" \
+    "ee04e3c5d4544a8e9de61d6a"
+SEALED_LIFECYCLE = "ad69cf0587597a1a8c14048dbb5f1256a604bf20" \
+    "cc8d9f092d8c7b658c41f8e9"
+SEALED_COPY = "29959dcbf9cc4cb40b9813cddf686d4118b0528f" \
+    "29a8edec070504e1265350f8"
 
 NEG_SHAS = {"renamed_field": "11" * 32,
             "widened_layout": "22" * 32,
@@ -417,13 +417,14 @@ def test_sealed_fixture_shallow_edges(monkeypatch, tmp_path):
 
 
 def test_sealed_blob_pin_matches_fixture():
-    path = Path(kmt.ROOT) / (
-        kmt.AYA_FIXTURE_BLOB % "copy")
-    data = path.read_bytes()
-    assert kmt.sealed_blob_id(data) == \
-        kmt.SEALED_FIXTURE_BLOBS["copy"]
-    assert kmt.sealed_blob_id(b"tampered") != \
-        kmt.SEALED_FIXTURE_BLOBS["copy"]
+    for channel in kmt.BPF_CHANNELS:
+        path = Path(kmt.ROOT) / (
+            kmt.AYA_FIXTURE_BLOB % channel)
+        data = path.read_bytes()
+        assert kmt.sealed_blob_id(data) == \
+            kmt.SEALED_FIXTURE_BLOBS[channel]
+        assert kmt.sealed_blob_id(b"tampered") != \
+            kmt.SEALED_FIXTURE_BLOBS[channel]
 
 
 def test_old_target_authority_gone():

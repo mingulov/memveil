@@ -37,7 +37,11 @@ MODULES_MANIFEST_SHA256/EXPECT_RELEASE), the oracle
 fixture (guest_oracle), the saturation test objects
 (battery_core TEST_*), and the attach grammar (guest
 flows). The L6 held-open leg keeps its own pin file
-(heldopen_seal) with the same swap shape.
+(heldopen_seal) with the same swap shape. The scenario
+runner is outside the repeat path and keeps its own
+sealed-source and fixture-blob pins (tools/kernel-matrix,
+mirrored by its offline test): swap them in the same
+pass, from the same seal, or its staging legs refuse.
 """
 
 # Retained seal manifest digest (sha256 of the sealed

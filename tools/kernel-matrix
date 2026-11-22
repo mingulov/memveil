@@ -777,15 +777,20 @@ AYA_FIXTURE_BLOB = "tests/vm/fixtures/aya/swiotlb_%s.bpf.o"
 MANIFEST_BPF_ENTRY = "bpf/swiotlb_%s.bpf.o"
 # The sealed source commit whose Aya fixture bytes anchor
 # scenario staging, plus their git blob ids. The blob pins
-# let shallow checkouts (which lack the sealed objects)
-# verify the worktree bytes before trusting them; dirt
-# fails the pin exactly as a missing object would.
+# name the sealed bundle bytes the committed fixtures were
+# refreshed from (the same seal tests/vm/candidate_pins.py
+# names; swap both in one pass at the next seal). They let
+# checkouts whose git objects cannot supply those bytes at
+# the sealed source (shallow clones, or a sealed source
+# tree that predates the fixture refresh) verify the
+# worktree bytes before trusting them; dirt fails the pin
+# exactly as a missing object would.
 SEALED_SOURCE_COMMIT = \
-    "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
+    "3a3d6cb8c8acc1295efdff6df44f2d89d327cc9c"
 SEALED_FIXTURE_BLOBS = {
-    "attempt": "1c27ff4c6860704f5ffbaf0fef599b27acfc9fdb",
-    "lifecycle": "80bdecbcccbc13ce4782a79ba3464e972bdfa005",
-    "copy": "927d44dfc017966a21dea6e70c407b7123541f0d",
+    "attempt": "bfbe26bbe4450145fed90c66f72ea2c4dba39b48",
+    "lifecycle": "280cce505ff18005793e3b04d897c29707249976",
+    "copy": "2899af58a7b7e91a4bce172b17ed2390ee0a79ea",
 }
 
 
@@ -857,12 +862,15 @@ def verified_sealed_fixture_sha(channel, spec):
 def sealed_fixture_sha(commit, channel):
     """Sha256 of one sealed-commit Aya fixture blob.
 
-    Reads the bytes straight from the git object store while the
-    sealed objects are present, so worktree dirt cannot bless
-    staged bytes. Checkouts lacking the sealed objects (shallow
-    clones) fall back to the worktree bytes only after they
-    verify against the sealed blob pin, which dirt cannot pass.
-    Raises ValueError when the blob is unreadable.
+    Reads the bytes straight from the git object store while
+    they are present, so worktree dirt cannot bless staged
+    bytes. For the sealed source commit the object bytes
+    must also match the sealed blob pin: the sealed source
+    tree can predate the fixture refresh, and then (as in
+    shallow clones lacking the sealed objects) the worktree
+    bytes are used only after they verify against the pin,
+    which dirt cannot pass. Raises ValueError when the blob
+    is unreadable.
     """
     spec = "%s:%s" % (commit, AYA_FIXTURE_BLOB % channel)
     try:
@@ -877,7 +885,11 @@ def sealed_fixture_sha(commit, channel):
         proc = None
     if proc is not None and proc.returncode == 0 \
             and proc.stdout:
-        return hashlib.sha256(proc.stdout).hexdigest()
+        if commit != SEALED_SOURCE_COMMIT \
+                or sealed_blob_id(proc.stdout) == \
+                SEALED_FIXTURE_BLOBS.get(channel):
+            return hashlib.sha256(
+                proc.stdout).hexdigest()
     if commit == SEALED_SOURCE_COMMIT:
         return verified_sealed_fixture_sha(channel, spec)
     if proc is None:
