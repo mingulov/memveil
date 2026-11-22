@@ -9,7 +9,7 @@
 //! collector gate (live size versus the admitted size).
 
 use super::attach::{ProgramSpec, check_programs};
-use super::session::{Channel, SessionError};
+use super::session::{Channel, SessionError, refusal_name};
 
 /// `BPF_MAP_TYPE_HASH` (`linux/bpf.h`).
 pub const BPF_MAP_TYPE_HASH: u32 = 1;
@@ -112,7 +112,7 @@ pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionErr
         let Some(got) = actual.iter().find(|spec| spec.name == want.name) else {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: missing map {}",
-                want.name
+                refusal_name(&want.name)
             )));
         };
         let ring = want.map_type == BPF_MAP_TYPE_RINGBUF;
@@ -122,7 +122,7 @@ pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionErr
         if !same {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: map {}: want type={} key={} value={} entries={}, got type={} key={} value={} entries={}",
-                want.name,
+                refusal_name(&want.name),
                 want.map_type,
                 want.key_size,
                 want.value_size,
@@ -138,7 +138,7 @@ pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionErr
         if !expected.iter().any(|want| want.name == got.name) {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: unexpected map {}",
-                got.name
+                refusal_name(&got.name)
             )));
         }
     }
@@ -152,7 +152,7 @@ pub fn check_maps(channel: Channel, actual: &[MapSpec]) -> Result<(), SessionErr
 fn check_loaded_against(expected: &[MapSpec], actual: &[MapSpec]) -> Result<(), String> {
     for want in expected {
         let Some(got) = actual.iter().find(|spec| spec.name == want.name) else {
-            return Err(format!("missing map {}", want.name));
+            return Err(format!("missing map {}", refusal_name(&want.name)));
         };
         let ring = want.map_type == BPF_MAP_TYPE_RINGBUF;
         let same = if ring {
@@ -165,7 +165,7 @@ fn check_loaded_against(expected: &[MapSpec], actual: &[MapSpec]) -> Result<(), 
         if !same {
             return Err(format!(
                 "map {}: want type={} key={} value={} entries={}, got type={} key={} value={} entries={}",
-                want.name,
+                refusal_name(&want.name),
                 want.map_type,
                 want.key_size,
                 want.value_size,
@@ -179,7 +179,7 @@ fn check_loaded_against(expected: &[MapSpec], actual: &[MapSpec]) -> Result<(), 
     }
     for got in actual {
         if !expected.iter().any(|want| want.name == got.name) {
-            return Err(format!("unexpected map {}", got.name));
+            return Err(format!("unexpected map {}", refusal_name(&got.name)));
         }
     }
     Ok(())

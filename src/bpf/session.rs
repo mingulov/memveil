@@ -160,6 +160,23 @@ impl std::fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
+/// One object-controlled name rendered into refusal text.
+///
+/// Keeps the producer's own alphabet (`[A-Za-z0-9_.-]`, which
+/// covers every frozen map and program name) and replaces any
+/// other byte with `?`: a renegade name can neither smuggle
+/// whitespace, separators, or header grammar into the refusal
+/// line nor break it into lines. Byte-wise, so the output is
+/// always valid UTF-8 whatever the object declared.
+pub(crate) fn refusal_name(name: &str) -> String {
+    let mut out = Vec::with_capacity(name.len());
+    for b in name.as_bytes() {
+        let keep = b.is_ascii_alphanumeric() || *b == 0x5F || *b == 0x2E || *b == 0x2D;
+        out.push(if keep { *b } else { 0x3F });
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
 /// One active attach: the program plus its link id.
 enum ActiveLink {
     TracePoint {
@@ -772,7 +789,8 @@ impl Session {
             let Some(got) = bpf.program(&want.name) else {
                 return Err(SessionError::Geometry(format!(
                     "{} channel: missing program {}",
-                    self.channel, want.name
+                    self.channel,
+                    refusal_name(&want.name)
                 )));
             };
             let kind = match got {
@@ -782,22 +800,27 @@ impl Session {
                 _ => {
                     return Err(SessionError::Geometry(format!(
                         "{} channel: program {} has an unexpected section",
-                        self.channel, want.name
+                        self.channel,
+                        refusal_name(&want.name)
                     )));
                 }
             };
             if kind != want.kind {
                 return Err(SessionError::Geometry(format!(
                     "{} channel: program {}: want section {:?}, got {:?}",
-                    self.channel, want.name, want.kind, kind
+                    self.channel,
+                    refusal_name(&want.name),
+                    want.kind,
+                    kind
                 )));
             }
         }
         for (name, _) in bpf.programs() {
             if !expected.iter().any(|want| want.name == name) {
                 return Err(SessionError::Geometry(format!(
-                    "{} channel: unexpected program {name}",
-                    self.channel
+                    "{} channel: unexpected program {}",
+                    self.channel,
+                    refusal_name(name)
                 )));
             }
         }
@@ -2370,6 +2393,32 @@ mod tests {
         let cp = std::fs::read(dir.join("cp-ok.o")).expect("read cp-ok.o");
         assert!(!declares_copy_table(&cp));
         assert!(!declares_copy_table(b"not an elf"));
+    }
+
+    #[test]
+    fn refusal_name_constrains_to_the_producer_alphabet() {
+        // Frozen names pass through byte-identical; everything
+        // outside [A-Za-z0-9_.-] becomes '?', so a renegade name
+        // carries no whitespace, separators, or header grammar.
+        assert_eq!(refusal_name("mv_counts"), "mv_counts");
+        assert_eq!(refusal_name("mv_bounce"), "mv_bounce");
+        assert_eq!(refusal_name("a-b.c_d9"), "a-b.c_d9");
+        assert_eq!(
+            refusal_name("fooch2 op=3 domain=2 code=-13: x"),
+            "fooch2?op?3?domain?2?code?-13??x"
+        );
+        assert_eq!(
+            refusal_name("extra\nch0 op=2 domain=2 code=-1: x"),
+            "extra?ch0?op?2?domain?2?code?-1??x"
+        );
+        assert_eq!(
+            refusal_name("extra: ch2 note code=-13"),
+            "extra??ch2?note?code?-13"
+        );
+        // Byte-wise: non-ASCII input still renders valid
+        // UTF-8, one '?' per byte ('é' is two bytes).
+        assert_eq!(refusal_name("mv_é"), "mv_??");
+        assert_eq!(refusal_name(""), "");
     }
 
     #[test]

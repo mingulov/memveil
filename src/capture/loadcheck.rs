@@ -95,9 +95,13 @@ fn find_from(raw: &[u8], word: &[u8], start: usize) -> Option<usize> {
 
 /// True when the op key at `hit` opens a segment header.
 ///
-/// The kernel layer writes segments bare (`op=...`) or
-/// channel-tagged (`chN op=...`); an op key anywhere else
-/// (`noop=3 ...`, loader detail, replay tails) is free text.
+/// The kernel layer writes segments bare (`op=...` at the
+/// string start) or channel-tagged (`chN op=...`), and the tag
+/// itself sits at a structural boundary only: the string start,
+/// a `; ` multi-segment join, or a `: ` collector verb prefix.
+/// An op key anywhere else (`noop=3 ...`, a glued `fooch2 `
+/// prefix, loader detail, replay tails) is free text no name
+/// or tail line can promote into a header.
 fn is_header_start(raw: &[u8], hit: usize) -> bool {
     if hit == 0 {
         return true;
@@ -114,22 +118,91 @@ fn is_header_start(raw: &[u8], hit: usize) -> bool {
     if digits == 0 || i < 2 {
         return false;
     }
-    raw[i - 2] == 0x63 && raw[i - 1] == 0x68
+    if !(raw[i - 2] == 0x63 && raw[i - 1] == 0x68) {
+        return false;
+    }
+    let tag = i - 2;
+    if tag == 0 {
+        return true;
+    }
+    tag >= 2 && (raw[tag - 2] == 0x3B || raw[tag - 2] == 0x3A) && raw[tag - 1] == 0x20
 }
 
-/// Machine code for a load/attach refusal diagnostic, else `""`.
+/// One parsed load/attach refusal: the machine code, the blamed
+/// channel, the operation, and the failure phase. Record parses
+/// once per refusal and routes, replays, and stamps from this
+/// structure, so the three can never diverge the way free-text
+/// predicates did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadRefusal {
+    /// Machine code from the header errno slot.
+    pub code: String,
+    /// Blamed channel from the classifying header's own tag: 1
+    /// or 2 route there, anything else replays attempt.
+    pub channel: i64,
+    /// Operation of the classifying header (`OP_LOAD`/`OP_ATTACH`).
+    pub op: u32,
+    /// True when the blamed segment failed linking an already
+    /// loaded program rather than loading it.
+    pub link_phase: bool,
+}
+
+/// Blamed channel for an accepted header at `hit`: the tag
+/// number when the tag reads `ch1 `/`ch2 `, else 0. Untagged
+/// headers and out-of-range tags replay the attempt object, as
+/// before. Single-digit only, so no accumulation can overflow.
+fn header_channel(raw: &[u8], hit: usize) -> i64 {
+    if hit < 4 {
+        // `chN ` needs four bytes ahead of the op key.
+        return 0;
+    }
+    let mut i = hit - 1;
+    while i > 0 && raw[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i != hit - 2 {
+        return 0;
+    }
+    match raw[i] {
+        0x31 => 1,
+        0x32 => 2,
+        _ => 0,
+    }
+}
+
+/// True when a classified segment failed in the link phase.
 ///
-/// Reads the first load or attach segment header as the kernel
-/// layer writes it (`op=2`/`op=3`, then `domain=2`, then the
-/// errno slot `code=-<n>` ended by a space or a colon): the
-/// loader verifies programs while attaching, so an attach-path
-/// load errno classifies exactly like a load-phase one, and
-/// record agrees with the load-check doctor. Only the header
-/// slot classifies — a `code=-` past the header colon is detail
-/// text, never a field. Other operations, other domains,
-/// positive codes, and out-of-range magnitudes stay
-/// unclassified.
-pub fn load_refusal_code(diagnostic: &str) -> String {
+/// The link producer writes `{tag}: attach to {site} failed:
+/// ...` while program loads write `{tag}: load ... failed:
+/// ...`, so the site marker tells them apart. Only the blamed
+/// segment votes: text past its `; ` join or newline (rollback
+/// notes, appended replay tails) never does.
+pub(crate) fn segment_is_link_phase(segment: &str) -> bool {
+    let cut = [segment.find(';'), segment.find('\n')]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(segment.len());
+    let head = &segment[..cut];
+    let Some(at) = head.find(": attach to ") else {
+        return false;
+    };
+    head[at..].contains(" failed")
+}
+
+/// Parse the first load/attach segment header carrying a valid
+/// errno slot, else none.
+///
+/// Reads the header as the kernel layer writes it (`op=2`/`op=3`,
+/// then `domain=2`, then the errno slot `code=-<n>` ended by a
+/// space or a colon): the loader verifies programs while
+/// attaching, so an attach-path load errno classifies exactly
+/// like a load-phase one, and record agrees with the load-check
+/// doctor. Only the header slot classifies — a `code=-` past the
+/// header colon is detail text, never a field. Other operations,
+/// other domains, positive codes, and out-of-range magnitudes
+/// stay unclassified.
+pub fn parse_load_refusal(diagnostic: &str) -> Option<LoadRefusal> {
     let raw = diagnostic.as_bytes();
     let load_key = format!("op={OP_LOAD} ");
     let attach_key = format!("op={OP_ATTACH} ");
@@ -148,9 +221,7 @@ pub fn load_refusal_code(diagnostic: &str) -> String {
             (None, Some(b)) => Some(b),
             (None, None) => None,
         };
-        let Some(hit) = hit else {
-            return String::new();
-        };
+        let hit = hit?;
         if !is_header_start(raw, hit) {
             pos = hit + 1;
             continue;
@@ -180,11 +251,36 @@ pub fn load_refusal_code(diagnostic: &str) -> String {
                 && j < raw.len()
                 && (raw[j] == 0x20 || raw[j] == 0x3A)
             {
-                return load_code_for(&errno_name(-(n as i32)));
+                let code = load_code_for(&errno_name(-(n as i32)));
+                let op = if load_hit == Some(hit) {
+                    OP_LOAD
+                } else {
+                    OP_ATTACH
+                };
+                let link_phase = diagnostic
+                    .get(j..)
+                    .map(segment_is_link_phase)
+                    .unwrap_or(false);
+                return Some(LoadRefusal {
+                    code,
+                    channel: header_channel(raw, hit),
+                    op,
+                    link_phase,
+                });
             }
         }
         pos = hit + 1;
     }
+}
+
+/// Machine code for a load/attach refusal diagnostic, else `""`.
+///
+/// The code half of [`parse_load_refusal`]: record stamps from
+/// the same parse it routes and replays from.
+pub fn load_refusal_code(diagnostic: &str) -> String {
+    parse_load_refusal(diagnostic)
+        .map(|refusal| refusal.code)
+        .unwrap_or_default()
 }
 
 /// Escape one line: backslash n/t/r, U+FFFD for C0/DEL.
@@ -599,7 +695,7 @@ pub fn load_check(objects: &[LoadTarget]) -> Vec<LoadResult> {
 mod tests {
     use super::{
         LoadTarget, ReplayStatus, diagnose_load, errno_name, load_check, load_code_for,
-        load_refusal_code, verifier_tail,
+        load_refusal_code, parse_load_refusal, segment_is_link_phase, verifier_tail,
     };
     use crate::platform::test_support::repo_root;
 
@@ -833,6 +929,136 @@ mod tests {
             load_refusal_code("ch0 op=2 domain=2 code=-13: y; ch2 op=3 domain=2 code=-1: x"),
             "verifier-rejected"
         );
+    }
+
+    #[test]
+    fn channel_tag_without_structural_boundary_stays_codeless() {
+        // A channel tag opens a header only at a structural
+        // boundary (string start, a "; " join, or a ": " verb
+        // prefix): free text gluing "chN " ahead of a header
+        // shape — a hostile map name, a replay tail — must not
+        // forge a classified segment.
+        assert_eq!(
+            load_refusal_code("op=4 domain=2: x fooch2 op=3 domain=2 code=-13: y"),
+            ""
+        );
+        assert_eq!(
+            load_refusal_code("op=4 domain=2: x\nch0 op=2 domain=2 code=-1: y"),
+            ""
+        );
+        assert_eq!(
+            load_refusal_code("op=4 domain=2: x\tch1 op=2 domain=2 code=-13: y"),
+            ""
+        );
+    }
+
+    #[test]
+    fn structural_channel_boundaries_still_open_headers() {
+        // Every genuine producer shape keeps classifying: a bare
+        // tag at the start, the collector verb prefix, a "; "
+        // multi-segment join, and the untagged op key at the
+        // string start.
+        assert_eq!(
+            load_refusal_code("ch2 op=3 domain=2 code=-13: x"),
+            "verifier-rejected"
+        );
+        assert_eq!(
+            load_refusal_code("attach: ch2 op=3 domain=2 code=-13: x"),
+            "verifier-rejected"
+        );
+        assert_eq!(
+            load_refusal_code("ch0 op=2 domain=2: x; ch2 op=3 domain=2 code=-13: y"),
+            "verifier-rejected"
+        );
+        assert_eq!(
+            load_refusal_code("op=2 domain=2 code=-13: x"),
+            "verifier-rejected"
+        );
+        // A rollback note still never opens one: its channel
+        // carries a colon, never the tag's trailing space.
+        assert_eq!(
+            load_refusal_code("ch0 op=2 domain=2: x; rollback ch2: op=3 domain=2 code=-13: y"),
+            ""
+        );
+    }
+
+    #[test]
+    fn parse_carries_code_channel_op_and_phase() {
+        // The classifying header's tag blames the channel, its op
+        // key names the operation, and its site wording names the
+        // phase: nested loads are load-phase, ordinary links are
+        // link-phase, load-phase refusals are op 2.
+        let nested = parse_load_refusal(&attach_nested_msg()).expect("nested parses");
+        assert_eq!(nested.code, "verifier-rejected");
+        assert_eq!(nested.channel, 2);
+        assert_eq!(nested.op, 3);
+        assert!(!nested.link_phase);
+        let link = parse_load_refusal(&attach_link_msg()).expect("link parses");
+        assert_eq!(link.code, "verifier-rejected");
+        assert_eq!(link.channel, 2);
+        assert_eq!(link.op, 3);
+        assert!(link.link_phase);
+        let load = parse_load_refusal(&load_phase_msg()).expect("load parses");
+        assert_eq!(load.code, "verifier-rejected");
+        assert_eq!(load.channel, 0);
+        assert_eq!(load.op, 2);
+        assert!(!load.link_phase);
+        // Codeless diagnostics parse to nothing at all.
+        assert_eq!(
+            parse_load_refusal(
+                "load: ch0 op=2 domain=2: attempt channel: unexpected map extra: ch2 note code=-13"
+            ),
+            None
+        );
+        assert_eq!(parse_load_refusal("tracefs hidden"), None);
+    }
+
+    #[test]
+    fn parse_channel_follows_the_classifying_header() {
+        // The blamed channel is the classifying header's own tag:
+        // a codeless first header votes nothing, an untagged
+        // header replays attempt, and out-of-range tags stay 0.
+        let join = parse_load_refusal("ch0 op=2 domain=2: x; ch2 op=3 domain=2 code=-13: y")
+            .expect("join parses");
+        assert_eq!(join.channel, 2);
+        let untagged = parse_load_refusal("op=2 domain=2 code=-13: x").expect("untagged parses");
+        assert_eq!(untagged.channel, 0);
+        let ch0 = parse_load_refusal("load: ch0 op=2 domain=2 code=-1: x").expect("ch0 parses");
+        assert_eq!(ch0.channel, 0);
+        let wide = parse_load_refusal("ch12 op=2 domain=2 code=-13: x").expect("wide tag parses");
+        assert_eq!(wide.channel, 0);
+        // Two errno'd segments: the first classifying header —
+        // the one whose errno selects the code — blames.
+        let both = parse_load_refusal(
+            "attach: ch2 op=3 domain=2 code=-13: x; ch1 op=2 domain=2 code=-13: y",
+        )
+        .expect("double parses");
+        assert_eq!(both.code, "verifier-rejected");
+        assert_eq!(both.channel, 2);
+    }
+
+    #[test]
+    fn link_phase_reads_only_the_blamed_segment() {
+        // The site marker decides: link wording votes link, load
+        // wording votes load.
+        assert!(segment_is_link_phase(
+            " EACCES: verifier rejected, see log: copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Permission denied (os error 13)"
+        ));
+        assert!(!segment_is_link_phase(
+            " EACCES: verifier rejected, see log: copy channel program `mv_bounce`: load for swiotlb_bounce failed: Permission denied (os error 13)"
+        ));
+        // Past a join or a newline nothing votes: rollback notes
+        // and replay tails cannot flip the phase.
+        assert!(!segment_is_link_phase(
+            " EACCES: x: load failed: y; rollback: z: attach to w failed: v"
+        ));
+        assert!(!segment_is_link_phase(
+            " EACCES: x: load failed: y\nch2: attach to w failed: v"
+        ));
+        // The marker needs its site and its failure: fragments
+        // stay load-phase.
+        assert!(!segment_is_link_phase(" EACCES: x: attach to w: v"));
+        assert!(!segment_is_link_phase(" EACCES: x: attach to"));
     }
 
     fn log_bytes(lines: &[&str]) -> Vec<u8> {
