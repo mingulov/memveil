@@ -68,6 +68,8 @@ and never move a Q branch after dispatching on it.
   `$HOME/.memveil-qualifier/`, outside the checkout, so
   key material never dirties the tree the seal gates on.
 - Toolchains: Rust 1.100.0 (`rust-toolchain.toml`),
+  gcc (the x86-64 link driver: only GNU ld merges the
+  `x86-64-v3` loader mark the bundle gate requires),
   nightly-2026-05-20 plus bpf-linker 0.10.4 for the eBPF
   child build (`build.rs`), packaging tools (`binutils`,
   `cpio`, `dpkg-dev`, `patchelf`, `rpm`), `ssh-keygen`,
