@@ -60,12 +60,14 @@ def test_manifest_roundtrip(built, tmp_path):
 def test_committed_manifest_verifies(built):
     """The committed manifest (when present) verifies rebuilt.
 
-    Byte shas move under fresh rebuilds (checkout-derived
-    codegen metadata; BTF line info moves with source
-    lines), so the committed manifest verifies in
-    fresh-rebuild mode: staged mutant sources plus pins,
-    recipe, baseline, and candidate must match, while the
-    byte shas bind staged copies of one build only.
+    The full-file sha256 moves under fresh rebuilds
+    (checkout-derived codegen metadata in DWARF), so the
+    committed manifest verifies in fresh-rebuild mode:
+    loader_sha256 (cross-checkout stable for identical
+    sources via --remap-path-prefix), staged mutant
+    sources, pins, recipe, baseline, and candidate must
+    match, while the full sha256 binds staged copies of
+    one build only.
     """
     root, _, _ = built
     path = producer.manifest_path()
@@ -81,9 +83,11 @@ def test_base_reproduction(built, tmp_path):
     Full bytes are checkout- and line-sensitive (codegen
     metadata, BTF line info), so the control pins the
     committed fixture to BASELINE_COPY_SHA256 and compares a
-    fresh base rebuild against the fixture the way the
-    path-confinement leg does: identical behavior sections
-    plus an identical loader-parse judgment.
+    fresh base rebuild against the fixture section by
+    section: every named section except `.BTF.ext` (its
+    line records move with source lines) and the DWARF
+    family must be byte-identical, plus an identical
+    loader-parse judgment.
     """
     root, _, _ = built
     fixture = proof.base_object(root)
@@ -97,7 +101,8 @@ def test_base_reproduction(built, tmp_path):
                 proof.BOUNCE + proof.SYNC]
     sections += [".rel" + section for section in sections]
     sections += ["maps", "license", "memveil_channel",
-                 ".text"]
+                 ".text", ".BTF", ".symtab", ".strtab",
+                 ".rel.BTF", ".rel.BTF.ext"]
     for section in sections:
         assert got.get(section) == want.get(section), \
             section

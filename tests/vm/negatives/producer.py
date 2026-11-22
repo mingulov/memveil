@@ -410,9 +410,14 @@ def build_base_object(root, outpath):
     """Rebuild the unmutated probe to outpath; its sha256.
 
     Builds the pinned tree in place (read-only: cargo writes
-    only to a fresh temporary target dir), so the bytes must
-    equal the baseline fixture exactly: the positive control
-    for the recipe itself.
+    only to a fresh temporary target dir). The bytes are not
+    expected to equal the baseline fixture exactly: full
+    bytes move with checkout-derived codegen metadata and
+    BTF line info moves with source lines. Callers compare
+    behavior against the fixture instead (identical behavior
+    sections plus an identical loader-parse judgment, with
+    the fixture itself pinned to BASELINE_COPY_SHA256): the
+    positive control for the recipe itself.
     """
     check_pins(root)
     check_toolchain()
@@ -554,15 +559,21 @@ def verify_manifest(root, path, for_fresh_rebuild=False):
     """Check a manifest against staged bytes and pins.
 
     Returns a list of problems (empty when it verifies):
-    every name present with the staged sha256, pins current,
-    baseline and candidate references exact. When
-    for_fresh_rebuild is true, the byte shas (sha256 and
-    loader_sha256) are not compared: a fresh rebuild moves
-    them (checkout-derived codegen metadata; BTF line info
-    moves with source lines), so the staged mutant SOURCES
-    are compared against mutant_source_sha256 instead, with
-    every other check unchanged. Staged copies of one build
-    must verify with the default strict comparison.
+    every name present with the staged sha256 and
+    loader_sha256, pins current, baseline and candidate
+    references exact. When for_fresh_rebuild is true, only
+    the full-file sha256 is not compared: its DWARF sections
+    embed checkout-derived codegen metadata, so full bytes
+    are checkout-bound. loader_sha256 is still compared: it
+    covers every section but DWARF and is cross-checkout
+    stable for identical sources by construction -- the
+    recipe remaps the home and checkout roots
+    (--remap-path-prefix) and staged trees live under the
+    checkout root. Fresh mode additionally compares the
+    staged mutant SOURCES against mutant_source_sha256,
+    with every other check unchanged. Staged copies of one
+    build must verify with the default strict comparison,
+    which also binds the full bytes.
     """
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -602,13 +613,12 @@ def verify_manifest(root, path, for_fresh_rebuild=False):
             problems.append("%s: loader sha unreadable: %s"
                             % (name, exc))
             continue
-        if not for_fresh_rebuild:
-            if entry.get("loader_sha256") != staged_loader:
-                problems.append(
-                    "%s: loader manifest %.16s, staged %.16s"
-                    % (name, entry.get("loader_sha256"),
-                       staged_loader))
-        else:
+        if entry.get("loader_sha256") != staged_loader:
+            problems.append(
+                "%s: loader manifest %.16s, staged %.16s"
+                % (name, entry.get("loader_sha256"),
+                   staged_loader))
+        if for_fresh_rebuild:
             source = os.path.join(
                 root, "build", "bpf-negative", "src", name,
                 "ebpf", "src", "copy.rs")
