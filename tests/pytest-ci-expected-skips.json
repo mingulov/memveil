@@ -52,6 +52,11 @@
       "reason": "needs build/bpf objects"
     },
     {
+      "count": 1,
+      "id": "tests/vm/test_lateattach.py",
+      "reason": "lateattach armed run needs MEMVEIL_VM_LATEATTACH=1"
+    },
+    {
       "count": 15,
       "id": "tests/vm/test_mint_record3.py",
       "reason": "needs built lifecycle/copy objects"

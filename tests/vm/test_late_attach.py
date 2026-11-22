@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Late-attach VM gate: a held mapping across attach, plus control.
 
+SUPERSEDED by tests/vm/test_lateattach.py (ported late-attach
+gate on the sealed consumer inputs). The judges below stay the
+verdict source of record and are imported verbatim by the port;
+only the retired armed path (token-less boot, --bridge guest
+contract) is superseded.
+
 Standalone runner (no lane wiring). Unarmed, it self-tests the
 harness logic against mock fixtures: a good late-attach pair
 must pass and five targeted mutations (missed held release,

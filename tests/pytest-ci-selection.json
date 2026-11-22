@@ -82,6 +82,7 @@
     "tests/vm/test_kernel_matrix.py",
     "tests/vm/test_kernel_matrix_load.py",
     "tests/vm/test_kernel_scenarios.py",
+    "tests/vm/test_lateattach.py",
     "tests/vm/test_live_soak.py",
     "tests/vm/test_mint_record3.py",
     "tests/vm/test_oracle_ledger.py",

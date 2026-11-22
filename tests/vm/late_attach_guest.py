@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Late-attach gate guest flow: a held mapping across attach.
 
+SUPERSEDED by tests/vm/lateattach_guest.py (ported guest flow
+driving the sealed consumer with its real CLI). The phase
+choreography below stays the contract of record and is
+replicated step for step by the port.
+
 Runs as root inside the virtme-ng guest (one boot, two phases).
 
 Phase A (late attach): the oracle module runs its scripted
