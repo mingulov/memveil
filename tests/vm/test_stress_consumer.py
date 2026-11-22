@@ -37,6 +37,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -65,6 +66,20 @@ ARM_ENV = "MEMVEIL_VM_STRESS"
 EXPORT_NAMES = stress_guest.export_names_for_mode("full")
 EXPORT_NAMES_Q3 = stress_guest.export_names_for_mode("q3")
 
+# Guest kernel parameters past vng's own. log_buf_len=2M
+# sizes the printk ring for the overlap phase: the
+# 2000-op script emits ~8000 oracle records (on the order
+# of 440 KiB of text plus per-record ring overhead), and
+# the phase snapshot reads the ring only at phase end, so
+# the default 256 KiB ring wraps mid-phase and the head
+# ops are lost before the snapshot. 2 MiB holds the phase
+# several times over (see self_test_oracle_capacity); the
+# guest refuses below a 1 MiB floor.
+GUEST_APPEND_BASE = "swiotlb=force"
+GUEST_APPEND_EXTRA = " log_buf_len=2M"
+GUEST_APPEND = GUEST_APPEND_BASE + GUEST_APPEND_EXTRA
+GUEST_RING_BYTES = 2 << 20
+
 # Guest command-line budget. vng base64-encodes the whole
 # --exec payload into virtme.exec= on the guest kernel
 # command line, so the projected total is the fixed vng
@@ -79,12 +94,15 @@ EXPORT_NAMES_Q3 = stress_guest.export_names_for_mode("q3")
 # payload lengths 1..1939; the tagless --run shape
 # measures 532, smaller and covered. The fixed part
 # embeds host paths (cwd, home), so it shifts with the
-# user and install locations; the constant below covers
-# the verbose shape plus that variance. The exec budget
-# is the largest payload with 768 + 4*ceil(n/3) <= 2048.
+# user and install locations; the 768 below covers the
+# verbose shape plus that variance with the bare base
+# append. The longer append lands verbatim on the kernel
+# command line, so each added char costs exactly one char
+# of budget. The exec budget is the largest payload with
+# 783 + 4*ceil(n/3) <= 2048.
 COMMAND_LINE_SIZE = 2048
-VNG_CMDLINE_OVERHEAD = 768
-GUEST_EXEC_BUDGET = 960
+VNG_CMDLINE_OVERHEAD = 768 + len(GUEST_APPEND_EXTRA)
+GUEST_EXEC_BUDGET = 948
 # Real-mode guest argvs must project this far under the
 # ceiling, so ordinary argv growth trips the offline test
 # before it trips the kernel.
@@ -3379,11 +3397,13 @@ def self_test_cmdline_budget(tmp):
     from types import SimpleNamespace
     ok = True
     ok = check("budget-arithmetic",
-               project_cmdline_total(GUEST_EXEC_BUDGET)
-               == COMMAND_LINE_SIZE
+               VNG_CMDLINE_OVERHEAD == 783
+               and GUEST_EXEC_BUDGET == 948
+               and project_cmdline_total(GUEST_EXEC_BUDGET)
+               == COMMAND_LINE_SIZE - 1
                and project_cmdline_total(
                    GUEST_EXEC_BUDGET + 1)
-               == COMMAND_LINE_SIZE + 4) and ok
+               == COMMAND_LINE_SIZE + 3) and ok
     for length, want in ((0, False),
                          (GUEST_EXEC_BUDGET - 1, False),
                          (GUEST_EXEC_BUDGET, False),
@@ -3460,6 +3480,203 @@ def self_test_cmdline_budget(tmp):
                and str(GUEST_EXEC_BUDGET) in out,
                "%s | %s" % (out.strip()[-160:],
                              boot_detail)) and ok
+    return ok
+
+
+def oracle_phase_records(nops, lifetime="7"):
+    """Full standard-script oracle emission, oldest first.
+
+    Unlike write_oracle_log (a judge fixture with grouped
+    releases), this mirrors the module's emission order:
+    each op attempts, succeeds, and syncs (op 1 twice),
+    then releases inline except the last op, which stays
+    held-open until the exit release; the stale unload
+    tail of the previous phase leads. Lifetimes are the
+    only free shape: callers pin them per bound (a single
+    digit for the lower bound, ten for the upper).
+    """
+    from consume import LC_SIZES
+    records = ["mv-oracle: unloaded"]
+    for i in range(nops):
+        size = LC_SIZES[i % len(LC_SIZES)]
+        direction = 2 if i % 2 else 1
+        records.append("mv-oracle: op=%d attempt requested=%d "
+                       "forced=0" % (i, size))
+        records.append("mv-oracle: op=%d outcome=success "
+                       "mapping=%d mapped=%d" % (i, i, size))
+        syncs = 2 if i == 1 else 1
+        for _ in range(syncs):
+            records.append("mv-oracle: op=%d mapping=%d sync "
+                           "dir=%d len=%d for=device"
+                           % (i, i, direction, size))
+        if i == nops - 1:
+            records.append("mv-oracle: op=%d mapping=%d "
+                           "held-open" % (i, i))
+            continue
+        records.append("mv-oracle: mapping=%d release "
+                       "lifetime_ns=%s" % (i, lifetime))
+    records.append("mv-oracle: script complete ops=%d"
+                   % nops)
+    records.append("mv-oracle: op=%d mapping=%d exit-release"
+                   % (nops - 1, nops - 1))
+    records.append("mv-oracle: mapping=%d release "
+                   "lifetime_ns=%s" % (nops - 1, lifetime))
+    return records
+
+
+def ring_retain(records, capacity, overhead):
+    """Oldest-first byte-FIFO keep: the printk ring evicts
+    the oldest records first, so an end-of-phase snapshot
+    holds a tail of the phase."""
+    keep = []
+    used = 0
+    for record in reversed(records):
+        need = len(record) + overhead
+        if used + need > capacity:
+            break
+        keep.append(record)
+        used += need
+    keep.reverse()
+    return keep, used
+
+
+def write_oracle_snapshot(path, records):
+    """Snapshot file through the guest filter shape: dmesg
+    lines kept only when they carry mv-oracle:."""
+    with open(path, "w") as handle:
+        for lineno, record in enumerate(records):
+            if "mv-oracle:" in record:
+                handle.write("[%10.6f] %s\n"
+                             % (150.0 + lineno * 0.01, record))
+
+
+def self_test_oracle_capacity(tmp):
+    """The guest ring holds a full overlap phase with margin."""
+    ok = True
+    # The runner sizes the ring on the guest command line,
+    # keeping the base token the guest requires.
+    ok = check("capacity-append",
+               GUEST_APPEND == GUEST_APPEND_BASE + GUEST_APPEND_EXTRA
+               and GUEST_APPEND.split()
+               == ["swiotlb=force", "log_buf_len=2M"]) and ok
+    # Both boot shapes append it verbatim.
+    for kver in ("v7.0.14", ""):
+        argv = build_vng_argv({"prefix": ["vng"], "harness": {}},
+                             "/tmp/x", "exec payload", kver)
+        try:
+            appended = argv[argv.index("--append") + 1]
+        except (ValueError, IndexError):
+            appended = None
+        ok = check("capacity-argv-%s" % (kver or "bare"),
+                   appended == GUEST_APPEND,
+                   "%r" % (argv,)) and ok
+    # The byte constant matches the appended size through
+    # the guest's own parser (which also proves the parser
+    # accepts the exact value the runner emits).
+    try:
+        size = stress_guest.parse_mem_size(
+            GUEST_APPEND.split("log_buf_len=")[1].split()[0])
+    except (IndexError, ValueError):
+        size = None
+    ok = check("capacity-size",
+               size == GUEST_RING_BYTES == 2 << 20,
+               "%r" % (size,)) and ok
+    # The old 256 KiB ring cannot hold the phase: even with
+    # zero per-record overhead and single-digit lifetimes,
+    # the oracle text alone overflows it.
+    floor_text = sum(len(record)
+                     for record in oracle_phase_records(2000))
+    ok = check("capacity-old-ring-wraps",
+               floor_text > 1 << 18,
+               "%d" % floor_text) and ok
+    # The new ring holds the phase twice over at hostile
+    # widths: ten-digit lifetimes, 24 bytes of per-record
+    # ring overhead, and 4 KiB of non-oracle noise.
+    wide = oracle_phase_records(2000, lifetime="1234567890")
+    resident = (sum(len(record) for record in wide)
+                + len(wide) * 24 + 4096)
+    ok = check("capacity-margin",
+               2 * resident <= GUEST_RING_BYTES,
+               "%d resident of %d"
+               % (resident, GUEST_RING_BYTES)) and ok
+    # End to end through the real host parser: the staged
+    # snapshot off the new ring covers every op, while the
+    # same phase off the old ring loses its head.
+    new_path = os.path.join(tmp, "capacity-new-oracle.log")
+    write_oracle_snapshot(new_path,
+                          ring_retain(wide, GUEST_RING_BYTES,
+                                      24)[0])
+    ops, releases, complete = parse_oracle_log(new_path)
+    ok = check("capacity-full-coverage",
+               sorted(ops) == list(range(2000))
+               and len(releases) == 2000 and complete == 2000,
+               "ops=%d releases=%d complete=%r"
+               % (len(ops), len(releases), complete)) and ok
+    old_path = os.path.join(tmp, "capacity-old-oracle.log")
+    write_oracle_snapshot(old_path,
+                          ring_retain(
+                              oracle_phase_records(2000),
+                              1 << 18, 0)[0])
+    old_ops, _, _ = parse_oracle_log(old_path)
+    ok = check("capacity-old-ring-loses-head",
+               bool(old_ops)
+               and sorted(old_ops) != list(range(2000))
+               and min(old_ops) > 0,
+               "ops=%d first=%d" % (len(old_ops),
+                                    min(old_ops)
+                                    if old_ops else -1)) and ok
+    # Envelope tripwire: no stress phase may outgrow the
+    # sized ring without re-deriving it.
+    guest_src = open(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "stress-consumer", "stress_guest.py")).read()
+    seen = [int(value) for value in
+            re.findall(r"mv_oracle_ops=(\d+)", guest_src)]
+    ok = check("capacity-ops-ceiling",
+               bool(seen) and max(seen) <= 2000,
+               "%r" % (seen,)) and ok
+    # The guest floor parser: exact sizes pass at or above
+    # 1 MiB with last-token-wins, values below the floor
+    # parse short, and absent or malformed values refuse.
+    floor = stress_guest.MIN_LOG_BUF_BYTES
+    ok = check("capacity-floor-pin", floor == 1 << 20,
+               "%r" % (floor,)) and ok
+    for idx, (text, want) in enumerate((
+            ("swiotlb=force log_buf_len=2M", 2 << 20),
+            ("log_buf_len=1M", 1 << 20),
+            ("log_buf_len=2048K", 2 << 20),
+            ("log_buf_len=2097152", 2097152),
+            ("log_buf_len=1M log_buf_len=2M", 2 << 20),
+            ("log_buf_len=1G", 1 << 30))):
+        try:
+            got = stress_guest.log_buf_bytes(text)
+        except ValueError:
+            got = None
+        ok = check("capacity-floor-accept-%d" % idx,
+                   got == want and got >= floor,
+                   "%r -> %r" % (text, got)) and ok
+    for idx, text in enumerate(
+            ("swiotlb=force", "", "log_buf_len=",
+             "log_buf_len=2X", "log_buf_len=-3",
+             "log_buf_len=2M=3")):
+        try:
+            got = stress_guest.log_buf_bytes(text)
+        except ValueError:
+            got = None
+        ok = check("capacity-floor-refuse-%d" % idx,
+                   got is None,
+                   "%r -> %r" % (text, got)) and ok
+    for idx, (text, want) in enumerate((
+            ("log_buf_len=256K", 1 << 18),
+            ("log_buf_len=0", 0),
+            ("log_buf_len=999999", 999999))):
+        try:
+            got = stress_guest.log_buf_bytes(text)
+        except ValueError:
+            got = None
+        ok = check("capacity-floor-short-%d" % idx,
+                   got == want and got < floor,
+                   "%r -> %r" % (text, got)) and ok
     return ok
 
 
@@ -4199,6 +4416,7 @@ def run_self_test(work=None):
         ok = self_test_full_mode(tmp) and ok
         ok = self_test_guest_argv() and ok
         ok = self_test_cmdline_budget(tmp) and ok
+        ok = self_test_oracle_capacity(tmp) and ok
         ok = self_test_inputs_binding(tmp) and ok
         ok = self_test_receipt_drift(tmp) and ok
         ok = self_test_console_capture(tmp) and ok
@@ -4744,7 +4962,7 @@ def build_vng_argv(flight, export, exec_str, kver):
     if kver:
         cmd += [kver]
     cmd += ["-m", "6G",
-            "--append", "swiotlb=force", "--verbose",
+            "--append", GUEST_APPEND, "--verbose",
             "--rwdir=/tmp/export=%s" % (export,),
             "--exec", exec_str]
     return cmd

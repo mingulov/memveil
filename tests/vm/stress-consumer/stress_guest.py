@@ -64,6 +64,18 @@ LC_SIZES = (512, 1024, 2048, 4096)
 # any fixture setup and re-checked by the host judge.
 EXPECT_RELEASE = "7.0.14-070014-generic"
 
+# Smallest printk ring this flow runs on. The overlap phase
+# emits 2000 scripted oracle ops (~8000 records, on the
+# order of 440 KiB of text plus per-record ring overhead;
+# see run_phase2 and the standard script in
+# tests/kernel/memveil_dma_oracle.c), and the phase
+# snapshot reads the ring only at phase end, so a 256 KiB
+# ring wraps mid-phase and the head ops are lost before
+# the snapshot. The host sizes the ring above this floor;
+# the guest refuses below it rather than run a phase whose
+# oracle evidence cannot survive to the snapshot.
+MIN_LOG_BUF_BYTES = 1 << 20
+
 # Guest modes; each boot runs exactly one, named by the
 # staged inputs doc the host binds in the run manifest.
 MODES = ("full", "q3")
@@ -113,6 +125,40 @@ def fail(msg):
     """Abort the guest flow; the host judges this failed."""
     print("stress-guest: FAIL: %s" % msg, file=sys.stderr)
     sys.exit(1)
+
+
+def parse_mem_size(text):
+    """Kernel-memparse subset: decimal bytes, K/M/G/T suffix.
+
+    Anything outside that shape raises ValueError so the
+    caller refuses rather than runs on an unknown ring
+    size. Every accepted shape parses identically under
+    the kernel's own memparse, so an accepted value is
+    always the size the kernel applies.
+    """
+    match = re.match(r"^([0-9]+)([KkMmGgTt])?$", text.strip())
+    if not match:
+        raise ValueError("bad memory size %r" % text)
+    value = int(match.group(1))
+    suffix = (match.group(2) or "").upper()
+    return value * {"": 1, "K": 1 << 10, "M": 1 << 20,
+                    "G": 1 << 30, "T": 1 << 40}[suffix]
+
+
+def log_buf_bytes(cmdline):
+    """log_buf_len in effect on this kernel command line.
+
+    Later tokens win, matching the kernel's own parameter
+    parsing. Raises ValueError when the parameter is absent
+    or malformed.
+    """
+    value = None
+    for token in cmdline.split():
+        if token.startswith("log_buf_len="):
+            value = parse_mem_size(token.split("=", 1)[1])
+    if value is None:
+        raise ValueError("no log_buf_len on the command line")
+    return value
 
 
 def parse_guest_inputs(export_dir, name):
@@ -628,8 +674,16 @@ class Gate:
         if os.path.exists("/sys/module/scsi_debug"):
             fail("scsi_debug already exists; no fixture ownership")
         with open("/proc/cmdline") as handle:
-            if "swiotlb=force" not in handle.read():
-                fail("guest lacks swiotlb=force")
+            cmdline = handle.read()
+        if "swiotlb=force" not in cmdline:
+            fail("guest lacks swiotlb=force")
+        try:
+            ring = log_buf_bytes(cmdline)
+        except ValueError:
+            fail("guest lacks log_buf_len for phase oracle logs")
+        if ring < MIN_LOG_BUF_BYTES:
+            fail("guest log_buf_len %d below %d"
+                 % (ring, MIN_LOG_BUF_BYTES))
         self.marker("boot", "ok", {"release": EXPECT_RELEASE,
                                    "mode": self.mode})
         self.verify_inputs()
