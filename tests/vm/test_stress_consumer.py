@@ -3639,6 +3639,246 @@ def self_test_inputs_binding(tmp):
     return ok
 
 
+def self_test_receipt_drift(tmp):
+    """Receipt-time manifest must still equal the judged snapshot."""
+    from types import SimpleNamespace
+    import contextlib
+    import vm_process
+    ok = True
+    manifest = {
+        "runner_commit": "self-test",
+        "consumer": {"binary_sha256": "self-test"},
+        "oracle": {"ko_sha256": guest_oracle.KO_SHA256},
+        "guest_inputs": {
+            "full": {"file": core.GUEST_INPUTS_FILE,
+                     "sha256": "a" * 64},
+            "q3": {"file": core.GUEST_INPUTS_FILE,
+                   "sha256": "b" * 64},
+        },
+    }
+    manifest_path = os.path.join(tmp, "drift-inputs.json")
+
+    def rewrite(doc):
+        with open(manifest_path, "w") as handle:
+            handle.write(json.dumps(doc, indent=2,
+                                    sort_keys=True) + "\n")
+
+    rewrite(manifest)
+    ok = check("receipt-drift-clean",
+               check_manifest_receipt_drift(
+                   manifest_path, manifest, "full")
+               == []) and ok
+    # A post-judgment mutation of the selected mode's
+    # digest refuses and names the drifted fields.
+    mutated = json.loads(json.dumps(manifest))
+    mutated["guest_inputs"]["full"]["sha256"] = "0" * 64
+    rewrite(mutated)
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "full")
+    ok = check("receipt-drift-digest",
+               len(bad) == 1 and "drifted" in bad[0]
+               and "guest_inputs" in bad[0],
+               "; ".join(bad)) and ok
+    # Drift confined to the other mode's entry still
+    # refuses: the receipt retains the whole manifest,
+    # so the compare covers the whole snapshot.
+    mutated = json.loads(json.dumps(manifest))
+    mutated["guest_inputs"]["q3"]["sha256"] = "0" * 64
+    rewrite(mutated)
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "full")
+    ok = check("receipt-drift-other-mode",
+               len(bad) == 1 and "drifted" in bad[0],
+               "; ".join(bad)) and ok
+    # A non-digest field mutation refuses the same way.
+    mutated = json.loads(json.dumps(manifest))
+    mutated["runner_commit"] = "drifted-commit"
+    rewrite(mutated)
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "full")
+    ok = check("receipt-drift-field",
+               len(bad) == 1 and "drifted" in bad[0]
+               and "runner_commit" in bad[0],
+               "; ".join(bad)) and ok
+    bad = check_manifest_receipt_drift(
+        os.path.join(tmp, "drift-missing.json"),
+        manifest, "full")
+    ok = check("receipt-drift-unreadable",
+               len(bad) == 1 and "unreadable" in bad[0],
+               "; ".join(bad)) and ok
+    with open(manifest_path, "w") as handle:
+        handle.write("[1, 2]\n")
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "full")
+    ok = check("receipt-drift-shape",
+               len(bad) == 1 and "not a mapping" in bad[0],
+               "; ".join(bad)) and ok
+    # Path level, both modes: honest evidence judges
+    # PASS with byte-identical receipts, while a
+    # post-judgment on-disk mutation refuses before
+    # any receipt is stamped. The stub guest parses
+    # the bound doc, then drifts the on-disk digest.
+    for mode in core.MODES:
+        synth = (synth_q3_leg if mode == "q3"
+                 else synth_full_leg)
+        names = (EXPORT_NAMES_Q3 if mode == "q3"
+                 else EXPORT_NAMES)
+        case = os.path.join(tmp, "drift-%s" % mode)
+        os.makedirs(case)
+        files = {}
+        files.update(synth(case, "baseline"))
+        files.update(synth(case, "c9"))
+        staged = b'{"mode": "%s"}\n' % mode.encode()
+        digest = hashlib.sha256(staged).hexdigest()
+        blob = {name: path.read_bytes()
+                for name, path in files.items()}
+        if mode == "full":
+            for leg in ("baseline", "c9"):
+                blob["%s-bpftrace.stderr" % leg] = b"empty\n"
+        blob["progress.log"] = b'{"step": "boot"}\n'
+        blob["identity.json"] = (json.dumps(
+            {"release": core.EXPECT_RELEASE,
+             "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
+             "digests": {"ko": guest_oracle.KO_SHA256}})
+            + "\n").encode()
+        blob["input-verify.json"] = (json.dumps(
+            {"mode": mode,
+             "guest_inputs_file": core.GUEST_INPUTS_FILE,
+             "guest_inputs_sha256": digest}) + "\n").encode()
+        judged = {
+            "runner_commit": "self-test",
+            "consumer": {"binary_sha256": "self-test"},
+            "oracle": {"ko_sha256":
+                       guest_oracle.KO_SHA256},
+            "guest_inputs": {
+                "full": {
+                    "file": core.GUEST_INPUTS_FILE,
+                    "sha256": (digest if mode == "full"
+                               else "f" * 64)},
+                "q3": {
+                    "file": core.GUEST_INPUTS_FILE,
+                    "sha256": (digest if mode == "q3"
+                               else "3" * 64)},
+            },
+        }
+        disk_path = os.path.join(case, "inputs.json")
+        with open(disk_path, "w") as handle:
+            handle.write(json.dumps(judged, indent=2,
+                                    sort_keys=True) + "\n")
+        staged_path = os.path.join(case, "staged.json")
+        with open(staged_path, "wb") as handle:
+            handle.write(staged)
+        mutate = []
+
+        def stub(cmd, timeout=None):
+            export = [arg.split("=", 2)[-1] for arg in cmd
+                      if arg.startswith(
+                          "--rwdir=/tmp/export=")][0]
+            seen = sha_file(os.path.join(
+                export, core.GUEST_INPUTS_FILE))
+            if seen != digest:
+                return SimpleNamespace(
+                    stdout="", stderr="tampered inputs\n",
+                    returncode=1)
+            if mutate:
+                disk = json.loads(open(disk_path).read())
+                disk["guest_inputs"][mode]["sha256"] = \
+                    "0" * 64
+                with open(disk_path, "w") as handle:
+                    handle.write(json.dumps(
+                        disk, indent=2, sort_keys=True)
+                        + "\n")
+            for name in names:
+                with open(os.path.join(export, name),
+                          "wb") as handle:
+                    handle.write(blob[name])
+                sidecar = sha_file(os.path.join(export,
+                                                name))
+                with open(os.path.join(export,
+                                       name + ".sha256"),
+                          "w") as handle:
+                    handle.write("%s  %s\n" % (sidecar,
+                                               name))
+            return SimpleNamespace(
+                stdout="guest out\n",
+                stderr="guest console\n", returncode=0)
+
+        saved_guest = vm_process.run_owned_guest
+        vm_process.run_owned_guest = stub
+        try:
+            logged = io.StringIO()
+            with contextlib.redirect_stdout(logged):
+                rc = armed_boot(
+                    SimpleNamespace(
+                        mode=mode, keep=False, kver="",
+                        timeout=30,
+                        out=os.path.join(case, "out")),
+                    disk_path, judged, staged_path,
+                    {"prefix": ["vng"], "harness": {}})
+        finally:
+            vm_process.run_owned_guest = saved_guest
+        receipt = os.path.join(case, "out",
+                               "host-verdict.json")
+        honest = rc == 0
+        detail = "rc=%r" % (rc,)
+        if honest:
+            try:
+                kept = json.loads(open(os.path.join(
+                    case, "out", "inputs.json")).read())
+                pinned = sha_file(os.path.join(
+                    case, "out",
+                    "host-guest-inputs.json"))
+                kept_raw = open(os.path.join(
+                    case, "out", "inputs.json"),
+                    "rb").read()
+                disk_raw = open(disk_path, "rb").read()
+                honest = (
+                    json.loads(open(receipt).read())[
+                        "verdict"] == "PASS"
+                    and kept == judged
+                    and kept_raw == disk_raw
+                    and pinned == digest)
+                detail = "rc=0 pinned=%s" % pinned[:16]
+            except (OSError, ValueError, KeyError) as exc:
+                honest = False
+                detail = str(exc)[:160]
+        ok = check("receipt-drift-%s-honest" % mode,
+                   honest, detail) and ok
+        mutate.append(True)
+        saved_guest = vm_process.run_owned_guest
+        vm_process.run_owned_guest = stub
+        try:
+            logged = io.StringIO()
+            with contextlib.redirect_stdout(logged):
+                rc = armed_boot(
+                    SimpleNamespace(
+                        mode=mode, keep=False, kver="",
+                        timeout=30,
+                        out=os.path.join(case,
+                                         "out-drift")),
+                    disk_path, judged, staged_path,
+                    {"prefix": ["vng"], "harness": {}})
+        finally:
+            vm_process.run_owned_guest = saved_guest
+        logged_text = logged.getvalue()
+        kept = logged_text.rsplit("kept at ", 1)[1].strip() \
+            if "kept at " in logged_text else ""
+        refused = (
+            rc == 1 and "drifted" in logged_text
+            and "guest_inputs" in logged_text
+            and not os.path.exists(os.path.join(
+                case, "out-drift"))
+            and kept and os.path.isdir(kept))
+        lines = logged_text.strip().splitlines()
+        detail = lines[-1][:160] if lines \
+            else "rc=%r" % (rc,)
+        if kept:
+            shutil.rmtree(kept, ignore_errors=True)
+        ok = check("receipt-drift-%s-refuses" % mode,
+                   refused, detail) and ok
+    return ok
+
+
 def self_test_console_capture(tmp):
     """Boots stay verbose and transcripts land in receipts."""
     ok = True
@@ -3743,6 +3983,7 @@ def run_self_test(work=None):
         ok = self_test_guest_argv() and ok
         ok = self_test_cmdline_budget(tmp) and ok
         ok = self_test_inputs_binding(tmp) and ok
+        ok = self_test_receipt_drift(tmp) and ok
         ok = self_test_console_capture(tmp) and ok
         if pairs is not None:
             ok = self_test_guest_inputs(tmp, pairs) and ok
@@ -4332,6 +4573,32 @@ def check_guest_inputs_binding(files, mode, manifest, export):
     return sorted(bad)
 
 
+def check_manifest_receipt_drift(manifest_path, manifest, mode):
+    """Refuse when the on-disk manifest drifts from the judged one.
+
+    Returns a reason list (empty ok): the receipt path
+    retains the on-disk manifest file, so a post-judgment
+    mutation would stamp evidence the host never judged.
+    The re-read must match the in-memory snapshot exactly.
+    """
+    try:
+        with open(manifest_path) as handle:
+            disk = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return ["%s: receipt manifest unreadable: %s"
+                % (mode, exc)]
+    if isinstance(disk, dict) and disk == manifest:
+        return []
+    if isinstance(disk, dict):
+        keys = sorted(key for key in set(disk) | set(manifest)
+                      if disk.get(key) != manifest.get(key))
+        detail = "fields %s" % (", ".join(keys),)
+    else:
+        detail = "top level is not a mapping"
+    return ["%s: on-disk inputs manifest drifted from the "
+            "judged snapshot (%s)" % (mode, detail)]
+
+
 def save_stress_receipts(out, names, tmp, export, files,
                          manifest_path, verdict):
     """Copy one boot receipt set; raises OSError on failure.
@@ -4467,6 +4734,12 @@ def armed_boot(args, manifest_path, manifest, staged_inputs,
                + cmp_reasons)
     host_verdict = "PASS" if verdict == "PASS" and not reasons else (
         "BLOCKED" if verdict == "BLOCKED" else "FAIL")
+    drift_bad = check_manifest_receipt_drift(
+        manifest_path, manifest, mode)
+    if drift_bad:
+        print("FAIL vm-stress: %s; artifacts kept at %s"
+              % ("; ".join(drift_bad), tmp))
+        return 1
     out = Path(args.out)
     try:
         save_stress_receipts(
@@ -4511,6 +4784,12 @@ def judge_q3_receipt(args, manifest_path, manifest, verified,
                + ["baseline: %s" % r for r in base_bad]
                + ["c9: %s" % r for r in c9_bad])
     host_verdict = "PASS" if not reasons else "FAIL"
+    drift_bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "q3")
+    if drift_bad:
+        print("FAIL vm-stress: %s; artifacts kept at %s"
+              % ("; ".join(drift_bad), tmp))
+        return 1
     out = Path(args.out)
     try:
         save_stress_receipts(
