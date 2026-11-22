@@ -15,7 +15,7 @@ re-verifies the late-attach input manifest. The object
 supply points are shared with the battery core: the seal
 pins live in exactly one pin file
 (tests/vm/stress-consumer/stress_core.py C9_* plus the
-battery profile/guest pins), so the C10 re-pin is a
+battery profile/guest pins), so the re-pin at seal is a
 pin-file change there, documented in the port report.
 All judging stays with the kept late-attach judges
 (tests/vm/test_late_attach.py), imported verbatim by the

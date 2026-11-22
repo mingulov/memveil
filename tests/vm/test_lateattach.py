@@ -4,7 +4,7 @@
 
 The retired late-attach harness (tests/vm/test_late_attach.py)
 drove a consumer contract with no surviving producer
-(--bridge argv the R98 consumer rejects, an ASCII bridge
+(--bridge argv the sealed consumer rejects, an ASCII bridge
 fixture, unstaged build inputs) and booted the host kernel
 instead of the pinned guest. This runner ports the gate to
 the battery precedent: a new guest flow
@@ -1939,4 +1939,3 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
-
