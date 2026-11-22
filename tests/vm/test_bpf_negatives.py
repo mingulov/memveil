@@ -58,25 +58,51 @@ def test_manifest_roundtrip(built, tmp_path):
 
 
 def test_committed_manifest_verifies(built):
-    """The committed manifest (when present) verifies."""
+    """The committed manifest (when present) verifies rebuilt.
+
+    Byte shas move under fresh rebuilds (checkout-derived
+    codegen metadata; BTF line info moves with source
+    lines), so the committed manifest verifies in
+    fresh-rebuild mode: staged mutant sources plus pins,
+    recipe, baseline, and candidate must match, while the
+    byte shas bind staged copies of one build only.
+    """
     root, _, _ = built
     path = producer.manifest_path()
     if not os.path.isfile(path):
         pytest.skip("no committed run-input-manifest.json")
-    assert producer.verify_manifest(root, path) == []
+    assert producer.verify_manifest(
+        root, path, for_fresh_rebuild=True) == []
 
 
 def test_base_reproduction(built, tmp_path):
-    """Positive control: the recipe reproduces baseline bytes."""
+    """Positive control: the recipe reproduces baseline behavior.
+
+    Full bytes are checkout- and line-sensitive (codegen
+    metadata, BTF line info), so the control pins the
+    committed fixture to BASELINE_COPY_SHA256 and compares a
+    fresh base rebuild against the fixture the way the
+    path-confinement leg does: identical behavior sections
+    plus an identical loader-parse judgment.
+    """
     root, _, _ = built
+    fixture = proof.base_object(root)
+    assert producer.sha_file(fixture) == \
+        producer.BASELINE_COPY_SHA256
     out = str(tmp_path / "swiotlb_copy.bpf.o")
-    sha = producer.build_base_object(root, out)
-    assert sha == producer.BASELINE_COPY_SHA256
-    with open(out, "rb") as handle:
-        rebuilt = handle.read()
-    with open(proof.base_object(root), "rb") as handle:
-        fixture = handle.read()
-    assert rebuilt == fixture
+    producer.build_base_object(root, out)
+    want = proof.elf_sections(fixture)
+    got = proof.elf_sections(out)
+    sections = [section for _, section in
+                proof.BOUNCE + proof.SYNC]
+    sections += [".rel" + section for section in sections]
+    sections += ["maps", "license", "memveil_channel",
+                 ".text"]
+    for section in sections:
+        assert got.get(section) == want.get(section), \
+            section
+    judgments = proof.oracle_judgment(root, [fixture, out])
+    assert judgments[out] == judgments[fixture]
 
 
 def test_loader_core_path_stable(built, tmp_path):

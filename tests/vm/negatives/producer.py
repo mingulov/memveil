@@ -55,8 +55,8 @@ BPF_LINKER_VERSION = "0.10.4"
 # the candidate tree and this checkout).
 PINNED_INPUTS = {
     "crates/ebpf/src/copy.rs":
-        "15c172bb367e01dddca79627abdc1a04b20997708db7607c"
-        "2e2a1065fea0874c",
+        "6c7998afb28959dbfa6db59dabb049a96b7005bf91c24fb9"
+        "057f70a765edcfdd",
     "crates/ebpf/src/common.rs":
         "0afe3e06394ce50099848b596776fbbcb412fa4f22ea6ef"
         "2f4dff9b1a427e62a",
@@ -64,8 +64,8 @@ PINNED_INPUTS = {
         "ff66d753570934d2edc3f5610abfb085246d45a005f6a919"
         "9462e03a93914db1",
     "crates/ebpf/Cargo.toml":
-        "de92ede0a3ebf122fb2e3c8826f484d9693c155a3fce49725"
-        "b2634b96e77599a",
+        "0bac8479a9f8c3a0bcf214807a724619c0a10202a798cdd2"
+        "cbf7d4d19841199d",
     "crates/ebpf/Cargo.lock":
         "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b"
         "066ef8bb432f5ea8",
@@ -73,8 +73,8 @@ PINNED_INPUTS = {
         "657c8d393a73b47d61d0cde44129f255f73fdc5d72d115830"
         "d7ecd1ca0f51c63",
     "crates/ebpf-common/src/lib.rs":
-        "6ac1489e17b2197bedf3db824725da93f9f76c63d35b5fb29"
-        "088c8f0673fecdc",
+        "69f15fe6b112ef87a2a9ce85dd8719b88bb23ccde5cc378a"
+        "bef020e8a3c4bd2b",
     "crates/ebpf-common/Cargo.toml":
         "e59200948711141d02dd44718c9e00bceee5cd3c7ffd22077"
         "5af9b70ba0d19e8",
@@ -83,12 +83,20 @@ PINNED_INPUTS = {
         "3b53f75d80ba40e",
 }
 
-# Baseline copy bytes the candidate manifest binds
-# (`bpf/swiotlb_copy.bpf.o`): a base rebuild must reproduce
-# these exactly, and every mutant is one delta away.
+# Full sha256 of the committed baseline fixture
+# (`tests/vm/fixtures/aya/swiotlb_copy.bpf.o`): the fixture
+# tracks the sealed bytes (currently the 39f4a227 seal's
+# copy object), and the reproduction control pins it to
+# this digest. A fresh base rebuild is compared against the
+# fixture's behavior bytes (see the test), not full bytes:
+# full bytes move with the checkout path (codegen metadata)
+# and with source lines (BTF line info), so byte-identity
+# only binds staged copies of one build. (The previous value
+# bound the superseded ac2503a3 seal's bytes; the candidate
+# record below keeps that qualified history.)
 BASELINE_COPY_SHA256 = (
-    "526a6726e24f7725a0e88e28d6994f0475a1589c3de10c7e"
-    "bef703a03dfa73e8"
+    "29959dcbf9cc4cb40b9813cddf686d4118b0528f29a8edec0"
+    "70504e1265350f8"
 )
 
 # Full candidate manifest digest (sha256 of the qualified
@@ -542,12 +550,19 @@ def write_manifest(root, versions, shas, mutant_src, path=None):
     return path
 
 
-def verify_manifest(root, path):
+def verify_manifest(root, path, for_fresh_rebuild=False):
     """Check a manifest against staged bytes and pins.
 
     Returns a list of problems (empty when it verifies):
     every name present with the staged sha256, pins current,
-    baseline and candidate references exact.
+    baseline and candidate references exact. When
+    for_fresh_rebuild is true, the byte shas (sha256 and
+    loader_sha256) are not compared: a fresh rebuild moves
+    them (checkout-derived codegen metadata; BTF line info
+    moves with source lines), so the staged mutant SOURCES
+    are compared against mutant_source_sha256 instead, with
+    every other check unchanged. Staged copies of one build
+    must verify with the default strict comparison.
     """
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -576,21 +591,41 @@ def verify_manifest(root, path):
         except OSError:
             problems.append("%s: staged bytes missing" % name)
             continue
-        if entry.get("sha256") != staged_sha:
-            problems.append("%s: manifest %.16s, staged %.16s"
-                            % (name, entry.get("sha256"),
-                               staged_sha))
+        if not for_fresh_rebuild:
+            if entry.get("sha256") != staged_sha:
+                problems.append(
+                    "%s: manifest %.16s, staged %.16s"
+                    % (name, entry.get("sha256"), staged_sha))
         try:
             staged_loader = loader_sha256_of(staged)
         except (OSError, ValueError) as exc:
             problems.append("%s: loader sha unreadable: %s"
                             % (name, exc))
             continue
-        if entry.get("loader_sha256") != staged_loader:
-            problems.append("%s: loader manifest %.16s, "
-                            "staged %.16s"
-                            % (name, entry.get("loader_sha256"),
-                               staged_loader))
+        if not for_fresh_rebuild:
+            if entry.get("loader_sha256") != staged_loader:
+                problems.append(
+                    "%s: loader manifest %.16s, staged %.16s"
+                    % (name, entry.get("loader_sha256"),
+                       staged_loader))
+        else:
+            source = os.path.join(
+                root, "build", "bpf-negative", "src", name,
+                "ebpf", "src", "copy.rs")
+            try:
+                staged_src = sha_file(source)
+            except OSError:
+                problems.append("%s: staged sources missing"
+                                % name)
+            else:
+                if entry.get("mutant_source_sha256") != \
+                        staged_src:
+                    problems.append(
+                        "%s: source manifest %.16s, staged "
+                        "%.16s"
+                        % (name,
+                           entry.get("mutant_source_sha256"),
+                           staged_src))
     pins = manifest.get("pins", {})
     for key, want in (("nightly", NIGHTLY),
                       ("rustc_commit", RUSTC_COMMIT),
