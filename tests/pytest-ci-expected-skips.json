@@ -32,6 +32,11 @@
       "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
     },
     {
+      "count": 4,
+      "id": "tests/vm/test_faults_binding.py",
+      "reason": "no dist/ seal in tree"
+    },
+    {
       "count": 20,
       "id": "tests/vm/test_fixture_generation.py",
       "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
