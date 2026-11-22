@@ -554,7 +554,14 @@ fn has_channel(diagnostic: &str, channel: i64) -> bool {
     if diagnostic.starts_with(&tag) {
         return true;
     }
-    diagnostic.contains(&format!("; {tag}"))
+    if diagnostic.contains(&format!("; {tag}")) {
+        return true;
+    }
+    // The collector prefixes the first tagged segment with its
+    // verb, so the blamed tag hides behind ": " ("attach: ch2
+    // ...", "load: ch1 ..."). A rollback note ("rollback chN:")
+    // carries a colon, never the tag's space, so it never matches.
+    diagnostic.contains(&format!(": {tag}"))
 }
 
 /// 0/1/2 for the load channel a diagnostic blames, else 0.
@@ -2068,6 +2075,7 @@ pub fn run_collector_with<W: WriterSource>(
     // the load replay below: this explicit binding keeps
     // the fd open across the whole collection.
     let _snap = snap;
+    let mut replay_lines = false;
     if is_load_errno_failure(&out.diagnostic) {
         let fail_ch = load_fail_channel(&out.diagnostic);
         let diag: LoadDiag = if fail_ch == 1 {
@@ -2080,9 +2088,23 @@ pub fn run_collector_with<W: WriterSource>(
         for line in &diag.lines {
             out.diagnostic += &format!("\n{line}");
         }
+        replay_lines = !diag.lines.is_empty();
     }
-    stamp_load_refusal_code(&mut out);
+    stamp_load_refusal_code(&mut out, replay_lines);
     out
+}
+
+/// Fix for a stamped load/attach refusal code: the shared remedy,
+/// except a verifier rejection without replay lines drops the
+/// tail pointer it cannot show. A refusal that yields no lines
+/// (the blamed object loads fine, as in a link failure) fails
+/// honest here, never silent with a promise of absent lines.
+fn refusal_fix(code: &str, replay_lines: bool) -> String {
+    if code == "verifier-rejected" && !replay_lines {
+        return "the kernel verifier rejected the object; no verifier lines were recovered"
+            .to_string();
+    }
+    remedy_for(code)
 }
 
 /// Stamp a load/attach refusal code onto a codeless refusal.
@@ -2090,15 +2112,17 @@ pub fn run_collector_with<W: WriterSource>(
 /// The collector reports the diagnostic without a machine
 /// code; a load or attach errno in the text selects the code
 /// (and its remedy) so record agrees with the load-check
-/// doctor. Non-refusals and already-coded results pass
+/// doctor. `replay_lines` tells whether the refusal replay
+/// appended verifier lines, so the remedy never promises
+/// absent lines. Non-refusals and already-coded results pass
 /// through untouched.
-fn stamp_load_refusal_code(out: &mut RunResult) {
+fn stamp_load_refusal_code(out: &mut RunResult, replay_lines: bool) {
     if out.exit_code == EXIT_REFUSAL && out.code.is_empty() {
         let lcode = load_refusal_code(&out.diagnostic);
         if !lcode.is_empty() {
             out.code = lcode;
             let code = out.code.clone();
-            out.fix = remedy_for(&code);
+            out.fix = refusal_fix(&code, replay_lines);
         }
     }
 }
@@ -2134,15 +2158,17 @@ pub fn repair_warning_for<W: WriterSource>(output: &str, writer: &W) -> String {
 mod tests {
     use super::{
         ExtraChannel, RecordOptions, ScanDecision, attempt_loss_evidence, decide_record,
-        loadcheck_bridge_sha, ownership_warning, parse_requested_caps, render_provenance,
-        repair_warning_for, resolve_bridge, resolve_channel_object, resolve_object,
-        run_collector_with, split_site, stamp_load_refusal_code,
+        load_fail_channel, loadcheck_bridge_sha, ownership_warning, parse_requested_caps,
+        refusal_fix, render_provenance, repair_warning_for, resolve_bridge, resolve_channel_object,
+        resolve_object, run_collector_with, split_site, stamp_load_refusal_code,
     };
+    use crate::bpf::session::{Channel, SessionError, format_failed_link, spec_for_program};
     use crate::capture::collector::EXIT_REFUSAL;
     use crate::capture::collector::script::{
         ScriptClock, ScriptKernel, ScriptSignal, ScriptWriter, zeros,
     };
     use crate::capture::collector::{Collector, CollectorConfig, EXIT_OK, RunResult};
+    use crate::capture::kernel::session_message;
     use crate::capture::live::WriterSource;
     use crate::cli::report::refusal_stderr_lines;
     use crate::platform::evidence::KernelInfo;
@@ -2662,7 +2688,9 @@ mod tests {
         let mut writer = ScriptWriter::new();
         let mut collector = Collector::new(cfg);
         let mut result = collector.run(&mut kernel, &mut clock, &mut signal, &mut writer);
-        stamp_load_refusal_code(&mut result);
+        // The scripted path performs no verifier replay, so the
+        // stamp never promises replay lines here.
+        stamp_load_refusal_code(&mut result, false);
         result
     }
 
@@ -2699,9 +2727,12 @@ mod tests {
         let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        // The scripted path performs no verifier replay, so its
+        // lineless diagnostic earns the honest remedy, not the tail
+        // pointer the live path shows above real replay lines.
         assert_eq!(
             lines[2],
-            "memveil record: fix: the kernel verifier rejected the object; see the verifier lines above\n"
+            "memveil record: fix: the kernel verifier rejected the object; no verifier lines were recovered\n"
         );
     }
 
@@ -2744,6 +2775,157 @@ mod tests {
     }
 
     #[test]
+    fn real_link_errno_flows_to_code_line() {
+        // A genuine ordinary-link failure end to end: the program
+        // loads, then the raw-tracepoint link syscall refuses
+        // EACCES and rollback succeeds (no suffix). Aya's Display
+        // names only the failed call while the errno rides the
+        // source chain, so every stage below must carry the real
+        // errno without any injected code text.
+        let error = aya::programs::ProgramError::from(aya::sys::SyscallError {
+            call: "bpf_raw_tracepoint_open",
+            io_error: std::io::Error::from_raw_os_error(libc::EACCES),
+        });
+        // Premise pin: the loader Display really is codeless, which
+        // is why formatting it alone loses the errno.
+        assert_eq!(error.to_string(), "`bpf_raw_tracepoint_open` failed");
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        let message = format_failed_link(&tag, &spec, &error);
+        assert!(
+            !message.contains("code=-13"),
+            "the link message must not inject the code itself: {message}"
+        );
+        let oped = session_message(3, &SessionError::Attach(message));
+        // Collector verb plus kernel channel tag wrap the segment.
+        let diagnostic = format!("attach: ch2 {oped}");
+        assert!(
+            diagnostic.contains("op=3 domain=2 code=-13 EACCES"),
+            "the op-3 segment carries the real errno: {diagnostic}"
+        );
+        let mut result = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic,
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        // A link failure's blamed object loads fine, so the replay
+        // yields no lines and the remedy stays honest about that.
+        stamp_load_refusal_code(&mut result, false);
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the kernel verifier rejected the object; no verifier lines were recovered\n"
+        );
+    }
+
+    #[test]
+    fn load_fail_channel_recognizes_collector_verbs() {
+        // The collector prefixes the first tagged segment with its
+        // verb ("attach: ch2 ...", "load: ch1 ..."): the blamed
+        // channel hides behind ": ", not just the string start or
+        // a join separator. Missing it replays the attempt object
+        // instead of the blamed one.
+        assert_eq!(
+            load_fail_channel(
+                "attach: ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: load for swiotlb_bounce failed: Permission denied (os error 13)"
+            ),
+            2
+        );
+        assert_eq!(
+            load_fail_channel("load: ch1 op=2 domain=2 code=-22 EINVAL: x"),
+            1
+        );
+        // Bare tags, joins, untagged diagnostics, and lifecycle
+        // precedence keep their established shapes.
+        assert_eq!(load_fail_channel("ch2 op=3 domain=2 code=-13: x"), 2);
+        assert_eq!(
+            load_fail_channel("ch0 op=2 domain=2: x; ch2 op=3 domain=2 code=-13: y"),
+            2
+        );
+        assert_eq!(load_fail_channel("load: ch0 op=2 domain=2 code=-1: x"), 0);
+        assert_eq!(load_fail_channel("op=2 domain=2 code=-13: x"), 0);
+        assert_eq!(
+            load_fail_channel(
+                "attach: ch2 op=3 domain=2 code=-13: x; ch1 op=2 domain=2 code=-13: y"
+            ),
+            1
+        );
+        // A rollback note names a channel without blaming it:
+        // "rollback ch2:" carries a colon, never the tag's space.
+        assert_eq!(
+            load_fail_channel("attach: ch0 op=2 domain=2: x; rollback ch2: detach failed"),
+            0
+        );
+    }
+
+    #[test]
+    fn refusal_fix_honesty_matrix() {
+        // Only the verifier remedy promises lines, so only it
+        // branches on the replay evidence; every other code keeps
+        // the shared remedy either way.
+        assert_eq!(
+            refusal_fix("verifier-rejected", false),
+            "the kernel verifier rejected the object; no verifier lines were recovered"
+        );
+        assert!(
+            !refusal_fix("verifier-rejected", false).contains("lines above"),
+            "a lineless remedy must not promise lines"
+        );
+        assert_eq!(
+            refusal_fix("verifier-rejected", true),
+            crate::platform::kernelgate::remedy_for("verifier-rejected")
+        );
+        assert!(
+            refusal_fix("verifier-rejected", true).contains("lines above"),
+            "real replay lines earn the tail pointer"
+        );
+        for code in ["load-eperm", "load-enomem", "load-failed"] {
+            let shared = crate::platform::kernelgate::remedy_for(code);
+            assert_eq!(refusal_fix(code, false), shared);
+            assert_eq!(refusal_fix(code, true), shared);
+        }
+    }
+
+    #[test]
+    fn attach_nested_refusal_with_lines_keeps_tail_pointer() {
+        // The fixed live shape: the blamed-channel replay appends
+        // real verifier lines to the diagnostic, so the stamp
+        // keeps the shared tail-pointer remedy and the lines are
+        // really above it in the rendered refusal line.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = nested_attach_failure();
+        let mut result = run_scripted_refusal(&tmp, ok_out(), failed_out(&failed));
+        assert_eq!(result.code, "verifier-rejected");
+        // Replay the fixed production append verbatim: one newline
+        // plus each tail line, then re-stamp with lines present.
+        result.code.clear();
+        result.fix.clear();
+        result.diagnostic += "\n0: R1=ctx() R2=0";
+        result.diagnostic += "\n1: R0=0";
+        stamp_load_refusal_code(&mut result, true);
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the kernel verifier rejected the object; see the verifier lines above\n"
+        );
+        assert!(
+            lines[0].contains("R1=ctx()") && lines[0].contains("R0=0"),
+            "the promised lines are really in the refusal line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn refusal_stamp_base_control() {
         // Base control: finalized runs stay codeless and print
         // no code line; coded and unclassified refusals pass
@@ -2758,7 +2940,7 @@ mod tests {
             unknown: false,
             trusted: false,
         };
-        stamp_load_refusal_code(&mut done);
+        stamp_load_refusal_code(&mut done, false);
         assert!(done.code.is_empty());
         assert!(done.fix.is_empty());
         let lines = refusal_stderr_lines("record", "ready", &done.code, &done.fix);
@@ -2773,7 +2955,7 @@ mod tests {
             unknown: false,
             trusted: false,
         };
-        stamp_load_refusal_code(&mut coded);
+        stamp_load_refusal_code(&mut coded, false);
         assert_eq!(coded.code, "tracefs-hidden");
         assert_eq!(coded.fix, "check the lockdown state");
         let mut other_op = RunResult {
@@ -2786,7 +2968,7 @@ mod tests {
             unknown: false,
             trusted: false,
         };
-        stamp_load_refusal_code(&mut other_op);
+        stamp_load_refusal_code(&mut other_op, false);
         assert!(other_op.code.is_empty());
         assert!(other_op.fix.is_empty());
     }

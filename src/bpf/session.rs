@@ -1396,6 +1396,26 @@ fn load_one(
     Ok(())
 }
 
+/// Full message for a link failure: the attach site plus the loader
+/// Display. The Display alone names only the failed call, so the
+/// syscall errno's own text rides along when the error chain
+/// carries one — its `(os error N)` marker is what the kernel
+/// layer parses for refusal classification. Without an errno the
+/// message is the site plus the Display, as before.
+pub(crate) fn format_failed_link(tag: &str, spec: &AttachSpec, error: &ProgramError) -> String {
+    let site = match spec.kind {
+        AttachKind::Tracepoint => format!("attach to {}:{}", spec.target_a, spec.target_b),
+        AttachKind::FEntry | AttachKind::FExit => format!("attach to {}", spec.target_a),
+    };
+    match errno_from_chain(error) {
+        Some(raw) => format!(
+            "{tag}: {site} failed: {error}: {}",
+            std::io::Error::from_raw_os_error(raw)
+        ),
+        None => format!("{tag}: {site} failed: {error}"),
+    }
+}
+
 /// Attach one already-loaded program, returning its link.
 fn link_one(bpf: &mut Ebpf, tag: &str, spec: &AttachSpec) -> Result<ActiveLink, String> {
     let Some(raw) = bpf.program_mut(&spec.program) else {
@@ -1408,12 +1428,7 @@ fn link_one(bpf: &mut Ebpf, tag: &str, spec: &AttachSpec) -> Result<ActiveLink, 
                 .map_err(|_| format!("{tag}: not a tracepoint program"))?;
             let id = typed
                 .attach(&spec.target_a, &spec.target_b)
-                .map_err(|error| {
-                    format!(
-                        "{tag}: attach to {}:{} failed: {error}",
-                        spec.target_a, spec.target_b
-                    )
-                })?;
+                .map_err(|error| format_failed_link(tag, spec, &error))?;
             Ok(ActiveLink::TracePoint {
                 program: spec.program.clone(),
                 id,
@@ -1425,7 +1440,7 @@ fn link_one(bpf: &mut Ebpf, tag: &str, spec: &AttachSpec) -> Result<ActiveLink, 
                 .map_err(|_| format!("{tag}: not an fentry program"))?;
             let id = typed
                 .attach()
-                .map_err(|error| format!("{tag}: attach to {} failed: {error}", spec.target_a))?;
+                .map_err(|error| format_failed_link(tag, spec, &error))?;
             Ok(ActiveLink::FEntry {
                 program: spec.program.clone(),
                 id,
@@ -1437,7 +1452,7 @@ fn link_one(bpf: &mut Ebpf, tag: &str, spec: &AttachSpec) -> Result<ActiveLink, 
                 .map_err(|_| format!("{tag}: not an fexit program"))?;
             let id = typed
                 .attach()
-                .map_err(|error| format!("{tag}: attach to {} failed: {error}", spec.target_a))?;
+                .map_err(|error| format_failed_link(tag, spec, &error))?;
             Ok(ActiveLink::FExit {
                 program: spec.program.clone(),
                 id,
@@ -2415,5 +2430,53 @@ mod tests {
         }
         let maps = with_ring(Channel::Attempt, "mv_attempts", 2_147_483_648);
         assert!(check_replay_maps(None, &maps).is_err());
+    }
+
+    /// The genuine link-failure error value: Aya's attach returns a
+    /// syscall error whose Display names only the call while the
+    /// errno rides the source chain.
+    fn syscall_error(call: &'static str, errno: i32) -> ProgramError {
+        ProgramError::from(aya::sys::SyscallError {
+            call,
+            io_error: std::io::Error::from_raw_os_error(errno),
+        })
+    }
+
+    #[test]
+    fn failed_link_carries_chain_errno() {
+        // The errno's own text rides along so the kernel layer's
+        // `(os error N)` parse recovers it for classification.
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        let got = format_failed_link(&tag, &spec, &syscall_error("bpf_raw_tracepoint_open", 13));
+        assert!(
+            got.contains("(os error 13)"),
+            "link message must carry the errno marker: {got}"
+        );
+        assert!(
+            got.starts_with("copy channel program `mv_bounce`: attach to swiotlb_bounce failed: "),
+            "link message keeps its site wording: {got}"
+        );
+        // Tracepoint sites keep the category:event shape too.
+        let tp = AttachSpec::new("mv_prog", AttachKind::Tracepoint, "sys", "evt");
+        let got_tp = format_failed_link("t", &tp, &syscall_error("perf_event_open", 1));
+        assert!(
+            got_tp.contains("attach to sys:evt failed: "),
+            "tracepoint site shape: {got_tp}"
+        );
+        assert!(got_tp.contains("(os error 1)"), "{got_tp}");
+    }
+
+    #[test]
+    fn failed_link_without_errno_keeps_display_wording() {
+        // No errno on the chain, no marker appended: the message
+        // stays exactly the site plus the Display.
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        let got = format_failed_link(&tag, &spec, &ProgramError::NotLoaded);
+        assert_eq!(
+            got,
+            "copy channel program `mv_bounce`: attach to swiotlb_bounce failed: the program is not loaded"
+        );
     }
 }

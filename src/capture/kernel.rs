@@ -110,7 +110,7 @@ fn os_errno(message: &str) -> Option<i32> {
 }
 
 /// One loader failure as structured op/domain/code detail.
-fn session_message(op: u32, err: &SessionError) -> String {
+pub(crate) fn session_message(op: u32, err: &SessionError) -> String {
     let message = err.to_string();
     match os_errno(&message) {
         Some(n) => {

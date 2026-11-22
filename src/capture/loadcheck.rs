@@ -93,21 +93,50 @@ fn find_from(raw: &[u8], word: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+/// True when the op key at `hit` opens a segment header.
+///
+/// The kernel layer writes segments bare (`op=...`) or
+/// channel-tagged (`chN op=...`); an op key anywhere else
+/// (`noop=3 ...`, loader detail, replay tails) is free text.
+fn is_header_start(raw: &[u8], hit: usize) -> bool {
+    if hit == 0 {
+        return true;
+    }
+    if raw[hit - 1] != 0x20 {
+        return false;
+    }
+    let mut i = hit - 1;
+    let mut digits = 0;
+    while i > 0 && raw[i - 1].is_ascii_digit() {
+        digits += 1;
+        i -= 1;
+    }
+    if digits == 0 || i < 2 {
+        return false;
+    }
+    raw[i - 2] == 0x63 && raw[i - 1] == 0x68
+}
+
 /// Machine code for a load/attach refusal diagnostic, else `""`.
 ///
-/// Reads the first load or attach segment as the kernel layer
-/// writes it (`op=2`/`op=3`, then `code=-<n>` ended by a space
-/// or a colon): the loader verifies programs while attaching,
-/// so an attach-path load errno classifies exactly like a
-/// load-phase one, and record agrees with the load-check
-/// doctor. Other operations, positive codes, and out-of-range
-/// magnitudes stay unclassified.
+/// Reads the first load or attach segment header as the kernel
+/// layer writes it (`op=2`/`op=3`, then `domain=2`, then the
+/// errno slot `code=-<n>` ended by a space or a colon): the
+/// loader verifies programs while attaching, so an attach-path
+/// load errno classifies exactly like a load-phase one, and
+/// record agrees with the load-check doctor. Only the header
+/// slot classifies — a `code=-` past the header colon is detail
+/// text, never a field. Other operations, other domains,
+/// positive codes, and out-of-range magnitudes stay
+/// unclassified.
 pub fn load_refusal_code(diagnostic: &str) -> String {
     let raw = diagnostic.as_bytes();
     let load_key = format!("op={OP_LOAD} ");
     let attach_key = format!("op={OP_ATTACH} ");
+    let op_len = load_key.len();
+    debug_assert_eq!(op_len, attach_key.len());
+    let domain_key = "domain=2";
     let code_key = " code=-";
-    let op_word = "op=";
     let key_len = code_key.len();
     let mut pos = 0;
     loop {
@@ -122,15 +151,26 @@ pub fn load_refusal_code(diagnostic: &str) -> String {
         let Some(hit) = hit else {
             return String::new();
         };
-        let seg_end = find_from(raw, op_word.as_bytes(), hit + 1).unwrap_or(raw.len());
-        if let Some(mark) = find_from(raw, code_key.as_bytes(), hit)
-            && mark < seg_end
-        {
+        if !is_header_start(raw, hit) {
+            pos = hit + 1;
+            continue;
+        }
+        let after_op = hit + op_len;
+        if !raw[after_op..].starts_with(domain_key.as_bytes()) {
+            pos = hit + 1;
+            continue;
+        }
+        let after_domain = after_op + domain_key.len();
+        if raw[after_domain..].starts_with(code_key.as_bytes()) {
             let mut n = 0i64;
             let mut digits = 0;
-            let mut j = mark + key_len;
+            let mut j = after_domain + key_len;
             while j < raw.len() && raw[j].is_ascii_digit() {
-                n = n * 10 + i64::from(raw[j] - b'0');
+                // Bound before arithmetic: the slot holds at most
+                // six digits, so accumulation cannot overflow.
+                if digits < 6 {
+                    n = n * 10 + i64::from(raw[j] - b'0');
+                }
                 digits += 1;
                 j += 1;
             }
@@ -694,6 +734,105 @@ mod tests {
         assert_eq!(load_refusal_code("op=3 domain=2 code=3: x"), "");
         assert_eq!(load_refusal_code("op=3 domain=2 code=-5000: x"), "");
         assert_eq!(load_refusal_code("op=3 domain=2 code=-0 x"), "");
+    }
+
+    #[test]
+    fn forged_op_in_free_text_stays_codeless() {
+        // "noop=3 ..." contains "op=3 " but starts no segment
+        // header: only a bare or channel-tagged op key counts.
+        assert_eq!(
+            load_refusal_code("op=4 domain=2: noop=3 domain=2 code=-13: poll detail"),
+            ""
+        );
+    }
+
+    #[test]
+    fn forged_op_does_not_override_genuine_header() {
+        // The forged detail hit must not outrank a genuine later
+        // header: the genuine op-2 errno decides.
+        assert_eq!(
+            load_refusal_code(
+                "op=4 domain=2: noop=3 domain=2 code=-13: poll detail; ch0 op=2 domain=2 code=-1: load failed"
+            ),
+            "load-eperm"
+        );
+    }
+
+    #[test]
+    fn detail_code_without_header_slot_stays_codeless() {
+        // A code past the header colon is detail text, never a
+        // field: no header slot, no classification.
+        assert_eq!(load_refusal_code("op=3 domain=2: detail code=-13: x"), "");
+        assert_eq!(
+            load_refusal_code("op=2 domain=2: code=13: detail code=-13: x"),
+            ""
+        );
+    }
+
+    #[test]
+    fn header_slot_decides_alone() {
+        // The header slot is the only vote: a valid header code
+        // classifies whatever detail follows, and an invalid
+        // header code leaves the segment codeless — detail codes
+        // neither override nor rescue.
+        assert_eq!(
+            load_refusal_code("op=2 domain=2 code=-13: x code=-1: y"),
+            "verifier-rejected"
+        );
+        assert_eq!(
+            load_refusal_code("op=2 domain=2 code=-99999: x code=-13: y"),
+            ""
+        );
+    }
+
+    #[test]
+    fn overlong_digit_run_rejected_without_overflow() {
+        // Digit accumulation bounds before arithmetic: i64::MIN's
+        // magnitude and longer runs reject on length instead of
+        // overflowing in debug builds.
+        assert_eq!(
+            load_refusal_code("op=2 domain=2 code=-9223372036854775808: x"),
+            ""
+        );
+        assert_eq!(
+            load_refusal_code("op=3 domain=2 code=-99999999999999999999: x"),
+            ""
+        );
+        assert_eq!(load_refusal_code("op=2 domain=2 code=-1234567: x"), "");
+    }
+
+    #[test]
+    fn untagged_header_shaped_text_stays_codeless() {
+        // A header shape that follows neither the string start
+        // nor a channel tag is detail text: replay tails join
+        // with newlines and loader detail with spaces, neither
+        // of which opens a segment.
+        assert_eq!(
+            load_refusal_code("op=4 domain=2: x\nop=2 domain=2 code=-1: y"),
+            ""
+        );
+        assert_eq!(
+            load_refusal_code("op=4 domain=2: x op=2 domain=2 code=-1: y"),
+            ""
+        );
+    }
+
+    #[test]
+    fn non_loader_domain_stays_codeless() {
+        // The producer only writes domain=2: neighboring domains
+        // and domain prefixes with trailing digits carry no slot.
+        assert_eq!(load_refusal_code("op=2 domain=1 code=-1: x"), "");
+        assert_eq!(load_refusal_code("op=2 domain=20 code=-1: x"), "");
+    }
+
+    #[test]
+    fn first_header_wins_in_either_join_order() {
+        // Earliest valid header wins whichever op leads: the
+        // mirror of the committed op-3-first join pin.
+        assert_eq!(
+            load_refusal_code("ch0 op=2 domain=2 code=-13: y; ch2 op=3 domain=2 code=-1: x"),
+            "verifier-rejected"
+        );
     }
 
     fn log_bytes(lines: &[&str]) -> Vec<u8> {
