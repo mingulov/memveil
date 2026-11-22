@@ -23,7 +23,12 @@ consumer; bytes must equal the pinned pairs either way.
 are required for every armed run; --expect-release refuses
 when it conflicts with the pinned guest release; --mode q3
 runs the adapter gate only (candidate then baseline,
-controls plus the quiet phase, no comparison).
+controls plus the quiet phase, no comparison). The guest
+command line carries only the staged inputs filename: the
+full inputs doc travels through the shared export dir, and
+any guest argv projecting past the kernel command-line
+budget refuses before booting. Every boot captures the
+guest console to the boot transcript.
 """
 
 import ast
@@ -59,6 +64,45 @@ ARM_ENV = "MEMVEIL_VM_STRESS"
 # judges exactly that list, never a private copy.
 EXPORT_NAMES = stress_guest.export_names_for_mode("full")
 EXPORT_NAMES_Q3 = stress_guest.export_names_for_mode("q3")
+
+# Guest command-line budget. vng base64-encodes the whole
+# --exec payload into virtme.exec= on the guest kernel
+# command line, so the projected total is the fixed vng
+# overhead plus 4*ceil(exec_chars/3), bounded by the x86
+# COMMAND_LINE_SIZE of 2048. Past that the kernel
+# truncates the exec and the guest hangs silently, so the
+# runner refuses pre-boot instead. Dry-run measurements
+# of this runner's boot shape (vng 1.41, microvm,
+# --run v7.0.14, -m 6G, --append swiotlb=force, --rwdir
+# export) put the fixed overhead at 638 chars quiet and
+# 610 with verbose console capture, constant across
+# payload lengths 1..1939; the tagless --run shape
+# measures 532, smaller and covered. The fixed part
+# embeds host paths (cwd, home), so it shifts with the
+# user and install locations; the constant below covers
+# the verbose shape plus that variance. The exec budget
+# is the largest payload with 768 + 4*ceil(n/3) <= 2048.
+COMMAND_LINE_SIZE = 2048
+VNG_CMDLINE_OVERHEAD = 768
+GUEST_EXEC_BUDGET = 960
+# Real-mode guest argvs must project this far under the
+# ceiling, so ordinary argv growth trips the offline test
+# before it trips the kernel.
+CMDLINE_HEADROOM = 400
+
+
+def project_cmdline_total(exec_chars):
+    """Projected kernel cmdline chars for an --exec payload.
+
+    exec_chars is the length of the joined --exec string;
+    vng base64-encodes those exact bytes into virtme.exec=.
+    """
+    return VNG_CMDLINE_OVERHEAD + 4 * ((exec_chars + 2) // 3)
+
+
+def cmdline_over_budget(exec_chars):
+    """True when a payload length must refuse pre-boot."""
+    return project_cmdline_total(exec_chars) > COMMAND_LINE_SIZE
 
 
 def sha_file(path):
@@ -690,9 +734,18 @@ def self_test_manifest(tmp, pairs):
         return check("manifest-verify", False, str(exc))
     commit = core.git_head(str(REPO))
     path = os.path.join(tmp, "inputs.json")
+    built = {"path": core.CONSUMER_RELEASE,
+             "sha256": sha_file(core.CONSUMER_RELEASE)}
+    try:
+        staged = write_guest_inputs_docs(
+            tmp, path, built, pairs, core.EXPECT_RELEASE)
+    except (ValueError, OSError) as exc:
+        return check("manifest-inputs-stage", False,
+                     str(exc)[:200])
     manifest = core.write_input_manifest(
         path, pairs, candidate, consumer, oracle,
-        ["test_stress_consumer.py", "--self-test"], commit)
+        ["test_stress_consumer.py", "--self-test"], commit,
+        guest_inputs=staged)
     ok = check("manifest-verify",
                core.verify_input_manifest(manifest,
                                           core.CONSUMER_RELEASE) == []) and ok
@@ -702,6 +755,11 @@ def self_test_manifest(tmp, pairs):
                and manifest["consumer"]["binary_sha256"]
                == sha_file(core.CONSUMER_RELEASE)
                and "memveil_dma_oracle.c" in manifest["oracle"]) and ok
+    ok = check("manifest-guest-inputs",
+               sorted(manifest["guest_inputs"])
+               == sorted(core.MODES)
+               and manifest["guest_inputs"]["full"]["file"]
+               == core.GUEST_INPUTS_FILE) and ok
     tampered = json.loads(open(path).read())
     tampered["pairs"]["c9"]["lc"]["sha256"] = "0" * 64
     ok = check("manifest-tamper",
@@ -718,6 +776,16 @@ def self_test_manifest(tmp, pairs):
     del btf_dropped["oracle"]["btf_sha256"]
     ok = check("manifest-btf-drop",
                core.verify_input_manifest(btf_dropped) != []) and ok
+    inputs_tampered = json.loads(open(path).read())
+    inputs_tampered["guest_inputs"]["full"]["sha256"] = "0" * 64
+    ok = check("manifest-inputs-tamper",
+               core.verify_input_manifest(inputs_tampered) != []) and ok
+    inputs_dropped = json.loads(open(path).read())
+    del inputs_dropped["guest_inputs"]["q3"]
+    ok = check("manifest-inputs-dropped",
+               any("q3" in reason for reason in
+                   core.verify_input_manifest(inputs_dropped)),
+               "dropped entry passed") and ok
     return ok
 
 
@@ -838,9 +906,19 @@ def self_test_guest_oracle(tmp, pairs):
     except (ValueError, OSError) as exc:
         return check("oracle-manifest-bind", False, str(exc)) and ok
     commit = core.git_head(str(REPO))
+    oracle_path = os.path.join(tmp, "oracle-inputs.json")
+    oracle_built = {"path": core.CONSUMER_RELEASE,
+                    "sha256": sha_file(core.CONSUMER_RELEASE)}
+    try:
+        oracle_staged = write_guest_inputs_docs(
+            tmp, oracle_path, oracle_built, pairs, "")
+    except (ValueError, OSError) as exc:
+        return check("oracle-manifest-bind", False,
+                     str(exc)[:160]) and ok
     manifest = core.write_input_manifest(
-        os.path.join(tmp, "oracle-inputs.json"), pairs, candidate,
-        consumer, oracle, ["self-test"], commit)
+        oracle_path, pairs, candidate,
+        consumer, oracle, ["self-test"], commit,
+        guest_inputs=oracle_staged)
     ok = check("oracle-manifest-bind",
                core.verify_input_manifest(
                    manifest, core.CONSUMER_RELEASE) == []
@@ -2447,9 +2525,19 @@ def self_test_candidate_flags(tmp, pairs):
     swapped = {"baseline": pairs["baseline"],
                "c9": {"lc": pairs["c9"]["cp"],
                       "cp": pairs["c9"]["lc"]}}
+    swapped_path = os.path.join(tmp, "swapped-inputs.json")
+    swapped_built = {"path": core.CONSUMER_RELEASE,
+                     "sha256": sha_file(core.CONSUMER_RELEASE)}
+    try:
+        swapped_staged = write_guest_inputs_docs(
+            tmp, swapped_path, swapped_built, swapped, "")
+    except (ValueError, OSError) as exc:
+        return check("candidate-flags-wrong-pair", False,
+                     str(exc)[:160])
     manifest = core.write_input_manifest(
-        os.path.join(tmp, "swapped-inputs.json"), swapped, candidate,
-        consumer, oracle, ["self-test"], commit)
+        swapped_path, swapped, candidate,
+        consumer, oracle, ["self-test"], commit,
+        guest_inputs=swapped_staged)
     reasons = core.verify_input_manifest(manifest)
     ok = check("candidate-flags-wrong-pair",
                any("not the pinned pair bytes" in r for r in reasons),
@@ -2545,22 +2633,18 @@ def self_test_identity():
                                     "btf_sha256": ident["btf_sha256"],
                                     "digests": {"ko": "0" * 64}})
                != []) and ok
-    # Guest init order: the release gate fires before the
-    # manifest is even read (no traceback on any host).
+    # Guest init order: the staged-inputs parse fires
+    # first (no traceback on any host); the release gate
+    # inside Gate still fires before the manifest read
+    # there and before any bound byte is verified.
     probe = core.run(
         [sys.executable, str(GUEST), "/tmp/sg-work", "/tmp/sg-export",
-         "--manifest", "/tmp/sg-absent-manifest.json",
-         "--consumer", "/tmp/sg-c", "--consumer-sha", "0" * 64,
-         "--ko", "/tmp/sg-k", "--ko-sha", "0" * 64,
-         "--mode", "q3", "--expect-release", "9.9.9-nope",
-         "--baseline-lc", "/tmp/a", "--baseline-cp", "/tmp/b",
-         "--baseline-lc-sha", "0" * 64, "--baseline-cp-sha", "0" * 64,
-         "--c9-lc", "/tmp/c", "--c9-cp", "/tmp/d",
-         "--c9-lc-sha", "0" * 64, "--c9-cp-sha", "0" * 64],
+         "--inputs", "sg-absent-inputs.json"],
         timeout=30)
     ok = check("identity-guest-order",
                probe.returncode == 1
                and "FAIL" in probe.stderr
+               and "cannot read guest inputs" in probe.stderr
                and "Traceback" not in probe.stderr,
                probe.stderr.strip()[-160:]) and ok
     # The exec-entry marker lands before the manifest
@@ -2579,7 +2663,9 @@ def self_test_identity():
         baseline_lc="/tmp/a", baseline_cp="/tmp/b",
         baseline_lc_sha="0" * 64, baseline_cp_sha="0" * 64,
         c9_lc="/tmp/c", c9_cp="/tmp/d",
-        c9_lc_sha="0" * 64, c9_cp_sha="0" * 64)
+        c9_lc_sha="0" * 64, c9_cp_sha="0" * 64,
+        guest_inputs_file=core.GUEST_INPUTS_FILE,
+        guest_inputs_sha="0" * 64)
     tmpdir = tempfile.mkdtemp(prefix="vmgate-exec-")
     try:
         logged = io.StringIO()
@@ -2664,6 +2750,30 @@ def self_test_identity():
                and "cannot read run manifest" in logged.getvalue()
                and "error" not in outcome,
                "%r %r" % (marks, outcome)) and ok
+    # Gate-level order: a wrong release refuses before
+    # the manifest read there, even when the manifest
+    # itself is missing too.
+    wrong = SimpleNamespace(release="9.9.9-nope")
+    tmpdir = tempfile.mkdtemp(prefix="vmgate-release-")
+    try:
+        logged = io.StringIO()
+        with mock.patch.object(stress_guest.os, "uname",
+                               return_value=wrong):
+            with contextlib.redirect_stderr(logged):
+                try:
+                    stress_guest.Gate(os.path.join(tmpdir, "work"),
+                                      os.path.join(tmpdir, "export"),
+                                      args)
+                except SystemExit as exited:
+                    code = exited.code
+                else:
+                    code = 0
+        ok = check("identity-gate-release-first",
+                   code == 1
+                   and "guest booted release" in logged.getvalue(),
+                   "%r %r" % (code, logged.getvalue()[-120:])) and ok
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
     return ok
 
 
@@ -2951,18 +3061,6 @@ def self_test_q3_mode(tmp, pairs):
     """Q3 selection: legs judge without p2 files or comparison."""
     from types import SimpleNamespace
     ok = True
-    argv = build_guest_argv(
-        os.path.join(tmp, "inputs.json"),
-        {"path": core.CONSUMER_RELEASE,
-         "sha256": sha_file(core.CONSUMER_RELEASE)},
-        pairs, "q3", core.EXPECT_RELEASE)
-    flags = dict(zip(argv[4::2], argv[5::2]))
-    ok = check("q3-guest-argv",
-               flags.get("--mode") == "q3"
-               and flags.get("--ko-sha") == guest_oracle.KO_SHA256
-               and flags.get("--ko") == guest_oracle.FIXTURE_KO
-               and flags.get("--expect-release") == core.EXPECT_RELEASE
-               and flags.get("--c9-lc-sha") == core.C9_LC_SHA) and ok
     full = set(EXPORT_NAMES)
     q3 = set(EXPORT_NAMES_Q3)
     ok = check("q3-inventory", q3 < full
@@ -3064,6 +3162,16 @@ def self_test_q3_mode(tmp, pairs):
         digest = sha_file(export / name)
         (export / ("%s.sha256" % name)).write_text(
             "%s  %s\n" % (digest, name))
+    staged_bytes = b'{"mode": "q3"}\n'
+    (export / core.GUEST_INPUTS_FILE).write_bytes(staged_bytes)
+    inventoried = verify_exports(export, EXPORT_NAMES_Q3)
+    ok = check("q3-inventory-with-staged",
+               inventoried["ok"]
+               and sorted(inventoried["files"])
+               == sorted(EXPORT_NAMES_Q3)
+               and core.GUEST_INPUTS_FILE
+               not in inventoried["files"],
+               "; ".join(inventoried["reasons"])) and ok
     verified = {"files": {name: export / name
                           for name in EXPORT_NAMES_Q3}}
     manifest = {"runner_commit": "self-test",
@@ -3083,11 +3191,16 @@ def self_test_q3_mode(tmp, pairs):
                           export, boot_tmp)
     receipt = json.loads(
         (Path(tmp) / "q3-out" / "host-verdict.json").read_text())
+    pinned = (Path(tmp) / "q3-out"
+              / "host-guest-inputs.json").read_bytes()
     ok = check("q3-receipt-no-compare",
                rc == 0 and receipt["verdict"] == "PASS"
                and receipt["mode"] == "q3"
                and receipt["comparison"]["verdict"] == "NOT_RUN"
-               and receipt["c9"]["metrics"] == {"M": 50, "D": 400},
+               and receipt["c9"]["metrics"] == {"M": 50, "D": 400}
+               and pinned == staged_bytes
+               and receipt["console_transcript"]
+               == "host-guest.stderr",
                "%r" % (receipt,)) and ok
     # A release that keeps its generation but mutates
     # size and direction, with rebalanced counters, must
@@ -3235,6 +3348,364 @@ def self_test_full_mode(tmp):
     return ok
 
 
+def self_test_guest_argv():
+    """Guest argv carries only the staged inputs pointer."""
+    import re
+    ok = True
+    for mode in core.MODES:
+        try:
+            argv = build_guest_argv(mode)
+            joined = " ".join(argv)
+            ok = check("argv-pointer-%s" % mode,
+                       argv[-2:] == ["--inputs",
+                                    core.GUEST_INPUTS_FILE]
+                       and "--manifest" not in joined
+                       and not re.search(r"[0-9a-f]{64}",
+                                         joined),
+                       joined[-160:]) and ok
+        except ValueError as exc:
+            ok = check("argv-pointer-%s" % mode, False,
+                       str(exc)) and ok
+    try:
+        build_guest_argv("q9")
+        ok = check("argv-bogus", False, "accepted") and ok
+    except ValueError:
+        ok = check("argv-bogus", True) and ok
+    return ok
+
+
+def self_test_cmdline_budget(tmp):
+    """Cmdline projection refuses over budget, frees real argvs."""
+    from types import SimpleNamespace
+    ok = True
+    ok = check("budget-arithmetic",
+               project_cmdline_total(GUEST_EXEC_BUDGET)
+               == COMMAND_LINE_SIZE
+               and project_cmdline_total(
+                   GUEST_EXEC_BUDGET + 1)
+               == COMMAND_LINE_SIZE + 4) and ok
+    for length, want in ((0, False),
+                         (GUEST_EXEC_BUDGET - 1, False),
+                         (GUEST_EXEC_BUDGET, False),
+                         (GUEST_EXEC_BUDGET + 1, True),
+                         # Observed over-budget payloads:
+                         # the original adapter exec and
+                         # the localizing preflight exec
+                         # both hung with zero guest output.
+                         (1257, True),
+                         (1436, True)):
+        over = cmdline_over_budget(length)
+        ok = check("budget-%d" % length, over == want,
+                   "over=%s want=%s" % (over, want)) and ok
+    for mode in core.MODES:
+        argv = build_guest_argv(mode)
+        total = project_cmdline_total(
+            len(shlex.join(argv)))
+        ok = check("budget-argv-%s" % mode,
+                   total <= COMMAND_LINE_SIZE - CMDLINE_HEADROOM,
+                   "%s projects %d (ceiling %d, "
+                   "headroom floor %d)"
+                   % (mode, total, COMMAND_LINE_SIZE,
+                      COMMAND_LINE_SIZE - CMDLINE_HEADROOM)) \
+            and ok
+    # The armed refusal itself: an over-budget argv
+    # exits 2 with a projected-vs-budget message and a
+    # refusal boot.json, without booting.
+    long_argv = ["sh", "-c", "y" * 2000]
+    saved = globals()["build_guest_argv"]
+    globals()["build_guest_argv"] = (
+        lambda mode: list(long_argv))
+    import contextlib
+    logged = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(logged):
+            rc = armed_boot(
+                SimpleNamespace(mode="full"),
+                os.path.join(tmp, "m.json"),
+                {"guest_inputs": {}},
+                os.path.join(tmp, "staged.json"),
+                {"prefix": ["vng"], "harness": {}})
+    finally:
+        globals()["build_guest_argv"] = saved
+    out = logged.getvalue()
+    kept = out.rsplit("kept at ", 1)[1].strip() \
+        if "kept at " in out else ""
+    boot_ok = False
+    boot_detail = "rc=%r kept=%r" % (rc, kept)
+    if kept:
+        try:
+            boot = json.loads(open(os.path.join(
+                kept, "boot.json")).read())
+            want_exec = len(shlex.join(long_argv))
+            boot_ok = (
+                boot.get("refused") == "cmdline budget"
+                and boot.get("exec_chars") == want_exec
+                and boot.get("projected_cmdline")
+                == project_cmdline_total(want_exec)
+                and boot.get("cmdline_ceiling")
+                == COMMAND_LINE_SIZE
+                and boot.get("exec_budget")
+                == GUEST_EXEC_BUDGET
+                and not os.path.exists(os.path.join(
+                    kept, "guest.stdout")))
+            boot_detail = "%r" % (boot,)
+        except (OSError, ValueError) as exc:
+            boot_detail = str(exc)[:160]
+        shutil.rmtree(kept, ignore_errors=True)
+    ok = check("budget-refuses-preboot",
+               rc == 2 and boot_ok
+               and "refusing boot" in out
+               and "projects to" in out
+               and str(COMMAND_LINE_SIZE) in out
+               and str(GUEST_EXEC_BUDGET) in out,
+               "%s | %s" % (out.strip()[-160:],
+                             boot_detail)) and ok
+    return ok
+
+
+def self_test_guest_inputs(tmp, pairs):
+    """Inputs docs stage, parse, bind, and refuse tampering."""
+    ok = True
+    built = {"path": core.CONSUMER_RELEASE,
+             "sha256": sha_file(core.CONSUMER_RELEASE)}
+    manifest_path = os.path.join(tmp, "gi-inputs.json")
+    try:
+        staged = write_guest_inputs_docs(
+            tmp, manifest_path, built, pairs,
+            core.EXPECT_RELEASE)
+    except (ValueError, OSError) as exc:
+        return check("inputs-stage", False, str(exc)[:160])
+    ok = check("inputs-stage",
+               sorted(staged) == sorted(core.MODES),
+               "%r" % (sorted(staged),)) and ok
+    try:
+        blob = open(staged["full"], "rb").read()
+        doc = json.loads(blob.decode("utf-8"))
+        ok = check("inputs-doc",
+                   doc["schema"]
+                   == core.GUEST_INPUTS_SCHEMA
+                   and doc["mode"] == "full"
+                   and doc["consumer"]["sha256"]
+                   == built["sha256"]
+                   and doc["ko"]["sha256"]
+                   == guest_oracle.KO_SHA256
+                   and doc["baseline_lc"]["sha256"]
+                   == core.BASELINE_LC_SHA
+                   and doc["c9_cp"]["sha256"]
+                   == core.C9_CP_SHA
+                   and doc["expect_release"]
+                   == core.EXPECT_RELEASE,
+                   blob[:120].decode("utf-8",
+                                     "replace")) and ok
+    except (OSError, ValueError, KeyError) as exc:
+        ok = check("inputs-doc", False, str(exc)[:160]) \
+            and ok
+    try:
+        build_guest_inputs("q9", manifest_path, built,
+                           pairs, "")
+        ok = check("inputs-bogus-mode", False,
+                   "accepted") and ok
+    except ValueError:
+        ok = check("inputs-bogus-mode", True) and ok
+    export = os.path.join(tmp, "gi-export")
+    os.makedirs(export, exist_ok=True)
+    staged_copy = os.path.join(export, core.GUEST_INPUTS_FILE)
+    shutil.copyfile(staged["full"], staged_copy)
+    with open(manifest_path, "w") as handle:
+        handle.write(json.dumps({
+            "guest_inputs": {
+                "full": {
+                    "file": core.GUEST_INPUTS_FILE,
+                    "sha256": sha_file(staged_copy),
+                },
+            },
+        }))
+    try:
+        fields, observed = stress_guest.parse_guest_inputs(
+            export, core.GUEST_INPUTS_FILE)
+        ok = check("inputs-parse",
+                   fields["mode"] == "full"
+                   and fields["ko_sha"]
+                   == guest_oracle.KO_SHA256
+                   and fields["c9_lc_sha"] == core.C9_LC_SHA
+                   and fields["manifest"] == manifest_path
+                   and observed == sha_file(staged_copy),
+                   observed[:16]) and ok
+    except ValueError as exc:
+        ok = check("inputs-parse", False,
+                   str(exc)[:160]) and ok
+    with open(staged_copy, "ab") as handle:
+        handle.write(b" ")
+    try:
+        stress_guest.parse_guest_inputs(
+            export, core.GUEST_INPUTS_FILE)
+        ok = check("inputs-tamper", False, "accepted") \
+            and ok
+    except ValueError as exc:
+        ok = check("inputs-tamper",
+                   "differ from the manifest binding"
+                   in str(exc),
+                   str(exc)[:160]) and ok
+    for label, name in (("absolute", "/etc/hostname"),
+                        ("escape", "../inputs.json"),
+                        ("empty", "")):
+        try:
+            stress_guest.parse_guest_inputs(export, name)
+            ok = check("inputs-pointer-%s" % label, False,
+                       "accepted") and ok
+        except ValueError as exc:
+            ok = check("inputs-pointer-%s" % label,
+                       "bare filename" in str(exc),
+                       str(exc)[:160]) and ok
+    # A doc whose mode the manifest never bound refuses:
+    # the q3 bytes match no entry in this full-only seal.
+    shutil.copyfile(staged["q3"], staged_copy)
+    try:
+        stress_guest.parse_guest_inputs(
+            export, core.GUEST_INPUTS_FILE)
+        ok = check("inputs-unbound-mode", False,
+                   "accepted") and ok
+    except ValueError as exc:
+        ok = check("inputs-unbound-mode",
+                   "lacks a guest-inputs binding" in str(exc),
+                   str(exc)[:160]) and ok
+    # Parse-to-Gate composition: the parsed fields drive
+    # a real guest construction (a missing attribute would
+    # traceback instead of refusing cleanly on any host).
+    shutil.copyfile(staged["full"], staged_copy)
+    composition = core.run(
+        [sys.executable, str(GUEST),
+         os.path.join(tmp, "gi-work"), export,
+         "--inputs", core.GUEST_INPUTS_FILE],
+        timeout=30)
+    ok = check("inputs-gate-composition",
+               composition.returncode == 1
+               and "FAIL" in composition.stderr
+               and "Traceback" not in composition.stderr,
+               composition.stderr.strip()[-160:]) and ok
+    return ok
+
+
+def self_test_inputs_binding(tmp):
+    """Guest-observed inputs digest must match the binding."""
+    ok = True
+    export = os.path.join(tmp, "bound-export")
+    os.makedirs(export, exist_ok=True)
+    staged = os.path.join(export, core.GUEST_INPUTS_FILE)
+    with open(staged, "wb") as handle:
+        handle.write(b'{"mode": "q3"}\n')
+    digest = sha_file(staged)
+    manifest = {"guest_inputs": {
+        "q3": {"file": core.GUEST_INPUTS_FILE,
+               "sha256": digest}}}
+    verify_path = os.path.join(tmp, "input-verify.json")
+
+    def files_for(doc):
+        with open(verify_path, "w") as handle:
+            handle.write(json.dumps(doc))
+        return {"input-verify.json": Path(verify_path)}
+
+    good = {"mode": "q3",
+            "guest_inputs_file": core.GUEST_INPUTS_FILE,
+            "guest_inputs_sha256": digest}
+    ok = check("binding-clean",
+               check_guest_inputs_binding(
+                   files_for(good), "q3", manifest,
+                   export) == []) and ok
+    drifted = dict(good, guest_inputs_sha256="0" * 64)
+    ok = check("binding-drift",
+               check_guest_inputs_binding(
+                   files_for(drifted), "q3", manifest,
+                   export) != [],
+               "drift passed") and ok
+    renamed = dict(good, mode="full")
+    ok = check("binding-mode",
+               check_guest_inputs_binding(
+                   files_for(renamed), "q3", manifest,
+                   export) != [],
+               "mode swap passed") and ok
+    with open(staged, "ab") as handle:
+        handle.write(b" ")
+    ok = check("binding-staged",
+               check_guest_inputs_binding(
+                   files_for(good), "q3", manifest,
+                   export) != [],
+               "staged tamper passed") and ok
+    os.unlink(verify_path)
+    ok = check("binding-missing",
+               check_guest_inputs_binding(
+                   {}, "q3", manifest, export) != [],
+               "missing verify passed") and ok
+    return ok
+
+
+def self_test_console_capture(tmp):
+    """Boots stay verbose and transcripts land in receipts."""
+    ok = True
+    flight = {"prefix": ["vng"], "harness": {}}
+    tagged = build_vng_argv(flight, "/tmp/x", "exec payload",
+                            "v7.0.14")
+    bare = build_vng_argv(flight, "/tmp/x", "exec payload", "")
+    ok = check("console-verbose",
+               "--verbose" in tagged and "--verbose" in bare
+               and tagged[-2:] == ["--exec", "exec payload"]
+               and "v7.0.14" in tagged
+               and "--disable-microvm" not in tagged,
+               " ".join(tagged[-6:])) and ok
+    boot = os.path.join(tmp, "mock-boot")
+    export = os.path.join(boot, "export")
+    os.makedirs(export, exist_ok=True)
+    transcript = ("[boot] console line\n"
+                  "stress-guest: legs exported\n")
+    for name, blob in (
+            ("boot.json", b'{"mode": "q3"}\n'),
+            ("guest.stdout", b"guest out\n"),
+            ("guest.stderr", transcript.encode()),
+            ("guest.exit", b"0")):
+        with open(os.path.join(boot, name), "wb") as handle:
+            handle.write(blob)
+    staged = b'{"mode": "q3"}\n'
+    with open(os.path.join(export, core.GUEST_INPUTS_FILE),
+              "wb") as handle:
+        handle.write(staged)
+    name = "identity.json"
+    with open(os.path.join(export, name), "wb") as handle:
+        handle.write(b"{}\n")
+    digest = sha_file(os.path.join(export, name))
+    with open(os.path.join(export, name + ".sha256"),
+              "w") as handle:
+        handle.write("%s  %s\n" % (digest, name))
+    manifest_path = os.path.join(tmp, "mock-inputs.json")
+    with open(manifest_path, "w") as handle:
+        handle.write("{}\n")
+    out = Path(tmp) / "receipt" / "q3"
+    try:
+        save_stress_receipts(
+            out, [name], Path(boot), Path(export),
+            {name: Path(export) / name}, manifest_path,
+            {"verdict": "PASS", "mode": "q3"})
+    except OSError as exc:
+        return check("console-receipt", False,
+                     str(exc)[:160])
+    try:
+        kept = (out / "host-guest.stderr").read_text()
+        verdict = json.loads(
+            (out / "host-verdict.json").read_text())
+        pinned = (out / "host-guest-inputs.json"
+                  ).read_bytes()
+        ok = check("console-receipt",
+                   kept == transcript
+                   and verdict["console_transcript"]
+                   == "host-guest.stderr"
+                   and verdict["mode"] == "q3"
+                   and pinned == staged,
+                   kept[:80]) and ok
+    except (OSError, ValueError) as exc:
+        ok = check("console-receipt", False,
+                   str(exc)[:160]) and ok
+    return ok
+
+
 def run_self_test(work=None):
     """Full offline suite: proofs plus unarmed checks. No boot."""
     print("stress-consumer self-test (unarmed, offline)")
@@ -3269,6 +3740,12 @@ def run_self_test(work=None):
         if pairs is not None:
             ok = self_test_q3_mode(tmp, pairs) and ok
         ok = self_test_full_mode(tmp) and ok
+        ok = self_test_guest_argv() and ok
+        ok = self_test_cmdline_budget(tmp) and ok
+        ok = self_test_inputs_binding(tmp) and ok
+        ok = self_test_console_capture(tmp) and ok
+        if pairs is not None:
+            ok = self_test_guest_inputs(tmp, pairs) and ok
     finally:
         if not keep:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -3322,7 +3799,12 @@ def armed_preflight():
 
 
 def verify_exports(export, names=None):
-    """Exact inventory + sidecar check; returns {ok, files, reasons}."""
+    """Exact inventory + sidecar check; returns {ok, files, reasons}.
+
+    The host-staged inputs doc shares the export dir but
+    is not guest output: the binding check verifies it
+    separately, so the guest inventory excludes it here.
+    """
     names = EXPORT_NAMES if names is None else names
     result = {"ok": False, "files": {}, "reasons": []}
     try:
@@ -3330,6 +3812,7 @@ def verify_exports(export, names=None):
     except OSError as exc:
         result["reasons"].append("export unreadable: %s" % (exc,))
         return result
+    have.discard(core.GUEST_INPUTS_FILE)
     want = set(names) | {"%s.sha256" % n for n in names}
     if have != want:
         result["reasons"].append(
@@ -3650,10 +4133,19 @@ def armed_run(args):
         shutil.rmtree(work, ignore_errors=True)
         return 1
     manifest_path = work / "inputs.json"
+    try:
+        staged = write_guest_inputs_docs(
+            str(work), str(manifest_path), built, pairs,
+            getattr(args, "expect_release", ""))
+    except (ValueError, OSError) as exc:
+        print("FAIL vm-stress: %s" % exc)
+        shutil.rmtree(work, ignore_errors=True)
+        return 1
     manifest = core.write_input_manifest(
         str(manifest_path), pairs, candidate,
         {"sha256": built["sha256"], "build": built["build"]},
-        oracle, sys.argv, commit)
+        oracle, sys.argv, commit,
+        guest_inputs=staged)
     reasons = core.verify_input_manifest(manifest, built["path"])
     if reasons:
         print("FAIL vm-stress: %s" % "; ".join(reasons))
@@ -3682,9 +4174,10 @@ def armed_run(args):
     except (ValueError, OSError) as exc:
         print("FAIL vm-stress: oracle fixture refused: %s" % (exc,))
         return 1
+    mode = getattr(args, "mode", "full")
     try:
-        return armed_boot(args, pairs, manifest_path, manifest,
-                          built, flight, work)
+        return armed_boot(args, manifest_path, manifest,
+                          staged[mode], flight)
     except Exception as exc:
         print("FAIL vm-stress: armed but %s" % (exc,))
         return 1
@@ -3717,32 +4210,157 @@ def snapshot_partial_export(export, tmp):
     return names
 
 
-def build_guest_argv(manifest_path, built, pairs, mode,
-                     expect_release):
-    """Guest command line for one boot (host-tested wiring)."""
+def build_guest_inputs(mode, manifest_path, built, pairs,
+                       expect_release):
+    """Staged inputs doc bytes for one mode (host-tested).
+
+    Carries every path and digest the guest flow verifies;
+    the host writes these exact bytes to the shared export
+    dir and binds their digest in the run manifest, while
+    the guest command line carries only the pointer
+    filename.
+    """
+    if mode not in core.MODES:
+        raise ValueError("bad mode %r" % (mode,))
+    doc = {
+        "schema": core.GUEST_INPUTS_SCHEMA,
+        "mode": mode,
+        "expect_release": expect_release,
+        "manifest": str(manifest_path),
+        "consumer": {"path": built["path"],
+                     "sha256": built["sha256"]},
+        "ko": {"path": guest_oracle.FIXTURE_KO,
+               "sha256": guest_oracle.KO_SHA256},
+        "baseline_lc": {"path": pairs["baseline"]["lc"]["path"],
+                        "sha256": pairs["baseline"]["lc"]["sha256"]},
+        "baseline_cp": {"path": pairs["baseline"]["cp"]["path"],
+                        "sha256": pairs["baseline"]["cp"]["sha256"]},
+        "c9_lc": {"path": pairs["c9"]["lc"]["path"],
+                  "sha256": pairs["c9"]["lc"]["sha256"]},
+        "c9_cp": {"path": pairs["c9"]["cp"]["path"],
+                  "sha256": pairs["c9"]["cp"]["sha256"]},
+    }
+    return (json.dumps(doc, indent=2, sort_keys=True)
+            + "\n").encode("utf-8")
+
+
+def write_guest_inputs_docs(work, manifest_path, built, pairs,
+                            expect_release):
+    """Stage one inputs doc per mode; return {mode: path}."""
+    staged = {}
+    for mode in core.MODES:
+        blob = build_guest_inputs(
+            mode, manifest_path, built, pairs, expect_release)
+        doc_path = os.path.join(work, "guest-inputs-%s.json"
+                                % mode)
+        with open(doc_path, "wb") as handle:
+            handle.write(blob)
+        staged[mode] = doc_path
+    return staged
+
+
+def build_guest_argv(mode):
+    """Guest command line for one boot (host-tested wiring).
+
+    Carries only the staged inputs filename: the full
+    inputs doc travels through the shared export dir, so
+    the joined payload stays far under GUEST_EXEC_BUDGET
+    however long the host paths grow.
+    """
+    if mode not in core.MODES:
+        raise ValueError("bad mode %r" % (mode,))
     return [sys.executable, str(GUEST), "/tmp/vmgate-work",
             "/tmp/export",
-            "--manifest", str(manifest_path),
-            "--consumer", built["path"],
-            "--consumer-sha", built["sha256"],
-            "--ko", guest_oracle.FIXTURE_KO,
-            "--ko-sha", guest_oracle.KO_SHA256,
-            "--mode", mode,
-            "--expect-release", expect_release,
-            "--baseline-lc", pairs["baseline"]["lc"]["path"],
-            "--baseline-cp", pairs["baseline"]["cp"]["path"],
-            "--baseline-lc-sha",
-            pairs["baseline"]["lc"]["sha256"],
-            "--baseline-cp-sha",
-            pairs["baseline"]["cp"]["sha256"],
-            "--c9-lc", pairs["c9"]["lc"]["path"],
-            "--c9-cp", pairs["c9"]["cp"]["path"],
-            "--c9-lc-sha", pairs["c9"]["lc"]["sha256"],
-            "--c9-cp-sha", pairs["c9"]["cp"]["sha256"]]
+            "--inputs", core.GUEST_INPUTS_FILE]
 
 
-def armed_boot(args, pairs, manifest_path, manifest, built,
-               flight, work):
+def build_vng_argv(flight, export, exec_str, kver):
+    """vng command for one boot (host-tested wiring).
+
+    Always verbose: that routes the guest console to the
+    captured stderr instead of /dev/null, so a boot that
+    never reaches the guest flow still leaves a console
+    transcript in the boot's host-guest.stderr.
+    """
+    cmd = flight["prefix"] + ["--run"]
+    if kver:
+        cmd += [kver]
+    cmd += ["-m", "6G",
+            "--append", "swiotlb=force", "--verbose",
+            "--rwdir=/tmp/export=%s" % (export,),
+            "--exec", exec_str]
+    return cmd
+
+
+def check_guest_inputs_binding(files, mode, manifest, export):
+    """Refuse unless the guest saw the exact staged bytes.
+
+    Returns a reason list (empty ok): the guest-observed
+    digest exported in input-verify.json must equal the
+    manifest-bound digest for this mode, and the staged
+    copy still in the export dir must hash the same.
+    """
+    try:
+        observed = json.loads(
+            files["input-verify.json"].read_text())
+    except (KeyError, ValueError, OSError) as exc:
+        return ["%s: input-verify unreadable: %s"
+                % (mode, exc)]
+    bad = []
+    if observed.get("mode") != mode:
+        bad.append("%s: input-verify names mode %r"
+                   % (mode, observed.get("mode")))
+    entry = manifest.get("guest_inputs", {}).get(mode, {})
+    if observed.get("guest_inputs_file") != entry.get("file"):
+        bad.append("%s: guest saw inputs file %r, bound %r"
+                   % (mode, observed.get("guest_inputs_file"),
+                      entry.get("file")))
+    if observed.get("guest_inputs_sha256") \
+            != entry.get("sha256"):
+        bad.append("%s: guest-observed inputs digest "
+                   "differs from the manifest binding"
+                   % mode)
+    try:
+        staged = sha_file(str(Path(export)
+                              / core.GUEST_INPUTS_FILE))
+    except OSError as exc:
+        return sorted(bad + ["%s: staged inputs "
+                             "unreadable: %s" % (mode, exc)])
+    if staged != entry.get("sha256"):
+        bad.append("%s: staged inputs bytes differ from "
+                   "the manifest binding" % mode)
+    return sorted(bad)
+
+
+def save_stress_receipts(out, names, tmp, export, files,
+                         manifest_path, verdict):
+    """Copy one boot receipt set; raises OSError on failure.
+
+    The boot console transcript lands in the receipt as
+    host-guest.stderr (the verbose boot routes the guest
+    console to the captured stderr);
+    host-guest-inputs.json pins the staged inputs bytes
+    the guest had to see.
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        shutil.copy2(files[name], out / name)
+        shutil.copy2(export / ("%s.sha256" % name),
+                     out / ("%s.sha256" % name))
+    shutil.copy2(manifest_path, out / "inputs.json")
+    shutil.copy2(export / core.GUEST_INPUTS_FILE,
+                 out / "host-guest-inputs.json")
+    for name in ("boot.json", "guest.stdout",
+                 "guest.stderr", "guest.exit"):
+        shutil.copy2(tmp / name, out / ("host-%s" % name))
+    stamped = dict(verdict,
+                   console_transcript="host-guest.stderr")
+    (out / "host-verdict.json").write_text(json.dumps(
+        stamped, indent=2, sort_keys=True) + "\n")
+
+
+def armed_boot(args, manifest_path, manifest, staged_inputs,
+               flight):
     """Boot once, run both legs in-guest, judge host-side."""
     from vm_process import run_owned_guest
     mode = getattr(args, "mode", "full")
@@ -3750,19 +4368,48 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
     tmp = Path(tempfile.mkdtemp(prefix="vmgate-stress-boot-"))
     export = tmp / "export"
     export.mkdir()
-    guest_argv = build_guest_argv(
-        manifest_path, built, pairs, mode,
-        getattr(args, "expect_release", ""))
-    cmd = flight["prefix"] + ["--run"]
-    if args.kver:
-        cmd += [args.kver]
-    cmd += ["-m", "6G",
-            "--append", "swiotlb=force",
-            "--rwdir=/tmp/export=%s" % (export,),
-            "--exec", shlex.join(guest_argv)]
+    guest_argv = build_guest_argv(mode)
+    exec_str = shlex.join(guest_argv)
+    projected = project_cmdline_total(len(exec_str))
+    if cmdline_over_budget(len(exec_str)):
+        (tmp / "boot.json").write_text(json.dumps(
+            {"mode": mode, "refused": "cmdline budget",
+             "exec_chars": len(exec_str),
+             "projected_cmdline": projected,
+             "cmdline_ceiling": COMMAND_LINE_SIZE,
+             "exec_budget": GUEST_EXEC_BUDGET},
+            indent=2, sort_keys=True) + "\n")
+        print("FAIL vm-stress %s: guest argv projects to "
+              "%d cmdline chars (exec %d chars, budget %d "
+              "total / %d exec); refusing boot, artifacts "
+              "kept at %s"
+              % (mode, projected, len(exec_str),
+                 COMMAND_LINE_SIZE, GUEST_EXEC_BUDGET, tmp))
+        return 2
+    try:
+        shutil.copyfile(staged_inputs,
+                        export / core.GUEST_INPUTS_FILE)
+        copied = sha_file(export / core.GUEST_INPUTS_FILE)
+    except OSError as exc:
+        print("FAIL vm-stress %s: staged inputs copy "
+              "failed (%s); artifacts kept at %s"
+              % (mode, exc, tmp))
+        return 1
+    bound = manifest.get("guest_inputs", {}).get(mode, {})
+    if copied != bound.get("sha256"):
+        print("FAIL vm-stress %s: staged inputs copy "
+              "differs from the manifest binding; "
+              "artifacts kept at %s" % (mode, tmp))
+        return 1
+    cmd = build_vng_argv(flight, export, exec_str, args.kver)
     (tmp / "boot.json").write_text(json.dumps(
         {"cmd": cmd, "manifest": manifest,
-         "harness": flight["harness"]},
+         "harness": flight["harness"],
+         "exec_chars": len(exec_str),
+         "projected_cmdline": projected,
+         "cmdline_ceiling": COMMAND_LINE_SIZE,
+         "exec_budget": GUEST_EXEC_BUDGET,
+         "guest_inputs_sha256": copied},
         indent=2, sort_keys=True) + "\n")
     try:
         proc = run_owned_guest(cmd, timeout=args.timeout)
@@ -3799,9 +4446,12 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
         print("FAIL vm-stress: %s; artifacts kept at %s"
               % ("; ".join(ident_bad), tmp))
         return 1
+    binding_bad = check_guest_inputs_binding(
+        verified["files"], mode, manifest, export)
     if mode == "q3":
         return judge_q3_receipt(args, manifest_path, manifest,
-                                verified, ident, names, export, tmp)
+                                verified, ident, names, export, tmp,
+                                binding_bad)
     base_bad, base_metrics = judge_leg(verified["files"], "baseline",
                                        "stress-base")
     c9_bad, c9_metrics = judge_leg(verified["files"], "c9", "stress-c9")
@@ -3811,23 +4461,17 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
           "complete": not c9_bad}
     verdict, cmp_reasons, detail = core.compare_pairs(base, c9,
                                                       "stress-compare")
-    reasons = (["baseline: %s" % r for r in base_bad]
+    reasons = (list(binding_bad)
+               + ["baseline: %s" % r for r in base_bad]
                + ["c9: %s" % r for r in c9_bad]
                + cmp_reasons)
     host_verdict = "PASS" if verdict == "PASS" and not reasons else (
         "BLOCKED" if verdict == "BLOCKED" else "FAIL")
     out = Path(args.out)
     try:
-        out.mkdir(parents=True, exist_ok=True)
-        for name in EXPORT_NAMES:
-            shutil.copy2(verified["files"][name], out / name)
-            shutil.copy2(export / ("%s.sha256" % name),
-                         out / ("%s.sha256" % name))
-        shutil.copy2(manifest_path, out / "inputs.json")
-        for name in ("boot.json", "guest.stdout",
-                     "guest.stderr", "guest.exit"):
-            shutil.copy2(tmp / name, out / ("host-%s" % name))
-        (out / "host-verdict.json").write_text(json.dumps(
+        save_stress_receipts(
+            out, EXPORT_NAMES, tmp, export, verified["files"],
+            manifest_path,
             {"verdict": host_verdict, "reasons": reasons,
              "mode": mode,
              "comparison": {"verdict": verdict, "detail": detail},
@@ -3837,8 +4481,7 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
              "identity": ident,
              "runner_commit": manifest["runner_commit"],
              "consumer": manifest["consumer"],
-             "oracle": manifest["oracle"]},
-            indent=2, sort_keys=True) + "\n")
+             "oracle": manifest["oracle"]})
     except OSError as exc:
         print("FAIL vm-stress: receipt failed (%s); artifacts kept "
               "at %s" % (exc, tmp))
@@ -3858,27 +4501,21 @@ def armed_boot(args, pairs, manifest_path, manifest, built,
 
 
 def judge_q3_receipt(args, manifest_path, manifest, verified,
-                     ident, names, export, tmp):
+                     ident, names, export, tmp, binding_bad=()):
     """Judge the adapter gate: both legs, no comparison."""
     base_bad, base_metrics = judge_q3_leg(
         verified["files"], "baseline", "stress-base")
     c9_bad, c9_metrics = judge_q3_leg(
         verified["files"], "c9", "stress-c9")
-    reasons = (["baseline: %s" % r for r in base_bad]
+    reasons = (list(binding_bad)
+               + ["baseline: %s" % r for r in base_bad]
                + ["c9: %s" % r for r in c9_bad])
     host_verdict = "PASS" if not reasons else "FAIL"
     out = Path(args.out)
     try:
-        out.mkdir(parents=True, exist_ok=True)
-        for name in names:
-            shutil.copy2(verified["files"][name], out / name)
-            shutil.copy2(export / ("%s.sha256" % name),
-                         out / ("%s.sha256" % name))
-        shutil.copy2(manifest_path, out / "inputs.json")
-        for name in ("boot.json", "guest.stdout",
-                     "guest.stderr", "guest.exit"):
-            shutil.copy2(tmp / name, out / ("host-%s" % name))
-        (out / "host-verdict.json").write_text(json.dumps(
+        save_stress_receipts(
+            out, names, tmp, export, verified["files"],
+            manifest_path,
             {"verdict": host_verdict, "reasons": reasons,
              "mode": "q3",
              "comparison": {"verdict": "NOT_RUN",
@@ -3891,8 +4528,7 @@ def judge_q3_receipt(args, manifest_path, manifest, verified,
              "identity": ident,
              "runner_commit": manifest["runner_commit"],
              "consumer": manifest["consumer"],
-             "oracle": manifest["oracle"]},
-            indent=2, sort_keys=True) + "\n")
+             "oracle": manifest["oracle"]})
     except OSError as exc:
         print("FAIL vm-stress: receipt failed (%s); artifacts kept "
               "at %s" % (exc, tmp))

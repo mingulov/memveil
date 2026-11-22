@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Stress-pair guest flow: baseline then candidate in one boot.
 
-Runs as root inside the virtme-ng guest. Re-verifies the exact
+Runs as root inside the virtme-ng guest. The host stages
+the full inputs doc in the shared export dir and passes
+only its filename via --inputs; this flow hashes those
+exact bytes first and refuses unless the run manifest
+binds the same digest. It then re-verifies the exact
 consumer and object bytes from the input manifest before
 attaching, then runs two legs (baseline pair, candidate pair)
 with fresh maps and owned fixture state per leg. Each leg runs
@@ -60,6 +64,18 @@ LC_SIZES = (512, 1024, 2048, 4096)
 # any fixture setup and re-checked by the host judge.
 EXPECT_RELEASE = "7.0.14-070014-generic"
 
+# Guest modes; each boot runs exactly one, named by the
+# staged inputs doc the host binds in the run manifest.
+MODES = ("full", "q3")
+
+# Guest-inputs doc schema, mirrored from the host
+# stress core (which owns the writer): the host stages
+# the full inputs doc in the shared export dir and the
+# guest command line carries only the pointer filename.
+# The guest hashes the exact bytes first and refuses
+# unless the run manifest binds the same digest.
+GUEST_INPUTS_SCHEMA = "memveil-stress-guest-inputs/1"
+
 # Every guest operation is bounded; nothing runs unbounded.
 # insmod covers the 2000-op paced oracle (~20 s paced plus
 # scheduling slack); dd covers one 128 MiB direct read.
@@ -97,6 +113,94 @@ def fail(msg):
     """Abort the guest flow; the host judges this failed."""
     print("stress-guest: FAIL: %s" % msg, file=sys.stderr)
     sys.exit(1)
+
+
+def parse_guest_inputs(export_dir, name):
+    """Read the staged inputs doc; return (fields, observed_sha).
+
+    Runs before anything else in the guest: the pointer
+    must be a bare filename resolved against the export
+    dir, the exact bytes are hashed first, and the run
+    manifest named inside must bind the same filename and
+    digest for the doc's mode. Raises ValueError; the
+    caller maps it to the guest abort.
+    """
+    if not name or not isinstance(name, str) \
+            or os.path.basename(name) != name \
+            or name in (".", "..") \
+            or os.path.isabs(name):
+        raise ValueError(
+            "inputs pointer must be a bare filename, "
+            "got %r" % (name,))
+    path = os.path.join(export_dir, name)
+    try:
+        with open(path, "rb") as handle:
+            blob = handle.read()
+    except OSError as exc:
+        raise ValueError("cannot read guest inputs %r: %s"
+                         % (name, exc))
+    observed = hashlib.sha256(blob).hexdigest()
+    try:
+        doc = json.loads(blob.decode("utf-8"))
+    except ValueError as exc:
+        raise ValueError("guest inputs %r are not JSON: %s"
+                         % (name, exc))
+    if not isinstance(doc, dict):
+        raise ValueError("guest inputs %r are not a mapping"
+                         % (name,))
+    if doc.get("schema") != GUEST_INPUTS_SCHEMA:
+        raise ValueError("guest inputs schema %r"
+                         % (doc.get("schema"),))
+    mode = doc.get("mode")
+    if mode not in MODES:
+        raise ValueError("bad mode %r" % (mode,))
+    manifest_path = doc.get("manifest")
+    if not manifest_path or not isinstance(
+            manifest_path, str):
+        raise ValueError("guest inputs lack a run manifest")
+    try:
+        with open(manifest_path) as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("cannot read run manifest: %s"
+                         % exc)
+    staged = manifest.get("guest_inputs", {})
+    entry = staged.get(mode, {}) if isinstance(
+        staged, dict) else {}
+    if not isinstance(entry, dict) \
+            or not entry.get("sha256"):
+        raise ValueError("run manifest lacks a "
+                         "guest-inputs binding for %s"
+                         % mode)
+    if entry.get("file") != name:
+        raise ValueError("guest inputs file %r is not the "
+                         "bound doc for %s" % (name, mode))
+    if entry.get("sha256") != observed:
+        raise ValueError(
+            "guest inputs bytes differ from the manifest "
+            "binding for %s: observed %s... bound %s..."
+            % (mode, observed[:16],
+               str(entry.get("sha256"))[:16]))
+    fields = {"mode": mode, "manifest": manifest_path}
+    for key in ("consumer", "ko", "baseline_lc", "baseline_cp",
+                "c9_lc", "c9_cp"):
+        section = doc.get(key, {})
+        if not isinstance(section, dict) \
+                or not isinstance(
+                    section.get("path"), str) \
+                or not section.get("path") \
+                or not isinstance(
+                    section.get("sha256"), str) \
+                or not section.get("sha256"):
+            raise ValueError("guest inputs lack %s "
+                             "path/digest" % key)
+        fields[key] = section["path"]
+        fields[key + "_sha"] = section["sha256"]
+    if not isinstance(doc.get("expect_release"), str):
+        raise ValueError(
+            "guest inputs lack an expect-release")
+    fields["expect_release"] = doc["expect_release"]
+    return fields, observed
 
 
 def _pipe_text(blob):
@@ -500,6 +604,8 @@ class Gate:
                    "lc_sha": args.c9_lc_sha, "cp_sha": args.c9_cp_sha},
         }
         self.consumer_sha = args.consumer_sha
+        self.guest_inputs_file = args.guest_inputs_file
+        self.guest_inputs_sha = args.guest_inputs_sha
         # Entry marker before the manifest read: a stall
         # there must still leave one marker host-side. The
         # release gate above still fires first, so refusal
@@ -578,7 +684,10 @@ class Gate:
             fail("oracle module not the manifest-bound bytes")
         self.checked = checked
         self.write_json("input-verify.json", {
+            "mode": self.mode,
             "digests": checked,
+            "guest_inputs_file": self.guest_inputs_file,
+            "guest_inputs_sha256": self.guest_inputs_sha,
             "manifest_schema": manifest.get("schema"),
             "runner_commit": manifest.get("runner_commit"),
         })
@@ -1148,24 +1257,20 @@ def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument("work")
     parser.add_argument("export")
-    parser.add_argument("--manifest", required=True)
-    parser.add_argument("--consumer", required=True)
-    parser.add_argument("--consumer-sha", required=True)
-    parser.add_argument("--ko", required=True)
-    parser.add_argument("--ko-sha", required=True)
-    parser.add_argument("--mode", default="full",
-                        choices=("full", "q3"))
-    parser.add_argument("--expect-release", default="")
-    parser.add_argument("--baseline-lc", required=True)
-    parser.add_argument("--baseline-cp", required=True)
-    parser.add_argument("--baseline-lc-sha", required=True)
-    parser.add_argument("--baseline-cp-sha", required=True)
-    parser.add_argument("--c9-lc", required=True)
-    parser.add_argument("--c9-cp", required=True)
-    parser.add_argument("--c9-lc-sha", required=True)
-    parser.add_argument("--c9-cp-sha", required=True)
+    parser.add_argument("--inputs", required=True,
+                        help="staged inputs doc filename "
+                             "(a bare name resolved "
+                             "against the export dir)")
     args = parser.parse_args(argv)
-    gate = Gate(args.work, args.export, args)
+    try:
+        fields, observed = parse_guest_inputs(
+            args.export, args.inputs)
+    except ValueError as exc:
+        fail(str(exc))
+    fields["guest_inputs_file"] = args.inputs
+    fields["guest_inputs_sha"] = observed
+    gate = Gate(args.work, args.export,
+                argparse.Namespace(**fields))
     try:
         run_flow(gate)
     except SystemExit:

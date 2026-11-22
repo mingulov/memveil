@@ -29,6 +29,22 @@ from stress_guest import EXPECT_RELEASE  # noqa: E402,E401
 
 SCHEMA = "memveil-stress-inputs/1"
 
+# Guest-inputs delivery: the full guest argv no longer
+# fits the kernel command line once vng base64-encodes the
+# --exec payload into virtme.exec=, so the host stages the
+# complete inputs doc in the already-shared export dir and
+# the guest command line carries only this stable pointer
+# filename (a fixed token: never a digest, never a host
+# path). The guest resolves it against its export dir,
+# hashes the exact bytes first, and refuses unless the run
+# manifest binds the same digest for its mode.
+GUEST_INPUTS_FILE = "guest-inputs.json"
+GUEST_INPUTS_SCHEMA = "memveil-stress-guest-inputs/1"
+
+# Guest modes; each run boots exactly one, and the run
+# manifest binds a staged inputs doc per mode.
+MODES = ("full", "q3")
+
 # Pre-change baseline: the parent of the cutover commit, by full
 # hash, with the two blob paths, blob ids, and byte hashes.
 BASELINE_COMMIT = "6f850aba88162c4e987b5afb42ecf59d326c7849"
@@ -548,8 +564,21 @@ def build_consumer():
 
 
 def write_input_manifest(path, pairs, candidate, consumer, oracle,
-                         argv, runner_commit):
-    """Write the stress-only input manifest binding every byte."""
+                         argv, runner_commit, guest_inputs=None):
+    """Write the stress-only input manifest binding every byte.
+
+    guest_inputs maps each guest mode to the staged
+    guest-inputs doc path for that mode; the doc bytes
+    are re-hashed at write time, so the manifest always
+    stamps the exact bytes the guest must see.
+    """
+    staged = {}
+    for mode, doc_path in sorted((guest_inputs or {}).items()):
+        staged[mode] = {
+            "file": GUEST_INPUTS_FILE,
+            "path": doc_path,
+            "sha256": sha_file(doc_path),
+        }
     manifest = {
         "schema": SCHEMA,
         "runner_commit": runner_commit,
@@ -558,6 +587,7 @@ def write_input_manifest(path, pairs, candidate, consumer, oracle,
             "binary_sha256": consumer["sha256"],
             "build": consumer["build"],
         },
+        "guest_inputs": staged,
         "oracle": oracle,
         "pairs": {
             "baseline": {
@@ -598,7 +628,7 @@ def verify_input_manifest(manifest, consumer_path=None):
     if manifest.get("schema") != SCHEMA:
         return ["manifest schema %r" % (manifest.get("schema"),)]
     for field in ("runner_commit", "runner_argv", "consumer",
-                  "oracle", "pairs"):
+                  "guest_inputs", "oracle", "pairs"):
         if field not in manifest:
             bad.append("manifest lacks %s" % field)
     if bad:
@@ -658,6 +688,29 @@ def verify_input_manifest(manifest, consumer_path=None):
         bad.append("oracle btf pin drift")
     if oracle.get("guest_release") != guest_oracle.GUEST_RELEASE:
         bad.append("oracle guest release drift")
+    staged = manifest.get("guest_inputs", {})
+    if not isinstance(staged, dict):
+        return sorted(bad + ["manifest guest_inputs is not a mapping"])
+    for mode in MODES:
+        entry = staged.get(mode, {})
+        if not isinstance(entry, dict) \
+                or entry.get("file") != GUEST_INPUTS_FILE:
+            bad.append("guest inputs lack a staged doc for %s" % mode)
+            continue
+        path = entry.get("path", "")
+        try:
+            got = sha_file(path)
+        except OSError:
+            bad.append("guest inputs doc unreadable for "
+                       "%s: %s" % (mode, path))
+            continue
+        if got != entry.get("sha256"):
+            bad.append("guest inputs doc bytes differ "
+                       "from manifest for %s" % mode)
+    for mode in sorted(staged):
+        if mode not in MODES:
+            bad.append("guest inputs stage unknown mode "
+                       "%r" % (mode,))
     return sorted(bad)
 
 
