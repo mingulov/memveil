@@ -542,11 +542,14 @@ pub fn copy_program_names() -> Vec<String> {
 
 /// True when a parsed refusal names an EINVAL/EACCES load errno.
 ///
-/// Only verifier-rejected refusals earn a replay: other errnos
-/// carry no verifier lines worth recovering, and a codeless
-/// diagnostic replays nothing at all.
+/// Only load-phase verifier-rejected refusals earn a replay:
+/// other errnos carry no verifier lines worth recovering, a
+/// codeless diagnostic replays nothing at all, and a link-phase
+/// failure never ran the verifier on the blamed program — a
+/// replay there would reach the next program and append its
+/// foreign verifier log to this link refusal.
 fn is_load_errno_failure(refusal: Option<&LoadRefusal>) -> bool {
-    matches!(refusal, Some(parsed) if parsed.code == "verifier-rejected")
+    matches!(refusal, Some(parsed) if parsed.code == "verifier-rejected" && !parsed.link_phase)
 }
 
 /// 0/1/2 for the load channel a parsed refusal blames, else 0.
@@ -3073,12 +3076,17 @@ mod tests {
     fn refusal_stamp_base_control() {
         // Base control: finalized runs stay codeless and print
         // no code line; coded and unclassified refusals pass
-        // through untouched.
+        // through untouched. The finalized and pre-coded
+        // controls carry a classifiable op-3 errno, so each
+        // preservation guard is tested independently: without
+        // its guard, the stamp would fire here.
+        let classifiable =
+            "ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: x".to_string();
         let mut done = RunResult {
             exit_code: EXIT_OK,
             end_reason: "complete".to_string(),
             outcome: "finalized".to_string(),
-            diagnostic: String::new(),
+            diagnostic: classifiable.clone(),
             fix: String::new(),
             code: String::new(),
             unknown: false,
@@ -3093,7 +3101,7 @@ mod tests {
             exit_code: EXIT_REFUSAL,
             end_reason: "unknown".to_string(),
             outcome: "refused".to_string(),
-            diagnostic: "tracefs hidden".to_string(),
+            diagnostic: classifiable,
             fix: "check the lockdown state".to_string(),
             code: "tracefs-hidden".to_string(),
             unknown: false,
@@ -3115,5 +3123,101 @@ mod tests {
         stamp_load_refusal_code(&mut other_op, false);
         assert!(other_op.code.is_empty());
         assert!(other_op.fix.is_empty());
+    }
+
+    /// The genuine mv_bounce link-EACCES diagnostic, built exactly
+    /// like `real_link_errno_flows_to_code_line`: the program
+    /// loads, then the raw-tracepoint link syscall refuses EACCES.
+    fn genuine_link_eacces_diagnostic() -> String {
+        let error = aya::programs::ProgramError::from(aya::sys::SyscallError {
+            call: "bpf_raw_tracepoint_open",
+            io_error: std::io::Error::from_raw_os_error(libc::EACCES),
+        });
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        let message = format_failed_link(&tag, &spec, &error);
+        let oped = session_message(3, &SessionError::Attach(message));
+        format!("attach: ch2 {oped}")
+    }
+
+    #[test]
+    fn link_phase_verifier_rejection_replays_nothing() {
+        // A genuine link denial parses link-phase with the
+        // verifier-rejected machine code —
+        // but the verifier never ran on the blamed program, so
+        // no replay may run (a replay would reach the next
+        // program and append its foreign verifier log to this
+        // link refusal). The machine code and link remedy stay.
+        let diagnostic = genuine_link_eacces_diagnostic();
+        let refusal = parse_load_refusal(&diagnostic).expect("a link errno classifies");
+        assert_eq!(refusal.code, "verifier-rejected");
+        assert_eq!(refusal.channel, 2);
+        assert_eq!(refusal.op, 3);
+        assert!(
+            refusal.link_phase,
+            "the blamed segment failed linking: {diagnostic}"
+        );
+        assert_eq!(
+            replay_routing(&diagnostic),
+            (false, 2),
+            "a link-phase failure must not replay: {diagnostic}"
+        );
+        // The stamp still codes the refusal and words the remedy
+        // for the failed link (no replay lines: nothing replayed).
+        let mut result = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic,
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut result, false);
+        assert_eq!(result.code, "verifier-rejected");
+        assert_eq!(
+            result.fix,
+            "the program loaded but the kernel refused to attach it; run as root and check the attach target"
+        );
+    }
+
+    #[test]
+    fn nested_load_phase_verifier_rejection_still_replays() {
+        // Control: an attach-path nested program-load rejection
+        // genuinely failed verification, so its blamed-channel
+        // replay stays eligible.
+        let diagnostic = format!("attach: {}", nested_attach_failure());
+        let refusal = parse_load_refusal(&diagnostic).expect("a nested errno classifies");
+        assert_eq!(refusal.code, "verifier-rejected");
+        assert!(
+            !refusal.link_phase,
+            "a nested load failure is load-phase: {diagnostic}"
+        );
+        assert_eq!(
+            replay_routing(&diagnostic),
+            (true, 2),
+            "a load-phase failure keeps its replay: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn link_phase_first_header_suppresses_later_load_replay() {
+        // The first classifying header wins: when it is
+        // link-phase, no replay runs even though a later segment
+        // names a load-phase errno.
+        let diagnostic = "attach: ch2 op=3 domain=2 code=-13 EACCES: attach refused: copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Permission denied (os error 13); ch1 op=2 domain=2 code=-22 EINVAL: x";
+        let refusal = parse_load_refusal(diagnostic).expect("the first errno classifies");
+        assert_eq!(refusal.code, "verifier-rejected");
+        assert_eq!(refusal.channel, 2);
+        assert!(
+            refusal.link_phase,
+            "the classifying header is link-phase: {diagnostic}"
+        );
+        assert_eq!(
+            replay_routing(diagnostic),
+            (false, 2),
+            "a link-phase classifying header suppresses replay: {diagnostic}"
+        );
     }
 }

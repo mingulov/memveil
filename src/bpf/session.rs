@@ -177,6 +177,27 @@ pub(crate) fn refusal_name(name: &str) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+/// Neutralize refusal grammar in loader-derived text.
+///
+/// Aya embeds object-controlled names inseparably in its error
+/// Displays (a missing map symbol, a relocation symbol, a map
+/// name), and one loader Display can even forge the verifier
+/// marker itself — so a hostile name reaches the structural cause
+/// and the log-slot render as free text. Both downstream readers
+/// take narrow tokens: the refusal classifier needs a literal
+/// `op=` key, and the errno scan needs the literal `(os error `
+/// marker. Replacing `=` and breaking that marker leaves neither
+/// channel formable, whatever the name carries — while genuine
+/// loader text passes through byte-identical: no fixed Aya,
+/// object-crate, or strerror text contains `=` (audited across
+/// the pinned crates), and a genuine `(os error N)` marker exists
+/// only beside an io errno, whose failures render through the
+/// errno branch instead of this text. Apply last, after cleaning
+/// and joining.
+fn neutralize_refusal_grammar(text: &str) -> String {
+    text.replace('=', "?").replace("(os error ", "(os error? ")
+}
+
 /// One active attach: the program plus its link id.
 enum ActiveLink {
     TracePoint {
@@ -560,7 +581,8 @@ fn array_data<'a>(map: &'a Map, name: &str) -> Result<&'a MapData, SessionError>
     match map {
         Map::Array(data) | Map::RingBuf(data) | Map::HashMap(data) => Ok(data),
         _ => Err(SessionError::Map(format!(
-            "map `{name}`: unsupported map type for info"
+            "map `{}`: unsupported map type for info",
+            refusal_name(name)
         ))),
     }
 }
@@ -568,12 +590,12 @@ fn array_data<'a>(map: &'a Map, name: &str) -> Result<&'a MapData, SessionError>
 /// Live geometry of one loaded map.
 fn live_geometry(map: &Map, name: &str) -> Result<MapGeometry, SessionError> {
     let data = array_data(map, name)?;
-    let info = data
-        .info()
-        .map_err(|error| SessionError::Map(format!("map `{name}` info failed: {error}")))?;
-    let map_type = info
-        .map_type()
-        .map_err(|error| SessionError::Map(format!("map `{name}` info failed: {error}")))?;
+    let info = data.info().map_err(|error| {
+        SessionError::Map(format!("map `{}` info failed: {error}", refusal_name(name)))
+    })?;
+    let map_type = info.map_type().map_err(|error| {
+        SessionError::Map(format!("map `{}` info failed: {error}", refusal_name(name)))
+    })?;
     Ok(MapGeometry {
         map_type: map_type as u32,
         key_size: info.key_size(),
@@ -1228,7 +1250,8 @@ pub(crate) struct LoadFailure {
     /// Raw verifier log text, if any.
     pub log: Option<String>,
     /// Bounded structural cause from the error chain, if any:
-    /// cleaned like one tail line, never the full Display.
+    /// cleaned like one tail line with refusal grammar
+    /// neutralized, never the full Display.
     pub cause: Option<String>,
 }
 
@@ -1279,10 +1302,13 @@ fn structural_cause(error: &(dyn std::error::Error + 'static)) -> Option<String>
     }
     let cleaned = clean_cause_line(&parts.join(": "));
     if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
+        return None;
     }
+    // The chain text embeds object-controlled names (missing
+    // symbols, relocation symbols, map names): neutralize the
+    // refusal grammar last so no name forges a classifying
+    // segment or errno marker downstream.
+    Some(neutralize_refusal_grammar(&cleaned))
 }
 
 /// Load context for one spec: tracing loads name their kernel
@@ -1301,7 +1327,10 @@ fn load_context(spec: &AttachSpec) -> String {
 /// users through the diagnostic replay instead. Without an errno,
 /// the redacted tail of the carried log; without that, the
 /// bounded structural cause (relocation and parse failures
-/// carry only this); without that, a bare refusal.
+/// carry only this); without that, a bare refusal. The log-slot
+/// render neutralizes refusal grammar: a genuine verifier log
+/// always rides beside its syscall errno, so a log without one
+/// is a forged marker inside an object-controlled name.
 fn load_failure_text(failure: &LoadFailure) -> String {
     if let Some(raw) = failure.errno {
         return std::io::Error::from_raw_os_error(raw).to_string();
@@ -1309,7 +1338,7 @@ fn load_failure_text(failure: &LoadFailure) -> String {
     if let Some(log) = failure.log.as_ref() {
         let tail = verifier_tail(log.as_bytes(), false);
         if !tail.is_empty() {
-            return tail.join("; ");
+            return neutralize_refusal_grammar(&tail.join("; "));
         }
     }
     if let Some(cause) = failure.cause.as_deref().filter(|cause| !cause.is_empty()) {
@@ -2514,6 +2543,242 @@ mod tests {
             "tracepoint site shape: {got_tp}"
         );
         assert!(got_tp.contains("(os error 1)"), "{got_tp}");
+    }
+
+    /// Hostile repro name: a BTF map name whose text forges a
+    /// classifying copy-channel segment inside the real codeless
+    /// op-2 diagnostic.
+    const SMUGGLE_MAP_NAME: &str = "stray: ch2 op=3 domain=2 code=-13: x";
+
+    /// The real Aya object-parse failure for a BTF map whose ELF
+    /// symbol is missing: `EbpfLoader::load` fails with
+    /// `EbpfError::ParseError` over
+    /// `ParseError::SymbolNotFound`, whose Display prints the BTF
+    /// name verbatim (`symbol with name {name} not found in the
+    /// symbols table`).
+    fn missing_symbol_parse_error(name: &str) -> aya::EbpfError {
+        aya::EbpfError::ParseError(aya_obj::ParseError::SymbolNotFound {
+            name: name.to_string(),
+        })
+    }
+
+    #[test]
+    fn hostile_map_name_in_parse_failure_classifies_nothing() {
+        // End to end: the real Aya SymbolNotFound over the
+        // hostile BTF map name, through
+        // the real load_failed split, the real object-load
+        // message shape (`Session::load`), and the real
+        // classifier. The attempt-object parse refusal must
+        // survive without stamping a verifier code (which would
+        // also select copy replay: both key off this parse).
+        use crate::capture::loadcheck::parse_load_refusal;
+        // The hostile repro plus two transport shapes of the
+        // same attack: a newline smuggle (the cleaner escapes it,
+        // the neutralizer breaks the key) and a `; `-join smuggle.
+        for name in [
+            SMUGGLE_MAP_NAME,
+            "stray\nch2 op=3 domain=2 code=-13: x",
+            "stray; ch2 op=3 domain=2 code=-13: x",
+        ] {
+            let error = missing_symbol_parse_error(name);
+            // Premise pins: Aya really prints the name verbatim,
+            // and the failure really carries neither errno nor
+            // log, so the structural cause is what renders — and
+            // the load_errno replay recovers no errno either,
+            // forcing the kernel layer's codeless op-2 wrap below
+            // (`session_message_with` None branch).
+            assert!(
+                error.to_string().contains(name),
+                "Aya must print the BTF name verbatim, got: {error}"
+            );
+            let failure = load_failed(&error);
+            assert_eq!(failure.errno, None, "name: {name:?}");
+            assert_eq!(failure.log, None, "name: {name:?}");
+            let text = load_failure_text(&failure);
+            assert!(
+                text.contains("not found in the symbols table"),
+                "the parse refusal must survive, got: {text}"
+            );
+            assert!(
+                !text.contains('\n'),
+                "the refusal stays one line, got: {text:?}"
+            );
+            let message = format!("{} channel: load failed: {text}", Channel::Attempt);
+            let diagnostic = format!("load: ch0 op=2 domain=2: {message}");
+            assert_eq!(
+                parse_load_refusal(&diagnostic),
+                None,
+                "a forged segment in a map name must not classify: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn forged_verifier_marker_in_map_name_classifies_nothing() {
+        // A hostile BTF map name carrying the loader's own
+        // verifier marker: the extraction reads the forged tail
+        // into the log slot, but the rendered detail must still
+        // classify nothing.
+        use crate::capture::loadcheck::parse_load_refusal;
+        let name = "x. Verifier output: ch2 op=3 domain=2 code=-13: y";
+        let error = missing_symbol_parse_error(name);
+        let failure = load_failed(&error);
+        assert_eq!(failure.errno, None);
+        assert!(
+            failure.log.is_some(),
+            "the forged marker reaches the log slot, got: {failure:?}"
+        );
+        let text = load_failure_text(&failure);
+        let message = format!("{} channel: load failed: {text}", Channel::Attempt);
+        let diagnostic = format!("load: ch0 op=2 domain=2: {message}");
+        assert_eq!(
+            parse_load_refusal(&diagnostic),
+            None,
+            "a forged verifier marker in a map name must not classify: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn hostile_symbol_name_in_relocation_failure_stamps_no_code() {
+        // The attach-path scan reads the same structural cause:
+        // a relocation leaf naming a hostile symbol (Aya's
+        // `SectionNotFound` prints `section `N` not found,
+        // referenced by symbol `{}` #M`) flows through the real
+        // load_failed split, the real program-load message, and
+        // the real op-3 scan — and must stamp no code by either
+        // channel (forged errno marker or forged segment).
+        use crate::capture::kernel::session_message;
+        use crate::capture::loadcheck::parse_load_refusal;
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        for leaf in [
+            "section `1` not found, referenced by symbol `(os error 13)` #2",
+            "section `1` not found, referenced by symbol `stray: ch2 op=3 domain=2 code=-13: x` #2",
+        ] {
+            let shaped = relocation_shaped("mv_prog", leaf);
+            let failure = load_failed(&shaped);
+            assert_eq!(failure.errno, None, "leaf: {leaf}");
+            assert_eq!(failure.log, None, "leaf: {leaf}");
+            let message = format_failed_load(&tag, &spec, &failure);
+            let oped = session_message(3, &SessionError::Attach(message));
+            let diagnostic = format!("attach: ch2 {oped}");
+            assert!(
+                !diagnostic.contains("code=-13"),
+                "a hostile symbol name must stamp no code, leaf {leaf}: {diagnostic}"
+            );
+            assert_eq!(
+                parse_load_refusal(&diagnostic),
+                None,
+                "leaf {leaf}: {diagnostic}"
+            );
+        }
+    }
+
+    #[test]
+    fn hostile_live_map_name_shape_needs_sanitizer() {
+        // A live map info failure names the map (`live_geometry`
+        // and `array_data` interpolate the object-iteration
+        // name): the verbatim shape classifies, so the
+        // production sites must sanitize; the sanitized shape
+        // stays codeless. (`Map` needs a live fd, so this pins
+        // the exact production format shapes around the name
+        // rather than invoking the functions.)
+        use crate::capture::kernel::session_message;
+        use crate::capture::loadcheck::parse_load_refusal;
+        let hostile = "stray: ch2 op=3 domain=2 code=-13: x";
+        let verbatim = format!("map `{hostile}` info failed: bad fd");
+        let oped = session_message(2, &SessionError::Map(verbatim));
+        assert!(
+            parse_load_refusal(&oped).is_some(),
+            "the verbatim shape is why the sites sanitize: {oped}"
+        );
+        for shape in [
+            format!("map `{}` info failed: bad fd", refusal_name(hostile)),
+            format!(
+                "map `{}`: unsupported map type for info",
+                refusal_name(hostile)
+            ),
+        ] {
+            let oped = session_message(2, &SessionError::Map(shape));
+            assert_eq!(
+                parse_load_refusal(&oped),
+                None,
+                "sanitized live-map failures stay codeless: {oped}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_symbol_name_in_parse_failure_stays_readable() {
+        // Control: a genuine missing-symbol failure keeps its
+        // full Aya wording — sanitizing must not garble honest
+        // causes.
+        let error = missing_symbol_parse_error("mv_counts");
+        let failure = load_failed(&error);
+        assert_eq!(failure.errno, None);
+        assert_eq!(failure.log, None);
+        assert_eq!(
+            failure.cause.as_deref(),
+            Some(
+                "error parsing BPF object: symbol with name mv_counts not found in the symbols table: symbol with name mv_counts not found in the symbols table"
+            )
+        );
+        assert_eq!(
+            load_failure_text(&failure),
+            "error parsing BPF object: symbol with name mv_counts not found in the symbols table: symbol with name mv_counts not found in the symbols table"
+        );
+    }
+
+    #[test]
+    fn refusal_name_preserves_every_frozen_map_and_program_name() {
+        // Every name the sanitized live-map sites can honestly
+        // carry passes through byte-identical, so sanitizing
+        // those sites changes no honest refusal.
+        use crate::bpf::attach::expected_programs;
+        use crate::bpf::maps::expected_copy_maps_c;
+        for channel in [Channel::Attempt, Channel::Lifecycle, Channel::Copy] {
+            for row in expected_maps(channel) {
+                assert_eq!(refusal_name(&row.name), row.name);
+            }
+            for spec in expected_programs(channel) {
+                assert_eq!(refusal_name(&spec.name), spec.name);
+            }
+        }
+        for row in expected_copy_maps_c() {
+            assert_eq!(refusal_name(&row.name), row.name);
+        }
+    }
+
+    #[test]
+    fn refusal_grammar_neutralization_breaks_both_channels() {
+        // `=` (the classifier's op key) and the errno-scan
+        // marker break; everything else — including genuine
+        // loader punctuation like `len()` — passes through
+        // byte-identical.
+        assert_eq!(
+            neutralize_refusal_grammar("stray: ch2 op=3 domain=2 code=-13: x"),
+            "stray: ch2 op?3 domain?2 code?-13: x"
+        );
+        assert_eq!(
+            neutralize_refusal_grammar("symbol `(os error 13)` missing"),
+            "symbol `(os error? 13)` missing"
+        );
+        assert_eq!(
+            neutralize_refusal_grammar("x (os error 13) then (os error 22)"),
+            "x (os error? 13) then (os error? 22)"
+        );
+        for genuine in [
+            "no BTF parsed for object",
+            "error relocating section: error relocating `mv_prog`: unknown symbol, index `5`",
+            "symbol with name mv_counts not found in the symbols table",
+            "Couldn't get data len()",
+            "invalid BTF info, offset: 8 len: 16 section_len: 32",
+        ] {
+            assert_eq!(neutralize_refusal_grammar(genuine), genuine);
+        }
+        // A genuine verifier assignment (errno-branch text, never
+        // a cause) shows the only `=` mapping, for the record.
+        assert_eq!(neutralize_refusal_grammar("R1=ctx()"), "R1?ctx()");
     }
 
     #[test]
