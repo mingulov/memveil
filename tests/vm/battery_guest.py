@@ -23,6 +23,7 @@ carries a sha256 sidecar. No DMA addresses ever cross:
 consumer files hold decoded facts only.
 """
 
+import errno
 import hashlib
 import json
 import os
@@ -52,6 +53,30 @@ TIMEOUT_DMESG = 30
 # Readiness stdout without an ack past this is a flood, not
 # a slow attach.
 READY_BUFFER_CAP = 1048576
+
+# Pre-readiness finalization reserve the record writer
+# fallocates before signaling readiness, mirrored from
+# the product's src/capture/writer.rs
+# FINALIZE_RESERVE_BYTES (EventWriter::prepare refuses
+# pre-readiness with ENOSPC when the output filesystem
+# cannot grant it). The f4 staging derives its size from
+# this, never from a bare number; the host self-test
+# re-checks the mirror against the product source.
+FINALIZE_RESERVE_BYTES = 17 * 1024 * 1024
+
+# f4 capture headroom past the reserve: the staging
+# files plus the baseline line and the few events a
+# slow guest persists between the ready line and the
+# post-readiness fill. 1 MiB is orders past the modeled
+# ~68 KiB need and noise against the 6 GiB guest.
+F4_HEADROOM_BYTES = 1024 * 1024
+
+# Exit the record binary reports for a cannot-start
+# refusal (product: src/capture/collector.rs
+# EXIT_REFUSAL): a pre-readiness death with this exit
+# is a classified refusal; any other pre-readiness
+# death is unexpected.
+EXIT_REFUSAL = 3
 
 CASES = ("matrix", "copy", "canonical-c", "canonical-e",
          "saturation", "stop", "faults", "record3",
@@ -871,8 +896,18 @@ def record_argv(gate, duration, caps, cap):
             "--capability", ",".join(caps)]
 
 
-def await_record_ready(rec, work, errname="record.stderr"):
-    """Wait for the record readiness line; fail with stderr tail."""
+def await_record_ready(rec, work, errname="record.stderr",
+                       allow_refusal=False):
+    """Wait for the record readiness line; classify early death.
+
+    Returns (ready, tail) on the ready line. A
+    pre-readiness death with the refusal exit returns
+    (None, tail) only with allow_refusal; any other
+    pre-readiness death (wrong exit, signal, timeout)
+    fails loudly, as does a refusal where readiness was
+    staged. Callers that staged readiness keep the
+    default and never silently ledger a refusal.
+    """
     def tail():
         try:
             with open(os.path.join(work, errname),
@@ -892,13 +927,58 @@ def await_record_ready(rec, work, errname="record.stderr"):
                 break
         if rec.poll() is not None:
             break
-    if ready is None:
+    if ready is not None:
+        return ready, tail
+    rc = rec.poll()
+    if rc is None:
         try:
             rec.kill()
         except OSError:
             pass
         fail("record never reached readiness: " + tail())
-    return ready, tail
+    if rc == EXIT_REFUSAL:
+        if allow_refusal:
+            return None, tail
+        fail("record refused pre-readiness, readiness "
+             "staged: " + tail())
+    if rc < 0:
+        fail("record died pre-readiness (signal %d): %s"
+             % (-rc, tail()))
+    fail("record died pre-readiness (exit %d): %s"
+         % (rc, tail()))
+
+
+def f4_fs_bytes():
+    """f4 output filesystem size: reserve plus headroom."""
+    return FINALIZE_RESERVE_BYTES + F4_HEADROOM_BYTES
+
+
+def f4_admits_start(fs_bytes):
+    """True when a filesystem admits the f4 reserve plus headroom."""
+    return fs_bytes >= f4_fs_bytes()
+
+
+def fill_to_full(path):
+    """Grow a filler file until its filesystem reports full.
+
+    Unbuffered 4 KiB writes so each ENOSPC surfaces at
+    the failing write rather than at close, leaving
+    under a page free. ENOSPC anywhere (open, write,
+    close) means the postcondition already holds and
+    returns quietly; any other errno, or a zero-byte
+    write without error, fails loudly: a filler that
+    stops any other way proves nothing about fullness.
+    """
+    chunk = b"x" * 4096
+    try:
+        with open(path, "ab", buffering=0) as handle:
+            while True:
+                if handle.write(chunk) == 0:
+                    fail("filler wrote zero bytes "
+                         "without error")
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            fail("filler failed: %s" % exc)
 
 
 def export_profile(gate):
@@ -1134,15 +1214,25 @@ def run_faults(gate):
         "cap": True,
     })
 
+    # f4: mid-capture fullness. The filesystem admits
+    # the writer's pre-readiness reserve plus headroom,
+    # and the filler grows only AFTER the ready line
+    # proves the reserve landed and capture started:
+    # ENOSPC must strike mid-capture (honest exit 1,
+    # events kept), never pre-readiness (exit 3
+    # refusal, no capture). The ready line is
+    # program-order proof: the product prints it after
+    # the reserve fallocate, attach, and baseline
+    # append, and the fill below runs strictly after
+    # this call returns that line.
     mnt = os.path.join(gate.work, "full")
     os.makedirs(mnt)
-    r = sh(["mount", "-t", "tmpfs", "-o", "size=64k",
+    r = sh(["mount", "-t", "tmpfs", "-o",
+            "size=%dk" % (f4_fs_bytes() // 1024),
             "memveil-full", mnt])
     if r.returncode != 0:
         fail("tmpfs mount failed: %s" % r.stderr.strip())
     try:
-        with open(os.path.join(mnt, "filler"), "wb") as handle:
-            handle.write(b"x" * 57344)
         before = gate.bpf_inventory()
         gate.clear_dmesg()
         cap = os.path.join(mnt, "cap")
@@ -1160,7 +1250,9 @@ def run_faults(gate):
             start_new_session=True,
         )
         ready, _ = await_record_ready(
-            rec, gate.work, "f4-record.stderr")
+            rec, gate.work, "f4-record.stderr",
+            allow_refusal=False)
+        fill_to_full(os.path.join(mnt, "filler"))
         gate.insmod(["mv_oracle_witness=1",
                      "mv_oracle_delay_ms=100",
                      "mv_oracle_scenario=1"])

@@ -852,6 +852,41 @@ def self_test_gate_constants():
     except OSError as exc:
         ok = check("const-loss-grammar", False,
                    str(exc)) and ok
+    try:
+        text = (REPO / "src" / "capture"
+                / "writer.rs").read_text()
+        ok = check("const-reserve",
+                   "FINALIZE_RESERVE_BYTES: u64 = "
+                   "17 * 1024 * 1024" in text
+                   and battery_guest.FINALIZE_RESERVE_BYTES
+                   == 17 * 1024 * 1024) and ok
+        ok = check("const-reserve-prepare",
+                   "pub fn prepare(" in text
+                   and "reserve allocation failed: errno "
+                   in text) and ok
+    except OSError as exc:
+        ok = check("const-reserve", False, str(exc)) and ok
+    try:
+        text = (REPO / "src" / "capture"
+                / "collector.rs").read_text()
+        ok = check("const-refusal-exit",
+                   "pub const EXIT_REFUSAL: i64 = 3;"
+                   in text
+                   and battery_guest.EXIT_REFUSAL == 3) \
+            and ok
+    except OSError as exc:
+        ok = check("const-refusal-exit", False,
+                   str(exc)) and ok
+    try:
+        text = (REPO / "src" / "capture"
+                / "live.rs").read_text()
+        made = text.index("fn create(")
+        ok = check("const-reserve-before-ready",
+                   made < text.index("w.prepare()",
+                                     made)) and ok
+    except (OSError, ValueError) as exc:
+        ok = check("const-reserve-before-ready", False,
+                   str(exc)[:80]) and ok
     ok = check("const-cases",
                set(core.CASES) == set(EXPORT_NAMES)
                and len(core.CASES) == 9) and ok
@@ -2118,6 +2153,304 @@ def self_test_faults(tmp):
     return ok
 
 
+def _f4_calls_in_order(node):
+    """Call nodes under node in execution order (post-order walk)."""
+    found = []
+    for child in ast.iter_child_nodes(node):
+        found.extend(_f4_calls_in_order(child))
+    if isinstance(node, ast.Call):
+        found.append(node)
+    return found
+
+
+class _FakeRec:
+    """Minimal Popen stand-in for readiness tests."""
+    def __init__(self, stdout_fh, exits):
+        self.stdout = stdout_fh
+        self._exits = list(exits)
+        self.returncode = None
+        self.killed = False
+
+    def poll(self):
+        if self._exits:
+            self.returncode = self._exits.pop(0)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+
+class _BoundedFile:
+    """Fake bounded-filesystem file: N writes, then err."""
+    def __init__(self, budget, err=None):
+        import errno as errno_mod
+        self.left = budget
+        self.writes = 0
+        self.errno = err if err is not None \
+            else errno_mod.ENOSPC
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write(self, chunk):
+        if self.left <= 0:
+            raise OSError(self.errno, "injected")
+        self.left -= 1
+        self.writes += 1
+        return len(chunk)
+
+
+class _ZeroFile:
+    """Fake file whose writes report zero without error."""
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write(self, chunk):
+        return 0
+
+
+def self_test_f4_staging(tmp):
+    """f4 admits the reserve, then fills; await classified."""
+    from unittest import mock
+    import errno as errno_mod
+    import io
+    ok = True
+    reserve = battery_guest.FINALIZE_RESERVE_BYTES
+    headroom = battery_guest.F4_HEADROOM_BYTES
+    size = battery_guest.f4_fs_bytes()
+    # Admission on mocked filesystem sizes: the new
+    # staging admits the reserve plus headroom, the
+    # old 64k staging (and its ~8k free) cannot.
+    ok = check("f4-admits",
+               size == reserve + headroom
+               and battery_guest.f4_admits_start(size)) \
+        and ok
+    ok = check("f4-rejects-starved",
+               not battery_guest.f4_admits_start(65536)
+               and not battery_guest.f4_admits_start(8192)) \
+        and ok
+    # Reserve boundary: the bare reserve with zero
+    # headroom is rejected (prepare needs staging and
+    # baseline bytes past the fallocate), the staged
+    # size is admitted with margin.
+    ok = check("f4-boundary",
+               not battery_guest.f4_admits_start(reserve - 1)
+               and not battery_guest.f4_admits_start(reserve)
+               and battery_guest.f4_admits_start(size)) and ok
+    # Headroom covers the modeled pre-fill need (a 4 KiB
+    # baseline line plus 64 one-KiB slow-guest events,
+    # two orders past any millisecond-scale
+    # ready-to-fill window); the mount arg stays KiB-exact.
+    ok = check("f4-headroom",
+               headroom >= 4096 + 64 * 1024
+               and size % 1024 == 0) and ok
+    # Fill-after-start, pinned structurally: in
+    # run_faults the f4 fill runs strictly after the f4
+    # readiness wait, the mount precedes both, and the
+    # starved pre-start staging is gone.
+    try:
+        tree = ast.parse(GUEST.read_text())
+    except OSError as exc:
+        return check("f4-order", False, str(exc)) and ok
+    faults = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) \
+                and node.name == "run_faults":
+            faults = node
+            break
+
+    def kind(call):
+        func = call.func
+        if isinstance(func, ast.Name):
+            if func.id == "sh" and call.args \
+                    and isinstance(call.args[0], ast.List) \
+                    and call.args[0].elts \
+                    and isinstance(call.args[0].elts[0],
+                                   ast.Constant) \
+                    and call.args[0].elts[0].value == "mount":
+                return "mount"
+            if func.id == "await_record_ready":
+                for arg in call.args:
+                    if isinstance(arg, ast.Constant) \
+                            and arg.value == "f4-record.stderr":
+                        return "await-f4"
+                return "await"
+            if func.id == "fill_to_full":
+                return "fill"
+        elif isinstance(func, ast.Attribute) \
+                and func.attr == "Popen":
+            return "popen"
+        return ""
+    calls = _f4_calls_in_order(faults) \
+        if faults is not None else []
+    kinds = [kind(call) for call in calls]
+
+    def pos(want):
+        return [i for i, got in enumerate(kinds)
+                if got == want]
+    mounts, awaits, fills = \
+        pos("mount"), pos("await-f4"), pos("fill")
+    order = (faults is not None and len(mounts) == 1
+             and len(awaits) == 1 and len(fills) == 1
+             and mounts[0] < awaits[0] < fills[0])
+    ok = check("f4-order", order,
+               "%d mount %d await-f4 %d fill"
+               % (len(mounts), len(awaits), len(fills))) \
+        and ok
+    denied = False
+    if len(awaits) == 1:
+        for word in calls[awaits[0]].keywords:
+            if word.arg == "allow_refusal" \
+                    and isinstance(word.value, ast.Constant):
+                denied = word.value.value is False
+    ok = check("f4-requires-ready", denied) and ok
+    dump = ast.dump(faults) if faults is not None else ""
+    ok = check("f4-no-starved-staging",
+               "size=64k" not in dump
+               and "57344" not in dump) and ok
+    # Mocked growth: the filler stops quietly at ENOSPC
+    # and fails loudly on anything else.
+    seen = {}
+    fake_file = []
+
+    def fake_open(path, mode="r", buffering=-1, **kw):
+        seen["mode"] = mode
+        seen["buffering"] = buffering
+        return fake_file[0]
+
+    def fails_quietly(fn):
+        """Run fn; return its FAIL text, else None."""
+        with mock.patch.object(sys, "stderr",
+                               io.StringIO()) as err:
+            try:
+                fn()
+            except SystemExit:
+                return err.getvalue()
+        return None
+    fake_file.append(_BoundedFile(3))
+    with mock.patch("builtins.open", fake_open):
+        battery_guest.fill_to_full("filler")
+    ok = check("f4-fill-stops",
+               fake_file[0].writes == 3
+               and seen.get("buffering") == 0
+               and seen.get("mode") == "ab") and ok
+    fake_file[0] = _BoundedFile(0)
+    with mock.patch("builtins.open", fake_open):
+        battery_guest.fill_to_full("filler")
+    ok = check("f4-fill-full-now",
+               fake_file[0].writes == 0) and ok
+    fake_file[0] = _BoundedFile(3, errno_mod.EIO)
+    with mock.patch("builtins.open", fake_open):
+        text = fails_quietly(
+            lambda: battery_guest.fill_to_full("filler"))
+    ok = check("f4-fill-other-errno",
+               text is not None
+               and "filler failed" in text,
+               (text or "")[:80]) and ok
+    fake_file[0] = _ZeroFile()
+    with mock.patch("builtins.open", fake_open):
+        text = fails_quietly(
+            lambda: battery_guest.fill_to_full("filler"))
+    ok = check("f4-fill-zero",
+               text is not None
+               and "zero bytes" in text,
+               (text or "")[:80]) and ok
+    # ENOSPC on open means already full (quiet); any
+    # other open errno fails loudly.
+    def raise_open(path, mode="r", buffering=-1, **kw):
+        raise OSError(open_errno[0], "injected")
+    open_errno = [errno_mod.ENOSPC]
+    with mock.patch("builtins.open", raise_open):
+        text = fails_quietly(
+            lambda: battery_guest.fill_to_full("filler"))
+    ok = check("f4-fill-open-full", text is None) and ok
+    open_errno[0] = errno_mod.EACCES
+    with mock.patch("builtins.open", raise_open):
+        text = fails_quietly(
+            lambda: battery_guest.fill_to_full("filler"))
+    ok = check("f4-fill-open-other",
+               text is not None
+               and "filler failed" in text,
+               (text or "")[:80]) and ok
+
+    # Readiness branches: success, expected refusal,
+    # and every unexpected death shape.
+    def pipe_with(text):
+        """Pipe read end serving text, write end closed (EOF)."""
+        rd, wr = os.pipe()
+        if text:
+            os.write(wr, text.encode())
+        os.close(wr)
+        return os.fdopen(rd, "r", buffering=1)
+    work = os.path.join(tmp, "f4-await")
+    os.makedirs(work)
+    errname = "t-record.stderr"
+    with open(os.path.join(work, errname), "wb") as handle:
+        handle.write(b"tail-bytes")
+    stdout = pipe_with("noise\nready session=t start_ns=1\n")
+    try:
+        ready, tail = battery_guest.await_record_ready(
+            _FakeRec(stdout, []), work, errname)
+    finally:
+        stdout.close()
+    ok = check("await-ready",
+               ready == "ready session=t start_ns=1"
+               and tail() == "tail-bytes") and ok
+    stdout = pipe_with("")
+    try:
+        state = battery_guest.await_record_ready(
+            _FakeRec(stdout, [3]), work, errname,
+            allow_refusal=True)
+    finally:
+        stdout.close()
+    ok = check("await-refused-allowed",
+               state[0] is None
+               and state[1]() == "tail-bytes") and ok
+    for tag, exits, allow, want in (
+            ("denied", [3], False,
+             "refused pre-readiness"),
+            ("died", [1], False,
+             "died pre-readiness (exit 1)"),
+            ("signal", [-15], False,
+             "died pre-readiness (signal 15)")):
+        stdout = pipe_with("")
+        try:
+            text = fails_quietly(
+                lambda: battery_guest.await_record_ready(
+                    _FakeRec(stdout, exits), work, errname,
+                    allow_refusal=allow))
+        finally:
+            stdout.close()
+        ok = check("await-%s" % tag,
+                   text is not None and want in text,
+                   (text or "")[:80]) and ok
+    # Timeout without waiting: the clock jumps past the
+    # deadline while the process stays alive.
+    stdout = pipe_with("")
+    rec = _FakeRec(stdout, [])
+    try:
+        with mock.patch("time.monotonic",
+                        side_effect=[100.0, 161.0]):
+            text = fails_quietly(
+                lambda: battery_guest.await_record_ready(
+                    rec, work, errname))
+    finally:
+        stdout.close()
+    ok = check("await-timeout",
+               text is not None
+               and "never reached readiness" in text
+               and rec.killed,
+               (text or "")[:80]) and ok
+    return ok
+
+
 # -- Unarmed self-test: manifest + selection ------------------
 
 def self_test_manifest(tmp):
@@ -2933,6 +3266,7 @@ def run_self_test(work=None):
         ok = self_test_loss_grammar() and ok
         ok = self_test_record3(tmp) and ok
         ok = self_test_faults(tmp) and ok
+        ok = self_test_f4_staging(tmp) and ok
         ok = self_test_manifest(tmp) and ok
         ok = self_test_selection() and ok
         ok = self_test_guest_argv(tmp) and ok
