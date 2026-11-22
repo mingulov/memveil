@@ -24,7 +24,8 @@ use crate::capture::run::{
     loadcheck_bridge_sha, parse_requested_caps, resolve_channel_object, resolve_object,
 };
 use crate::cli::report::{
-    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic, write_stderr,
+    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, no_profiles_lines,
+    profiles_manifest_missing, sanitize_diagnostic, write_stderr, write_stderr_trusted,
 };
 use crate::platform::btf::read_object_map_bytes;
 use crate::platform::capabilities::attempt_loss_exact;
@@ -180,6 +181,19 @@ fn doctor_failed(detail: &str) -> i64 {
         Ok(()) => EXIT_INVALID,
         Err(_) => EXIT_INTERNAL,
     }
+}
+
+/// Report a missing profiles tree on stderr; return EXIT_UNAVAILABLE.
+///
+/// The lone-install shape: the searched manifest path plus the
+/// packaged-layout fix, written trusted so the path survives.
+fn doctor_unavailable_profiles(dir: &str) -> i64 {
+    for line in no_profiles_lines("doctor", dir) {
+        if write_stderr_trusted(&line).is_err() {
+            return EXIT_INTERNAL;
+        }
+    }
+    EXIT_UNAVAILABLE
 }
 
 /// One judged capability: status, reason, code, evidence.
@@ -1218,11 +1232,14 @@ pub fn run_doctor_with(root: &str, profiles_dir: &str, as_json: bool) -> i64 {
 
 /// Run the admission-judging doctor flow; return exit code.
 ///
-/// Bad roots, profiles, or capability lists fail with exit 2; a load
-/// check against a fixture root is rejected the same way. Otherwise
-/// the report goes to stdout with exit 0 when the requested set is
-/// ready and 3 when it is unavailable. Passive runs never touch the
-/// bridge.
+/// Bad roots or capability lists fail with exit 2; a load check
+/// against a fixture root is rejected the same way. A missing
+/// profiles tree (no manifest at the searched path) reports the
+/// lone-install shape with exit 3, matching record; a present but
+/// malformed tree keeps the loader diagnostic with exit 2.
+/// Otherwise the report goes to stdout with exit 0 when the
+/// requested set is ready and 3 when it is unavailable. Passive
+/// runs never touch the bridge.
 pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
     if opts.load_check && !opts.root.is_empty() {
         return doctor_failed("--load-check needs the live host");
@@ -1231,6 +1248,9 @@ pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
         return doctor_failed(&format!("cannot open evidence: {e}"));
     }
     if let Err(e) = load_profiles(&opts.profiles_dir) {
+        if profiles_manifest_missing(&opts.profiles_dir) {
+            return doctor_unavailable_profiles(&opts.profiles_dir);
+        }
         return doctor_failed(&format!("cannot load profiles: {e}"));
     }
     let ask = parse_requested_caps(&opts.capabilities);
@@ -1826,7 +1846,15 @@ mod tests {
 
     #[test]
     fn exit_bad_profiles() {
+        // A missing profiles tree is unavailable (3), matching
+        // record; only a present-but-malformed tree stays a usage
+        // error (2) with the loader diagnostic.
         let code = run_doctor_with(&fx("ordinary-7.0"), "no-such-profiles", false);
+        assert_eq!(code, EXIT_UNAVAILABLE);
+        let tmp = TestDir::create("memveil-doctor-badman").expect("mkdtemp");
+        std::fs::write(tmp.path().join("manifest.txt"), "p.json\n\n").expect("manifest");
+        let bad = tmp.as_str().to_string();
+        let code = run_doctor_with(&fx("ordinary-7.0"), &bad, false);
         assert_eq!(code, 2);
     }
 
@@ -1878,12 +1906,14 @@ mod tests {
 
     #[test]
     fn exit_profiles_dir_bad_path() {
+        // A --profiles-dir without a manifest is unavailable (3),
+        // matching record.
         assert_eq!(
             run_doctor(&args(&[
                 "--profiles-dir",
                 "tests/fixtures/capabilities/nonexistent-xyz"
             ])),
-            2
+            EXIT_UNAVAILABLE
         );
     }
 

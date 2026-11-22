@@ -300,6 +300,38 @@ pub fn refusal_stderr_lines(verb: &str, diagnostic: &str, code: &str, fix: &str)
     out
 }
 
+/// True when `<dir>/manifest.txt` is absent, not merely unreadable.
+///
+/// Only [`std::io::ErrorKind::NotFound`] counts: a present but
+/// malformed manifest, or a profiles path that is not a directory,
+/// keeps its loader diagnostic instead of this shape.
+pub fn profiles_manifest_missing(dir: &str) -> bool {
+    let probe = format!("{dir}/manifest.txt");
+    matches!(
+        std::fs::symlink_metadata(&probe),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// Lone-install stderr lines: diagnostic naming the searched manifest, fix.
+///
+/// Both lines carry the verb prefix and newline; the diagnostic names
+/// the exact path the loader probed. Fragments are escaped; write both
+/// lines through the trusted writer so the searched path and the fix
+/// command survive intact.
+pub fn no_profiles_lines(verb: &str, dir: &str) -> Vec<String> {
+    vec![
+        format!(
+            "memveil {verb}: no profiles found: {}/manifest.txt does not exist\n",
+            sanitize_diagnostic(dir)
+        ),
+        format!(
+            "memveil {verb}: fix: run the packaged layout (profiles/ beside bin/), \
+             or pass --profiles-dir DIR\n"
+        ),
+    ]
+}
+
 /// Raw write(2) on fd 2 with an EINTR retry loop.
 fn write_fd2(raw: &[u8]) -> Result<(), StderrError> {
     let total = raw.len();
@@ -1300,6 +1332,57 @@ mod tests {
         );
         let plain = refusal_stderr_lines("record", "budget 1 below 131072", "", "");
         assert_eq!(plain.len(), 1);
+    }
+
+    #[test]
+    fn no_profiles_lines_shape() {
+        // The lone-install shape, byte-exact for both verbs: the
+        // searched manifest path plus the packaged-layout fix.
+        for verb in ["doctor", "record"] {
+            let lines = super::no_profiles_lines(verb, "/tmp/lone/../profiles");
+            assert_eq!(
+                lines,
+                vec![
+                    format!(
+                        "memveil {verb}: no profiles found: \
+                         /tmp/lone/../profiles/manifest.txt does not exist\n"
+                    ),
+                    format!(
+                        "memveil {verb}: fix: run the packaged layout (profiles/ beside bin/), \
+                         or pass --profiles-dir DIR\n"
+                    ),
+                ]
+            );
+        }
+        // A hostile --profiles-dir value stays one escaped line.
+        let lines = super::no_profiles_lines("doctor", "/tmp/x\n/tmp/y");
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("/tmp/x\\n/tmp/y/manifest.txt"), "{}", lines[0]);
+        assert_eq!(lines[0].matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn profiles_manifest_missing_vectors() {
+        use crate::platform::test_support::TestDir;
+        // A nonexistent tree and a tree without a manifest count.
+        assert!(super::profiles_manifest_missing(
+            "/tmp/memveil-no-such-tree-xyz"
+        ));
+        let tmp = TestDir::create("memveil-prof-miss").expect("mkdtemp");
+        assert!(super::profiles_manifest_missing(tmp.as_str()));
+        // A present manifest does not count, trailing slash or not.
+        std::fs::write(tmp.path().join("manifest.txt"), "p.json\n").expect("manifest");
+        assert!(!super::profiles_manifest_missing(tmp.as_str()));
+        assert!(!super::profiles_manifest_missing(
+            &format!("{}/", tmp.as_str())
+        ));
+        // A profiles path that is not a directory keeps the loader
+        // diagnostic: probing under it fails, but nothing is missing.
+        let file = tmp.path().join("plain");
+        std::fs::write(&file, "x").expect("plain file");
+        assert!(!super::profiles_manifest_missing(
+            file.to_str().expect("utf-8")
+        ));
     }
 
     #[test]

@@ -28,8 +28,8 @@ use crate::cli::doctor::default_profiles_dir;
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::report::{
     CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL,
-    final_capture_summary, refusal_stderr_lines, sanitize_diagnostic, write_stderr,
-    write_stderr_trusted,
+    final_capture_summary, no_profiles_lines, profiles_manifest_missing, refusal_stderr_lines,
+    sanitize_diagnostic, write_stderr, write_stderr_trusted,
 };
 use crate::platform::stdout::write_stdout;
 
@@ -334,6 +334,17 @@ fn record_done_line(end_reason: &str, outcome: &str, exit_code: i64) -> String {
 /// diagnostic and exit 3 before any BPF or output
 /// resource exists.
 pub fn run_record_with(root: &str, profiles_dir: &str, opts: RecordOptions) -> i64 {
+    if profiles_manifest_missing(profiles_dir) {
+        // Lone install: name the searched manifest and the
+        // packaged-layout fix before admission runs. Every other
+        // profiles failure keeps the collector diagnostic below.
+        for line in no_profiles_lines("record", profiles_dir) {
+            if write_stderr_trusted(&line).is_err() {
+                return EXIT_INTERNAL;
+            }
+        }
+        return EXIT_REFUSAL;
+    }
     let mut writer = LiveWriter::new();
     let output = opts.output.clone();
     let result = run_collector_with(root, profiles_dir, opts, &mut writer);
@@ -409,7 +420,10 @@ pub fn run_record(args: &[String]) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_profiles_dir, parse_record_args, record_done_line, record_usage};
+    use super::{
+        default_profiles_dir, parse_record_args, record_done_line, record_usage, run_record_with,
+    };
+    use super::EXIT_REFUSAL;
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
@@ -419,6 +433,15 @@ mod tests {
         let mut words = vec!["--output", "out", "--object", "obj.o"];
         words.extend(extra.iter());
         args(&words)
+    }
+
+    #[test]
+    fn record_missing_profiles_is_refusal() {
+        // A profiles tree without a manifest refuses (3) with the
+        // lone-install shape before admission runs, matching doctor.
+        let opts = parse_record_args(&base(&[])).expect("base parses");
+        let code = run_record_with("", "no-such-profiles", opts);
+        assert_eq!(code, EXIT_REFUSAL);
     }
 
     #[test]
