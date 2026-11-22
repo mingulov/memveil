@@ -5,8 +5,8 @@
 Seven scenarios in one pinned guest: truncated lc/cp objects
 refuse with exit 3 and zero BPF residue; SIGTERM mid-capture
 (1ch f3a and 3ch f3b) stops bounded with a signal end reason;
-a full output filesystem fails honestly without a
-masquerading session; paced 300-op floods compare 1ch against
+a full output filesystem publishes an honest error
+session; paced 300-op floods compare 1ch against
 3ch capture exactly; a burst flood reconciles recorded plus
 omitted against the scripted prediction; background flood
 during attach leaves no pre-window records. Helper tests do
@@ -43,6 +43,7 @@ from evidence_retention import (VerifiedExports, expected_from_verified,
                                 retain_failure, snapshot_exports)
 from export_validation import validate_lifecycle_exports
 import guest_oracle  # noqa: E402
+from test_attempt_capture import evidence
 from test_bundle import check_report
 from test_record3 import (_events, check_capture_session,
                           check_lifetimes, check_oracle_slice)
@@ -614,6 +615,64 @@ def check_cut_slice(events, ops_logged, tag):
     return bad
 
 
+def check_error_session(events, raw, session, tag,
+                      expect_decision=None):
+    """Honest error session: claims verified, not echoed.
+
+    The session must be finalized with the error end
+    reason under the admitted profile decision, and its
+    committed accounting (bytes, line count, digest,
+    sequence bounds) must match the kept events byte for
+    byte; the kept events must be a nonzero 0-based
+    prefix of the session's own id.
+    """
+    bad = []
+    capture = session["capture"]
+    if capture["finalized"] is not True:
+        bad.append("%s: capture not finalized" % tag)
+    if capture.get("end_reason") != "error":
+        bad.append("%s: end_reason %r want 'error'"
+                   % (tag, capture.get("end_reason")))
+    decision = evidence(session, "profile.decision")
+    want_decision = ("candidate record3-ephemeral: "
+                     "bindings hold (profile unvalidated)") \
+        if expect_decision is None else expect_decision
+    if decision != want_decision:
+        bad.append("%s: profile decision %r" % (tag, decision))
+    integrity = capture["integrity"]
+    if integrity.get("algorithm") != "sha256":
+        bad.append("%s: integrity algorithm %r"
+                   % (tag, integrity.get("algorithm")))
+    if len(raw) != int(integrity["events_bytes"]):
+        bad.append("%s: events bytes %d != integrity %s"
+                   % (tag, len(raw),
+                      integrity["events_bytes"]))
+    if hashlib.sha256(raw).hexdigest() != \
+            integrity["events_sha256"]:
+        bad.append("%s: events digest mismatch" % tag)
+    if len(events) != int(integrity["line_count"]):
+        bad.append("%s: event lines %d != integrity %s"
+                   % (tag, len(events),
+                      integrity["line_count"]))
+    if not events:
+        bad.append("%s: no events kept" % tag)
+        return bad
+    seqs = [int(event["seq"]) for event in events]
+    if seqs != list(range(len(events))):
+        bad.append("%s: event seq not a 0-based prefix"
+                   % tag)
+    if str(integrity["first_seq"]) != "0":
+        bad.append("%s: integrity first_seq %r"
+                   % (tag, integrity["first_seq"]))
+    if str(integrity["last_seq"]) != str(len(events) - 1):
+        bad.append("%s: integrity last_seq %r"
+                   % (tag, integrity["last_seq"]))
+    sids = {event["session_id"] for event in events}
+    if sids != {session["session_id"]}:
+        bad.append("%s: session ids %r" % (tag, sids))
+    return bad
+
+
 def judge_faults_capture(got, expect_decision=None):
     """Judge one multi-channel faults boot.
 
@@ -643,11 +702,30 @@ def judge_faults_capture(got, expect_decision=None):
         assert row["cap"] is False, row
         assert row["stderr"], row
         print("ft-%s refused: %s" % (tag, row["stderr"]))
+    # f4: mid-capture fullness publishes the honest
+    # error session through the released finalization
+    # reserve (exit 1, finalized, outcome error). The
+    # session must exist, and its error claim must
+    # verify against the kept events, never merely echo
+    # the ledger.
     row = ledger["f4"]
     assert row["exit"] == 1, row
-    assert row["cap"] is False, row
+    assert row["cap"] is True, row
     assert row["events_kept"] is True, row
     assert row["stderr"], row
+    assert row["ready"], row
+    assert row["done"] == "record: end=error outcome=error " \
+        "exit=1", row
+    f4_session = json.loads(
+        got["f4-session.json"].read_text())
+    f4_raw = got["f4-events.ndjson"].read_bytes()
+    f4_events = [json.loads(line) for line in
+                 f4_raw.decode("utf-8").splitlines()
+                 if line.strip()]
+    bad = []
+    bad += check_error_session(
+        f4_events, f4_raw, f4_session, "ft-f4",
+        expect_decision)
     f4_ops, _, _ = parse_oracle_log(
         str(got["f4-oracle.log"]))
     assert len(f4_ops) == 2, f4_ops
@@ -661,7 +739,6 @@ def judge_faults_capture(got, expect_decision=None):
         ops, _, _ = parse_oracle_log(
             str(got[f"{tag}-oracle.log"]))
         caps[tag] = (record, session, events, ops)
-    bad = []
     for tag in ("f3a", "f3b"):
         record, session, events, ops = caps[tag]
         window = ledger[tag]["window"]

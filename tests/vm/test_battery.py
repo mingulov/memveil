@@ -2027,14 +2027,60 @@ def synth_faults_files(tmp):
         handle.write(json.dumps(report, sort_keys=True))
     files["f3b-report.json"] = Path(report_path)
     ledger_row("f3b-report", exit=0)
-    # Full-filesystem honesty: oracle facts only.
+    # Full-filesystem honesty: the error session plus
+    # its kept prefix, integrity derived from the exact
+    # bytes the way the writer accounts its committed
+    # stream (pool baseline first, then the scenario-1
+    # traffic cut mid-capture).
     f4_path = os.path.join(tmp, "ft-f4-oracle.log")
     with open(f4_path, "w") as handle:
         handle.write(oracle_script_log(ops=2))
     files["f4-oracle.log"] = Path(f4_path)
-    ledger_row("f4", exit=1, stderr="enospc", cap=False)
+    f4_id = "cap-synth-f4"
+    f4_events = [synth_event(f4_id, 0, 5000000,
+                             "pool_sample",
+                             {"used_bytes": "100"})]
+    for pos, event in enumerate(
+            scenario1_events(f4_id, 5001000)[:4]):
+        event["seq"] = pos + 1
+        f4_events.append(event)
+    f4_events_path = os.path.join(tmp, "ft-f4-events.ndjson")
+    write_events(f4_events_path, f4_events)
+    files["f4-events.ndjson"] = Path(f4_events_path)
+    with open(f4_events_path, "rb") as handle:
+        f4_raw = handle.read()
+    f4_lines = [json.loads(line) for line in
+                f4_raw.decode("utf-8").splitlines()
+                if line.strip()]
+    f4_kinds = dict((kind, "0") for kind in
+                    ("bounce_attempt", "map_result", "unmap",
+                     "copy", "sync_request",
+                     "transition_result", "pool_sample",
+                     "gap", "marker", "counter_snapshot"))
+    for line in f4_lines:
+        kind = line["kind"]
+        f4_kinds[kind] = str(int(f4_kinds[kind]) + 1)
+    f4_session = synth_session(
+        session_id=f4_id, start_ns=1000000,
+        span_ns=10000000000, end_reason="error")
+    f4_session["capture"]["integrity"] = {
+        "algorithm": "sha256",
+        "events_bytes": str(len(f4_raw)),
+        "line_count": str(len(f4_lines)),
+        "first_seq": "0",
+        "last_seq": str(len(f4_lines) - 1),
+        "events_sha256": hashlib.sha256(f4_raw).hexdigest(),
+        "kinds": f4_kinds,
+    }
+    f4_session_path = os.path.join(tmp, "ft-f4-session.json")
+    with open(f4_session_path, "w") as handle:
+        handle.write(json.dumps(f4_session, sort_keys=True))
+    files["f4-session.json"] = Path(f4_session_path)
+    ledger_row("f4", exit=1, stderr="enospc", cap=True)
     ledger[-1]["events_kept"] = True
     ledger[-1]["ready"] = "ready session=f4"
+    ledger[-1]["done"] = "record: end=error outcome=error " \
+        "exit=1"
     # Paced floods: 1ch attempts plus exact 3ch multisets.
     window = window_for(600000000)
     session_id = "cap-synth-f5a"
@@ -2448,6 +2494,178 @@ def self_test_f4_staging(tmp):
                and "never reached readiness" in text
                and rec.killed,
                (text or "")[:80]) and ok
+    return ok
+
+
+# -- Unarmed self-test: f4 error-session judge ---------------
+
+def self_test_f4_judge(tmp):
+    """f4 admits only the honest error session."""
+    ok = True
+    files = synth_faults_files(tmp)
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-honest", bad == [],
+               "; ".join(bad[:3])) and ok
+
+    def rewrite(name, mut):
+        with open(files[name]) as handle:
+            doc = handle.read()
+        if name.endswith(".json"):
+            loaded = json.loads(doc)
+            mut(loaded)
+            files[name].write_text(json.dumps(loaded))
+        else:
+            files[name].write_text(mut(doc))
+
+    def f4_row(loaded):
+        for row in loaded:
+            if row["scenario"] == "f4":
+                return row
+        raise AssertionError("synth lacks f4")
+
+    # The pre-reserve shape no longer admits: exit 1
+    # without the error session fails.
+    files = synth_faults_files(tmp)
+    rewrite("faults.json",
+            lambda loaded: f4_row(loaded).update(cap=False))
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-stale",
+               any("'cap': False" in reason for reason in
+                   bad),
+               "; ".join(bad[:2])) and ok
+    # A finalized outcome over an exit-1 ENOSPC run is
+    # dishonest, whatever the session claims.
+    files = synth_faults_files(tmp)
+    rewrite("faults.json", lambda loaded: f4_row(loaded)
+            .update(done="record: end=error "
+                         "outcome=finalized exit=1"))
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-outcome",
+               any("outcome=finalized" in reason
+                   for reason in bad),
+               "; ".join(bad[:2])) and ok
+    # A clean end reason over an exit-1 run is
+    # dishonest, whatever the done line claims.
+    files = synth_faults_files(tmp)
+    rewrite("f4-session.json",
+            lambda doc: doc["capture"].update(
+                end_reason="duration"))
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-end-reason",
+               any("end_reason 'duration'" in reason
+                   for reason in bad),
+               "; ".join(bad[:2])) and ok
+    # Dropped events break the session's committed
+    # accounting: bytes, count, and digest all move.
+    files = synth_faults_files(tmp)
+    rewrite("f4-events.ndjson",
+            lambda text: "".join(
+                text.splitlines(keepends=True)[:-1]))
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-events",
+               any("events digest mismatch" in reason
+                   for reason in bad),
+               "; ".join(bad[:2])) and ok
+    # A renumbered middle event breaks the prefix even
+    # when the accounting is recomputed honestly over
+    # the altered bytes: bytes, count, and digest all
+    # agree, only the 0-based prefix fails.
+    files = synth_faults_files(tmp)
+    lines = files["f4-events.ndjson"].read_text().splitlines()
+    renumbered = json.loads(lines[2])
+    renumbered["seq"] = 99
+    lines[2] = json.dumps(renumbered, sort_keys=True)
+    files["f4-events.ndjson"].write_text(
+        "\n".join(lines) + "\n")
+
+    def reaccount(doc):
+        blob = files["f4-events.ndjson"].read_bytes()
+        kept = [json.loads(line) for line in
+                blob.decode("utf-8").splitlines()
+                if line.strip()]
+        claim = doc["capture"]["integrity"]
+        claim["events_bytes"] = str(len(blob))
+        claim["line_count"] = str(len(kept))
+        claim["first_seq"] = "0"
+        claim["last_seq"] = str(len(kept) - 1)
+        claim["events_sha256"] = \
+            hashlib.sha256(blob).hexdigest()
+    rewrite("f4-session.json", reaccount)
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-seq",
+               any("not a 0-based prefix" in reason
+                   for reason in bad),
+               "; ".join(bad[:2])) and ok
+    # The error session must carry the admitted profile
+    # decision, like every other leg.
+    files = synth_faults_files(tmp)
+
+    def bogus_decision(doc):
+        doc["environment"]["evidence"][0][
+            "interpretation"] = "bogus"
+    rewrite("f4-session.json", bogus_decision)
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-decision",
+               any("profile decision" in reason
+                   for reason in bad),
+               "; ".join(bad[:2])) and ok
+    # An error session with zero events fails: f4 always
+    # keeps at least its pre-readiness baseline prefix.
+    files = synth_faults_files(tmp)
+    rewrite("f4-events.ndjson", lambda text: "")
+    empty_sha = hashlib.sha256(b"").hexdigest()
+
+    def zero_integrity(doc):
+        doc["capture"]["integrity"] = {
+            "algorithm": "sha256", "events_bytes": "0",
+            "line_count": "0", "first_seq": None,
+            "last_seq": None, "events_sha256": empty_sha,
+            "kinds": {},
+        }
+    rewrite("f4-session.json", zero_integrity)
+    bad, _ = judge_case(files, "faults", synth_manifest())
+    ok = check("judge-f4-empty",
+               any("no events kept" in reason
+                   for reason in bad),
+               "; ".join(bad[:2])) and ok
+    # The drained verdict is the last non-empty stdout
+    # line past the consumed ready line, or empty.
+    import io
+    for tag, rest, want in (
+            ("done",
+             "record: end=error outcome=error exit=1\n",
+             "record: end=error outcome=error exit=1"),
+            ("padded",
+             "chatter\n\n  \nrecord: end=error "
+             "outcome=error exit=1\n\n",
+             "record: end=error outcome=error exit=1"),
+            ("silent", "", "")):
+        stream = io.StringIO(
+            "ready session=f4 start_ns=1\n" + rest)
+        stream.readline()
+        got = battery_guest.drain_done_line(
+            _FakeRec(stream, []))
+        ok = check("judge-f4-drain-%s" % tag,
+                   got == want, "%r" % got) and ok
+    # run_faults drains the f4 outcome line exactly once.
+    try:
+        tree = ast.parse(GUEST.read_text())
+    except OSError as exc:
+        return check("judge-f4-done-wired", False,
+                     str(exc)) and ok
+    faults = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) \
+                and node.name == "run_faults":
+            faults = node
+            break
+    drains = [call for call in
+              _f4_calls_in_order(faults)
+              if isinstance(call.func, ast.Name)
+              and call.func.id == "drain_done_line"] \
+        if faults is not None else []
+    ok = check("judge-f4-done-wired", len(drains) == 1,
+               "%d drains" % len(drains)) and ok
     return ok
 
 
@@ -3267,6 +3485,7 @@ def run_self_test(work=None):
         ok = self_test_record3(tmp) and ok
         ok = self_test_faults(tmp) and ok
         ok = self_test_f4_staging(tmp) and ok
+        ok = self_test_f4_judge(tmp) and ok
         ok = self_test_manifest(tmp) and ok
         ok = self_test_selection() and ok
         ok = self_test_guest_argv(tmp) and ok

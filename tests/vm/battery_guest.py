@@ -120,7 +120,8 @@ def export_names_for_case(case):
         names.append("ledger.json")
     elif case == "faults":
         names += ["profile.json", "faults.json",
-                  "f4-oracle.log", "f3b-report.json",
+                  "f4-oracle.log", "f4-session.json",
+                  "f4-events.ndjson", "f3b-report.json",
                   "f3a-cut-oracle.log", "f3b-cut-oracle.log"]
         for tag in FAULT_CAPTURES:
             names += ["%s-record.json" % tag,
@@ -948,6 +949,22 @@ def await_record_ready(rec, work, errname="record.stderr",
          % (rc, tail()))
 
 
+def drain_done_line(rec):
+    """Last non-empty stdout line past the ready line.
+
+    Record prints exactly one stdout summary at exit,
+    so past the consumed ready line the remainder
+    holds only that run verdict (plus blank padding,
+    if any). Empty when record printed nothing past
+    readiness; the host judge refuses the empty line.
+    """
+    done = ""
+    for line in rec.stdout.read().splitlines():
+        if line.strip():
+            done = line.strip()
+    return done
+
+
 def f4_fs_bytes():
     """f4 output filesystem size: reserve plus headroom."""
     return FINALIZE_RESERVE_BYTES + F4_HEADROOM_BYTES
@@ -1044,7 +1061,7 @@ def run_faults(gate):
     mid-capture (1ch and 3ch) must stop bounded with a
     signal end reason, with a cut oracle snapshot proving
     the flood was mid-flight; a full output filesystem
-    must fail honestly without a masquerading session;
+    must publish an honest error session;
     paced and burst 300-op floods compare 1ch against 3ch
     capture; background flood during attach must not leak
     pre-window records. The faults.json ledger carries
@@ -1264,12 +1281,19 @@ def run_faults(gate):
             rec.kill()
             rec.wait()
             fail("f4: record did not exit")
+        done = drain_done_line(rec)
         gate.oracle_log("f4-oracle.log")
         with open(os.path.join(gate.work, "f4-record.stderr"),
                   "rb") as handle:
             err = handle.read()[-512:].decode("utf-8",
                                               "replace")
         after, settle = gate.settled_inventory(before)
+        for name in ("session.json", "events.ndjson"):
+            src = os.path.join(cap, name)
+            if not os.path.isfile(src):
+                fail("f4: capture lacks %s" % name)
+            shutil.copyfile(
+                src, os.path.join(gate.work, "f4-" + name))
         ledger.append({
             "scenario": "f4", "exit": rc, "stderr": err,
             "progs_before": before["progs"],
@@ -1282,6 +1306,7 @@ def run_faults(gate):
             "events_kept": os.path.isfile(
                 os.path.join(cap, "events.ndjson")),
             "ready": ready,
+            "done": done,
         })
     finally:
         r = sh(["umount", mnt])
