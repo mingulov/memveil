@@ -1189,7 +1189,9 @@ pub fn run_top_os(args: &[OsString]) -> i64 {
     }
     match parse_top_args_os(args) {
         Ok(TopOsArgs::Live) => {
-            let _ = write_stderr(&top_usage());
+            // Fixed compile-time text: the trusted writer keeps its
+            // slashes, so this equals `top --help` stdout byte for byte.
+            let _ = write_stderr_trusted(&top_usage());
             EXIT_INVALID
         }
         Ok(TopOsArgs::Replay(parsed)) => {
@@ -1798,6 +1800,16 @@ mod tests {
                 "{words:?} must stay live"
             );
         }
+    }
+
+    #[test]
+    fn top_verb_usage_survives_trusted_writer_byte_exact() {
+        // The raw live arm prints usage to stderr through the
+        // trusted writer, which must preserve it byte for byte, so
+        // that usage error equals `top --help` stdout.
+        use crate::cli::report::neutralize_controls;
+        let text = top_usage();
+        assert_eq!(neutralize_controls(&text), text);
     }
 
     #[test]

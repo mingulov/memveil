@@ -7,7 +7,9 @@ use memveil::cli::bind::run_bind;
 use memveil::cli::doctor::run_doctor_os;
 use memveil::cli::qualify::run_qualify;
 use memveil::cli::record::run_record;
-use memveil::cli::report::{EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report_os, write_stderr};
+use memveil::cli::report::{
+    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, run_report_os, write_stderr, write_stderr_trusted,
+};
 use memveil::cli::top::{run_top, run_top_os};
 use memveil::platform::runtime::embedded_manifest;
 use memveil::platform::signal::{ensure_inherited_signal_block, ignore_sigpipe};
@@ -169,7 +171,9 @@ fn main() -> ExitCode {
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     match dispatch(&raw) {
         Dispatch::InvalidUsage => {
-            let _ = write_stderr(&top_usage());
+            // Fixed compile-time text: the trusted writer keeps its
+            // slashes, so no-args/bogus stderr equals --help stdout.
+            let _ = write_stderr_trusted(&top_usage());
             ExitCode::from(EXIT_INVALID as u8)
         }
         Dispatch::Help => match write_stdout(&top_usage()) {
@@ -257,6 +261,19 @@ mod tests {
 
     fn is_invalid(raw: &[OsString]) -> bool {
         matches!(dispatch(raw), Dispatch::InvalidUsage)
+    }
+
+    #[test]
+    fn top_usage_survives_trusted_writer_byte_exact() {
+        // The InvalidUsage arm routes usage through the trusted
+        // writer, which must preserve it byte for byte, so no-args
+        // and bogus-verb stderr equal --help stdout. The scrubbing
+        // writer would mutilate it (slashes in prose), which is why
+        // the routing matters.
+        use memveil::cli::report::{neutralize_controls, scrub_paths};
+        let text = top_usage();
+        assert_eq!(neutralize_controls(&text), text);
+        assert_ne!(scrub_paths(&text), text);
     }
 
     fn is_help(raw: &[OsString]) -> bool {
