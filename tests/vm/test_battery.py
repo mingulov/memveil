@@ -18,9 +18,10 @@ verdict host-side from the exported observations, and
 writes stamped receipts. --bundle/--candidate name the
 retained seal explicitly and are required for every armed
 run; --expect-release refuses when it conflicts with the
-pinned guest release. The `saturation` case refuses until
-the 4 KiB test objects plus the loader test layout land.
-The guest command line carries only the staged inputs
+pinned guest release. The `saturation` case runs on the
+bound 4 KiB test pair the armed run stages, and refuses
+without it. The guest command line carries only the staged
+inputs
 filename: the full inputs doc travels through the shared
 export dir, and any guest argv projecting past the kernel
 command-line budget refuses before booting. Every boot
@@ -727,7 +728,13 @@ def self_test_pins():
             ("tests/vm/fixtures/aya/swiotlb_copy.bpf.o",
              score.C9_CP_SHA),
             ("tests/vm/fixtures/aya/swiotlb_attempt.bpf.o",
-             score.C9_ATTEMPT_SHA)]:
+             score.C9_ATTEMPT_SHA),
+            ("tests/vm/fixtures/aya-test/"
+             "swiotlb_lifecycle-test.bpf.o",
+             core.TEST_LC_SHA256),
+            ("tests/vm/fixtures/aya-test/"
+             "swiotlb_copy-test.bpf.o",
+             core.TEST_CP_SHA256)]:
         got = sha_file(str(REPO / rel))
         ok = check("pins-%s" % rel.rsplit("/", 1)[1].split(
             ".")[0], got == want, got[:16]) and ok
@@ -982,11 +989,45 @@ LAYOUT_WANT = {
                      "mv_sync_device": "fentry",
                      "mv_sync_cpu": "fentry"},
     },
+    ("test", "lc"): {
+        "family": "aya", "core": "no",
+        "maps": {
+            "mv_counts": {"type": 2, "key": 4, "value": 8,
+                          "entries": 6},
+            "mv_lifecycle": {"type": 27, "key": 0, "value": 0,
+                             "entries": 4096},
+            "mv_gen_table": {"type": 1, "key": 16, "value": 8,
+                             "entries": 32768},
+            "mv_gen_next": {"type": 2, "key": 4, "value": 8,
+                            "entries": 1},
+        },
+        "programs": {"mv_map_result": "fexit",
+                     "mv_unmap": "fentry"},
+    },
+    ("test", "cp"): {
+        "family": "aya", "core": "no",
+        "maps": {
+            "mv_counts": {"type": 2, "key": 4, "value": 8,
+                          "entries": 6},
+            "mv_claims": {"type": 2, "key": 4, "value": 16,
+                          "entries": 4096},
+            "mv_copy_fb": {"type": 2, "key": 4, "value": 8,
+                           "entries": 4},
+            "mv_copies": {"type": 27, "key": 0, "value": 0,
+                          "entries": 4096},
+            "mv_copy_offs": {"type": 2, "key": 4, "value": 112,
+                             "entries": 1},
+        },
+        "programs": {"mv_bounce": "fentry",
+                     "mv_bounce_exit": "fexit",
+                     "mv_sync_device": "fentry",
+                     "mv_sync_cpu": "fentry"},
+    },
 }
 
 
 def self_test_layouts(tmp, pairs):
-    """C9 layouts verified against pinned bytes, offline."""
+    """C9 and test layouts verified against pinned bytes, offline."""
     rings = {"lc": "mv_lifecycle", "cp": "mv_copies"}
     ok = True
     for (name, channel), want in sorted(LAYOUT_WANT.items()):
@@ -1025,6 +1066,13 @@ def self_test_layouts(tmp, pairs):
                proc.returncode == 1
                and "neither family" in proc.stdout,
                "exit=%d" % proc.returncode) and ok
+    proc = consumer_run(["--verify-layout",
+                         pairs["test"]["lc"]["path"],
+                         "mv_copies"])
+    ok = check("layout-cross-channel-test",
+               proc.returncode == 1
+               and "neither family" in proc.stdout,
+               "exit=%d" % proc.returncode) and ok
     return ok
 
 
@@ -1036,6 +1084,7 @@ def self_test_wrong_pair(pairs):
     """
     ok = True
     c9_lc = pairs["c9"]["lc"]["path"]
+    test_lc = pairs["test"]["lc"]["path"]
     never = os.path.join(tempfile.gettempdir(),
                          "battery-never-written")
     cases = [
@@ -1046,6 +1095,14 @@ def self_test_wrong_pair(pairs):
         ("digest-wrong",
          ["--expect-sha256", "0" * 64, c9_lc, "mv_lifecycle",
           core.LC_SITES, "1", never],
+         "digest mismatch"),
+        ("digest-test-as-c9",
+         ["--expect-sha256", score.C9_LC_SHA, test_lc,
+          "mv_lifecycle", core.LC_SITES, "1", never],
+         "digest mismatch"),
+        ("digest-c9-as-test",
+         ["--expect-sha256", core.TEST_LC_SHA256, c9_lc,
+          "mv_lifecycle", core.LC_SITES, "1", never],
          "digest mismatch"),
         ("sites-short",
          [c9_lc, "mv_lifecycle", "mv_map_result:x",
@@ -1060,6 +1117,66 @@ def self_test_wrong_pair(pairs):
                    "exit=%d %s" % (proc.returncode,
                                    proc.stdout.strip()[
                                        -160:])) and ok
+    return ok
+
+
+def self_test_test_objects(tmp):
+    """Test-pair staging: pins bind, drift and gaps refuse."""
+    ok = True
+    try:
+        pair = core.materialize_test_objects(
+            str(REPO), os.path.join(tmp, "test-objects"))
+    except (ValueError, OSError) as exc:
+        return check("testobj-materialize", False,
+                     str(exc)[:160])
+    ok = check("testobj-materialize",
+               pair["lc"]["sha256"] == core.TEST_LC_SHA256
+               and pair["cp"]["sha256"]
+               == core.TEST_CP_SHA256) and ok
+    try:
+        staged_ok = sha_file(pair["lc"]["path"]) \
+            == core.TEST_LC_SHA256 \
+            and sha_file(pair["cp"]["path"]) \
+            == core.TEST_CP_SHA256 \
+            and os.path.dirname(pair["lc"]["path"]) \
+            == os.path.dirname(pair["cp"]["path"])
+    except OSError as exc:
+        return check("testobj-staged", False,
+                     str(exc)[:160]) and ok
+    ok = check("testobj-staged", staged_ok) and ok
+    fake = os.path.join(tmp, "fake-repo")
+    for rel in (core.TEST_LC_REL, core.TEST_CP_REL):
+        dst = os.path.join(fake, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(str(REPO / rel), dst)
+    with open(os.path.join(fake, core.TEST_LC_REL),
+              "r+b") as handle:
+        handle.seek(64)
+        byte = handle.read(1)
+        if len(byte) != 1:
+            return check("testobj-drift", False,
+                         "tamper setup failed") and ok
+        handle.seek(64)
+        handle.write(bytes([byte[0] ^ 1]))
+    try:
+        core.materialize_test_objects(
+            fake, os.path.join(tmp, "fake-out"))
+        ok = check("testobj-drift", False, "accepted") and ok
+    except ValueError as exc:
+        ok = check("testobj-drift", "drift" in str(exc),
+                   str(exc)[:160]) and ok
+    os.remove(os.path.join(fake, core.TEST_CP_REL))
+    shutil.copyfile(str(REPO / core.TEST_LC_REL),
+                    os.path.join(fake, core.TEST_LC_REL))
+    try:
+        core.materialize_test_objects(
+            fake, os.path.join(tmp, "fake-out2"))
+        ok = check("testobj-missing", False, "accepted") \
+            and ok
+    except ValueError as exc:
+        ok = check("testobj-missing",
+                   "unreadable" in str(exc),
+                   str(exc)[:160]) and ok
     return ok
 
 
@@ -2801,17 +2918,18 @@ def self_test_manifest(tmp):
                any("not a mapping" in reason
                    for reason in reasons),
                "; ".join(reasons[:2])) and ok
-    # Bound test objects round-trip structurally. The C9
-    # bytes stand in for the future small-ring objects to
-    # prove the plumbing only; live flood accounting still
-    # needs the real objects (the loader's exact layout
-    # allowlist plus the induced-loss judgment refuse
-    # anything else).
+    # Bound test objects round-trip with the real small-ring
+    # bytes: the staged pair, the guest-inputs doc, and the
+    # manifest all bind the pinned test digests.
+    try:
+        real_pair = core.materialize_test_objects(
+            str(REPO), os.path.join(tmp, "seal-test-objects"))
+    except (ValueError, OSError) as exc:
+        return check("manifest-saturation-stage", False,
+                     str(exc)[:200])
     sat_pair = {"bound": True,
-                "lc": {"path": inputs["lc"]["path"],
-                       "sha256": inputs["lc"]["sha256"]},
-                "cp": {"path": inputs["cp"]["path"],
-                       "sha256": inputs["cp"]["sha256"]}}
+                "lc": real_pair["lc"],
+                "cp": real_pair["cp"]}
     try:
         sat_staged = write_guest_inputs_docs(
             tmp, ["saturation"],
@@ -2826,8 +2944,8 @@ def self_test_manifest(tmp):
         ["saturation"], ["test_battery", "--case",
                          "saturation"], commit,
         test_objects={
-            "lc": {"path": inputs["lc"]["path"]},
-            "cp": {"path": inputs["cp"]["path"]}},
+            "lc": {"path": real_pair["lc"]["path"]},
+            "cp": {"path": real_pair["cp"]["path"]}},
         guest_inputs=sat_staged)
     reasons = core.verify_input_manifest(bound, built["path"])
     ok = check("manifest-saturation-bound",
@@ -2835,7 +2953,9 @@ def self_test_manifest(tmp):
     ok = check("manifest-bound-stamps",
                bound["test_objects"]["bound"] is True
                and bound["test_objects"]["lc"]["sha256"]
-               == inputs["lc"]["sha256"]) and ok
+               == core.TEST_LC_SHA256
+               and bound["test_objects"]["cp"]["sha256"]
+               == core.TEST_CP_SHA256) and ok
     # A wrong consumer binary refuses against the manifest.
     other = os.path.join(tmp, "other-consumer")
     with open(other, "wb") as handle:
@@ -3379,6 +3499,57 @@ def self_test_inputs_manifest(tmp):
                    for reason in core.verify_input_manifest(
                        manifest, consumer_path)),
                "rewritten bytes passed") and ok
+    try:
+        syn_pair = core.materialize_test_objects(
+            str(REPO), os.path.join(tmp, "syn-test-objects"))
+    except (ValueError, OSError) as exc:
+        return check("syn-sat-stage", False,
+                     str(exc)[:160]) and ok
+    syn_entry = {"bound": True, "lc": syn_pair["lc"],
+                 "cp": syn_pair["cp"]}
+    try:
+        sat_staged = write_guest_inputs_docs(
+            tmp, ["saturation"],
+            os.path.join(tmp, "syn-sat-inputs.json"), built,
+            inputs, syn_entry, "")
+    except (ValueError, OSError) as exc:
+        return check("syn-sat-stage", False,
+                     str(exc)[:160]) and ok
+    try:
+        with open(sat_staged["saturation"], "rb") as handle:
+            doc = json.loads(
+                handle.read().decode("utf-8"))
+        ok = check("syn-sat-doc",
+                   doc["test_lc"]["sha256"]
+                   == core.TEST_LC_SHA256
+                   and doc["test_cp"]["path"]
+                   == syn_pair["cp"]["path"]) and ok
+    except (OSError, ValueError) as exc:
+        ok = check("syn-sat-doc", False,
+                   str(exc)[:160]) and ok
+    try:
+        sat_manifest = core.write_input_manifest(
+            os.path.join(tmp, "syn-sat-inputs.json"), inputs,
+            {"sha256": consumer_sha, "build": "synthetic"},
+            ["saturation"], ["synthetic"], "syn-commit",
+            test_objects={
+                "lc": {"path": syn_pair["lc"]["path"]},
+                "cp": {"path": syn_pair["cp"]["path"]}},
+            guest_inputs=sat_staged)
+    except (ValueError, OSError) as exc:
+        return check("syn-sat-write", False,
+                     str(exc)[:160]) and ok
+    reasons = core.verify_input_manifest(
+        sat_manifest, consumer_path)
+    ok = check("syn-sat-verify", reasons == [],
+               "; ".join(reasons[:2])) and ok
+    tampered = copy.deepcopy(sat_manifest)
+    tampered["test_objects"]["lc"]["sha256"] = "0" * 64
+    ok = check("syn-sat-tamper",
+               any("test object" in reason
+                   for reason in core.verify_input_manifest(
+                       tampered, consumer_path)),
+               "tamper passed") and ok
     return ok
 
 
@@ -3471,9 +3642,19 @@ def run_self_test(work=None):
             "cp": {"path": str(
                 REPO / "tests/vm/fixtures/aya/"
                        "swiotlb_copy.bpf.o"),
-                "sha256": score.C9_CP_SHA}}}
+                "sha256": score.C9_CP_SHA}},
+            "test": {
+                "lc": {"path": str(
+                    REPO / "tests/vm/fixtures/aya-test/"
+                           "swiotlb_lifecycle-test.bpf.o"),
+                    "sha256": core.TEST_LC_SHA256},
+                "cp": {"path": str(
+                    REPO / "tests/vm/fixtures/aya-test/"
+                           "swiotlb_copy-test.bpf.o"),
+                    "sha256": core.TEST_CP_SHA256}}}
         ok = self_test_layouts(tmp, pairs) and ok
         ok = self_test_wrong_pair(pairs) and ok
+        ok = self_test_test_objects(tmp) and ok
         ok = self_test_prefix_rule() and ok
         ok = self_test_matrix(tmp) and ok
         ok = self_test_copy(tmp) and ok
@@ -3830,13 +4011,29 @@ def armed_run(args):
         shutil.rmtree(work, ignore_errors=True)
         return 1
     manifest_path = work / "inputs.json"
-    # No test-object inputs exist yet, so saturation stays
-    # unbound here; the writer already takes the bound pair
-    # once the small-ring objects land.
+    # The saturation case runs on the staged 4 KiB test
+    # pair; every other case leaves it unbound, and the
+    # writers refuse a saturation run without it.
+    if "saturation" in cases:
+        try:
+            test_pair = core.materialize_test_objects(
+                str(REPO), str(work / "test-objects"))
+        except (ValueError, OSError) as exc:
+            print("FAIL vm-battery: %s" % exc)
+            shutil.rmtree(work, ignore_errors=True)
+            return 1
+        guest_pair = {"bound": True, "lc": test_pair["lc"],
+                      "cp": test_pair["cp"]}
+        manifest_pair = {
+            "lc": {"path": test_pair["lc"]["path"]},
+            "cp": {"path": test_pair["cp"]["path"]}}
+    else:
+        guest_pair = None
+        manifest_pair = None
     try:
         staged = write_guest_inputs_docs(
             str(work), cases, manifest_path, built, inputs,
-            None, args.expect_release)
+            guest_pair, args.expect_release)
     except (ValueError, OSError) as exc:
         print("FAIL vm-battery: %s" % exc)
         shutil.rmtree(work, ignore_errors=True)
@@ -3844,7 +4041,7 @@ def armed_run(args):
     manifest = core.write_input_manifest(
         str(manifest_path), inputs,
         {"sha256": built["sha256"], "build": built["build"]},
-        cases, sys.argv, commit,
+        cases, sys.argv, commit, test_objects=manifest_pair,
         guest_inputs=staged)
     reasons = core.verify_input_manifest(manifest,
                                          built["path"])

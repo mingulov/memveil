@@ -84,15 +84,21 @@ PROFILE_DECISION = ("candidate linux-x86_64-7.0-reference: "
                     "(profile unvalidated)")
 
 # Saturation test objects: separately hashed 4 KiB
-# lifecycle/copy objects plus an explicit test layout in the
-# consumer loader. UNBOUND: neither the objects nor the
-# loader layout exist yet, so the
-# saturation case refuses until they land. Only these two
-# constants plus the loader gate need the artifact; the
-# saturation guest flow and judges are already wired to
-# consume them by digest.
-TEST_LC_SHA256 = None
-TEST_CP_SHA256 = None
+# lifecycle/copy fixtures plus an explicit test layout in the
+# consumer loader. Bound: the fixtures carry the same probes
+# with 4 KiB rings, and the saturation guest flow and judges
+# consume them by digest. Only these two constants plus the
+# loader gate name the artifact.
+TEST_LC_SHA256 = "6c340a485951d18b8302703e815df70f" \
+    "41120408c645a1901ab62efa2f6133f9"
+TEST_CP_SHA256 = "c5eed61a8632a0df53deee45bd2968b6" \
+    "53e2c7f4a162141135e0fa82827080f9"
+TEST_LC_REL = os.path.join(
+    "tests", "vm", "fixtures", "aya-test",
+    "swiotlb_lifecycle-test.bpf.o")
+TEST_CP_REL = os.path.join(
+    "tests", "vm", "fixtures", "aya-test",
+    "swiotlb_copy-test.bpf.o")
 
 # Attach grammar shared with the retired legs
 # (tests/vm/guest_lifecycle.py) and the guest flow here.
@@ -352,27 +358,58 @@ def materialize(repo, work, candidate_path, bundle_path):
     }
 
 
+def materialize_test_objects(repo, work):
+    """Stage the bound saturation pair under work, verified.
+
+    Reads the committed 4 KiB fixtures, refuses unless their
+    bytes equal the TEST_*_SHA256 pins, and copies them into
+    the run work dir (which the guest resolves identically).
+    Returns {lc/cp: {path, sha256}} for the manifest writer
+    and the staged guest-inputs docs. Any drift refuses.
+    """
+    os.makedirs(work, exist_ok=True)
+    pair = {}
+    for channel, rel, want in (
+            ("lc", TEST_LC_REL, TEST_LC_SHA256),
+            ("cp", TEST_CP_REL, TEST_CP_SHA256)):
+        src = os.path.join(repo, rel)
+        try:
+            with open(src, "rb") as handle:
+                blob = handle.read()
+        except OSError as exc:
+            raise ValueError("saturation test object unreadable "
+                             "%s: %s" % (rel, exc))
+        got = hashlib.sha256(blob).hexdigest()
+        if got != want:
+            raise ValueError("saturation test object drift: %s"
+                             % rel)
+        dst = os.path.join(work, os.path.basename(rel))
+        with open(dst, "wb") as handle:
+            handle.write(blob)
+        os.chmod(dst, 0o644)
+        pair[channel] = {"path": dst, "sha256": got}
+    return pair
+
+
 def write_input_manifest(path, inputs, consumer, cases, argv,
                          runner_commit, test_objects=None,
                          guest_inputs=None):
     """Write the battery input manifest binding every byte.
 
     test_objects names the bound saturation pair
-    ({lc/cp: {path, sha256}}) once the 4 KiB objects land;
-    without it the saturation case stays unbound and
-    refuses. guest_inputs maps each listed case to the
-    staged guest-inputs doc path for that case; the doc
-    bytes are re-hashed at write time, so the manifest
-    always stamps the exact bytes the guest must see.
-    Bound bytes are re-hashed at write time, so the
-    manifest always stamps measured bytes.
+    ({lc/cp: {path, sha256}}); without it the saturation
+    case stays unbound and refuses. guest_inputs maps each
+    listed case to the staged guest-inputs doc path for
+    that case; the doc bytes are re-hashed at write time,
+    so the manifest always stamps the exact bytes the
+    guest must see. Bound bytes are re-hashed at write
+    time, so the manifest always stamps measured bytes.
     """
     if test_objects is None:
         test_entry = {
             "bound": False,
             "reason": "saturation 4 KiB objects unbound "
-                      "(the objects plus the loader test "
-                      "layout are not yet available)",
+                      "for this run (no staged test pair)",
         }
     else:
         test_entry = {"bound": True}
@@ -573,9 +610,7 @@ def verify_input_manifest(manifest, consumer_path=None):
                            "differ from manifest" % channel)
     if "saturation" in cases and not test_objects.get("bound"):
         bad.append("saturation needs bound 4 KiB test "
-                   "objects: unbound (the objects plus the "
-                   "loader test layout are not yet "
-                   "available)")
+                   "objects: unbound for this run")
     return sorted(bad)
 
 

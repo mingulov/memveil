@@ -9,8 +9,10 @@
 //! `.maps` definitions) relocates against kernel BTF at load, and
 //! its lifecycle object still carries the retired quarantine and
 //! dark maps the shipping session gate no longer admits. The
-//! compat logic lives in this harness only: each family has an
-//! exact allowlist, and a layout matching neither refuses.
+//! Aya family additionally admits the 4 KiB test geometry (the
+//! same probes with small rings for the saturation flood leg).
+//! The compat logic lives in this harness only: each family has
+//! an exact allowlist, and a layout matching neither refuses.
 
 use std::collections::BTreeMap;
 
@@ -20,6 +22,14 @@ pub const MAP_HASH: u32 = 1;
 pub const MAP_ARRAY: u32 = 2;
 /// `BPF_MAP_TYPE_RINGBUF` (`linux/bpf.h`).
 pub const MAP_RINGBUF: u32 = 27;
+
+/// Production ring capacity in bytes (32 MiB).
+pub const RING_BYTES_PROD: u32 = 33_554_432;
+/// Saturation-test ring capacity in bytes (4 KiB): the same Aya
+/// probes built with the test ring geometry, admitted explicitly
+/// so the flood leg can exhaust the ring. Digests still separate
+/// test bytes from production bytes on every leg.
+pub const RING_BYTES_TEST: u32 = 4096;
 
 /// Lifecycle ring map name.
 pub const RING_LIFECYCLE: &str = "mv_lifecycle";
@@ -155,16 +165,20 @@ fn section_label(section: &aya_obj::ProgramSection) -> &'static str {
 
 /// Exact map allowlist for one family and ring. Rings compare by
 /// type and capacity only (legacy ring definitions carry no key or
-/// value sizes); every other row is exact. The legacy lifecycle
-/// set keeps the retired `mv_gen_quarantine` (hash 16/1 x1024) and
-/// `mv_gen_dark` (array 4/1 x1) maps the shipping gate dropped:
-/// admitting them here is harness compat, never product admission.
+/// value sizes); every other row is exact. Ring capacity admits
+/// exactly the production 32 MiB geometry, plus the 4 KiB test
+/// geometry for the Aya family only (the frozen legacy family
+/// never has a test build); any other capacity refuses. The
+/// legacy lifecycle set keeps the retired `mv_gen_quarantine`
+/// (hash 16/1 x1024) and `mv_gen_dark` (array 4/1 x1) maps the
+/// shipping gate dropped: admitting them here is harness compat,
+/// never product admission.
 pub fn expected_maps(family: Family, ring: &str) -> Option<Vec<MapRow>> {
     let counts = || MapRow::named("mv_counts", MAP_ARRAY, 4, 8, 6);
     match (family, ring) {
         (Family::Aya, RING_LIFECYCLE) => Some(vec![
             counts(),
-            MapRow::named(RING_LIFECYCLE, MAP_RINGBUF, 0, 0, 33_554_432),
+            MapRow::named(RING_LIFECYCLE, MAP_RINGBUF, 0, 0, RING_BYTES_PROD),
             MapRow::named("mv_gen_table", MAP_HASH, 16, 8, 32768),
             MapRow::named("mv_gen_next", MAP_ARRAY, 4, 8, 1),
         ]),
@@ -172,12 +186,12 @@ pub fn expected_maps(family: Family, ring: &str) -> Option<Vec<MapRow>> {
             counts(),
             MapRow::named("mv_claims", MAP_ARRAY, 4, 16, 4096),
             MapRow::named("mv_copy_fb", MAP_ARRAY, 4, 8, 4),
-            MapRow::named(RING_COPY, MAP_RINGBUF, 0, 0, 33_554_432),
+            MapRow::named(RING_COPY, MAP_RINGBUF, 0, 0, RING_BYTES_PROD),
             MapRow::named("mv_copy_offs", MAP_ARRAY, 4, 112, 1),
         ]),
         (Family::Legacy, RING_LIFECYCLE) => Some(vec![
             counts(),
-            MapRow::named(RING_LIFECYCLE, MAP_RINGBUF, 0, 0, 33_554_432),
+            MapRow::named(RING_LIFECYCLE, MAP_RINGBUF, 0, 0, RING_BYTES_PROD),
             MapRow::named("mv_gen_table", MAP_HASH, 16, 8, 32768),
             MapRow::named("mv_gen_next", MAP_ARRAY, 4, 8, 1),
             MapRow::named("mv_gen_quarantine", MAP_HASH, 16, 1, 1024),
@@ -187,7 +201,7 @@ pub fn expected_maps(family: Family, ring: &str) -> Option<Vec<MapRow>> {
             counts(),
             MapRow::named("mv_claims", MAP_ARRAY, 4, 16, 4096),
             MapRow::named("mv_copy_fb", MAP_ARRAY, 4, 8, 4),
-            MapRow::named(RING_COPY, MAP_RINGBUF, 0, 0, 33_554_432),
+            MapRow::named(RING_COPY, MAP_RINGBUF, 0, 0, RING_BYTES_PROD),
         ]),
         _ => None,
     }
@@ -208,6 +222,14 @@ pub fn expected_programs(ring: &str) -> Option<Vec<(&'static str, &'static str)>
     }
 }
 
+/// Ring capacities one family admits, for refusal messages.
+fn admitted_capacities(family: Family) -> String {
+    match family {
+        Family::Aya => format!("{RING_BYTES_PROD} or {RING_BYTES_TEST}"),
+        Family::Legacy => format!("{RING_BYTES_PROD}"),
+    }
+}
+
 /// Match one layout against one family allowlist: every expected
 /// row present with its geometry, no unexpected maps.
 fn match_family(layout: &Layout, family: Family, ring: &str) -> Result<(), String> {
@@ -219,10 +241,26 @@ fn match_family(layout: &Layout, family: Family, ring: &str) -> Result<(), Strin
             return Err(format!("missing map {}", want.name));
         };
         let ring = want.map_type == MAP_RINGBUF;
+        let capacity_ok = if ring {
+            got.max_entries == RING_BYTES_PROD
+                || (family == Family::Aya && got.max_entries == RING_BYTES_TEST)
+        } else {
+            got.max_entries == want.max_entries
+        };
         let same = got.map_type == want.map_type
-            && got.max_entries == want.max_entries
+            && capacity_ok
             && (ring || (got.key_size, got.value_size) == (want.key_size, want.value_size));
         if !same {
+            if ring {
+                return Err(format!(
+                    "map {}: want type={} entries in ({}), got type={} entries={}",
+                    want.name,
+                    want.map_type,
+                    admitted_capacities(family),
+                    got.map_type,
+                    got.max_entries
+                ));
+            }
             return Err(format!(
                 "map {}: want type={} key={} value={} entries={}, got type={} key={} value={} entries={}",
                 want.name,
@@ -437,5 +475,63 @@ mod tests {
         assert_eq!(Family::parse("x"), None);
         assert_eq!(Family::Aya.name(), "aya");
         assert_eq!(Family::Legacy.name(), "c");
+    }
+
+    fn with_ring(rows: Vec<MapRow>, ring: &str, entries: u32) -> Vec<MapRow> {
+        rows.into_iter()
+            .map(|mut row| {
+                if row.name == ring {
+                    row.max_entries = entries;
+                }
+                row
+            })
+            .collect()
+    }
+
+    #[test]
+    fn aya_test_ring_matches_both_channels() {
+        let lc = with_ring(
+            expected_maps(Family::Aya, RING_LIFECYCLE).unwrap(),
+            RING_LIFECYCLE,
+            RING_BYTES_TEST,
+        );
+        let seen = check_layout(&layout(lc, lc_programs()), RING_LIFECYCLE).unwrap();
+        assert_eq!(seen, Family::Aya);
+        let programs = vec![
+            ("mv_bounce", "fentry"),
+            ("mv_bounce_exit", "fexit"),
+            ("mv_sync_device", "fentry"),
+            ("mv_sync_cpu", "fentry"),
+        ];
+        let cp = with_ring(
+            expected_maps(Family::Aya, RING_COPY).unwrap(),
+            RING_COPY,
+            RING_BYTES_TEST,
+        );
+        let seen = check_layout(&layout(cp, programs), RING_COPY).unwrap();
+        assert_eq!(seen, Family::Aya);
+    }
+
+    #[test]
+    fn wrong_ring_capacity_refuses_naming_both() {
+        let rows = with_ring(
+            expected_maps(Family::Aya, RING_LIFECYCLE).unwrap(),
+            RING_LIFECYCLE,
+            8192,
+        );
+        let err = check_layout(&layout(rows, lc_programs()), RING_LIFECYCLE).unwrap_err();
+        assert!(err.contains("neither family"), "{err}");
+        assert!(err.contains("33554432 or 4096"), "{err}");
+    }
+
+    #[test]
+    fn legacy_test_ring_refuses() {
+        let rows = with_ring(
+            expected_maps(Family::Legacy, RING_LIFECYCLE).unwrap(),
+            RING_LIFECYCLE,
+            RING_BYTES_TEST,
+        );
+        let err = check_layout(&layout(rows, lc_programs()), RING_LIFECYCLE).unwrap_err();
+        assert!(err.contains("neither family"), "{err}");
     }
 }

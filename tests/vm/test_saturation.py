@@ -6,8 +6,7 @@ SUPERSEDED by tests/vm/test_battery.py case `saturation`
 (battery port onto the test-only Rust consumer with
 separately hashed 4 KiB test objects); kept until the
 reviewed removal step. The battery `saturation` live leg
-stays stopped until the test objects plus the loader test
-layout land.
+runs on the bound 4 KiB test pair.
 
 Requires MEMVEIL_VM_SATURATION=1 with qualified probes.
 Unarmed runs exit 77 without booting; armed runs boot one
