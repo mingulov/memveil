@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Peer-oracle recorded fixtures
 
 Recorded tracefs oracle bytes from the pinned 7.0.14 guest
