@@ -810,6 +810,21 @@ pub fn decode_offsets_table(buf: &[u8]) -> Result<Offsets, DecodeError> {
     })
 }
 
+/// 64-bit context-offset bound for pre-6.7 verifiers: the u32
+/// validators already enforce `cap`, but 6.0/6.6 cannot link 32-bit
+/// compares to the 64-bit `ctx + off` check, so re-check the widened
+/// value behind an optimizer barrier. Redundant by construction. The
+/// barrier sits after the widening: an opaque u32 would let LLVM
+/// narrow the compare back to 32 bits, defeating the guard.
+#[inline(always)]
+pub fn bound_ctx_off(off: u32, cap: u32) -> Option<usize> {
+    let off64 = core::hint::black_box(off as u64);
+    if off64 > cap as u64 {
+        return None;
+    }
+    Some(off64 as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,6 +983,25 @@ mod tests {
         bad[0] ^= 0xff;
         assert_eq!(decode_offsets_table(&bad), Err(DecodeError::TableBad));
         assert_eq!(decode_offsets_table(&buf[..23]), Err(DecodeError::Short));
+    }
+
+    #[test]
+    fn bound_ctx_off_enforces_cap() {
+        assert_eq!(bound_ctx_off(0, 120), Some(0));
+        assert_eq!(bound_ctx_off(120, 120), Some(120));
+        assert_eq!(bound_ctx_off(121, 120), None);
+        assert_eq!(bound_ctx_off(u32::MAX, 120), None);
+    }
+
+    #[test]
+    fn bound_ctx_off_covers_channel_caps() {
+        // Tabled extents mirror decode_offsets_table's per-extent caps;
+        // the data offset mirrors mv_loc_ok's read-cap bound.
+        assert_eq!(bound_ctx_off(120, MV_FIXED_MAX - 8), Some(120));
+        assert_eq!(bound_ctx_off(124, MV_FIXED_MAX - 4), Some(124));
+        assert_eq!(bound_ctx_off(127, MV_FIXED_MAX - 1), Some(127));
+        assert_eq!(bound_ctx_off(511, MV_CTX_READ_CAP as u32 - 1), Some(511));
+        assert_eq!(bound_ctx_off(512, MV_CTX_READ_CAP as u32 - 1), None);
     }
 
     /// Split a `corpus.bin` blob into `(kind, bytes)` records.

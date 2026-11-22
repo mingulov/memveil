@@ -43,7 +43,7 @@
 //! working unchanged.
 
 use super::collector::{GeomOut, KernelSource, MissOut, PollOut, SnapOut, StatsOut};
-use super::loadcheck::{errno_cause, errno_from_chain, errno_name};
+use super::loadcheck::{errno_cause, errno_from_chain, errno_name, segment_is_link_phase};
 use crate::bpf::session::{check_replay_maps, core_precondition, declared_map_specs};
 use crate::bpf::{
     AttachKind, AttachSpec, Channel, Frame, Session, SessionError, copy_specs, lifecycle_specs,
@@ -109,8 +109,22 @@ fn os_errno(message: &str) -> Option<i32> {
     found
 }
 
+/// One-line cause for a loader errno on one operation, else `""`.
+///
+/// A link-phase attach errno refused the attach operation, never
+/// the verifier, so it earns link wording instead of the verifier
+/// cause. Every other shape keeps the errno's own cause: nested
+/// program loads during attach genuinely fail verification, and
+/// load-phase errnos never link.
+fn errno_cause_for(op: u32, code: i32, message: &str) -> String {
+    if op == OP_ATTACH && (code == -13 || code == -22) && segment_is_link_phase(message) {
+        return "attach refused".to_string();
+    }
+    errno_cause(code)
+}
+
 /// One loader failure as structured op/domain/code detail.
-fn session_message(op: u32, err: &SessionError) -> String {
+pub(crate) fn session_message(op: u32, err: &SessionError) -> String {
     let message = err.to_string();
     match os_errno(&message) {
         Some(n) => {
@@ -119,7 +133,7 @@ fn session_message(op: u32, err: &SessionError) -> String {
                 "op={op} domain={DOMAIN_LOADER} code={code} {}",
                 errno_name(code)
             );
-            let cause = errno_cause(code);
+            let cause = errno_cause_for(op, code, &message);
             if !cause.is_empty() {
                 out += &format!(": {cause}");
             }
@@ -138,7 +152,7 @@ fn session_message_with(op: u32, message: &str, errno: Option<i32>) -> String {
                 "op={op} domain={DOMAIN_LOADER} code={code} {}",
                 errno_name(code),
             );
-            let cause = errno_cause(code);
+            let cause = errno_cause_for(op, code, message);
             if !cause.is_empty() {
                 out += &format!(": {cause}");
             }
@@ -2284,6 +2298,202 @@ mod tests {
         assert!(got2.contains("op=2 domain=2:"), "{got2}");
         assert!(!got2.contains("code="));
         assert_eq!(crate::capture::loadcheck::load_refusal_code(&got2), "");
+    }
+
+    fn declared_attempt_rows(extra_name: &str) -> Vec<crate::bpf::maps::MapSpec> {
+        let mut rows = crate::bpf::maps::expected_maps(crate::bpf::Channel::Attempt);
+        rows.push(crate::bpf::maps::MapSpec {
+            name: extra_name.to_string(),
+            map_type: crate::bpf::maps::BPF_MAP_TYPE_ARRAY,
+            key_size: 4,
+            value_size: 8,
+            max_entries: 1,
+        });
+        rows
+    }
+
+    fn geometry_refusal_for(extra_name: &str) -> String {
+        // One hostile extra map row through the declared-map
+        // gate and the refusal rendering: the exact path a
+        // renegade object's names travel to the classifier.
+        let rows = declared_attempt_rows(extra_name);
+        let err = crate::bpf::session::check_declared_maps(crate::bpf::Channel::Attempt, &rows)
+            .expect_err("the extra map must refuse");
+        session_message(2, &err)
+    }
+
+    #[test]
+    fn geometry_map_name_forged_segment_stays_codeless() {
+        // A hostile name gluing "ch2 " ahead of a header shape
+        // must not forge a classified segment.
+        let diagnostic = geometry_refusal_for("fooch2 op=3 domain=2 code=-13: x");
+        assert!(
+            diagnostic.starts_with("op=2 domain=2: attempt channel: unexpected map "),
+            "{diagnostic:?}"
+        );
+        assert_eq!(
+            crate::capture::loadcheck::load_refusal_code(&diagnostic),
+            "",
+            "{diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn geometry_map_name_smuggled_header_stays_codeless() {
+        // A hostile name carrying a literal newline must not
+        // smuggle a fake classified header.
+        let diagnostic = geometry_refusal_for("extra\nch0 op=2 domain=2 code=-1: x");
+        assert!(
+            diagnostic.starts_with("op=2 domain=2: attempt channel: unexpected map "),
+            "{diagnostic:?}"
+        );
+        assert_eq!(
+            crate::capture::loadcheck::load_refusal_code(&diagnostic),
+            "",
+            "{diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn geometry_map_name_refusal_renders_one_line() {
+        // A hostile name carrying a literal newline must not
+        // break the refusal into lines: it renders as one line.
+        let diagnostic = geometry_refusal_for("extra\nch0 op=2 domain=2 code=-1: x");
+        assert!(
+            !diagnostic.contains('\n'),
+            "a refusal renders as one line: {diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn geometry_map_name_adaptive_join_forgery_stays_codeless() {
+        // An adaptive forgery: the name carries its own "; "
+        // join, which is a genuine structural boundary the parser
+        // must keep accepting — so the producer constraint is the
+        // load-bearing layer here, and the refusal renders the
+        // neutralized name exactly.
+        let diagnostic = geometry_refusal_for("x; ch2 op=3 domain=2 code=-13: y");
+        assert_eq!(
+            diagnostic,
+            "op=2 domain=2: attempt channel: unexpected map x??ch2?op?3?domain?2?code?-13??y"
+        );
+        assert_eq!(
+            crate::capture::loadcheck::load_refusal_code(&diagnostic),
+            ""
+        );
+    }
+
+    #[test]
+    fn elf_time_gates_constrain_hostile_names() {
+        // The ELF-time map gate and the program gate constrain
+        // hostile names exactly like the declared gate: neither a
+        // forged segment nor a smuggled header classifies.
+        use crate::bpf::maps::BPF_MAP_TYPE_ARRAY;
+        let mut maps = crate::bpf::maps::expected_maps(crate::bpf::Channel::Attempt);
+        maps.push(crate::bpf::maps::MapSpec {
+            name: "fooch2 op=3 domain=2 code=-13: x".to_string(),
+            map_type: BPF_MAP_TYPE_ARRAY,
+            key_size: 4,
+            value_size: 8,
+            max_entries: 1,
+        });
+        let map_err = crate::bpf::maps::check_maps(crate::bpf::Channel::Attempt, &maps)
+            .expect_err("the extra map must refuse");
+        let map_diagnostic = session_message(2, &map_err);
+        assert_eq!(
+            crate::capture::loadcheck::load_refusal_code(&map_diagnostic),
+            "",
+            "{map_diagnostic:?}"
+        );
+        let mut progs = crate::bpf::attach::expected_programs(crate::bpf::Channel::Attempt);
+        progs.push(crate::bpf::attach::ProgramSpec {
+            name: "extra\nch0 op=2 domain=2 code=-1: x".to_string(),
+            kind: crate::bpf::attach::AttachKind::Tracepoint,
+            sleepable: false,
+        });
+        let prog_err = crate::bpf::attach::check_programs(crate::bpf::Channel::Attempt, &progs)
+            .expect_err("the extra program must refuse");
+        let prog_diagnostic = session_message(2, &prog_err);
+        assert!(
+            !prog_diagnostic.contains('\n'),
+            "a refusal renders as one line: {prog_diagnostic:?}"
+        );
+        assert_eq!(
+            crate::capture::loadcheck::load_refusal_code(&prog_diagnostic),
+            "",
+            "{prog_diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn honest_geometry_map_name_text_unchanged() {
+        // An honest unexpected-map name renders byte-identical:
+        // the name constraint is a no-op on the producer's own
+        // alphabet, and the refusal stays codeless.
+        let rows = declared_attempt_rows("mv_extra");
+        let err = crate::bpf::session::check_declared_maps(crate::bpf::Channel::Attempt, &rows)
+            .expect_err("the extra map must refuse");
+        let diagnostic = session_message(2, &err);
+        assert_eq!(
+            diagnostic,
+            "op=2 domain=2: attempt channel: unexpected map mv_extra"
+        );
+        assert_eq!(
+            crate::capture::loadcheck::load_refusal_code(&diagnostic),
+            ""
+        );
+    }
+
+    #[test]
+    fn attach_link_errno_cause_names_the_link() {
+        // An ordinary link failure carries its errno with a
+        // link-worded cause: the program loaded and only the
+        // attach operation failed, so the verifier is never
+        // named.
+        let err = SessionError::Attach(
+            "copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Permission denied (os error 13)".to_string(),
+        );
+        let got = session_message(3, &err);
+        assert!(got.contains("op=3 domain=2 code=-13 EACCES"), "{got}");
+        assert!(got.contains("attach refused"), "{got}");
+        assert!(!got.contains("verifier rejected"), "{got}");
+        // A nested program-load failure during attach keeps the
+        // verifier cause: the verifier genuinely rejected it.
+        let nested = SessionError::Attach(
+            "copy channel program `mv_bounce`: load for swiotlb_bounce failed: Permission denied (os error 13)".to_string(),
+        );
+        let got_nested = session_message(3, &nested);
+        assert!(
+            got_nested.contains("verifier rejected, see log"),
+            "{got_nested}"
+        );
+        // A load-phase errno is untouched: loads never link.
+        let load = SessionError::Load(
+            "attempt channel: load failed: Permission denied (os error 13)".to_string(),
+        );
+        let got_load = session_message(2, &load);
+        assert!(
+            got_load.contains("verifier rejected, see log"),
+            "{got_load}"
+        );
+        // An EINVAL link earns the same link wording, and the
+        // op gates the cause: link-like wording on a load-phase
+        // errno keeps the verifier cause.
+        let einval = SessionError::Attach(
+            "copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Invalid argument (os error 22)".to_string(),
+        );
+        let got_einval = session_message(3, &einval);
+        assert!(
+            got_einval.contains("op=3 domain=2 code=-22 EINVAL"),
+            "{got_einval}"
+        );
+        assert!(got_einval.contains("attach refused"), "{got_einval}");
+        assert!(!got_einval.contains("verifier rejected"), "{got_einval}");
+        let load_link_words = SessionError::Load(
+            "attempt channel: load failed: note attach to x failed: Permission denied (os error 13)".to_string(),
+        );
+        let got_llw = session_message(2, &load_link_words);
+        assert!(got_llw.contains("verifier rejected, see log"), "{got_llw}");
     }
 
     #[test]

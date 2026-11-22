@@ -24,7 +24,7 @@
 use super::collector::{Collector, CollectorConfig, EXIT_REFUSAL, RunResult};
 use super::kernel::AyaKernel;
 use super::live::WriterSource;
-use super::loadcheck::{LoadDiag, diagnose_load, load_refusal_code};
+use super::loadcheck::{LoadDiag, LoadRefusal, diagnose_load, parse_load_refusal};
 use super::reader::DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES;
 use crate::model::session::EvidenceItem;
 use crate::model::validate::check_opaque_id;
@@ -540,37 +540,29 @@ pub fn copy_program_names() -> Vec<String> {
     cp_progs().iter().map(|w| w.name.clone()).collect()
 }
 
-/// True when a diagnostic names an EINVAL/EACCES load errno.
-fn is_load_errno_failure(diagnostic: &str) -> bool {
-    if diagnostic.contains("code=-22") {
-        return true;
-    }
-    diagnostic.contains("code=-13")
-}
-
-/// True when the diagnostic tags one load channel.
-fn has_channel(diagnostic: &str, channel: i64) -> bool {
-    let tag = format!("ch{channel} ");
-    if diagnostic.starts_with(&tag) {
-        return true;
-    }
-    diagnostic.contains(&format!("; {tag}"))
-}
-
-/// 0/1/2 for the load channel a diagnostic blames, else 0.
+/// True when a parsed refusal names an EINVAL/EACCES load errno.
 ///
-/// Session and load errors carry a ch0/ch1/ch2 tag from
-/// the kernel layer; the verifier replay diagnoses the
-/// blamed object's load. Untagged diagnostics replay
-/// the attempt object.
-fn load_fail_channel(diagnostic: &str) -> i64 {
-    if has_channel(diagnostic, 1) {
-        return 1;
-    }
-    if has_channel(diagnostic, 2) {
-        return 2;
-    }
-    0
+/// Only load-phase verifier-rejected refusals earn a replay:
+/// other errnos carry no verifier lines worth recovering, a
+/// codeless diagnostic replays nothing at all, and a link-phase
+/// failure's program already loaded successfully — the link
+/// failure itself has no verifier log, so a replay would reach
+/// the next program and append its foreign verifier log to
+/// this link refusal.
+fn is_load_errno_failure(refusal: Option<&LoadRefusal>) -> bool {
+    matches!(refusal, Some(parsed) if parsed.code == "verifier-rejected" && !parsed.link_phase)
+}
+
+/// 0/1/2 for the load channel a parsed refusal blames, else 0.
+///
+/// The blamed channel is the classifying header's own tag, so
+/// routing can never disagree with the stamped code; the
+/// verifier replay diagnoses the blamed object's load. An
+/// unparsed diagnostic answers the attempt default, and the
+/// caller replays only when `is_load_errno_failure` holds, so a
+/// codeless diagnostic replays nothing at all.
+fn load_fail_channel(refusal: Option<&LoadRefusal>) -> i64 {
+    refusal.map(|parsed| parsed.channel).unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2068,8 +2060,12 @@ pub fn run_collector_with<W: WriterSource>(
     // the load replay below: this explicit binding keeps
     // the fd open across the whole collection.
     let _snap = snap;
-    if is_load_errno_failure(&out.diagnostic) {
-        let fail_ch = load_fail_channel(&out.diagnostic);
+    let mut replay_lines = false;
+    // One parse feeds routing, replay eligibility, and the stamp
+    // below: the three read the same structure, never free text.
+    let refusal = parse_load_refusal(&out.diagnostic);
+    if is_load_errno_failure(refusal.as_ref()) {
+        let fail_ch = load_fail_channel(refusal.as_ref());
         let diag: LoadDiag = if fail_ch == 1 {
             diagnose_load(&decision.lc.elf, &lifecycle_program_names())
         } else if fail_ch == 2 {
@@ -2080,16 +2076,64 @@ pub fn run_collector_with<W: WriterSource>(
         for line in &diag.lines {
             out.diagnostic += &format!("\n{line}");
         }
+        replay_lines = !diag.lines.is_empty();
     }
-    if out.exit_code == EXIT_REFUSAL && out.code.is_empty() {
-        let lcode = load_refusal_code(&out.diagnostic);
-        if !lcode.is_empty() {
-            out.code = lcode;
-            let code = out.code.clone();
-            out.fix = remedy_for(&code);
-        }
-    }
+    stamp_parsed_refusal_code(&mut out, replay_lines, refusal.as_ref());
     out
+}
+
+/// Fix for a stamped load/attach refusal code: the shared remedy,
+/// except a verifier rejection earns the evidence-aware text —
+/// link-phase wording when the blamed segment failed linking an
+/// already loaded program (the link step itself has no verifier
+/// log), otherwise the
+/// shared tail pointer when replay lines exist and the honest
+/// lineless text when they do not. A refusal that yields no lines
+/// (the blamed object loads fine, as in a link failure) fails
+/// honest here, never silent with a promise of absent lines.
+fn refusal_fix(code: &str, replay_lines: bool, link_phase: bool) -> String {
+    if code == "verifier-rejected" && link_phase {
+        return "the program loaded but the kernel refused to attach it; run as root and check the attach target".to_string();
+    }
+    if code == "verifier-rejected" && !replay_lines {
+        return "the kernel verifier rejected the object; no verifier lines were recovered"
+            .to_string();
+    }
+    remedy_for(code)
+}
+
+/// Stamp a parsed load/attach refusal onto a codeless refusal.
+///
+/// The collector reports the diagnostic without a machine code;
+/// the parsed code (and its phase-aware remedy) stamps the
+/// result so record agrees with the load-check doctor.
+/// `replay_lines` tells whether the refusal replay appended
+/// verifier lines, so the remedy never promises absent lines.
+/// Non-refusals and already-coded results pass through untouched.
+fn stamp_parsed_refusal_code(
+    out: &mut RunResult,
+    replay_lines: bool,
+    refusal: Option<&LoadRefusal>,
+) {
+    if out.exit_code == EXIT_REFUSAL
+        && out.code.is_empty()
+        && let Some(parsed) = refusal
+    {
+        out.code = parsed.code.clone();
+        let code = out.code.clone();
+        out.fix = refusal_fix(&code, replay_lines, parsed.link_phase);
+    }
+}
+
+/// Stamp a load/attach refusal code onto a codeless refusal.
+///
+/// Parses the diagnostic once, then stamps from the parse: the
+/// offline shape of the record refusal path, where the live path
+/// threads its own earlier parse through instead.
+#[cfg(test)]
+fn stamp_load_refusal_code(out: &mut RunResult, replay_lines: bool) {
+    let refusal = parse_load_refusal(&out.diagnostic);
+    stamp_parsed_refusal_code(out, replay_lines, refusal.as_ref());
 }
 
 /// Warn-once line for a failed ownership repair, with newline.
@@ -2123,14 +2167,24 @@ pub fn repair_warning_for<W: WriterSource>(output: &str, writer: &W) -> String {
 mod tests {
     use super::{
         ExtraChannel, RecordOptions, ScanDecision, attempt_loss_evidence, decide_record,
-        loadcheck_bridge_sha, ownership_warning, parse_requested_caps, render_provenance,
-        repair_warning_for, resolve_bridge, resolve_channel_object, resolve_object,
-        run_collector_with, split_site,
+        is_load_errno_failure, load_fail_channel, loadcheck_bridge_sha, ownership_warning,
+        parse_requested_caps, refusal_fix, render_provenance, repair_warning_for, resolve_bridge,
+        resolve_channel_object, resolve_object, run_collector_with, split_site,
+        stamp_load_refusal_code,
     };
+    use crate::bpf::session::{Channel, SessionError, format_failed_link, spec_for_program};
     use crate::capture::collector::EXIT_REFUSAL;
+    use crate::capture::collector::script::{
+        ScriptClock, ScriptKernel, ScriptSignal, ScriptWriter, zeros,
+    };
+    use crate::capture::collector::{Collector, CollectorConfig, EXIT_OK, RunResult};
+    use crate::capture::kernel::session_message;
     use crate::capture::live::WriterSource;
+    use crate::capture::loadcheck::parse_load_refusal;
+    use crate::cli::report::refusal_stderr_lines;
     use crate::platform::evidence::KernelInfo;
     use crate::platform::narrow::LiveValue;
+    use crate::platform::outcome::OpOut;
     use crate::platform::profiles::load_profiles;
     use crate::platform::test_support::{TestDir, repo_root};
 
@@ -2614,5 +2668,559 @@ mod tests {
         let c = ExtraChannel::default();
         assert!(!c.present);
         assert!(c.elf.is_empty());
+    }
+
+    fn failed_out(message: &str) -> OpOut {
+        OpOut {
+            ok: false,
+            message: message.to_string(),
+        }
+    }
+
+    /// Drive one scripted refusal through the collector and the
+    /// refusal-code stamp: the offline shape of the record
+    /// refusal path.
+    fn run_scripted_refusal(tmp: &TestDir, load_out: OpOut, attach_out: OpOut) -> RunResult {
+        let cfg = CollectorConfig {
+            duration_s: 60,
+            max_events_bytes: 134217728,
+            output: format!("{}/cap", tmp.as_str()),
+            profile_id: "refuse-probe".to_string(),
+            pid: 4242,
+            ..Default::default()
+        };
+        let mut kernel = ScriptKernel::new();
+        kernel.load_out = load_out;
+        kernel.attach_out = attach_out;
+        zeros(&mut kernel, 2, 2);
+        let mut clock = ScriptClock::new();
+        clock.add(1000000000);
+        let mut signal = ScriptSignal::new();
+        let mut writer = ScriptWriter::new();
+        let mut collector = Collector::new(cfg);
+        let mut result = collector.run(&mut kernel, &mut clock, &mut signal, &mut writer);
+        // The scripted path performs no verifier replay, so the
+        // stamp never promises replay lines here.
+        stamp_load_refusal_code(&mut result, false);
+        result
+    }
+
+    fn ok_out() -> OpOut {
+        OpOut {
+            ok: true,
+            message: String::new(),
+        }
+    }
+
+    /// The exact attach-path nested-load diagnostic the kernel
+    /// layer reports when the verifier rejects a program load
+    /// during attach.
+    fn nested_attach_failure() -> String {
+        "ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: load for swiotlb_bounce failed: Permission denied (os error 13)".to_string()
+    }
+
+    #[test]
+    fn attach_nested_refusal_emits_code_line() {
+        // Attach-path nested load rejection: exit 3, no
+        // capture, and the exact verifier-rejected code line.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = nested_attach_failure();
+        let result = run_scripted_refusal(&tmp, ok_out(), failed_out(&failed));
+        assert_eq!(result.exit_code, EXIT_REFUSAL);
+        assert_eq!(result.end_reason, "unknown");
+        assert_eq!(result.outcome, "refused");
+        assert_eq!(result.diagnostic, format!("attach: {failed}"));
+        assert!(
+            !std::path::Path::new(&format!("{}/cap", tmp.as_str())).exists(),
+            "a refused record leaves no capture"
+        );
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        // The scripted path performs no verifier replay, so its
+        // lineless diagnostic earns the honest remedy, not the tail
+        // pointer the live path shows above real replay lines.
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the kernel verifier rejected the object; no verifier lines were recovered\n"
+        );
+    }
+
+    #[test]
+    fn attach_link_refusal_emits_code_line() {
+        // Ordinary link failure, same errno: classified by the
+        // errno, not by nested-load wording. The site marker —
+        // not the cause text — steers the remedy, so even this
+        // older producer shape (verifier cause, link site) earns
+        // the honest link wording.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = "ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Permission denied (os error 13)".to_string();
+        let result = run_scripted_refusal(&tmp, ok_out(), failed_out(&failed));
+        assert_eq!(result.exit_code, EXIT_REFUSAL);
+        assert_eq!(result.outcome, "refused");
+        assert_eq!(result.diagnostic, format!("attach: {failed}"));
+        assert!(
+            !std::path::Path::new(&format!("{}/cap", tmp.as_str())).exists(),
+            "a refused record leaves no capture"
+        );
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the program loaded but the kernel refused to attach it; run as root and check the attach target\n"
+        );
+    }
+
+    #[test]
+    fn load_phase_refusal_emits_code_line() {
+        // Load-phase refusal with the same errno: the
+        // precedent pin for the attach-path contract.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = "ch0 op=2 domain=2 code=-13 EACCES: verifier rejected, see log: attempt channel: load failed: Permission denied (os error 13)".to_string();
+        let result = run_scripted_refusal(&tmp, failed_out(&failed), ok_out());
+        assert_eq!(result.exit_code, EXIT_REFUSAL);
+        assert_eq!(result.outcome, "refused");
+        assert_eq!(result.diagnostic, format!("load: {failed}"));
+        assert!(
+            !std::path::Path::new(&format!("{}/cap", tmp.as_str())).exists(),
+            "a refused record leaves no capture"
+        );
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+    }
+
+    #[test]
+    fn real_link_errno_flows_to_code_line() {
+        // A genuine ordinary-link failure end to end: the program
+        // loads, then the raw-tracepoint link syscall refuses
+        // EACCES and rollback succeeds (no suffix). Aya's Display
+        // names only the failed call while the errno rides the
+        // source chain, so every stage below must carry the real
+        // errno without any injected code text.
+        let error = aya::programs::ProgramError::from(aya::sys::SyscallError {
+            call: "bpf_raw_tracepoint_open",
+            io_error: std::io::Error::from_raw_os_error(libc::EACCES),
+        });
+        // Premise pin: the loader Display really is codeless, which
+        // is why formatting it alone loses the errno.
+        assert_eq!(error.to_string(), "`bpf_raw_tracepoint_open` failed");
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        let message = format_failed_link(&tag, &spec, &error);
+        assert!(
+            !message.contains("code=-13"),
+            "the link message must not inject the code itself: {message}"
+        );
+        let oped = session_message(3, &SessionError::Attach(message));
+        // Collector verb plus kernel channel tag wrap the segment.
+        let diagnostic = format!("attach: ch2 {oped}");
+        assert!(
+            diagnostic.contains("op=3 domain=2 code=-13 EACCES"),
+            "the op-3 segment carries the real errno: {diagnostic}"
+        );
+        let mut result = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic,
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        // A link failure's blamed object loads fine, so the replay
+        // yields no lines; the remedy names the failed link
+        // operation instead of the verifier, which never ran.
+        stamp_load_refusal_code(&mut result, false);
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the program loaded but the kernel refused to attach it; run as root and check the attach target\n"
+        );
+    }
+
+    #[test]
+    fn real_link_errno_carries_link_worded_diagnosis() {
+        // A genuine ordinary-link failure end to end: the program
+        // loads, then the raw-tracepoint link syscall refuses
+        // EACCES. The machine code stays verifier-rejected per
+        // the errno contract, but every human-readable word must
+        // name the failed link operation — the program loaded fine
+        // and only its link failed.
+        let error = aya::programs::ProgramError::from(aya::sys::SyscallError {
+            call: "bpf_raw_tracepoint_open",
+            io_error: std::io::Error::from_raw_os_error(libc::EACCES),
+        });
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        let message = format_failed_link(&tag, &spec, &error);
+        let oped = session_message(3, &SessionError::Attach(message));
+        let diagnostic = format!("attach: ch2 {oped}");
+        assert!(
+            oped.contains("attach refused"),
+            "the cause names the failed link operation: {oped}"
+        );
+        assert!(
+            !oped.contains("verifier rejected"),
+            "a link failure never blames the verifier: {oped}"
+        );
+        let mut result = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic,
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut result, false);
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the program loaded but the kernel refused to attach it; run as root and check the attach target\n"
+        );
+    }
+
+    /// Replay eligibility plus blamed channel for one
+    /// diagnostic through the production call pattern: parse
+    /// once, then route from the parse.
+    fn replay_routing(diagnostic: &str) -> (bool, i64) {
+        let refusal = parse_load_refusal(diagnostic);
+        (
+            is_load_errno_failure(refusal.as_ref()),
+            load_fail_channel(refusal.as_ref()),
+        )
+    }
+
+    #[test]
+    fn load_fail_channel_recognizes_collector_verbs() {
+        // The collector prefixes the first tagged segment with its
+        // verb ("attach: ch2 ...", "load: ch1 ..."): the blamed
+        // channel hides behind ": ", not just the string start or
+        // a join separator. Missing it replays the attempt object
+        // instead of the blamed one.
+        assert_eq!(
+            replay_routing(
+                "attach: ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: copy channel program `mv_bounce`: load for swiotlb_bounce failed: Permission denied (os error 13)"
+            ),
+            (true, 2)
+        );
+        assert_eq!(
+            replay_routing("load: ch1 op=2 domain=2 code=-22 EINVAL: x"),
+            (true, 1)
+        );
+        // Bare tags, joins, and untagged diagnostics keep their
+        // established shapes; a non-verifier errno classifies but
+        // earns no replay.
+        assert_eq!(replay_routing("ch2 op=3 domain=2 code=-13: x"), (true, 2));
+        assert_eq!(
+            replay_routing("ch0 op=2 domain=2: x; ch2 op=3 domain=2 code=-13: y"),
+            (true, 2)
+        );
+        assert_eq!(
+            replay_routing("load: ch0 op=2 domain=2 code=-1: x"),
+            (false, 0)
+        );
+        assert_eq!(replay_routing("op=2 domain=2 code=-13: x"), (true, 0));
+        // Two errno'd segments route to the first classifying
+        // header — the one whose errno selects the stamped code —
+        // never to a later tag the code ignores.
+        assert_eq!(
+            replay_routing("attach: ch2 op=3 domain=2 code=-13: x; ch1 op=2 domain=2 code=-13: y"),
+            (true, 2)
+        );
+        // A rollback note names a channel without blaming it:
+        // "rollback ch2:" carries a colon, never the tag's space,
+        // and the codeless diagnostic replays nothing at all.
+        assert_eq!(
+            replay_routing("attach: ch0 op=2 domain=2: x; rollback ch2: detach failed"),
+            (false, 0)
+        );
+    }
+
+    #[test]
+    fn codeless_diagnostic_replays_nothing() {
+        // Replay eligibility and channel routing read the same
+        // parsed refusal as the classifier: a codeless geometry
+        // refusal whose free text happens to name a channel and
+        // an errno replays no object at all.
+        let diagnostic =
+            "load: ch0 op=2 domain=2: attempt channel: unexpected map extra: ch2 note code=-13";
+        assert_eq!(crate::capture::loadcheck::load_refusal_code(diagnostic), "");
+        let refusal = parse_load_refusal(diagnostic);
+        assert_eq!(refusal, None);
+        assert!(
+            !is_load_errno_failure(refusal.as_ref()),
+            "a codeless diagnostic is never replay-eligible"
+        );
+        assert_eq!(load_fail_channel(refusal.as_ref()), 0);
+    }
+
+    #[test]
+    fn blamed_channel_routing_follows_the_classifying_header() {
+        // Genuine shapes route to the blamed object: the channel
+        // tag of the header whose errno slot classified, with
+        // untagged diagnostics replaying the attempt object.
+        assert_eq!(
+            replay_routing("attach: ch2 op=3 domain=2 code=-13 EACCES: x"),
+            (true, 2)
+        );
+        assert_eq!(
+            replay_routing("load: ch1 op=2 domain=2 code=-22 EINVAL: x"),
+            (true, 1)
+        );
+        assert_eq!(
+            replay_routing("ch0 op=2 domain=2: x; ch2 op=3 domain=2 code=-13: y"),
+            (true, 2)
+        );
+        assert_eq!(replay_routing("op=2 domain=2 code=-13: x"), (true, 0));
+        // A codeless later tag votes nothing: the blamed object is
+        // the copy one even though ch1 is named.
+        assert_eq!(
+            replay_routing("attach: ch2 op=3 domain=2 code=-13: x; ch1 op=2 domain=2: y"),
+            (true, 2)
+        );
+        // A non-verifier errno classifies but replays nothing:
+        // only EINVAL/EACCES refusals carry verifier lines worth
+        // recovering.
+        assert_eq!(
+            replay_routing("load: ch0 op=2 domain=2 code=-1 EPERM: x"),
+            (false, 0)
+        );
+    }
+
+    #[test]
+    fn refusal_fix_honesty_matrix() {
+        // Only the verifier remedy promises lines, so only it
+        // branches on the replay evidence; link-phase refusals
+        // name the failed attach instead, since the verifier
+        // never ran; every other code keeps the shared remedy
+        // either way.
+        assert_eq!(
+            refusal_fix("verifier-rejected", false, false),
+            "the kernel verifier rejected the object; no verifier lines were recovered"
+        );
+        assert!(
+            !refusal_fix("verifier-rejected", false, false).contains("lines above"),
+            "a lineless remedy must not promise lines"
+        );
+        assert_eq!(
+            refusal_fix("verifier-rejected", true, false),
+            crate::platform::kernelgate::remedy_for("verifier-rejected")
+        );
+        assert!(
+            refusal_fix("verifier-rejected", true, false).contains("lines above"),
+            "real replay lines earn the tail pointer"
+        );
+        for replay_lines in [false, true] {
+            let fix = refusal_fix("verifier-rejected", replay_lines, true);
+            assert_eq!(
+                fix,
+                "the program loaded but the kernel refused to attach it; run as root and check the attach target"
+            );
+            assert!(
+                !fix.contains("verifier"),
+                "a link remedy never names the verifier: {fix}"
+            );
+        }
+        for code in ["load-eperm", "load-enomem", "load-failed"] {
+            let shared = crate::platform::kernelgate::remedy_for(code);
+            assert_eq!(refusal_fix(code, false, false), shared);
+            assert_eq!(refusal_fix(code, true, false), shared);
+            assert_eq!(
+                refusal_fix(code, false, true),
+                shared,
+                "the link flag only steers the verifier text"
+            );
+        }
+    }
+
+    #[test]
+    fn attach_nested_refusal_with_lines_keeps_tail_pointer() {
+        // The fixed live shape: the blamed-channel replay appends
+        // real verifier lines to the diagnostic, so the stamp
+        // keeps the shared tail-pointer remedy and the lines are
+        // really above it in the rendered refusal line.
+        let tmp = TestDir::create("memveil-refuse").expect("mkdtemp");
+        let failed = nested_attach_failure();
+        let mut result = run_scripted_refusal(&tmp, ok_out(), failed_out(&failed));
+        assert_eq!(result.code, "verifier-rejected");
+        // Replay the fixed production append verbatim: one newline
+        // plus each tail line, then re-stamp with lines present.
+        result.code.clear();
+        result.fix.clear();
+        result.diagnostic += "\n0: R1=ctx() R2=0";
+        result.diagnostic += "\n1: R0=0";
+        stamp_load_refusal_code(&mut result, true);
+        assert_eq!(result.code, "verifier-rejected");
+        let lines = refusal_stderr_lines("record", &result.diagnostic, &result.code, &result.fix);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "memveil record: code: verifier-rejected\n");
+        assert_eq!(
+            lines[2],
+            "memveil record: fix: the kernel verifier rejected the object; see the verifier lines above\n"
+        );
+        assert!(
+            lines[0].contains("R1=ctx()") && lines[0].contains("R0=0"),
+            "the promised lines are really in the refusal line: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn refusal_stamp_base_control() {
+        // Base control: finalized runs stay codeless and print
+        // no code line; coded and unclassified refusals pass
+        // through untouched. The finalized and pre-coded
+        // controls carry a classifiable op-3 errno, so each
+        // preservation guard is tested independently: without
+        // its guard, the stamp would fire here.
+        let classifiable =
+            "ch2 op=3 domain=2 code=-13 EACCES: verifier rejected, see log: x".to_string();
+        let mut done = RunResult {
+            exit_code: EXIT_OK,
+            end_reason: "complete".to_string(),
+            outcome: "finalized".to_string(),
+            diagnostic: classifiable.clone(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut done, false);
+        assert!(done.code.is_empty());
+        assert!(done.fix.is_empty());
+        let lines = refusal_stderr_lines("record", "ready", &done.code, &done.fix);
+        assert_eq!(lines, vec!["memveil record: ready\n".to_string()]);
+        let mut coded = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic: classifiable,
+            fix: "check the lockdown state".to_string(),
+            code: "tracefs-hidden".to_string(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut coded, false);
+        assert_eq!(coded.code, "tracefs-hidden");
+        assert_eq!(coded.fix, "check the lockdown state");
+        let mut other_op = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic: "op=4 domain=2 code=-13: poll failed".to_string(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut other_op, false);
+        assert!(other_op.code.is_empty());
+        assert!(other_op.fix.is_empty());
+    }
+
+    /// The genuine mv_bounce link-EACCES diagnostic, built exactly
+    /// like `real_link_errno_flows_to_code_line`: the program
+    /// loads, then the raw-tracepoint link syscall refuses EACCES.
+    fn genuine_link_eacces_diagnostic() -> String {
+        let error = aya::programs::ProgramError::from(aya::sys::SyscallError {
+            call: "bpf_raw_tracepoint_open",
+            io_error: std::io::Error::from_raw_os_error(libc::EACCES),
+        });
+        let spec = spec_for_program("mv_bounce").expect("copy channel bounce spec");
+        let tag = format!("{} channel program `{}`", Channel::Copy, spec.program);
+        let message = format_failed_link(&tag, &spec, &error);
+        let oped = session_message(3, &SessionError::Attach(message));
+        format!("attach: ch2 {oped}")
+    }
+
+    #[test]
+    fn link_phase_verifier_rejection_replays_nothing() {
+        // A genuine link denial parses link-phase with the
+        // verifier-rejected machine code —
+        // but the blamed program loaded fine and only its link
+        // failed, so no replay may run (a replay would reach the next
+        // program and append its foreign verifier log to this
+        // link refusal). The machine code and link remedy stay.
+        let diagnostic = genuine_link_eacces_diagnostic();
+        let refusal = parse_load_refusal(&diagnostic).expect("a link errno classifies");
+        assert_eq!(refusal.code, "verifier-rejected");
+        assert_eq!(refusal.channel, 2);
+        assert_eq!(refusal.op, 3);
+        assert!(
+            refusal.link_phase,
+            "the blamed segment failed linking: {diagnostic}"
+        );
+        assert_eq!(
+            replay_routing(&diagnostic),
+            (false, 2),
+            "a link-phase failure must not replay: {diagnostic}"
+        );
+        // The stamp still codes the refusal and words the remedy
+        // for the failed link (no replay lines: nothing replayed).
+        let mut result = RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: "unknown".to_string(),
+            outcome: "refused".to_string(),
+            diagnostic,
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: false,
+        };
+        stamp_load_refusal_code(&mut result, false);
+        assert_eq!(result.code, "verifier-rejected");
+        assert_eq!(
+            result.fix,
+            "the program loaded but the kernel refused to attach it; run as root and check the attach target"
+        );
+    }
+
+    #[test]
+    fn nested_load_phase_verifier_rejection_still_replays() {
+        // Control: an attach-path nested program-load rejection
+        // genuinely failed verification, so its blamed-channel
+        // replay stays eligible.
+        let diagnostic = format!("attach: {}", nested_attach_failure());
+        let refusal = parse_load_refusal(&diagnostic).expect("a nested errno classifies");
+        assert_eq!(refusal.code, "verifier-rejected");
+        assert!(
+            !refusal.link_phase,
+            "a nested load failure is load-phase: {diagnostic}"
+        );
+        assert_eq!(
+            replay_routing(&diagnostic),
+            (true, 2),
+            "a load-phase failure keeps its replay: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn link_phase_first_header_suppresses_later_load_replay() {
+        // The first classifying header wins: when it is
+        // link-phase, no replay runs even though a later segment
+        // names a load-phase errno.
+        let diagnostic = "attach: ch2 op=3 domain=2 code=-13 EACCES: attach refused: copy channel program `mv_bounce`: attach to swiotlb_bounce failed: Permission denied (os error 13); ch1 op=2 domain=2 code=-22 EINVAL: x";
+        let refusal = parse_load_refusal(diagnostic).expect("the first errno classifies");
+        assert_eq!(refusal.code, "verifier-rejected");
+        assert_eq!(refusal.channel, 2);
+        assert!(
+            refusal.link_phase,
+            "the classifying header is link-phase: {diagnostic}"
+        );
+        assert_eq!(
+            replay_routing(diagnostic),
+            (false, 2),
+            "a link-phase classifying header suppresses replay: {diagnostic}"
+        );
     }
 }
