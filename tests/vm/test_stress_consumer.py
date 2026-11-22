@@ -1929,6 +1929,361 @@ def self_test_forensics(tmp):
                and "\ufffd" in byte_err,
                "%r %r %r %r" % (bare, long_err[-60:],
                              long_val[-8:], byte_err)) and ok
+    # A refused selector registration stays visible: with
+    # ENOSPC injected on the second registration, every
+    # collector still drains the sibling, marks the lost
+    # stream unavailable-with-reason, and refuses clean
+    # success.
+    import errno
+    import selectors as _selectors
+    import vm_process
+
+    _real_selector = _selectors.DefaultSelector
+
+    class _FlakySelector:
+        """Fails chosen registrations, delegates the rest."""
+
+        fail_on = {2}
+
+        def __init__(self):
+            self._inner = _real_selector()
+            self._regs = 0
+
+        def register(self, *args, **kwargs):
+            self._regs += 1
+            if self._regs in _FlakySelector.fail_on:
+                raise OSError(errno.ENOSPC,
+                              "No space left on device")
+            return self._inner.register(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    reg_script = ("import os;os.write(1,b'reg-out');"
+                  "os.write(2,b'reg-err')")
+    for label, mod in (("sh", stress_guest),
+                       ("run", core),
+                       ("rebuild", guest_oracle),
+                       ("owned", vm_process)):
+        _FlakySelector.fail_on = {2}
+        with mock.patch.object(_selectors, "DefaultSelector",
+                               _FlakySelector):
+            proc = subprocess.Popen(
+                [sys.executable, "-c", reg_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+            out, err, done = mod._collect(proc, 30)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+        ok = check("forensics-regfail-%s" % label,
+                   done is False
+                   and out == b"reg-out"
+                   and b"stderr unavailable" in err
+                   and b"No space left on device" in err
+                   and b"reg-err" not in err,
+                   "%r %r %r" % (done, out, err)) and ok
+    # Both registrations refused: both streams carry
+    # their own note, and the collection still fails.
+    _FlakySelector.fail_on = {1, 2}
+    with mock.patch.object(_selectors, "DefaultSelector",
+                           _FlakySelector):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", reg_script],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err, done = stress_guest._collect(proc, 30)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
+    ok = check("forensics-regfail-both",
+               done is False
+               and b"stdout unavailable" in out
+               and b"stderr unavailable" in err,
+               "%r %r %r" % (done, out, err)) and ok
+    # The callers turn the same loss into a failure
+    # verdict carrying the sibling plus the marker,
+    # never clean success.
+    _FlakySelector.fail_on = {2}
+    try:
+        with mock.patch.object(_selectors, "DefaultSelector",
+                               _FlakySelector):
+            made_proc = stress_guest.sh(
+                [sys.executable, "-c", reg_script],
+                timeout=30)
+        ok = check("forensics-regfail-sh-verdict", False,
+                   "clean success %r" % (made_proc,)) and ok
+    except stress_guest.StepTimeout as exc:
+        ok = check("forensics-regfail-sh-verdict",
+                   "reg-out" in (exc.out or "")
+                   and "stderr unavailable" in (exc.err or "")
+                   and "No space left on device" in (exc.err or ""),
+                   "%r %r" % (exc.out, exc.err)) and ok
+    try:
+        with mock.patch.object(_selectors, "DefaultSelector",
+                               _FlakySelector):
+            made_proc = core.run(
+                [sys.executable, "-c", reg_script],
+                timeout=30)
+        ok = check("forensics-regfail-run-verdict", False,
+                   "clean success %r" % (made_proc,)) and ok
+    except subprocess.TimeoutExpired as exc:
+        ok = check("forensics-regfail-run-verdict",
+                   "reg-out" in (exc.output or "")
+                   and "stderr unavailable" in (exc.stderr or "")
+                   and "No space left on device"
+                   in (exc.stderr or ""),
+                   "%r %r" % (exc.output, exc.stderr)) and ok
+    try:
+        with mock.patch.object(_selectors, "DefaultSelector",
+                               _FlakySelector):
+            made_proc = run_owned_guest(
+                [sys.executable, "-c", reg_script],
+                timeout=30)
+        ok = check("forensics-regfail-owned-verdict", False,
+                   "clean success %r" % (made_proc,)) and ok
+    except subprocess.TimeoutExpired as exc:
+        ok = check("forensics-regfail-owned-verdict",
+                   "reg-out" in (exc.output or "")
+                   and "stderr unavailable" in (exc.stderr or "")
+                   and "No space left on device"
+                   in (exc.stderr or ""),
+                   "%r %r" % (exc.output, exc.stderr)) and ok
+    reg_build = os.path.join(tmp, "rebuild-regfail")
+    reg_tree = os.path.join(
+        reg_build, "tree", "usr", "src",
+        "linux-headers-7.0.14-070014-generic")
+    os.makedirs(os.path.join(reg_tree, "include",
+                             "config"))
+    Path(reg_tree, "Makefile").write_text("# fake\n")
+    Path(reg_tree, "include", "config",
+         "kernel.release").write_text(
+        guest_oracle.GUEST_RELEASE + "\n")
+
+    class RegFailMake(real_popen):
+        """A make that writes both markers, exits 0."""
+
+        def __init__(self, args, **kwargs):
+            super().__init__([sys.executable, "-c",
+                              reg_script] + list(args),
+                             **kwargs)
+
+    try:
+        with mock.patch.object(guest_oracle.subprocess,
+                               "Popen", RegFailMake):
+            with mock.patch.object(_selectors,
+                                   "DefaultSelector",
+                                   _FlakySelector):
+                made = guest_oracle.rebuild_from_kbuild(
+                    os.path.join(reg_build, "scratch"),
+                    kbuild=reg_build)
+        ok = check("forensics-regfail-rebuild-verdict",
+                   False, "clean success %r" % (made,)) and ok
+    except subprocess.TimeoutExpired as exc:
+        ok = check("forensics-regfail-rebuild-verdict",
+                   "reg-out" in (exc.output or "")
+                   and "stderr unavailable" in (exc.stderr or "")
+                   and "No space left on device"
+                   in (exc.stderr or ""),
+                   "%r %r" % (exc.output, exc.stderr)) and ok
+    except ValueError as exc:
+        ok = check("forensics-regfail-rebuild-verdict",
+                   False, str(exc)) and ok
+    # Guest entry clears inherited descriptors: a child
+    # holding fds past stdio sweeps them, keeps 0/1/2,
+    # and allocates fresh pipes low. The sweep runs in
+    # a child; this process keeps its own table.
+    sc_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "stress-consumer")
+    sweep = (
+        "import os,sys;"
+        "sys.path.insert(0,%r);"
+        "import stress_guest;"
+        "fill=[os.open('/dev/null',os.O_RDONLY) "
+        "for _ in range(40)];"
+        "assert min(fill)>=3;"
+        "stress_guest._close_inherited_fds();"
+        "rest=sorted(int(n) "
+        "for n in os.listdir('/proc/self/fd'));"
+        "assert max(rest)<=3,rest;"
+        "[os.fstat(n) for n in (0,1,2)];"
+        "r,w=os.pipe();"
+        "assert (r,w)==(3,4),(r,w);"
+        "print('SWEEP-OK',flush=True)" % sc_dir)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", sweep],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True)
+    sweep_out = proc.communicate(timeout=30)[0]
+    ok = check("forensics-entry-sweep",
+               proc.returncode == 0
+               and "SWEEP-OK" in sweep_out,
+               "%r %r" % (proc.returncode, sweep_out)) and ok
+    # Inherited fds 3-1023 must not break the guest: a
+    # child that sweeps at entry like the guest flow
+    # allocates its pipe low and acknowledges cleanly,
+    # while a high pipe without the sweep refuses
+    # loudly and the abort records the skipped tail.
+    soft_now, _hard_now = resource.getrlimit(
+        resource.RLIMIT_NOFILE)
+    if soft_now < 1040:
+        print("ok forensics-inherit-ack SKIP (fds capped)")
+        print("ok forensics-inherit-tripwire SKIP (fds capped)")
+        print("ok forensics-abort-skipped SKIP (fds capped)")
+    else:
+        vm_dir = os.path.dirname(os.path.abspath(__file__))
+        child_path = os.path.join(tmp, "inherit-ack-child.py")
+        with open(child_path, "w") as handle:
+            handle.write(
+                "import os,subprocess,sys\n"
+                "sys.path.insert(0,%r)\n"
+                "sys.path.insert(0,%r)\n"
+                "import stress_guest\n"
+                "\n"
+                "class ProbeGate(stress_guest.Gate):\n"
+                "    def __init__(self, work, export):\n"
+                "        self.work = work\n"
+                "        self.export_dir = export\n"
+                "        self.consumers = []\n"
+                "        self.transients = []\n"
+                "        self.oracle_loaded = False\n"
+                "        self.mode = 'full'\n"
+                "\n"
+                "stress_guest._close_inherited_fds()\n"
+                "work = %r\n"
+                "export = %r\n"
+                "os.makedirs(work, exist_ok=True)\n"
+                "os.makedirs(export, exist_ok=True)\n"
+                "gate = ProbeGate(work, export)\n"
+                "ack = subprocess.Popen(\n"
+                "    [sys.executable, '-c',\n"
+                "     \"print('ready ring=mv_lifecycle',flush=True);\"\n"
+                "     'import time;time.sleep(30)'],\n"
+                "    stdout=subprocess.PIPE,\n"
+                "    stderr=subprocess.STDOUT,\n"
+                "    text=True, bufsize=1,\n"
+                "    start_new_session=True)\n"
+                "ack.gate_ring = 'mv_lifecycle'\n"
+                "print('pipe fd=%%d' %% ack.stdout.fileno(),\n"
+                "      flush=True)\n"
+                "try:\n"
+                "    gate.wait_ready([ack], timeout=10)\n"
+                "    print('ACKED', flush=True)\n"
+                "finally:\n"
+                "    ack.kill()\n"
+                "    try:\n"
+                "        ack.wait(timeout=10)\n"
+                "    except subprocess.TimeoutExpired:\n"
+                "        pass\n"
+                % (vm_dir, sc_dir,
+                   os.path.join(tmp, "iwork"),
+                   os.path.join(tmp, "iexport")))
+        fillers = []
+        try:
+            while True:
+                fd = os.open("/dev/null", os.O_RDONLY)
+                os.set_inheritable(fd, True)
+                fillers.append(fd)
+                if fd >= 1023:
+                    break
+            proc = subprocess.Popen(
+                [sys.executable, child_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True,
+                close_fds=False)
+            child_out = proc.communicate(timeout=60)[0]
+            try:
+                child_fd = int(child_out.split("pipe fd=")[1]
+                               .split()[0])
+            except (IndexError, ValueError):
+                child_fd = -1
+            ok = check("forensics-inherit-ack",
+                       proc.returncode == 0
+                       and "ACKED" in child_out
+                       and 0 <= child_fd < 1024,
+                       "%r %r" % (proc.returncode,
+                                 child_out)) and ok
+            loud = subprocess.Popen(
+                [sys.executable, "-c",
+                 "print('ready ring=mv_lifecycle',flush=True);"
+                 "import time;time.sleep(30)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                start_new_session=True)
+            loud.gate_ring = "mv_lifecycle"
+            loud_fd = loud.stdout.fileno()
+            try:
+                gate.wait_ready([loud], timeout=5)
+                ok = check("forensics-inherit-tripwire",
+                           False, "accepted") and ok
+            except ValueError as exc:
+                ok = check("forensics-inherit-tripwire",
+                           loud_fd >= 1024
+                           and "readiness fd" in str(exc)
+                           and "select()" in str(exc),
+                           "%d %s" % (loud_fd, exc)) and ok
+            except SystemExit as exc:
+                ok = check("forensics-inherit-tripwire",
+                           False, "SystemExit %s" % exc) and ok
+            finally:
+                loud.kill()
+                try:
+                    loud.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            gate.consumers.clear()
+            skipped_proc = subprocess.Popen(
+                [sys.executable, "-c",
+                 "print('skipped-tail-marker',flush=True)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                start_new_session=True)
+            skipped_fd = skipped_proc.stdout.fileno()
+            gate.consumers.append(skipped_proc)
+            try:
+                skipped_proc.wait(timeout=10)
+                gate.abort("probe high-fd abort")
+                record = json.loads(open(os.path.join(
+                    export, "abort.json")).read())
+                skipped = record.get("skipped_tails")
+                first = (skipped or [{}])[0]
+                ok = check("forensics-abort-skipped",
+                           skipped_fd >= 1024
+                           and record.get("tails") == []
+                           and isinstance(skipped, list)
+                           and len(skipped) == 1
+                           and first.get("consumer") == 0
+                           and "abort tail drain failed"
+                           in first.get("reason", "")
+                           and "select()"
+                           in first.get("reason", ""),
+                           "%d %r" % (skipped_fd,
+                                     record)) and ok
+            except (SystemExit, OSError, ValueError,
+                    subprocess.TimeoutExpired) as exc:
+                ok = check("forensics-abort-skipped",
+                           False, str(exc)) and ok
+            finally:
+                gate.consumers.remove(skipped_proc)
+                try:
+                    skipped_proc.kill()
+                except OSError:
+                    pass
+                try:
+                    skipped_proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            for fd in fillers:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
     return ok
 
 

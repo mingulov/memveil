@@ -38,6 +38,19 @@ def _capture_text(blob, stream):
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _unavailable_note(key,reason):
+    """Bytes marking one unregistered stream lost.
+
+    Names the stream and the registration error, so
+    a collection missing a stream carries its reason
+    instead of reporting clean success.
+    """
+    name={"out":"stdout","err":"stderr"}[key]
+    return ("\n[vm_process: %s unavailable: "
+            "selector registration failed "
+            "(%s)]\n"%(name,reason)).encode("utf-8")
+
+
 def _collect(proc,timeout):
     """Drain both pipes with a deadline, then reap.
 
@@ -51,8 +64,12 @@ def _collect(proc,timeout):
     them). EOF'd streams are closed, as with
     communicate. Readiness waits use the default
     selector, which has no fd-number ceiling
-    (unlike select()'s 1024 fd_set). No stdin
-    pipe: the caller leaves stdin inherited.
+    (unlike select()'s 1024 fd_set). A stream the
+    selector refuses stays visible: its bytes carry
+    an unavailable-with-reason note, and done is
+    False, so a collection missing a stream never
+    reports clean success. No stdin pipe: the caller
+    leaves stdin inherited.
     """
     want={}
     for key,name in (("out","stdout"),("err","stderr")):
@@ -68,12 +85,18 @@ def _collect(proc,timeout):
     open_streams=list(want)
     end=time.monotonic()+timeout
     selector=selectors.DefaultSelector()
+    lost={}
     try:
         for stream in open_streams:
             try:
                 selector.register(stream,
                                   selectors.EVENT_READ)
-            except (OSError,ValueError):
+            except (OSError,ValueError) as exc:
+                # Refused is unavailable, not EOF: the
+                # sibling still drains, and the note
+                # below keeps the loss visible.
+                lost[stream]="%s: %s"%(type(exc).__name__,
+                                       exc)
                 try:
                     stream.close()
                 except (OSError,ValueError):
@@ -115,13 +138,16 @@ def _collect(proc,timeout):
                 os.set_blocking(stream.fileno(),True)
             except (OSError,ValueError):
                 pass
+    for stream,reason in lost.items():
+        chunks[want[stream]].append(
+            _unavailable_note(want[stream],reason))
     try:
         proc.wait(timeout=max(end-time.monotonic(),0))
     except subprocess.TimeoutExpired:
         return (b"".join(chunks["out"]),
                 b"".join(chunks["err"]),False)
     return (b"".join(chunks["out"]),b"".join(chunks["err"]),
-            not open_streams)
+            not open_streams and not lost)
 
 
 def run_owned_guest(cmd,timeout):

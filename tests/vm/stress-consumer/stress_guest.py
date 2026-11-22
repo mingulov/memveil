@@ -111,6 +111,19 @@ def _pipe_text(blob):
         "\r\n", "\n").replace("\r", "\n")
 
 
+def _unavailable_note(key, reason):
+    """Bytes marking one unregistered stream lost.
+
+    Names the stream and the registration error,
+    so a collection missing a stream carries its
+    reason instead of reporting clean success.
+    """
+    name = {"out": "stdout", "err": "stderr"}[key]
+    return ("\n[stress-guest: %s unavailable: "
+            "selector registration failed "
+            "(%s)]\n" % (name, reason)).encode("utf-8")
+
+
 def _collect(proc, timeout):
     """Drain both pipes with a deadline, then reap.
 
@@ -124,8 +137,12 @@ def _collect(proc, timeout):
     them). EOF'd streams are closed, as with
     communicate. Readiness waits use the default
     selector, which has no fd-number ceiling
-    (unlike select()'s 1024 fd_set). No stdin
-    pipe: every caller here leaves stdin inherited.
+    (unlike select()'s 1024 fd_set). A stream the
+    selector refuses stays visible: its bytes carry
+    an unavailable-with-reason note, and done is
+    False, so a collection missing a stream never
+    reports clean success. No stdin pipe: every
+    caller here leaves stdin inherited.
     """
     want = {}
     for key, name in (("out", "stdout"),
@@ -142,12 +159,18 @@ def _collect(proc, timeout):
     open_streams = list(want)
     end = time.monotonic() + timeout
     selector = selectors.DefaultSelector()
+    lost = {}
     try:
         for stream in open_streams:
             try:
                 selector.register(stream,
                                   selectors.EVENT_READ)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                # Refused is unavailable, not EOF:
+                # the sibling still drains, and the
+                # note below keeps the loss visible.
+                lost[stream] = "%s: %s" % (
+                    type(exc).__name__, exc)
                 try:
                     stream.close()
                 except (OSError, ValueError):
@@ -191,6 +214,9 @@ def _collect(proc, timeout):
                 os.set_blocking(stream.fileno(), True)
             except (OSError, ValueError):
                 pass
+    for stream, reason in lost.items():
+        chunks[want[stream]].append(
+            _unavailable_note(want[stream], reason))
     try:
         proc.wait(timeout=max(end - time.monotonic(),
                               0))
@@ -199,7 +225,7 @@ def _collect(proc, timeout):
                 b"".join(chunks["err"]), False)
     return (b"".join(chunks["out"]),
             b"".join(chunks["err"]),
-            not open_streams)
+            not open_streams and not lost)
 
 
 def sh(args, timeout=TIMEOUT_DMESG, **kw):
@@ -248,6 +274,70 @@ def sh(args, timeout=TIMEOUT_DMESG, **kw):
     raise StepTimeout(" ".join(args), timeout, out, err)
 
 
+# select()'s fd_set has a fixed ceiling: it
+# cannot wait on fd 1024 or higher. Entry
+# hygiene keeps guest pipes low; the waits below
+# still refuse a high fd loudly instead of
+# misreading it.
+SELECT_FD_CEIL = 1024
+
+
+def _close_inherited_fds():
+    """Close every inherited descriptor past stdio.
+
+    Guest entry owns only 0/1/2; anything past them
+    is launcher residue that would push this
+    process's own pipes past select()'s fd_set
+    ceiling. Runs single-threaded before anything
+    opens a descriptor, so nothing needed can race
+    the sweep. No descriptor past stdio is ever a
+    guest input: nothing here passes fds in or out
+    (no pass_fds, no descriptor-passing socket, no
+    activation), and every spawned child reaps a
+    clean table through close-on-exec plus the
+    default close_fds.
+    """
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        names = []
+    top = SELECT_FD_CEIL
+    for name in names:
+        try:
+            number = int(name)
+        except ValueError:
+            continue
+        if number > top:
+            top = number
+    closerange = getattr(os, "closerange", None)
+    if closerange is not None:
+        closerange(3, top + 1)
+        return
+    for fd in range(3, top + 1):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _select_fd(stream, what):
+    """fileno() refusing high fds before select().
+
+    A pipe at or past the ceiling raises ValueError
+    either way; refuse early with the stream named
+    so the tripwire reads as a range refusal, not a
+    bare select error. Loud in every caller: the
+    readiness path fails the run with the reason,
+    and the abort drain records the skip.
+    """
+    fd = stream.fileno()
+    if fd < 0 or fd >= SELECT_FD_CEIL:
+        raise ValueError(
+            "%s fd %d is outside select()'s 0..%d "
+            "range" % (what, fd, SELECT_FD_CEIL - 1))
+    return fd
+
+
 def drain_bounded(proc, seconds):
     """Drain a reaped-or-dying proc's stdout, bounded.
 
@@ -255,11 +345,13 @@ def drain_bounded(proc, seconds):
     EOF or the deadline, plus whether the deadline cut the
     drain short (a stray holder kept the pipe open). EOF
     before the deadline means complete, whatever the size.
-    The pipe is closed; later readers see .closed.
+    The pipe is closed; later readers see .closed. A pipe
+    past select()'s ceiling raises ValueError naming the
+    fd; the abort caller records the skip.
     """
     if proc.stdout is None:
         return "", False
-    fd = proc.stdout.fileno()
+    fd = _select_fd(proc.stdout, "drain")
     os.set_blocking(fd, False)
     chunks = []
     truncated = False
@@ -593,7 +685,9 @@ class Gate:
         each tail drain has its own deadline. Tails reach
         the shared export with sidecars and are listed in
         the abort record; a cut-short drain is marked
-        truncated, never silently dropped. A dying proc
+        truncated, never silently dropped, and a drain
+        that cannot run at all is listed under
+        skipped_tails with its reason. A dying proc
         still drains: the pipe is the evidence, and the
         drain is bounded whether or not EOF arrives.
         """
@@ -613,6 +707,7 @@ class Gate:
                     except subprocess.TimeoutExpired:
                         pass
         tails = []
+        skipped = []
         for index, proc in enumerate(self.consumers):
             if proc.stdout is None or proc.stdout.closed:
                 continue
@@ -620,7 +715,15 @@ class Gate:
             proc.poll()
             try:
                 rest, truncated = drain_bounded(proc, TIMEOUT_DRAIN)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                # A skipped tail stays visible: the
+                # record names the consumer and why
+                # its tail never exported.
+                skipped.append(
+                    {"consumer": index,
+                     "reason": "abort tail drain failed: "
+                               "%s: %s" % (type(exc).__name__,
+                                           exc)})
                 continue
             # The readiness prefix is preserved consumer
             # output too: a diagnostic consumed before a
@@ -662,6 +765,7 @@ class Gate:
         self.write_json("abort.json", {"reason": reason,
                                        "mode": self.mode,
                                        "tails": tails,
+                                       "skipped_tails": skipped,
                                        "unreaped": unreaped})
         for name in ["abort.json", "progress.log"] + tails:
             try:
@@ -703,6 +807,7 @@ class Gate:
         buffers = {}
         for proc in procs:
             buffers[id(proc)] = b""
+            _select_fd(proc.stdout, "readiness")
             os.set_blocking(proc.stdout.fileno(), False)
         try:
             pending = list(procs)
@@ -1038,6 +1143,7 @@ def run_phase2(gate, name, pair, family, disk, short):
 
 
 def main(argv):
+    _close_inherited_fds()
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("work")
