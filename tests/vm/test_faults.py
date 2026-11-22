@@ -434,8 +434,8 @@ def verify_faults_exports(tmp, names, binding):
     """Check the exact exports plus schemas plus identity."""
     got, verified = snapshot_faults_exports(tmp, names)
     # Identity and the exported profile carry
-    # faults-specific checks below; the shared validator
-    # predates both shapes.
+    # faults-specific binding checks below; retention
+    # owns their shared shape, the gate their pins.
     validate_lifecycle_exports(
         {name: path for name, path in got.items()
          if name not in ("identity.json", "profile.json")},

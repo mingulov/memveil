@@ -346,6 +346,305 @@ def test_consumer_identity_still_requires_its_hash():
     export_validation.identity(dict(IDENTITY_DOC), 'copy')
 
 
+FAULTS_IDENTITY_DOC = dict(
+    release='7.0.14-070014-generic',
+    cmdline='virtme_hostname=virtme-ng swiotlb=force console=ttyS0',
+    btf_sha256='e' * 64,
+    digests={key: 'f' * 64 for key in (
+        'attempt', 'binary', 'cp', 'ko', 'lc', 'profile')})
+
+
+def test_faults_identity_accepted_under_faults(tmp_path):
+    export_validation.identity(dict(FAULTS_IDENTITY_DOC), 'faults')
+    path = tmp_path / 'identity.json'
+    path.write_text(json.dumps(FAULTS_IDENTITY_DOC))
+    export_validation.validate_lifecycle_exports(
+        {'identity.json': path}, 'faults')
+
+
+def test_identity_shapes_refuse_across_subs(tmp_path):
+    import copy
+    for sub in ('copy', 'bundle', None):
+        with pytest.raises(ValueError):
+            export_validation.identity(
+                copy.deepcopy(FAULTS_IDENTITY_DOC), sub)
+    for doc in (IDENTITY_DOC, BUNDLE_IDENTITY_DOC):
+        with pytest.raises(ValueError):
+            export_validation.identity(dict(doc), 'faults')
+    path = tmp_path / 'identity.json'
+    path.write_text(json.dumps(FAULTS_IDENTITY_DOC))
+    with pytest.raises(ValueError):
+        export_validation.validate_lifecycle_exports(
+            {'identity.json': path}, 'copy')
+    path.write_text(json.dumps(IDENTITY_DOC))
+    with pytest.raises(ValueError):
+        export_validation.validate_lifecycle_exports(
+            {'identity.json': path}, 'faults')
+    export_validation.identity(dict(IDENTITY_DOC), 'copy')
+    export_validation.identity(dict(BUNDLE_IDENTITY_DOC), 'bundle')
+
+
+def _faults_identity_mutations():
+    short = '0' * 63
+    return [
+        ('drop-release', lambda doc: doc.pop('release')),
+        ('drop-cmdline', lambda doc: doc.pop('cmdline')),
+        ('drop-btf', lambda doc: doc.pop('btf_sha256')),
+        ('drop-digests', lambda doc: doc.pop('digests')),
+        ('extra-key', lambda doc: doc.update(iface='eth0')),
+        ('short-release', lambda doc: doc.update(release='7.0')),
+        ('shell-release',
+         lambda doc: doc.update(release='7.0.14; reboot')),
+        ('cmdline-without-token',
+         lambda doc: doc.update(cmdline='console=ttyS0')),
+        ('empty-cmdline', lambda doc: doc.update(cmdline='')),
+        ('untyped-cmdline', lambda doc: doc.update(cmdline=None)),
+        ('short-btf', lambda doc: doc.update(btf_sha256=short)),
+        ('nonhex-btf', lambda doc: doc.update(btf_sha256='G' * 64)),
+        ('drop-digest', lambda doc: doc['digests'].pop('ko')),
+        ('extra-digest',
+         lambda doc: doc['digests'].update(bridge='a' * 64)),
+        ('short-digest',
+         lambda doc: doc['digests'].update(lc=short)),
+        ('untyped-digests', lambda doc: doc.update(digests=['lc'])),
+    ]
+
+
+@pytest.mark.parametrize(
+    'name,mutation',
+    [pytest.param(name, mutation, id=name)
+     for name, mutation in _faults_identity_mutations()])
+def test_faults_identity_malformed_refused(name, mutation):
+    import copy
+    doc = copy.deepcopy(FAULTS_IDENTITY_DOC)
+    mutation(doc)
+    with pytest.raises(ValueError):
+        export_validation.identity(doc, 'faults')
+
+
+def faults_profile_doc():
+    return dict(
+        schema_version='0.1.2',
+        profile_id='linux-x86_64-7.0-reference',
+        status='reference-unvalidated',
+        identity=dict(
+            arch='x86_64', min_kernel='7.0',
+            source=dict(origin='upstream', revision='0' * 40,
+                        note='reviewed'),
+            note='reference'),
+        hooks=[
+            dict(name='swiotlb:swiotlb_bounced', kind='tracepoint',
+                 id_path='/sys/kernel/tracing/events/swiotlb/id',
+                 format_path='/sys/kernel/tracing/events/swiotlb/format',
+                 format_text=None),
+            dict(name='fexit:swiotlb_tbl_map_single', kind='tracing',
+                 function='swiotlb_tbl_map_single', attach='fexit',
+                 signature='phys_addr_t f(struct device *dev)',
+                 signature_alt=['phys_addr_t f(void)'],
+                 note='frozen'),
+        ],
+        capabilities=[
+            dict(id='attempt-trace', status='candidate',
+                 hooks=['swiotlb:swiotlb_bounced'],
+                 reason='unproven'),
+        ],
+        layouts=[
+            dict(capability='copy-actual', target='enumerator',
+                 struct='dma_data_direction', field='DMA_BIDIRECTIONAL',
+                 type_kind='enum', bit_size=32, optional=False),
+            dict(capability='copy-actual', target='type',
+                 struct='dma_data_direction',
+                 type_kind='enum', bit_size=32, optional=True),
+        ],
+        notes=['retention grammar control'])
+
+
+def test_faults_profile_accepted_under_faults(tmp_path):
+    export_validation.faults_profile(faults_profile_doc())
+    doc = faults_profile_doc()
+    doc['identity']['min_kernel'] = '7.0.1'
+    export_validation.faults_profile(doc)
+    doc = faults_profile_doc()
+    doc['identity']['min_kernel'] = '2147483647.0'
+    export_validation.faults_profile(doc)
+    doc = faults_profile_doc()
+    doc['profile_id'] = 'a' * 128
+    export_validation.faults_profile(doc)
+    # Empty arrays stay valid: the product parser admits them,
+    # and the gate already pins the profile bytes.
+    doc = faults_profile_doc()
+    doc.update(hooks=[], capabilities=[], layouts=[], notes=[])
+    export_validation.faults_profile(doc)
+    doc = faults_profile_doc()
+    doc.pop('notes')
+    doc.pop('layouts')
+    export_validation.faults_profile(doc)
+    path = tmp_path / 'profile.json'
+    path.write_text(json.dumps(faults_profile_doc()))
+    export_validation.validate_lifecycle_exports(
+        {'profile.json': path}, 'faults')
+
+
+def test_faults_profile_v11_layout_shape():
+    doc = faults_profile_doc()
+    doc['schema_version'] = '0.1.1'
+    doc['layouts'] = [dict(struct='s', field='f', bit_offset=0,
+                           bit_size=8)]
+    export_validation.faults_profile(doc)
+    legacy = dict(struct='s', field='f', bit_offset=0, bit_size=8)
+    doc = faults_profile_doc()
+    doc['layouts'] = [legacy]
+    with pytest.raises(ValueError):
+        export_validation.faults_profile(doc)
+    doc = faults_profile_doc()
+    doc['schema_version'] = '0.1.1'
+    with pytest.raises(ValueError):
+        export_validation.faults_profile(doc)
+
+
+def test_faults_profile_refused_outside_faults(tmp_path):
+    path = tmp_path / 'profile.json'
+    path.write_text(json.dumps(faults_profile_doc()))
+    for sub in ('copy', 'bundle', 'peer', None):
+        with pytest.raises(
+                ValueError,
+                match='unrecognized lifecycle export profile.json'):
+            export_validation.validate_lifecycle_exports(
+                {'profile.json': path}, sub)
+
+
+def _faults_profile_mutations():
+    return [
+        ('drop-schema', lambda doc: doc.pop('schema_version')),
+        ('drop-profile-id', lambda doc: doc.pop('profile_id')),
+        ('drop-status', lambda doc: doc.pop('status')),
+        ('drop-identity', lambda doc: doc.pop('identity')),
+        ('drop-hooks', lambda doc: doc.pop('hooks')),
+        ('drop-capabilities', lambda doc: doc.pop('capabilities')),
+        ('extra-top-key', lambda doc: doc.update(extra={})),
+        ('bad-schema', lambda doc: doc.update(schema_version='0.1.3')),
+        ('spaced-schema',
+         lambda doc: doc.update(schema_version='0.1.2 ')),
+        ('empty-profile-id', lambda doc: doc.update(profile_id='')),
+        ('dot-profile-id',
+         lambda doc: doc.update(profile_id='.leading-dot')),
+        ('spaced-profile-id',
+         lambda doc: doc.update(profile_id='has space')),
+        ('long-profile-id',
+         lambda doc: doc.update(profile_id='a' * 129)),
+        ('cased-status', lambda doc: doc.update(status='Validated')),
+        ('draft-status', lambda doc: doc.update(status='draft')),
+        ('drop-arch', lambda doc: doc['identity'].pop('arch')),
+        ('drop-source', lambda doc: doc['identity'].pop('source')),
+        ('short-floor',
+         lambda doc: doc['identity'].update(min_kernel='7')),
+        ('long-floor',
+         lambda doc: doc['identity'].update(min_kernel='7.0.0.0')),
+        ('text-floor',
+         lambda doc: doc['identity'].update(min_kernel='seven')),
+        ('wide-floor',
+         lambda doc: doc['identity'].update(
+             min_kernel='2147483648.0')),
+        ('untyped-floor',
+         lambda doc: doc['identity'].update(min_kernel=7)),
+        ('drop-revision',
+         lambda doc: doc['identity']['source'].pop('revision')),
+        ('extra-source',
+         lambda doc: doc['identity']['source'].update(extra='x')),
+        ('untyped-hooks', lambda doc: doc.update(hooks={})),
+        ('nameless-hook', lambda doc: doc['hooks'][0].pop('name')),
+        ('kindless-hook', lambda doc: doc['hooks'][1].pop('kind')),
+        ('bad-kind',
+         lambda doc: doc['hooks'][1].update(kind='kprobe')),
+        ('tracing-without-signature',
+         lambda doc: doc['hooks'][1].pop('signature')),
+        ('tracing-with-tracepoint-field',
+         lambda doc: doc['hooks'][1].update(id_path='/id')),
+        ('bad-attach',
+         lambda doc: doc['hooks'][1].update(attach='fmodify')),
+        ('empty-signature-alt',
+         lambda doc: doc['hooks'][1].update(signature_alt=[''])),
+        ('untyped-signature-alt',
+         lambda doc: doc['hooks'][1].update(signature_alt='sig')),
+        ('tracepoint-without-format',
+         lambda doc: doc['hooks'][0].pop('format_path')),
+        ('tracepoint-with-tracing-field',
+         lambda doc: doc['hooks'][0].update(function='f')),
+        ('numeric-format-text',
+         lambda doc: doc['hooks'][0].update(format_text=7)),
+        ('numeric-hook-note',
+         lambda doc: doc['hooks'][1].update(note=7)),
+        ('untyped-capabilities',
+         lambda doc: doc.update(capabilities={})),
+        ('reasonless-capability',
+         lambda doc: doc['capabilities'][0].pop('reason')),
+        ('bad-capability-id',
+         lambda doc: doc['capabilities'][0].update(id='trace')),
+        ('bad-capability-status',
+         lambda doc: doc['capabilities'][0].update(status='pending')),
+        ('untyped-capability-hooks',
+         lambda doc: doc['capabilities'][0].update(hooks='x')),
+        ('empty-capability-hook',
+         lambda doc: doc['capabilities'][0].update(hooks=[''])),
+        ('untyped-capability-reason',
+         lambda doc: doc['capabilities'][0].update(reason=None)),
+        ('untyped-notes', lambda doc: doc.update(notes=[None])),
+        ('untyped-layouts', lambda doc: doc.update(layouts='x')),
+        ('layout-without-optional',
+         lambda doc: doc['layouts'][0].pop('optional')),
+        ('layout-conversion-capability',
+         lambda doc: doc['layouts'][0].update(
+             capability='conversion-observe')),
+        ('layout-bad-target',
+         lambda doc: doc['layouts'][0].update(target='struct')),
+        ('layout-type-with-field',
+         lambda doc: doc['layouts'][1].update(field='f')),
+        ('layout-field-without-field',
+         lambda doc: doc['layouts'][0].pop('field')),
+        ('layout-bad-type-kind',
+         lambda doc: doc['layouts'][0].update(type_kind='bool')),
+        ('layout-zero-size',
+         lambda doc: doc['layouts'][0].update(bit_size=0)),
+        ('layout-bool-size',
+         lambda doc: doc['layouts'][0].update(bit_size=True)),
+        ('layout-text-size',
+         lambda doc: doc['layouts'][0].update(bit_size='32')),
+        ('layout-text-optional',
+         lambda doc: doc['layouts'][0].update(optional='yes')),
+    ]
+
+
+@pytest.mark.parametrize(
+    'name,mutation',
+    [pytest.param(name, mutation, id=name)
+     for name, mutation in _faults_profile_mutations()])
+def test_faults_profile_malformed_refused(name, mutation):
+    import copy
+    doc = copy.deepcopy(faults_profile_doc())
+    mutation(doc)
+    with pytest.raises(ValueError):
+        export_validation.faults_profile(doc)
+
+
+def test_faults_retention_gate_passes(tmp_path, monkeypatch):
+    import evidence_retention
+    run = retention_run(tmp_path, gate='faults', files={
+        'identity.json': json.dumps(FAULTS_IDENTITY_DOC),
+        'profile.json': json.dumps(faults_profile_doc()),
+        'faults.json': json.dumps([faults_row()]),
+    })
+    owned = owned_dir(tmp_path, monkeypatch)
+    receipt = evidence_retention.retain_gate_evidence(
+        run, 'faults', 'passed')
+    assert receipt == owned / 'gates' / 'faults' / 'receipt.json'
+    doc = evidence_retention.verify_retained('faults')
+    assert doc['complete'] is True
+    assert doc['disposition'] == 'passed'
+    assert {entry['name'] for entry in doc['files']} == {
+        'faults-identity.json', 'faults-profile.json',
+        'faults-faults.json'}
+
+
 def retention_run(tmp_path, gate='bundle', files=None):
     run = tmp_path / 'run'
     export = run / 'export'
