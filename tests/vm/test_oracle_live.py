@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Oracle live gate: module build plus guest comparison.
 
+SUPERSEDED by tests/vm/test_heldopen.py for the live
+held-open leg (test_guest_comparison): the ported runner
+drives the reviewed consumer with its real CLI, the sealed
+objects and executable, the fixture, and the pinned
+7.0.14 guest. test_module_builds remains the host
+module-build check. This file keeps working defaults.
+
 test_module_builds compiles the test-only oracle module against
 the running kernel's build tree and checks its modinfo; it runs
 everywhere the headers exist. test_guest_comparison boots the
@@ -63,6 +70,58 @@ def test_module_builds():
     assert "mv_oracle_arm" in info.stdout
 
 
+def judge_oracle_comparison(got, work_dir, memveil_bin,
+                            profile_id):
+    """Judge one held-open window; returns a reason list (empty ok).
+
+    Verbatim extraction of the test_guest_comparison judge
+    block: conservation on both consumer files, the oracle
+    script check plus the scripted multiset comparison
+    (4 ops, no fail-op), then the separately authored
+    synthetic reducer fixture rendered by the report
+    command and compared against the replayed oracle
+    ledger with zero tolerated mismatches, plus the
+    lifetime-ordering check. The retired entry passes the
+    build-tree binary and the prepared gate profile id;
+    the held-open port passes the staged sealed binary
+    and the seal-bound profile id. The retired asserts
+    (window checks, report exit, ledger mismatches) return
+    as reasons instead, so armed runners print them.
+    """
+    bad = []
+    lc, lc_sum = parse_consume_file(str(got["cmp-lc.txt"]))
+    cp, cp_sum = parse_consume_file(str(got["cmp-cp.txt"]))
+    bad += check_conservation(lc, lc_sum, "cmp-lc")
+    bad += check_conservation(cp, cp_sum, "cmp-cp")
+    ops_log, releases, complete = parse_oracle_log(
+        str(got["cmp-oracle.log"]))
+    bad += check_oracle_script(ops_log, releases, complete,
+                               4, -1, "cmp")
+    bad += compare_scripted(lc, cp, 4, -1, "cmp")
+    if bad:
+        return sorted(bad)
+    cap_dir = os.path.join(work_dir, "cap-report")
+    os.makedirs(cap_dir, exist_ok=True)
+    probe_lifetimes = translate_session(
+        lc, cp, ops_log, cap_dir, "oracle-live-session",
+        profile_id)
+    authored = os.path.join(work_dir, "authored-reducer-fixture")
+    author_reducer_fixture(cap_dir, authored)
+    rep = subprocess.run(
+        [memveil_bin, "report", "--format", "json",
+         authored],
+        capture_output=True, text=True, timeout=300)
+    if rep.returncode != 0:
+        return ["cmp: report exit %d: %s"
+                % (rep.returncode, rep.stderr[-1000:])]
+    report = json.loads(rep.stdout)
+    ledger = replay_oracle_ledger(ops_log, releases)
+    mismatches = compare_live(report, ledger, probe_lifetimes)
+    mismatches += check_lifetime_ordering(
+        probe_lifetimes, releases, "cmp")
+    return sorted(mismatches)
+
+
 def test_guest_comparison(tmp_path):
     # Boot the frozen harness, insmod the oracle module with
     # mv_oracle_arm=1, replay its mv-oracle: log lines into the
@@ -86,34 +145,10 @@ def test_guest_comparison(tmp_path):
                              ["identity.json", "cmp-lc.txt",
                               "cmp-cp.txt", "cmp-oracle.log"])
         expected = expected_from_verified(got, "oracle")
-        lc, lc_sum = parse_consume_file(str(got["cmp-lc.txt"]))
-        cp, cp_sum = parse_consume_file(str(got["cmp-cp.txt"]))
-        bad = check_conservation(lc, lc_sum, "cmp-lc")
-        bad += check_conservation(cp, cp_sum, "cmp-cp")
-        ops_log, releases, complete = parse_oracle_log(
-            str(got["cmp-oracle.log"]))
-        bad += check_oracle_script(ops_log, releases, complete,
-                                   4, -1, "cmp")
-        bad += compare_scripted(lc, cp, 4, -1, "cmp")
-        assert not bad, "\n".join(bad)
-        cap_dir = tmp_path / "cap-report"
-        cap_dir.mkdir()
-        probe_lifetimes = translate_session(
-            lc, cp, ops_log, str(cap_dir), "oracle-live-session",
+        bad = judge_oracle_comparison(
+            got, str(tmp_path), MEMVEIL_BIN,
             gate_kernel.selected_profile_id())
-        authored = tmp_path / "authored-reducer-fixture"
-        author_reducer_fixture(cap_dir, authored)
-        rep = subprocess.run(
-            [MEMVEIL_BIN, "report", "--format", "json",
-             str(authored)],
-            capture_output=True, text=True, timeout=300)
-        assert rep.returncode == 0, rep.stderr[-1000:]
-        report = json.loads(rep.stdout)
-        ledger = replay_oracle_ledger(ops_log, releases)
-        mismatches = compare_live(report, ledger, probe_lifetimes)
-        mismatches += check_lifetime_ordering(
-            probe_lifetimes, releases, "cmp")
-        assert not mismatches, "\n".join(mismatches)
+        assert not bad, "\n".join(bad)
         print("oracle: 8 lc + 17 cp exact, report matches "
               "ledger in separately authored synthetic reducer fixture")
     except Exception:

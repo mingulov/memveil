@@ -11,9 +11,19 @@ covered separately by `tools/test record-failures`.
 Run only in an assigned disposable ordinary guest environment. The host needs
 unprivileged KVM access, the locked virtme-ng/QEMU/bpftrace/bpftool versions,
 a readable selected kernel, and at least 2 GiB spare storage. The guest needs
-ext4, virtio block, BTF, readable `/proc/config.gz`, mount, mkfs.ext4, blkid, and an admitted attempt profile
+ext4, virtio block, BTF, mount, mkfs.ext4, blkid, and an admitted attempt profile
 matching that kernel and object. An earlier attach refusal fails the gate.
 The profile is supplied explicitly; this runner does not admit a profile.
+Before each boot the host verifies the bound kernel image and modules
+manifest and binds the launch to those verified paths. Before any guest disk
+mutation the guest must show the expected release, the bound module manifest,
+and the pinned live BTF. A guest exposing `/proc/config.gz` must match the
+staged config bytes exactly; a guest without it is accepted only on the one
+approved release named in the runner, and every receipt records
+`config_status` (`measured` or `absent`). The staged config is then kept as a
+separate publisher-supplied provenance record, never merged into the absent
+claim. The absent-row binding is explicitly weaker than a direct config match:
+an image digest proves image identity, not the exact build config.
 
 Build the test adapter with `python3 tests/cli/prepare_capture_failures.py`.
 Then supply exact candidate inputs and an absent evidence directory:
@@ -26,6 +36,9 @@ MEMVEIL_VM_CAPTURE_FAILURES=1 python3 tests/vm/capture_durability.py \
   --bridge /path/to/candidate/lib/memveil/libgcc_s.so.1 \
   --profile /path/to/admitted-profile.json \
   --kernel /path/to/selected-vmlinuz --kernel-config /path/to/selected.config \
+  --modules /path/to/selected-modules --expected-release EXPECTED_UNAME_RELEASE \
+  --expected-kernel-sha256 PINNED_IMAGE_SHA --expected-modules-sha256 PINNED_MANIFEST_SHA \
+  --expected-btf-sha256 PINNED_LIVE_BTF_SHA \
   --out /path/to/new-evidence-directory
 ```
 
@@ -43,7 +56,8 @@ concurrently. Unarmed exit 77 is SKIP; armed failures return 1 and retain the
 failure reason, commands, available logs, and images.
 
 Evidence binds executable/object/bridge/profile/test-adapter hashes, kernel
-image/config/BTF, boot IDs, filesystem UUID, reached boundary, allocated reserve,
+image/release/modules-manifest/BTF pins with the observed guest values, boot IDs,
+filesystem UUID, reached boundary, allocated reserve,
 checkpoint digest/counts, product exits, and independent report validation.
 The full-filesystem cases stop the ready writer and verify its unfinalized
 checkpoint before filling only the owned guest image. The writer stays stopped

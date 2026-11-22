@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# L6 held-open leg: battery-shaped guest flow, sealed inputs,
+# fixture, pinned 7.0.14 guest.
+#
+# The held-open leg runs only when armed
+# (MEMVEIL_VM_HELDOPEN=1) with --out plus the explicit seal
+# paths; the runner stages and verifies every input before
+# booting. Unarmed runs exit 77 without building or
+# booting; armed runs with missing pieces fail loudly.
+set -u
+
+case "${1:-}" in
+    --help|-h) sed -n '2,/^set -u/p' "$0" | sed 's/^# //; s/^#//'; exit 0 ;;
+esac
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+cd "$ROOT" || exit 1
+if [ "${MEMVEIL_VM_HELDOPEN:-0}" != "1" ]; then
+    echo "vm-heldopen: SKIP: needs MEMVEIL_VM_HELDOPEN=1" \
+        "with --out and the seal paths" >&2
+    exit 77
+fi
+exec python3 -m pytest \
+    tests/vm/test_heldopen.py::test_armed_heldopen -v "$@"

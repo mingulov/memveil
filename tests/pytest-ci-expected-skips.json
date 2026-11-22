@@ -13,6 +13,11 @@
     },
     {
       "count": 1,
+      "id": "tests/vm/test_battery.py",
+      "reason": "battery armed run needs MEMVEIL_VM_BATTERY=1"
+    },
+    {
+      "count": 1,
       "id": "tests/vm/test_bundle.py",
       "reason": "lifecycle VM gates need MEMVEIL_VM_LIFECYCLE=1 with qualified probes"
     },
@@ -25,6 +30,11 @@
       "count": 3,
       "id": "tests/vm/test_core_layouts.py",
       "reason": "fixture regen inputs retired with the C/Mojo tree; committed fixtures carry the suites"
+    },
+    {
+      "count": 4,
+      "id": "tests/vm/test_faults_binding.py",
+      "reason": "no dist/ seal in tree"
     },
     {
       "count": 20,
@@ -42,9 +52,29 @@
       "reason": "needs build/bpf objects"
     },
     {
+      "count": 1,
+      "id": "tests/vm/test_heldopen.py",
+      "reason": "heldopen armed run needs MEMVEIL_VM_HELDOPEN=1"
+    },
+    {
+      "count": 1,
+      "id": "tests/vm/test_lateattach.py",
+      "reason": "lateattach armed run needs MEMVEIL_VM_LATEATTACH=1"
+    },
+    {
       "count": 15,
       "id": "tests/vm/test_mint_record3.py",
       "reason": "needs built lifecycle/copy objects"
+    },
+    {
+      "count": 1,
+      "id": "tests/vm/test_output_stall.py",
+      "reason": "output-stall armed run needs MEMVEIL_VM_OUTPUT_STALL=1"
+    },
+    {
+      "count": 1,
+      "id": "tests/vm/test_peer_oracle.py",
+      "reason": "peer leg needs MEMVEIL_VM_PEER=1"
     }
   ]
 }

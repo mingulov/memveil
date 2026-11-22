@@ -50,7 +50,22 @@ def sha(value):
         raise ValueError('invalid export hash')
 
 
+def faults_identity(doc):
+    keys(doc,('release','cmdline','btf_sha256','digests'))
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+[-A-Za-z0-9.+_]*',doc['release']):
+        raise ValueError('invalid kernel release')
+    if type(doc['cmdline']) is not str or 'swiotlb=force' not in doc['cmdline']:
+        raise ValueError('missing force boot option')
+    sha(doc['btf_sha256'])
+    digests=doc['digests']
+    keys(digests,('attempt','binary','cp','ko','lc','profile'))
+    for value in digests.values(): sha(value)
+
+
 def identity(doc,sub=None):
+    if sub=='faults':
+        faults_identity(doc)
+        return
     required=('release','swiotlb_force','config_sha','btf_sha','bridge_sha',
               'consume_sha','lc_sha','cp_sha','ko_sha')
     if sub=='bundle':
@@ -440,6 +455,170 @@ def validate_overhead_probe(doc):
             raise ValueError('overhead probe identity drift')
 
 
+def _peer_export_names():
+    """The peer-leg export inventory, owned by peer_oracle."""
+    from peer_oracle import EXPORT_NAMES
+    return EXPORT_NAMES
+
+
+def _validate_peer_record_log(path):
+    body=path.read_bytes()
+    if len(body)>65536:raise ValueError('peer record log exceeds 64 KiB cap')
+    try:body.decode('utf-8')
+    except UnicodeDecodeError:raise ValueError('peer record log is not UTF-8 text')
+
+
+def _validate_peer_export(name,path):
+    """Strict per-file checks for one peer-leg export.
+
+    peer.json carries the exact-key oracle document.
+    record.out/record.stderr carry free-form product
+    diagnostics (a refusal explanation on failure
+    paths), so only their text shape is bounded, never
+    their content. Anything else in the inventory
+    refuses here: the cap-session.json/cap-events.ndjson
+    pair never reaches this branch (the generic
+    product-schema branches above claim it), and a new
+    inventory member fails closed until it gains an
+    explicit strict validator.
+    """
+    from peer_oracle import RECORD_LOGS, validate_peer_doc
+    if name=='peer.json':
+        validate_peer_doc(strict_json(path.read_text()))
+    elif name in RECORD_LOGS:
+        _validate_peer_record_log(path)
+    else:raise ValueError('unrecognized lifecycle export '+name)
+
+
+def _profile_items(value,error):
+    if type(value) is not list:raise ValueError(error)
+    return value
+
+
+def _profile_hook(hook):
+    keys(hook,('name','kind'),('function','attach','signature','signature_alt',
+                               'id_path','format_path','format_text','note'))
+    if type(hook['name']) is not str or not hook['name']:
+        raise ValueError('invalid profile hook')
+    if hook['kind']=='tracing':
+        keys(hook,('name','kind','function','attach','signature'),
+             ('signature_alt','note'))
+        for key in ('function','signature'):
+            if type(hook[key]) is not str or not hook[key]:
+                raise ValueError('invalid profile hook')
+        if hook['attach'] not in ('fentry','fexit'):
+            raise ValueError('invalid profile hook')
+        if 'signature_alt' in hook and (
+                type(hook['signature_alt']) is not list or any(
+                    type(alt) is not str or not alt
+                    for alt in hook['signature_alt'])):
+            raise ValueError('invalid profile hook')
+    elif hook['kind']=='tracepoint':
+        keys(hook,('name','kind','id_path','format_path'),
+             ('format_text','note'))
+        for key in ('id_path','format_path'):
+            if type(hook[key]) is not str or not hook[key]:
+                raise ValueError('invalid profile hook')
+        if 'format_text' in hook and hook['format_text'] is not None and (
+                type(hook['format_text']) is not str):
+            raise ValueError('invalid profile hook')
+    else:raise ValueError('invalid profile hook')
+    if 'note' in hook and type(hook['note']) is not str:
+        raise ValueError('invalid profile hook')
+
+
+def _profile_layout(layout,schema):
+    if schema=='0.1.2':
+        keys(layout,('capability','target','struct','type_kind','bit_size',
+                     'optional'),('field',))
+        if layout['capability'] not in ('attempt-trace','mapping-lifecycle',
+                                        'copy-actual'):
+            raise ValueError('invalid profile layout')
+        target=layout['target']
+        if target not in ('field','type','enumerator'):
+            raise ValueError('invalid profile layout')
+        if (target=='type')==('field' in layout):
+            raise ValueError('invalid profile layout')
+        if layout['type_kind'] not in ('int','ptr','array','struct','union',
+                                       'enum','float'):
+            raise ValueError('invalid profile layout')
+        if type(layout['struct']) is not str or not layout['struct']:
+            raise ValueError('invalid profile layout')
+        if 'field' in layout and (type(layout['field']) is not str or
+                                  not layout['field']):
+            raise ValueError('invalid profile layout')
+        if type(layout['bit_size']) is not int or layout['bit_size'] < 1:
+            raise ValueError('invalid profile layout')
+        if layout['optional'] is not True and layout['optional'] is not False:
+            raise ValueError('invalid profile layout')
+    else:
+        keys(layout,('struct','field','bit_offset','bit_size'))
+        for key in ('struct','field'):
+            if type(layout[key]) is not str or not layout[key]:
+                raise ValueError('invalid profile layout')
+        integer(layout['bit_offset']);integer(layout['bit_size'])
+
+
+def faults_profile(doc):
+    """Faults-gate profile export grammar; mirrors the product parser shape.
+
+    Key inventories, required fields, and closed value sets follow the
+    profile parser; cross-item references stay with that parser.
+    """
+    keys(doc,('schema_version','profile_id','status','identity','hooks',
+              'capabilities'),('notes','layouts'))
+    schema=doc['schema_version']
+    if schema not in ('0.1.1','0.1.2'):
+        raise ValueError('invalid profile schema')
+    if type(doc['profile_id']) is not str or not re.fullmatch(
+            r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}',doc['profile_id']):
+        raise ValueError('invalid profile identity')
+    if doc['status'] not in ('validated','reference-unvalidated'):
+        raise ValueError('invalid profile status')
+    ident=doc['identity']
+    keys(ident,('arch','min_kernel','source'),('note',))
+    if type(ident['arch']) is not str or not ident['arch']:
+        raise ValueError('invalid profile identity')
+    floor=ident['min_kernel']
+    parts=floor.split('.') if type(floor) is str else []
+    if len(parts) not in (2,3) or any(
+            not re.fullmatch(r'[0-9]+',part) or int(part) > 2147483647
+            for part in parts):
+        raise ValueError('invalid profile kernel floor')
+    if 'note' in ident and type(ident['note']) is not str:
+        raise ValueError('invalid profile identity')
+    source=ident['source']
+    keys(source,('origin','revision'),('note',))
+    for key in ('origin','revision'):
+        if type(source[key]) is not str or not source[key]:
+            raise ValueError('invalid profile source')
+    if 'note' in source and type(source['note']) is not str:
+        raise ValueError('invalid profile source')
+    for hook in _profile_items(doc['hooks'],'invalid profile hooks'):
+        _profile_hook(hook)
+    for cap in _profile_items(doc['capabilities'],
+                              'invalid profile capabilities'):
+        keys(cap,('id','status','hooks','reason'))
+        if cap['id'] not in ('attempt-trace','mapping-lifecycle',
+                             'copy-actual','conversion-observe'):
+            raise ValueError('invalid capability identity')
+        if cap['status'] not in ('candidate','supported','unsupported'):
+            raise ValueError('invalid capability status')
+        for need in _profile_items(cap['hooks'],'invalid capability hooks'):
+            if type(need) is not str or not need:
+                raise ValueError('invalid capability hooks')
+        if type(cap['reason']) is not str:
+            raise ValueError('invalid capability reason')
+    if 'notes' in doc:
+        for note in _profile_items(doc['notes'],'invalid profile notes'):
+            if type(note) is not str:
+                raise ValueError('invalid profile notes')
+    if 'layouts' in doc:
+        for layout in _profile_items(doc['layouts'],
+                                     'invalid profile layouts'):
+            _profile_layout(layout,schema)
+
+
 def validate_lifecycle_exports(got,sub):
     for name,path in got.items():
         if name=='identity.json': identity(strict_json(path.read_text()),sub)
@@ -589,7 +768,7 @@ def validate_lifecycle_exports(got,sub):
             for row in rows:
                 keys(row,('scenario','exit','stderr','progs_before','progs_after',
                           'maps_before','maps_after','settle_s','cap'),
-                     ('events_kept','ready','window'))
+                     ('events_kept','ready','window','done'))
                 if row['scenario'] not in ('f1','f2','f3a','f3b','f3b-report','f4',
                                            'f5a','f5b','f5c','f6'):
                     raise ValueError('unknown fault scenario')
@@ -606,12 +785,17 @@ def validate_lifecycle_exports(got,sub):
                     raise ValueError('invalid events_kept flag')
                 if 'ready' in row and (type(row['ready']) is not str or 'ready session=' not in row['ready']):
                     raise ValueError('invalid fault readiness')
+                if 'done' in row and (type(row['done']) is not str or not re.fullmatch(r'record: end=[A-Za-z_]+ outcome=[A-Za-z_]+ exit=-?[0-9]+',row['done'])):
+                    raise ValueError('invalid fault run verdict')
                 if 'window' in row:
                     window=row['window']
                     if type(window) is not list or len(window) != 2:
                         raise ValueError('invalid fault window')
                     integer(window[0]);integer(window[1])
                     if window[0] >= window[1]: raise ValueError('empty fault window')
+        elif name=='profile.json':
+            if sub!='faults': raise ValueError('unrecognized lifecycle export '+name)
+            faults_profile(strict_json(path.read_text()))
         elif name=='live.txt':
             body=path.read_text()
             lines=body.splitlines()
@@ -629,6 +813,8 @@ def validate_lifecycle_exports(got,sub):
             validate_overhead_legs(strict_json(path.read_text()))
         elif name=='probe.json':
             validate_overhead_probe(strict_json(path.read_text()))
+        elif sub=='peer' and name in _peer_export_names():
+            _validate_peer_export(name,path)
         else: raise ValueError('unrecognized lifecycle export '+name)
 
 

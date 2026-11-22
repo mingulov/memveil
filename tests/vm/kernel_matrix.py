@@ -2521,9 +2521,35 @@ def validate_shell_path(value, what):
                          % (what, value))
 
 
+VNG_TOKEN_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def validate_vng_token(value, what):
+    """Reject vng selectors the launcher paste would rewrite.
+
+    A --run value that is not an upstream tag reaches the
+    launcher command raw, so only plain release tokens pass:
+    letters, digits, dots, underscores, and dashes. Anything
+    else refuses, including an empty value and a leading dash
+    that vng would parse as a flag.
+    """
+    if not value or value[:1] == "-" \
+            or not VNG_TOKEN_RE.fullmatch(value):
+        raise ValueError("%s is not a plain vng release token: %r"
+                         % (what, value))
+
+
 def qemu_drive_opt(disk_img, drive_id="d0", serial="mv0",
                    readonly=True):
-    """NVMe drive options, commas doubled for QEMU."""
+    """NVMe drive options, commas doubled for QEMU.
+
+    The caller embeds the result in --qemu-opts, which the
+    launcher pastes raw, so every interpolated value must be
+    shell-inert first.
+    """
+    validate_shell_path(disk_img, "disk image")
+    validate_shell_path(drive_id, "drive id")
+    validate_shell_path(serial, "drive serial")
     mode = ",readonly=on" if readonly else ""
     return "-drive file=%s,if=none,id=%s,format=raw," \
         "cache=none%s -device nvme,serial=%s,drive=%s" \
@@ -2878,7 +2904,12 @@ def vmlinuz_for_release(base, release):
 
 
 def vng_download_cmd(vng, ver):
-    """Populate one cache entry through vng itself."""
+    """Populate one cache entry through vng itself.
+
+    ver reaches the launcher command raw unless it is an
+    upstream tag, so only plain release tokens pass.
+    """
+    validate_vng_token(ver, "vng version")
     return [vng, "--run", ver, "--dry-run"]
 
 
@@ -3968,6 +3999,13 @@ def prog_misses(progs, names):
 
 ROW_RECEIPT_SCHEMA_V1 = "memveil-matrix-row/1"
 ROW_RECEIPT_SCHEMA = "memveil-matrix-row/2"
+# artifacts.json tool value when the guest considered the tool
+# and could not resolve it: the key stays present (never
+# silently absent) so the audit trail distinguishes
+# considered-and-unresolvable from forgot-to-record. Admitted
+# only in scenarios mode; the matrix guest fails closed on an
+# unreadable tool version, so a matrix row carrying it refuses.
+ARTIFACTS_TOOL_UNRESOLVED = "unresolved"
 QUAL_DURATION_S = 60
 QUAL_DD_COUNT = 128
 PROFILE_REASON = ("matrix rows assert lock expectations and "
@@ -4013,6 +4051,14 @@ _ROW_BUSY_RES = (re.compile(r"progs[0-9]+\.json"),)
 _ROW_NEG_RE = re.compile(
     r"swiotlb_copy-(renamed_field|widened_layout|wrong_shift"
     r"|wrong_argcnt)\.bpf\.o")
+# Scenario-rootfs evidence, admitted only in scenarios mode:
+# the runner-written rootfs record plus the single-file
+# staged-deb expose dir. Matrix rows keep the historical set
+# exactly: neither constant joins the shared top-level allowlist.
+_ROW_ROOTFS_RECORD = "rootfs.json"
+_ROW_STAGE_DEB_DIR = "ro-deb"
+_ROW_STAGE_DEB_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9+_~.-]*\.deb")
 _ROW_SCN_DIR_RE = re.compile(r"scn-[a-z][a-z0-9-]{0,31}")
 _ROW_SCN_FILES = frozenset({
     "doctor-passive.json", "doctor-passive.exit",
@@ -4049,13 +4095,20 @@ _BUSY_EVENTS_TOKEN_SET = frozenset(
 _CHOWN_TOKEN = "busy-chown-failed"
 
 
-def _row_rel_known(rel):
-    """True when a row-relative path is allowlisted evidence."""
+def _row_rel_known(rel, mode="matrix"):
+    """True when a row-relative path is allowlisted evidence.
+
+    Scenarios mode additionally admits the runner-written
+    rootfs record and single-segment staged-deb names; the
+    matrix default keeps the historical set exactly.
+    """
     if rel in _ROW_TOP_FILES:
         return True
     for expr in _ROW_TOP_RES:
         if expr.fullmatch(rel):
             return True
+    if mode == "scenarios" and rel == _ROW_ROOTFS_RECORD:
+        return True
     if "/" not in rel:
         return False
     head, rest = rel.split("/", 1)
@@ -4070,6 +4123,9 @@ def _row_rel_known(rel):
                    for expr in _ROW_BUSY_RES)
     if head == "neg":
         return _ROW_NEG_RE.fullmatch(rest) is not None
+    if mode == "scenarios" and head == _ROW_STAGE_DEB_DIR:
+        return "/" not in rest \
+            and _ROW_STAGE_DEB_RE.fullmatch(rest) is not None
     if _ROW_SCN_DIR_RE.fullmatch(head):
         if rest in _ROW_SCN_FILES:
             return True
@@ -4086,7 +4142,7 @@ def _row_rel_known(rel):
     return False
 
 
-def row_receipt_files(row_dir):
+def row_receipt_files(row_dir, mode="matrix"):
     """Hashed inventory of one row dir, in receipt order.
 
     Every regular file must be allowlisted evidence; the
@@ -4095,6 +4151,8 @@ def row_receipt_files(row_dir):
     lines never cross into receipts, the signed inventory,
     replays, or shipped archives). Raises ValueError on
     symlinks, unreadable files, or unknown evidence.
+    Scenarios mode additionally admits the runner-written
+    rootfs record and staged-deb expose files.
     """
     root = Path(row_dir)
     found = []
@@ -4107,7 +4165,7 @@ def row_receipt_files(row_dir):
             if path.is_symlink() or not path.is_file():
                 raise ValueError(
                     "row receipt refuses non-file %s" % rel)
-            if not _row_rel_known(rel):
+            if not _row_rel_known(rel, mode):
                 raise ValueError(
                     "row receipt refuses unknown file %s"
                     % rel)
@@ -4517,6 +4575,73 @@ def _check_row_ctx(ctx):
     return ctx
 
 
+_ROOTFS_RECORD_KEYS = frozenset({
+    "image", "sha256", "mount", "privilege", "runner_commit",
+    "runner_dirty", "staging"})
+_ROOTFS_STAGING_KEYS = frozenset({
+    "reference", "manifest_digest", "manifest_commit",
+    "copy_sha256", "bpf_set"})
+
+
+def _check_row_rootfs(row):
+    """Validated scenario rootfs record, None when absent.
+
+    The runner-written rootfs.json carries exact keys and no
+    extras: the image and mount are absolute host paths, the
+    image digest is 64 hex, privilege names the mount path,
+    the runner commit is 40 hex (or "unknown", matching the
+    runner identity), the dirty flag is a bool, and staging
+    is None or the exact staging record. Raises ValueError
+    on any shape or field gap.
+    """
+    doc = _row_json(row, _ROW_ROOTFS_RECORD)
+    if doc is None:
+        return None
+    if not isinstance(doc, dict) \
+            or set(doc) != _ROOTFS_RECORD_KEYS:
+        raise ValueError("row receipt rejects rootfs.json")
+    for key in ("image", "mount"):
+        if not isinstance(doc[key], str) or not doc[key] \
+                or not os.path.isabs(doc[key]):
+            raise ValueError(
+                "row receipt rejects rootfs %s" % key)
+    _check_hex(doc["sha256"], 64, "rootfs image digest")
+    if doc["privilege"] not in ("sudo", "direct"):
+        raise ValueError(
+            "row receipt rejects rootfs privilege")
+    if doc["runner_commit"] != "unknown":
+        _check_hex(doc["runner_commit"], 40,
+                   "rootfs runner commit")
+    if doc["runner_dirty"] is not True \
+            and doc["runner_dirty"] is not False:
+        raise ValueError("row receipt rejects rootfs dirt")
+    staging = doc["staging"]
+    if staging is None:
+        return doc
+    if not isinstance(staging, dict) \
+            or set(staging) != _ROOTFS_STAGING_KEYS:
+        raise ValueError(
+            "row receipt rejects rootfs staging")
+    if staging["reference"] not in ("sealed-fixture",
+                                    "bpf-set"):
+        raise ValueError(
+            "row receipt rejects rootfs staging")
+    _check_hex(staging["manifest_digest"], 64,
+               "rootfs manifest digest")
+    _check_hex(staging["manifest_commit"], 40,
+               "rootfs manifest commit")
+    _check_hex(staging["copy_sha256"], 64,
+               "rootfs copy digest")
+    bpf_set = staging["bpf_set"]
+    if bpf_set is not None \
+            and (not isinstance(bpf_set, str)
+                 or not bpf_set
+                 or not os.path.isabs(bpf_set)):
+        raise ValueError(
+            "row receipt rejects rootfs bpf set")
+    return doc
+
+
 def _check_losses_block(block, busy):
     keys = {"overall", "per", "aggregate"} if busy else {
         "channels", "overall", "bounds", "shortfalls",
@@ -4589,6 +4714,26 @@ def _losses_jsonable(block, busy):
     return clean
 
 
+def _check_row_lock_source_distro(source, what):
+    """Strict distro lock grammar for row receipts.
+
+    The writer and the reader share this check, and both
+    reuse the frozen-lock grammar itself: the receipt binds
+    the full source entry (pinned package URLs and shas,
+    the image member, the cached vmlinuz, modules-manifest
+    and extracted-config shas, and the guest banner), so a
+    source the lock would refuse is refused here too.
+    Raises ValueError with a receipt message.
+    """
+    if not isinstance(source, dict):
+        raise ValueError("row receipt rejects %s" % what)
+    try:
+        _need_distro_source(source, "row")
+    except LockError:
+        raise ValueError("row receipt rejects %s" % what)
+    return source
+
+
 def write_row_receipt(row_dir, rec, entry, ctx):
     """Write receipt.json proving one matrix row, return it.
 
@@ -4611,7 +4756,7 @@ def write_row_receipt(row_dir, rec, entry, ctx):
             "row receipt exists (refusing overwrite)")
     if not isinstance(rec, dict) or not isinstance(entry, dict):
         raise ValueError("row receipt needs a rec and entry")
-    files = row_receipt_files(row)
+    files = row_receipt_files(row, mode=ctx["mode"])
     job = _row_json(row, "job.json")
     if not isinstance(job, dict):
         raise ValueError("row receipt needs job.json")
@@ -4650,6 +4795,15 @@ def write_row_receipt(row_dir, rec, entry, ctx):
     actual_ok = rec.get("ok")
     if actual_ok is not True and actual_ok is not False:
         raise ValueError("row receipt rejects the verdict")
+    if mode == "scenarios":
+        _check_row_rootfs(row)
+        staged_deb = [
+            entry["sha256"] for entry in files
+            if entry["name"].startswith("ro-deb/")]
+        for digest in staged_deb:
+            if digest != ctx["source_sha256"]:
+                raise ValueError(
+                    "row receipt rejects staged deb bytes")
     guest_ran = (row / "artifacts.json").is_file()
     if actual_ok and not guest_ran:
         raise ValueError(
@@ -4686,8 +4840,12 @@ def write_row_receipt(row_dir, rec, entry, ctx):
         for name, digest in bpf.items():
             _check_hex(digest, 64, "bpf hash " + name)
         for key in ("bpftrace", "bpftool"):
-            if not isinstance(artifacts[key], str) \
-                    or not artifacts[key]:
+            value = artifacts[key]
+            if value == ARTIFACTS_TOOL_UNRESOLVED:
+                if mode != "scenarios":
+                    raise ValueError(
+                        "row receipt rejects artifacts.json")
+            elif not isinstance(value, str) or not value:
                 raise ValueError(
                     "row receipt rejects artifacts.json")
     else:
@@ -4759,8 +4917,14 @@ def write_row_receipt(row_dir, rec, entry, ctx):
         raise ValueError("row receipt rejects boot label")
     if not isinstance(kernel["lock_source"], dict) \
             or kernel["lock_source"].get("kind") not in (
-                "archive", "built"):
+                "archive", "built", "distro"):
         raise ValueError("row receipt rejects lock source")
+    if kernel["lock_source"]["kind"] == "distro":
+        _check_row_lock_source_distro(
+            kernel["lock_source"], "lock source")
+        if guest_ran and config_status != "absent":
+            raise ValueError(
+                "row receipt rejects distro config evidence")
     if mode == "matrix":
         checks = _check_row_checks(rec.get("checks"))
         if actual_ok != all(check["ok"] for check in checks):
@@ -4962,7 +5126,7 @@ def write_row_receipt(row_dir, rec, entry, ctx):
     return doc
 
 
-def validate_row_receipt(doc):
+def validate_row_receipt(doc, entry=None):
     """Strict grammar for one matrix row receipt.
 
     Accepts the /2 Rust shape and the historical /1
@@ -4972,7 +5136,12 @@ def validate_row_receipt(doc):
     conjunction, the smoke label, the boot label, and the
     pass-evidence rules are recomputed: a pass with
     admitted caps needs measured guest artifacts, a clean
-    oracle, and structured channel losses.
+    oracle, and structured channel losses, and a distro
+    pass always needs measured guest artifacts. When the
+    caller supplies the frozen lock entry, the receipt's
+    full kernel source including its kind must equal the
+    entry's source; without it only the grammar is
+    checked.
     """
     if not isinstance(doc, dict) or set(doc) != {
             "schema", "id", "release", "run_id", "mode",
@@ -5054,8 +5223,12 @@ def validate_row_receipt(doc):
         for digest in bpf.values():
             _check_hex(digest, 64, "bpf hash")
         for key in ("bpftrace", "bpftool"):
-            if not isinstance(artifacts[key], str) \
-                    or not artifacts[key]:
+            value = artifacts[key]
+            if value == ARTIFACTS_TOOL_UNRESOLVED:
+                if mode != "scenarios":
+                    raise ValueError(
+                        "row receipt rejects artifacts")
+            elif not isinstance(value, str) or not value:
                 raise ValueError(
                     "row receipt rejects artifacts")
     elif set(artifacts) != {"status"}:
@@ -5072,8 +5245,19 @@ def validate_row_receipt(doc):
     lock_source = kernel["lock_source"]
     if not isinstance(lock_source, dict) \
             or lock_source.get("kind") not in ("archive",
-                                               "built"):
+                                               "built",
+                                               "distro"):
         raise ValueError("row receipt rejects its kernel")
+    if lock_source["kind"] == "distro":
+        _check_row_lock_source_distro(
+            lock_source, "its kernel")
+    if entry is not None:
+        source = entry.get("source") \
+            if isinstance(entry, dict) else None
+        if source != lock_source:
+            raise ValueError(
+                "row receipt source differs from its "
+                "lock entry")
     if kernel["boot_label"] != row_boot_label(
             {"source": lock_source, "id": doc["id"]}):
         raise ValueError("row receipt rejects its kernel")
@@ -5093,6 +5277,9 @@ def validate_row_receipt(doc):
             _check_hex(kernel[sha_key], 64, "kernel hash")
         elif kernel[sha_key] is not None:
             raise ValueError("row receipt rejects its kernel")
+    if lock_source["kind"] == "distro" and measured \
+            and kernel["config_status"] != "absent":
+        raise ValueError("row receipt rejects its kernel")
     hooks = kernel["hooks"]
     if hooks is not None:
         if not isinstance(hooks, dict) \
@@ -5266,6 +5453,11 @@ def validate_row_receipt(doc):
             _check_losses_block(losses["busy"], True)
     else:
         raise ValueError("row receipt rejects losses")
+    if lock_source["kind"] == "distro" and actual_ok \
+            and not measured:
+        raise ValueError(
+            "row receipt refuses a distro pass without "
+            "measured artifacts")
     if admitted and measured and actual_ok:
         if mode == "matrix":
             if not oracle.get("present") \
@@ -5474,7 +5666,7 @@ def _rederive_compare_rec(doc, rec):
     return None
 
 
-def rederive_row(row_dir, rec=None):
+def rederive_row(row_dir, rec=None, entry=None):
     """Re-derive one row verdict from its receipt and siblings.
 
     Validates receipt.json, verifies every inventoried hash,
@@ -5484,6 +5676,8 @@ def rederive_row(row_dir, rec=None):
     from the receipt instead of trusting it. Returns
     (ok, detail). A pass needs the recomputed verdict plus
     every cross-check; anything else fails with its reason.
+    An optional frozen lock entry binds the receipt's
+    kernel source during validation.
 
     This re-proves transcription, provenance, evidence
     integrity, and consistency. It does not re-execute the
@@ -5501,11 +5695,11 @@ def rederive_row(row_dir, rec=None):
     except ValueError as exc:
         return False, "receipt.json unreadable: %s" % exc
     try:
-        validate_row_receipt(doc)
+        validate_row_receipt(doc, entry)
     except ValueError as exc:
         return False, "receipt invalid: %s" % exc
     try:
-        found = row_receipt_files(row)
+        found = row_receipt_files(row, mode=doc["mode"])
     except ValueError as exc:
         return False, "row evidence refused: %s" % exc
     want = {entry["name"]: (entry["sha256"], entry["bytes"])
@@ -6083,9 +6277,10 @@ def verify_tested_rows(out_dir, lock, manifest):
     carry the /2 Rust shape (historical /1 receipts verify
     structurally but predate the Rust bindings and refuse
     here), the row must name this candidate, and the row must
-    have tested these exact bytes (pinned lock entry, full-run
-    non-smoke mode, source, toolchain, executable, selected
-    artifact, BPF objects, runtime closure). Returns the {row
+    have tested these exact bytes (pinned lock entry, receipt
+    kernel source, full-run non-smoke mode, source,
+    toolchain, executable, selected artifact, BPF objects,
+    runtime closure). Returns the {row
     id: checks} map; raises ValueError and writes nothing
     otherwise.
 
@@ -6134,6 +6329,11 @@ def verify_tested_rows(out_dir, lock, manifest):
         candidate.require(
             inputs.get("entry") == entry,
             "matrix expectations differ from "
+            "pinned lock")
+        candidate.require(
+            receipt["kernel"]["lock_source"]
+            == entry.get("source"),
+            "matrix kernel source differs from "
             "pinned lock")
         candidate.require(
             receipt["mode"] == "matrix"

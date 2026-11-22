@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kernel_matrix as km
 import kernel_matrix_guest as guest
+import kernel_scenarios_guest as scguest
 
 
 def _lock_entry(verdicts=None, omitted=None, vng="v6.6.160",
@@ -978,6 +979,42 @@ def test_verify_entry_cache_missing_says_build(tmp_path, monkeypatch):
         "/nonexistent", _distro_entry())
     assert not ok
     assert "tools/kernel-fetch" in why
+    assert not got
+
+
+def _valid_distro_cache(tmp_path, monkeypatch):
+    entry = _distro_entry()
+    monkeypatch.setenv("MV_KCACHE", str(tmp_path / "kcache"))
+    rowdir = tmp_path / "kcache" / entry["id"]
+    boot = rowdir / "boot"
+    mods = rowdir / "usr" / "lib" / "modules" / entry["release"] \
+        / "kernel"
+    mods.mkdir(parents=True)
+    boot.mkdir(parents=True)
+    vmlinuz = boot / ("vmlinuz-" + entry["release"])
+    vmlinuz.write_bytes(b"fake-distro-vmlinuz")
+    (mods / "nvme.ko").write_bytes(b"fake-module")
+    (rowdir / "config").write_text("CONFIG_X=y\n")
+    src = entry["source"]
+    src["vmlinuz_sha256"] = km.sha_file(str(vmlinuz))
+    mods_root = rowdir / "usr" / "lib" / "modules" \
+        / entry["release"]
+    src["modules_manifest_sha256"], _ = km.modules_manifest_sha(
+        str(mods_root))
+    src["config_sha256"] = km.sha_file(str(rowdir / "config"))
+    return entry, str(vmlinuz)
+
+
+def test_verify_entry_cache_distro_drift_fails(tmp_path,
+                                               monkeypatch):
+    entry, kernel = _valid_distro_cache(tmp_path, monkeypatch)
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert ok, why
+    assert got == kernel
+    entry["source"]["vmlinuz_sha256"] = "7" * 64
+    ok, why, got = km.verify_entry_cache("/nonexistent", entry)
+    assert not ok
+    assert "vmlinuz" in why
     assert not got
 
 
@@ -4022,6 +4059,60 @@ def test_qemu_drive_opt_doubles_commas():
     assert ",," in km.qemu_drive_opt("/tmp/a,b.img")
 
 
+def test_qemu_drive_opt_rejects_shell_rewrites():
+    for bad in ("/tmp/a b.img", "/tmp/x\"y.img",
+                "/tmp/o$(touch x).img", "/tmp/a;b.img",
+                "/tmp/a`b.img", "/tmp/a'b.img"):
+        with pytest.raises(ValueError):
+            km.qemu_drive_opt(bad)
+    for bad_id in ("d 0", "d;0", "d$0", 'd"0'):
+        with pytest.raises(ValueError):
+            km.qemu_drive_opt("/tmp/disk.img", drive_id=bad_id)
+    for bad_serial in ("mv 0", "mv;0", "mv$0", "mv`0"):
+        with pytest.raises(ValueError):
+            km.qemu_drive_opt("/tmp/disk.img", serial=bad_serial)
+    # Honest spellings, including the comma QEMU needs
+    # doubled, still build the exact same option text.
+    assert km.qemu_drive_opt("/tmp/a,b.img") == \
+        ("-drive file=/tmp/a,,b.img,if=none,id=d0,format=raw,"
+         "cache=none,readonly=on"
+         " -device nvme,serial=mv0,drive=d0")
+
+
+def test_qemu_drive_opt_rejects_joined_scratch_spelling():
+    evil = km.scratch_img_path("/tmp/disk.img", "k$(touch x)")
+    with pytest.raises(ValueError):
+        km.qemu_drive_opt(evil)
+    clean = km.scratch_img_path("/tmp/disk.img", "7.0")
+    assert "scratch-7.0.img" in km.qemu_drive_opt(clean)
+
+
+def test_validate_vng_token_accepts_release_tokens():
+    for good in ("v7.0.14", "v7.3-rc3", "v6.12", "6.12.114",
+                 "7.0.14-070014-generic", "a_b.c-d"):
+        km.validate_vng_token(good, "kernel selector")
+
+
+def test_validate_vng_token_rejects_rewrites():
+    for bad in ("", "-evil", "../evil", "v7.0.14 x",
+                "v7.0.14;touch x", "v7.0.14$(touch x)",
+                "v7.0.14`touch x`", 'v7.0.14"x', "v7.0.14'x",
+                "v7.0.14|x", "v7.0.14&x", "v7.0.14*x",
+                "v7.0.14?x", "v7.0.14#x", "v7.0.14~x",
+                "v7.0.14\\x", "v7.0.14/x"):
+        with pytest.raises(ValueError):
+            km.validate_vng_token(bad, "kernel selector")
+
+
+def test_vng_download_cmd_rejects_rewrites():
+    assert km.vng_download_cmd("/usr/bin/vng", "v7.0.14") == \
+        ["/usr/bin/vng", "--run", "v7.0.14", "--dry-run"]
+    for bad in ("v7.0.14 x", "v7.0.14;touch x",
+                "v7.0.14$(touch x)", "../evil", ""):
+        with pytest.raises(ValueError):
+            km.vng_download_cmd("/usr/bin/vng", bad)
+
+
 def test_persisted_counts_strict():
     lines = ['{"kind": "bounce_attempt"}\n', "\n",
              '{"kind": "map_result"}\n']
@@ -6429,6 +6520,492 @@ def test_row_receipt_scenarios_roundtrip(tmp_path):
     assert ok, detail
 
 
+# Scenario-rootfs evidence: the runner-written rootfs.json plus
+# the single-file ro-deb expose record are allowlisted in
+# scenarios mode only, with strict shape checks. Matrix rows keep
+# the historical set exactly.
+
+_DEB_BYTES = b"staged-deb-bytes"
+
+
+def _rootfs_record():
+    return {
+        "image": "/work/debian-rootfs-v2.img",
+        "sha256": "ab" * 32,
+        "mount": "/work/scenarios-rerun-rootfs-mnt",
+        "privilege": "sudo",
+        "runner_commit": "c" * 40,
+        "runner_dirty": False,
+        "staging": {
+            "reference": "sealed-fixture",
+            "manifest_digest": "dd" * 32,
+            "manifest_commit": "1a" * 20,
+            "copy_sha256": "ee" * 32,
+            "bpf_set": None,
+        },
+    }
+
+
+def _scenarios_rootfs_row(tmp_path, rootfs=None,
+                          deb_name="memveil-test.deb",
+                          deb_bytes=_DEB_BYTES,
+                          extra=None):
+    neg_sha = hashlib.sha256(b"obj").hexdigest()
+    files = {
+        "job.json": json.dumps(dict(
+            _row_job(),
+            negatives={"renamed_field": neg_sha})),
+        "cache.txt": "hit /cache\n",
+        "vng.exit": "0",
+        "artifacts.json": json.dumps(_row_artifacts()),
+        "configid.txt": "1" * 64 + "\n",
+        "btf-sha.txt": "2" * 64 + "\n",
+        "uname.txt": "Linux guest 6.6.160\n",
+        "mods.txt": "6.6.160\nguest\n",
+        "version.txt": "#1 SMP\n",
+        "lockdown.txt": "none\n",
+        "hooks.json": json.dumps({"present": {"tp": True},
+                                  "omitted": [],
+                                  "btf": True}),
+        "neg/swiotlb_copy-renamed_field.bpf.o": "obj",
+        "scn-base/precondition.json": json.dumps(
+            {"verdict": "ready"}),
+        "scn-base/record.stdout": "",
+        "scn-base/record.stderr": "",
+    }
+    if rootfs is not None:
+        files["rootfs.json"] = rootfs \
+            if isinstance(rootfs, str) else json.dumps(rootfs)
+    row = _write_row(tmp_path, files)
+    if deb_name is not None:
+        dest = row / "ro-deb" / deb_name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(deb_bytes)
+    if extra:
+        for name, text in extra.items():
+            path = row / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+    return row, neg_sha
+
+
+def _scenarios_rootfs_rec(neg_sha):
+    return {"id": "6.6", "mode": "scenarios", "ok": True,
+            "detail": "all ok", "run_id": "20261030T000000Z",
+            "vng_version": "v6.6.160",
+            "release": "6.6.160-0606160-generic",
+            "elapsed": 1.0, "binary_sha256": "b" * 64,
+            "negatives": {"renamed_field": neg_sha},
+            "scenarios": [{"name": "base", "status": "ok",
+                           "checks": []}]}
+
+
+def _scenarios_rootfs_ctx():
+    return _row_ctx(
+        mode="scenarios",
+        source_sha256=hashlib.sha256(_DEB_BYTES).hexdigest())
+
+
+def test_row_receipt_scenarios_rootfs_roundtrip(tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    names = [entry["name"] for entry in doc["files"]]
+    assert "rootfs.json" in names
+    assert "ro-deb/memveil-test.deb" in names
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_matrix_refuses_rootfs(tmp_path):
+    row = _admitted_row(tmp_path,
+                        **{"rootfs.json": json.dumps(
+                            _rootfs_record())})
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def test_row_receipt_matrix_refuses_staged_deb(tmp_path):
+    row = _admitted_row(tmp_path)
+    dest = row / "ro-deb" / "memveil-test.deb"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_DEB_BYTES)
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+
+
+def _inventory_names(row, mode):
+    return [entry["name"]
+            for entry in km.row_receipt_files(row, mode)]
+
+
+def test_row_receipt_files_scenarios_only(tmp_path):
+    row = _write_row(tmp_path, {
+        "job.json": "{}",
+        "rootfs.json": "{}",
+        "ro-deb/m.deb": "deb",
+    })
+    names = _inventory_names(row, "scenarios")
+    assert "rootfs.json" in names
+    assert "ro-deb/m.deb" in names
+    with pytest.raises(ValueError):
+        km.row_receipt_files(row, "matrix")
+    with pytest.raises(ValueError):
+        km.row_receipt_files(row)
+
+
+@pytest.mark.parametrize("bad", [
+    "ro-deb/sub/m.deb", "ro-deb/m.txt", "ro-deb/m .deb",
+    "ro-deb/.deb", "xrootfs.json", "rootfs.json2",
+    "rootfs.json/x"])
+def test_row_receipt_files_scenarios_name_shape(tmp_path,
+                                               bad):
+    row = _write_row(tmp_path, {"job.json": "{}",
+                                bad: "x"})
+    with pytest.raises(ValueError):
+        km.row_receipt_files(row, "scenarios")
+
+
+def _damaged_rootfs(kind):
+    doc = _rootfs_record()
+    if kind == "extra-key":
+        doc["umount"] = "ok"
+    elif kind == "missing-key":
+        del doc["mount"]
+    elif kind == "bad-digest":
+        doc["sha256"] = "zz" * 32
+    elif kind == "short-digest":
+        doc["sha256"] = "ab" * 31
+    elif kind == "relative-image":
+        doc["image"] = "rel/r.img"
+    elif kind == "empty-mount":
+        doc["mount"] = ""
+    elif kind == "bad-privilege":
+        doc["privilege"] = "user"
+    elif kind == "bad-commit":
+        doc["runner_commit"] = "zz" * 20
+    elif kind == "short-commit":
+        doc["runner_commit"] = "c" * 39
+    elif kind == "dirty-string":
+        doc["runner_dirty"] = "no"
+    elif kind == "staging-extra":
+        doc["staging"]["extra"] = 1
+    elif kind == "staging-reference":
+        doc["staging"]["reference"] = "tarball"
+    elif kind == "staging-digest":
+        doc["staging"]["copy_sha256"] = "00" * 31
+    elif kind == "staging-commit":
+        doc["staging"]["manifest_commit"] = "1a" * 19
+    elif kind == "staging-bpf-set":
+        doc["staging"]["bpf_set"] = "rel/bpf"
+    elif kind == "staging-list":
+        doc["staging"] = []
+    elif kind == "not-a-dict":
+        return ["rootfs.json"]
+    elif kind == "garbage":
+        return "{nope"
+    else:
+        raise AssertionError(kind)
+    return doc
+
+
+@pytest.mark.parametrize("kind", [
+    "extra-key", "missing-key", "bad-digest",
+    "short-digest", "relative-image", "empty-mount",
+    "bad-privilege", "bad-commit", "short-commit",
+    "dirty-string", "staging-extra", "staging-reference",
+    "staging-digest", "staging-commit", "staging-bpf-set",
+    "staging-list", "not-a-dict", "garbage"])
+def test_row_receipt_rootfs_damage_refuses(tmp_path, kind):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _damaged_rootfs(kind))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_staged_deb_without_rootfs(tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(tmp_path, None)
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    assert "rootfs.json" not in [
+        entry["name"] for entry in doc["files"]]
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_rootfs_unknown_commit_roundtrip(
+        tmp_path):
+    record = _rootfs_record()
+    record["runner_commit"] = "unknown"
+    row, neg_sha = _scenarios_rootfs_row(tmp_path, record)
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_staged_deb_bytes_must_match(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record(), deb_bytes=b"other")
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_rootfs_tamper_breaks_rederive(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    record = _rootfs_record()
+    record["sha256"] = "00" * 32
+    (row / "rootfs.json").write_text(json.dumps(record))
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
+def test_row_receipt_staged_deb_tamper_breaks_rederive(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    (row / "ro-deb" / "memveil-test.deb").write_bytes(
+        b"tampered")
+    ok, _ = km.rederive_row(row)
+    assert ok is False
+
+
+# Scenario guest tool versions: the guest records every
+# artifacts.json key with real --version first lines when the
+# tools resolve and the explicit unresolved marker when they do
+# not. The receipt admits the marker in scenarios mode only;
+# matrix rows keep the measured-only rule exactly.
+
+
+def _scenario_guest_bundle(tmp_path):
+    bindir = tmp_path / "guestbin"
+    bindir.mkdir(exist_ok=True)
+    mv = bindir / "memveil"
+    mv.write_bytes(b"memveil-binary")
+    for _, leaf in scguest.BPF_OBJECTS:
+        (bindir / leaf).write_bytes(b"obj-" + leaf.encode())
+    return str(mv)
+
+
+def _scenario_guest_artifacts(tmp_path, monkeypatch,
+                              path_dir):
+    out = tmp_path / "guestout"
+    out.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setattr(scguest, "_OUT", str(tmp_path))
+    scguest.record_artifacts(
+        km, str(out), _scenario_guest_bundle(tmp_path),
+        "bundle")
+    return json.loads((out / "artifacts.json").read_text())
+
+
+def _fake_tool(tool_dir, name, first_line=None, rc=0):
+    script = tool_dir / name
+    text = "#!/bin/sh\n"
+    if first_line is not None:
+        text += "echo '%s'\n" % first_line
+    text += "exit %d\n" % rc
+    script.write_text(text)
+    script.chmod(0o755)
+
+
+def test_scenario_guest_marks_unresolvable_tools(
+        tmp_path, monkeypatch):
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     empty)
+    assert set(arts) == {"mode", "binary", "dpkg_version",
+                         "bpf", "bpftrace", "bpftool"}
+    assert arts["bpftrace"] == km.ARTIFACTS_TOOL_UNRESOLVED
+    assert arts["bpftool"] == km.ARTIFACTS_TOOL_UNRESOLVED
+
+
+def test_scenario_guest_measures_resolvable_tools(
+        tmp_path, monkeypatch):
+    tools = tmp_path / "toolbin"
+    tools.mkdir()
+    _fake_tool(tools, "bpftrace", "bpftrace v0.25.0")
+    _fake_tool(tools, "bpftool", "bpftool v7.7.0")
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     tools)
+    assert arts["bpftrace"] == "bpftrace v0.25.0"
+    assert arts["bpftool"] == "bpftool v7.7.0"
+
+
+def test_scenario_guest_unreadable_tool_version_marks(
+        tmp_path, monkeypatch):
+    tools = tmp_path / "toolbin"
+    tools.mkdir()
+    _fake_tool(tools, "bpftrace", "bpftrace v0.25.0")
+    _fake_tool(tools, "bpftool", rc=1)
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     tools)
+    assert arts["bpftrace"] == "bpftrace v0.25.0"
+    assert arts["bpftool"] == km.ARTIFACTS_TOOL_UNRESOLVED
+
+
+def test_row_receipt_scenarios_guest_markers_roundtrip(
+        tmp_path, monkeypatch):
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    arts = _scenario_guest_artifacts(tmp_path, monkeypatch,
+                                     empty)
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    rec = _scenarios_rootfs_rec(neg_sha)
+    rec["binary_sha256"] = arts["binary"]["sha256"]
+    doc = km.write_row_receipt(
+        row, rec, _lock_entry(), _scenarios_rootfs_ctx())
+    assert doc["artifacts"]["status"] == "measured"
+    assert doc["artifacts"]["bpftrace"] == \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    assert doc["artifacts"]["bpftool"] == \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_scenarios_mixed_tool_marker_roundtrip(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    arts = _row_artifacts()
+    arts["bpftool"] = km.ARTIFACTS_TOOL_UNRESOLVED
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    assert doc["artifacts"]["bpftrace"] == \
+        "bpftrace v0.25.0"
+    assert doc["artifacts"]["bpftool"] == \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
+def test_row_receipt_scenarios_refuses_silent_tool_absence(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    arts = _row_artifacts()
+    del arts["bpftrace"]
+    del arts["bpftool"]
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+    arts["bpftrace"] = "bpftrace v0.25.0"
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_scenarios_refuses_blank_tool_version(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    arts = _row_artifacts()
+    arts["bpftrace"] = ""
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha),
+            _lock_entry(), _scenarios_rootfs_ctx())
+
+
+def test_row_receipt_matrix_refuses_unresolved_tool_markers(
+        tmp_path):
+    arts = _row_artifacts()
+    arts["bpftrace"] = km.ARTIFACTS_TOOL_UNRESOLVED
+    arts["bpftool"] = km.ARTIFACTS_TOOL_UNRESOLVED
+    row = _admitted_row(
+        tmp_path, **{"artifacts.json": json.dumps(arts)})
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+    arts["bpftrace"] = "bpftrace v0.25.0"
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    with pytest.raises(ValueError):
+        km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                             _row_ctx())
+    arts["bpftool"] = "bpftool v7.7.0"
+    (row / "artifacts.json").write_text(json.dumps(arts))
+    doc = km.write_row_receipt(row, _row_rec(), _lock_entry(),
+                               _row_ctx())
+    doc["artifacts"]["bpftrace"] = \
+        km.ARTIFACTS_TOOL_UNRESOLVED
+    with pytest.raises(ValueError):
+        km.validate_row_receipt(doc)
+
+
+def test_row_receipt_scenarios_failure_without_guest(
+        tmp_path):
+    neg_sha = hashlib.sha256(b"obj").hexdigest()
+    row = _write_row(tmp_path, {
+        "job.json": json.dumps(dict(
+            _row_job(),
+            negatives={"renamed_field": neg_sha})),
+        "cache.txt": "hit /cache\n",
+        "vng.exit": "42",
+        "console.txt": "9p mounts\nscenario mounts "
+                       "missing: /tmp/mv-repo\n",
+        "FAIL.txt": "scenario mounts missing: "
+                    "/tmp/mv-repo\n",
+    })
+    rec = {"id": "6.6", "mode": "scenarios", "ok": False,
+           "detail": "0 ok; guest FAIL: scenario mounts "
+                     "missing: /tmp/mv-repo",
+           "run_id": "20261030T000000Z",
+           "vng_version": "v6.6.160",
+           "release": "6.6.160-0606160-generic",
+           "elapsed": 1.0, "binary_sha256": None,
+           "negatives": {},
+           "scenarios": [{"name": "base", "status": "fail",
+                          "checks": [{"name": "precondition",
+                                      "ok": False,
+                                      "detail": "no guest "
+                                                "evidence",
+                                      "skipped": False}]}]}
+    doc = km.write_row_receipt(
+        row, rec, _lock_entry(), _row_ctx(mode="scenarios"))
+    assert doc["actual"]["ok"] is False
+    assert doc["negatives"] == {}
+    assert doc["artifacts"] == {"status": "no-guest"}
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert "FAIL" in detail
+
+
 # Row source/toolchain identity reads the Rust tree: the git
 # revision, both Cargo lock digests, the rust-toolchain
 # channel, and probed cargo/rustc/bpf-linker versions.
@@ -6680,6 +7257,222 @@ def test_row_receipt_allows_record_streams(tmp_path):
     km.validate_row_receipt(doc)
     ok, detail = km.rederive_row(row)
     assert ok, detail
+
+
+def _distro_row_job():
+    job = _row_job()
+    job.update({"id": "debian13", "vng_version": "debian13",
+                "release": "6.12.57-amd64"})
+    return job
+
+
+def _distro_row_rec(**over):
+    rec = _row_rec(id="debian13", vng_version="debian13",
+                   release="6.12.57-amd64")
+    rec.update(over)
+    return rec
+
+
+def _distro_row_ctx(**over):
+    return _row_ctx(kernel_selector="--kernel debian13", **over)
+
+
+def _distro_admitted_row(tmp_path, **files):
+    base = {
+        "job.json": json.dumps(_distro_row_job()),
+        "configid.txt": "absent\n",
+        "uname.txt": "6.12.57-amd64\nswiotlb=131072,force "
+                     "virtme_link_mods=/cache/usr/lib/modules/"
+                     "6.12.57-amd64\n",
+        "mods.txt": "6.12.57-amd64\n/cache/usr/lib/modules/"
+                    "6.12.57-amd64\n",
+        "version.txt": _distro_source()["banner"] + "\n",
+    }
+    base.update(files)
+    return _admitted_row(tmp_path, **base)
+
+
+def test_row_receipt_distro_roundtrip(tmp_path):
+    entry = _distro_entry()
+    row = _distro_admitted_row(tmp_path)
+    rec = _distro_row_rec()
+    doc = km.write_row_receipt(row, rec, entry,
+                               _distro_row_ctx())
+    assert doc["actual"]["ok"] is True
+    assert doc["kernel"]["lock_source"] == entry["source"]
+    assert doc["kernel"]["boot_label"] == "debian13"
+    assert doc["kernel"]["config_status"] == "absent"
+    assert doc["kernel"]["config_sha256"] is None
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row, rec)
+    assert ok, detail
+
+
+def _tamper_distro_source(source, name):
+    if name == "package-sha":
+        source["packages"][0]["sha256"] = "x" * 64
+    elif name == "vmlinuz-sha":
+        source["vmlinuz_sha256"] = "0" * 63
+    elif name == "banner":
+        source["banner"] = "custom build 6.12.57"
+    elif name == "kind":
+        source["kind"] = "snapshot"
+    elif name == "member":
+        del source["vmlinuz_member"]
+    else:
+        raise AssertionError("unknown tamper " + name)
+
+
+_DISTRO_TAMPERS = ("package-sha", "vmlinuz-sha", "banner",
+                   "kind", "member")
+
+
+@pytest.mark.parametrize("tamper", _DISTRO_TAMPERS)
+def test_row_receipt_distro_writer_refuses_tampered_source(
+        tmp_path, tamper):
+    entry = _distro_entry()
+    _tamper_distro_source(entry["source"], tamper)
+    row = _distro_admitted_row(tmp_path)
+    with pytest.raises(ValueError, match="lock source"):
+        km.write_row_receipt(row, _distro_row_rec(), entry,
+                             _distro_row_ctx())
+
+
+@pytest.mark.parametrize("tamper", _DISTRO_TAMPERS)
+def test_row_receipt_distro_reader_refuses_tampered_source(
+        tmp_path, tamper):
+    row = _distro_admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _distro_row_rec(),
+                               _distro_entry(),
+                               _distro_row_ctx())
+    _tamper_distro_source(doc["kernel"]["lock_source"], tamper)
+    with pytest.raises(ValueError, match="its kernel"):
+        km.validate_row_receipt(doc)
+
+
+def test_row_receipt_distro_writer_refuses_guest_config(
+        tmp_path):
+    row = _distro_admitted_row(
+        tmp_path, **{"configid.txt": "6" * 64 + "\n"})
+    with pytest.raises(ValueError, match="distro config"):
+        km.write_row_receipt(row, _distro_row_rec(),
+                             _distro_entry(),
+                             _distro_row_ctx())
+
+
+def test_row_receipt_distro_reader_refuses_guest_config(
+        tmp_path):
+    row = _distro_admitted_row(tmp_path)
+    doc = km.write_row_receipt(row, _distro_row_rec(),
+                               _distro_entry(),
+                               _distro_row_ctx())
+    doc["kernel"]["config_sha256"] = "6" * 64
+    doc["kernel"]["config_status"] = "measured"
+    with pytest.raises(ValueError, match="its kernel"):
+        km.validate_row_receipt(doc)
+
+
+def test_row_receipt_distro_early_failure(tmp_path):
+    row = _write_row(tmp_path, {
+        "job.json": json.dumps(_distro_row_job()),
+        "cache-FAIL.txt": "cache missing vmlinuz; "
+                          "run tools/kernel-fetch\n",
+    })
+    rec = {"id": "debian13", "ok": False,
+           "run_id": "20261030T000000Z", "elapsed": 0.1,
+           "checks": [{"name": "cache", "ok": False,
+                       "detail": "cache-unverified",
+                       "skipped": False}]}
+    doc = km.write_row_receipt(row, rec, _distro_entry(),
+                               _distro_row_ctx())
+    assert doc["actual"]["ok"] is False
+    assert doc["artifacts"]["status"] == "no-guest"
+    assert doc["kernel"]["config_status"] == "missing"
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert detail
+
+
+def _swap_distro_source_valid(source, name):
+    if name == "package-sha":
+        assert source["packages"][0]["sha256"] != "0" * 64
+        source["packages"][0]["sha256"] = "0" * 64
+    elif name == "banner":
+        source["banner"] += " (different build)"
+    elif name == "kind":
+        source["kind"] = "built"
+    else:
+        raise AssertionError("unknown swap " + name)
+
+
+_DISTRO_SOURCE_SWAPS = ("package-sha", "banner", "kind")
+
+
+@pytest.mark.parametrize("swap", _DISTRO_SOURCE_SWAPS)
+def test_row_receipt_distro_bound_readback_refuses_swap(
+        tmp_path, swap):
+    entry = _distro_entry()
+    pinned = json.loads(json.dumps(entry))
+    row = _distro_admitted_row(tmp_path)
+    rec = _distro_row_rec()
+    doc = km.write_row_receipt(row, rec, entry,
+                               _distro_row_ctx())
+    km.validate_row_receipt(doc, pinned)
+    ok, detail = km.rederive_row(row, rec, pinned)
+    assert ok, detail
+    _swap_distro_source_valid(
+        doc["kernel"]["lock_source"], swap)
+    assert doc["kernel"]["lock_source"] != pinned["source"]
+    with pytest.raises(ValueError, match="lock entry"):
+        km.validate_row_receipt(doc, pinned)
+    (row / "receipt.json").write_text(json.dumps(doc))
+    ok, detail = km.rederive_row(row, rec, pinned)
+    assert ok is False
+    assert "lock entry" in detail
+
+
+def test_row_receipt_distro_reader_refuses_noguest_pass(
+        tmp_path):
+    out = tmp_path / "out"
+    row = out / "debian13"
+    row.mkdir(parents=True)
+    (row / "job.json").write_text(
+        json.dumps(_distro_row_job()))
+    (row / "cache-FAIL.txt").write_text(
+        "cache missing vmlinuz; run tools/kernel-fetch\n")
+    failed = {"id": "debian13", "ok": False,
+              "run_id": "20261030T000000Z", "elapsed": 0.1,
+              "checks": [{"name": "cache", "ok": False,
+                          "detail": "cache-unverified",
+                          "skipped": False}]}
+    early = km.write_row_receipt(row, failed, _distro_entry(),
+                                 _distro_row_ctx())
+    assert early["artifacts"] == {"status": "no-guest"}
+    assert early["kernel"]["config_status"] == "missing"
+    km.validate_row_receipt(early)
+    assert km.rederive_row(row) == (
+        False, "row re-derived FAIL from the receipt")
+    forged = json.loads(json.dumps(early))
+    forged["actual"]["ok"] = True
+    forged["actual"]["checks"][0]["ok"] = True
+    with pytest.raises(ValueError, match="distro pass"):
+        km.validate_row_receipt(forged)
+    (row / "receipt.json").write_text(json.dumps(forged))
+    ok, detail = km.rederive_row(row)
+    assert ok is False
+    assert "distro pass" in detail
+    passed = json.loads(json.dumps(failed))
+    passed["ok"] = True
+    passed["checks"][0]["ok"] = True
+    ok, detail = km.rederive_row(row, passed)
+    assert ok is False
+    assert "distro pass" in detail
+    (out / "debian13.json").write_text(json.dumps(passed))
+    (out / "summary.json").write_text(json.dumps([passed]))
+    report = km.verify_matrix_out(out)
+    assert report["ok"] is False
+    assert "distro pass" in report["rows"][0]["detail"]
 
 
 def test_verify_matrix_out_pass(tmp_path):

@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "memveil-stress-consumer"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "GPL-3.0-or-later"
+description = "Test-only lifecycle/copy probe consumer for the VM stress gates"
+publish = false
+
+# Detached from the parent workspace on purpose: this harness
+# must build without touching the product workspace manifest.
+[workspace]
+
+[[bin]]
+name = "stress-consume"
+path = "src/main.rs"
+
+[dependencies]
+aya = "=0.14.0"
+aya-obj = "=0.3.0"
+memveil-ebpf-common = { version = "0.0.0", path = "../../../crates/ebpf-common", features = ["user"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

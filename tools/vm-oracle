@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Oracle live gate: module build plus guest comparison.
 #
+# SUPERSEDED by tools/vm-heldopen for the live held-open
+# leg (test_guest_comparison); this entry keeps working.
+#
 # The guest comparison and its owned module build run only
 # when armed (MEMVEIL_VM_ORACLE=1) with qualified lifecycle
 # probes. Unarmed runs exit 77 without building or booting;

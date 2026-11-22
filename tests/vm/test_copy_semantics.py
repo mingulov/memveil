@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Copy semantics in the disposable VM.
 
+SUPERSEDED by tests/vm/test_battery.py case `copy`
+(battery port onto the test-only Rust consumer);
+kept until the reviewed removal step.
+
 Verifies request-vs-copy accounting on live traffic: sync
 requests alone add no copy bytes, nested copies before a map
 result stay counted, and copies under a failed mapping survive

@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Shipped three-channel record against oracle scenario 1.
 
+SUPERSEDED by tests/vm/test_battery.py case `record3`
+(battery port: the sealed C9 record runs directly
+under the bound reference profile with no bridge); kept
+until the reviewed removal step.
+
 Boots the guest, runs the real `memveil record` with the
 attempt plus lifecycle plus copy channels under a minted
 test profile, drives oracle 0.4.0 scenario 1 (nested
@@ -73,13 +78,18 @@ def _events(path):
 def check_capture_session(events, session, record, tag,
                           span_lo, span_hi, profile_id,
                           paired=True, end_reason="duration",
-                          strict_loss=True):
+                          strict_loss=True,
+                          expect_decision=None):
     """Session-wide record admission, quality, and ordering.
 
     paired=True expects the designed v2 split (correlation
     honestly partial); single-channel captures without
     lifecycle refs pass paired=False (correlation not
     applicable: attempt counting has nothing to correlate).
+    expect_decision overrides the admitted profile
+    decision string for rebound legs (the battery runner
+    admits under the bound reference profile instead of
+    the retired record3-ephemeral mint).
     """
     bad = []
     if record["exit"] != 0:
@@ -88,9 +98,11 @@ def check_capture_session(events, session, record, tag,
     if session["capture"]["finalized"] is not True:
         bad.append("%s: capture not finalized" % tag)
     decision = evidence(session, "profile.decision")
-    if decision != ("candidate %s: "
-                    "bindings hold (profile unvalidated)"
-                    % profile_id):
+    want_decision = ("candidate %s: "
+                     "bindings hold (profile unvalidated)"
+                     % profile_id) if expect_decision is None \
+        else expect_decision
+    if decision != want_decision:
         bad.append("%s: profile decision %r" % (tag, decision))
     if session["capture"].get("end_reason") != end_reason:
         bad.append("%s: end_reason %r want %r"
@@ -219,11 +231,13 @@ def check_oracle_slice(events, tag):
     return bad
 
 
-def check_record3_capture(events, session, record, tag):
+def check_record3_capture(events, session, record, tag,
+                          expect_decision=None):
     """Session checks plus whole-capture scenario-1 multisets."""
     bad = check_capture_session(
         events, session, record, tag,
-        20_000_000_000, 45_000_000_000, "record3-ephemeral")
+        20_000_000_000, 45_000_000_000, "record3-ephemeral",
+        expect_decision=expect_decision)
     bad += check_oracle_slice(events, tag)
     kinds = {}
     for event in events:

@@ -16,6 +16,14 @@ publish = false
 aya-ebpf = "=0.2.1"
 memveil-ebpf-common = { version = "0.0.0", path = "../ebpf-common", default-features = false }
 
+[features]
+# 4 KiB lifecycle/copy rings for the saturation flood leg: the same
+# probes with a ring small enough to exhaust under STOP, so loss
+# accounting is exercised instead of assumed. Test-only fixture
+# input, never shipped: the default build keeps the production
+# 32 MiB rings, and no product path enables this feature.
+test-ring = []
+
 [[bin]]
 name = "memveil-ebpf-attempt"
 path = "src/bin/attempt.rs"

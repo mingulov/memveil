@@ -18,6 +18,8 @@ sys.path.insert(0, str(ROOT / 'tests/cli'))
 sys.path.insert(0, str(ROOT / 'tests/fuzz'))
 from test_checkpoint_writer import independent
 from report_oracle import accepted_report
+from capture_durability import APPROVED_CONFIG_ABSENT_RELEASE, OWNERSHIP_NONCE_LENGTH
+from kernel_matrix import modules_manifest_sha
 
 
 def digest(path):
@@ -33,7 +35,10 @@ def run(args):
 
 
 def owned_device(nonce):
-    if len(nonce) != 32 or any(c not in '0123456789abcdef' for c in nonce):
+    # Exact 20-char shape: the virtio-blk serial survives the guest
+    # kernel only up to VIRTIO_BLK_ID_BYTES (20 bytes), so a longer
+    # value can never round-trip and a shorter one is not ours.
+    if len(nonce) != OWNERSHIP_NONCE_LENGTH or any(c not in '0123456789abcdef' for c in nonce):
         raise ValueError('invalid ownership nonce')
     if os.geteuid() != 0 or 'memveil_fs_gate=' + nonce not in Path('/proc/cmdline').read_text().split():
         raise ValueError('owned guest command-line barrier absent')
@@ -57,12 +62,48 @@ def emit(path, doc):
 
 
 def identity(config):
-    observed = hashlib.sha256(gzip.decompress(Path('/proc/config.gz').read_bytes())).hexdigest()
-    if observed != digest(config['kernel_config']):
-        raise ValueError('booted kernel config differs from supplied config')
-    return dict(kernel_config_sha256=observed, kernel=os.uname().release,
+    release = os.uname().release
+    if release != config['expected_release']:
+        raise ValueError('booted kernel release differs from expected release')
+    try:
+        link = os.readlink('/lib/modules/' + release)
+        mods = link if os.path.isabs(link) else os.path.join('/lib/modules', release, link)
+    except OSError:
+        mods = '/lib/modules/' + release
+    if not os.path.isdir(mods):
+        raise ValueError('guest modules dir missing for booted release')
+    observed_mods, _ = modules_manifest_sha(mods)
+    if observed_mods != config['expected_modules_sha256']:
+        raise ValueError('guest modules manifest differs from bound modules')
+    try:
+        btf = digest('/sys/kernel/btf/vmlinux')
+    except OSError:
+        raise ValueError('live BTF unreadable')
+    if btf != config['expected_btf_sha256']:
+        raise ValueError('live BTF differs from pinned BTF')
+    try:
+        raw = Path('/proc/config.gz').read_bytes()
+    except FileNotFoundError:
+        if os.path.lexists('/proc/config.gz'):
+            raise ValueError('booted kernel config unreadable')
+        raw = None
+    except OSError:
+        raise ValueError('booted kernel config unreadable')
+    if raw is None:
+        if release != APPROVED_CONFIG_ABSENT_RELEASE:
+            raise ValueError('kernel config absent on an unapproved row')
+        status, observed = 'absent', None
+    else:
+        try:
+            observed = hashlib.sha256(gzip.decompress(raw)).hexdigest()
+        except Exception:
+            raise ValueError('booted kernel config unreadable')
+        if observed != digest(config['kernel_config']):
+            raise ValueError('booted kernel config differs from supplied config')
+        status = 'measured'
+    return dict(kernel_config_sha256=observed, config_status=status, kernel=release,
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-                btf_sha256=digest('/sys/kernel/btf/vmlinux'),
+                btf_sha256=btf, modules_manifest_sha256=observed_mods,
                 inputs={key: digest(config[key]) for key in ('binary', 'object', 'bridge', 'profile', 'shim')})
 
 
@@ -156,6 +197,7 @@ def main():
     export = Path('/tmp/export')
     mount = Path('/tmp/memveil-owned-ext4')
     mount.mkdir(mode=0o700)
+    ident = identity(config)
     if phase == 'capture':
         run(['mkfs.ext4', '-F', '-q', '-m', '0', '-N', '2048', '-L', 'memveil-owned', device])
     elif phase != 'recover':
@@ -163,7 +205,6 @@ def main():
     uuid = run(['blkid', '-s', 'UUID', '-o', 'value', device]).stdout.strip()
     run(['mount', '-t', 'ext4', '-o', 'data=ordered', device, str(mount)])
     capture = mount / 'capture'
-    ident = identity(config)
     child = None
     try:
         mounts = [line.split() for line in Path('/proc/mounts').read_text().splitlines()]
@@ -175,7 +216,7 @@ def main():
                 raise ValueError('recovery disk identity changed')
             if promised['identity']['boot_id'] == ident['boot_id']:
                 raise ValueError('power loss requires a fresh kernel boot')
-            if promised['identity']['inputs'] != ident['inputs'] or promised['identity']['btf_sha256'] != ident['btf_sha256'] or promised['identity']['kernel_config_sha256'] != ident['kernel_config_sha256']:
+            if promised['identity']['inputs'] != ident['inputs'] or promised['identity']['btf_sha256'] != ident['btf_sha256'] or promised['identity']['kernel_config_sha256'] != ident['kernel_config_sha256'] or promised['identity']['config_status'] != ident['config_status'] or promised['identity']['modules_manifest_sha256'] != ident['modules_manifest_sha256']:
                 raise ValueError('candidate or guest identity changed across power cut')
             doc = independent(capture)
             if doc['capture']['integrity'] != promised['integrity']:
