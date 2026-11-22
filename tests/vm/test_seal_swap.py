@@ -8,7 +8,7 @@ refreshed), this check verifies the swap against the new
 seal files through the DEFAULT guards: the stress
 candidate binding, the faults seal gate, the bound-profile
 match (sealed member versus the checkout doc, the same
-match the faults preflight enforces, verified again on
+match the faults preflight enforces, bound by digest on
 the staged bytes after materialization), and battery
 materialization. Both seal paths are REQUIRED: a missing
 manifest or bundle is a hard failure, never a skip.
@@ -21,8 +21,9 @@ hermetically (no dist/, no boot): swapped pins accept the
 fixture through all four default guards, unswapped pins
 refuse it, tampered copies refuse under swapped pins,
 stale checkout profiles refuse under swapped pins,
-absent paths fail instead of skipping, and unwritable
-scratch fails clean with no traceback.
+tampered staging refuses under swapped pins, absent
+paths fail instead of skipping, and unwritable scratch
+fails clean with no traceback.
 """
 
 import gzip
@@ -73,10 +74,13 @@ def sha_file(path):
 def sealed_profile_member(bundle_path):
     """The bound profile member bytes from one seal bundle.
 
-    Reads the pinned member straight out of the tarball
-    so the staged battery profile can be compared against
-    the sealed bytes. Any unreadable bundle or member
-    raises ValueError; nothing here skips.
+    Reads the pinned member straight out of the tarball.
+    The checker no longer re-reads the bundle after
+    staging (disk bytes re-read that late were never
+    verified); the isolated-profile legs below use this
+    to stage a repo whose doc equals the seal member.
+    Any unreadable bundle or member raises ValueError;
+    nothing here skips.
     """
     try:
         archive = tarfile.open(bundle_path, "r:gz")
@@ -102,12 +106,15 @@ def verify_swapped_seal(manifest_path, bundle_path, repo, work):
     seal gate (all five sealed members), the faults
     profile gate (sealed member versus the checkout doc,
     before anything stages), and battery materialization
-    (extract plus fixture cross-check), and finally
-    compares the staged battery profile bytes against
-    the sealed member bytes, with default pins
-    throughout. Returns the four bindings. Any absence,
-    drift, or mix raises ValueError with a precise
-    reason; nothing here skips.
+    (extract plus fixture cross-check), and finally binds
+    the staged battery profile to the already-verified
+    seal by hashing the staged bytes against the seal
+    binding's profile digest (no bundle re-read: disk
+    bytes re-read after staging were never verified),
+    with default pins throughout. Returns the four
+    bindings. Any absence, drift, or mix raises
+    ValueError with a precise reason; nothing here
+    skips.
     """
     if not manifest_path or not os.path.isfile(manifest_path):
         raise ValueError("swap seal manifest missing: %r"
@@ -123,26 +130,35 @@ def verify_swapped_seal(manifest_path, bundle_path, repo, work):
                               bundle_path)
     with open(inputs["profile"]["path"], "rb") as handle:
         staged_bytes = handle.read()
-    if staged_bytes != sealed_profile_member(bundle_path):
+    staged_sha = hashlib.sha256(staged_bytes).hexdigest()
+    if staged_sha != seal_binding["files"][PROFILE_MEMBER]:
         raise ValueError("staged battery profile differs from "
                          "the sealed profile member")
     return {"stress": stress_binding, "faults": seal_binding,
             "profile": profile_binding, "inputs": inputs}
 
 
-def main(argv):
-    """CLI entry: verify the named seal, exit 0 iff bound."""
+def main(argv, repo=None):
+    """CLI entry: verify the named seal, exit 0 iff bound.
+
+    The repo defaults to this checkout; the
+    isolated-profile legs pass a staged overlay so the
+    accept leg pins fixture behavior without coupling
+    to the live checkout profile state.
+    """
     if len(argv) > 2:
         print("FAIL seal-swap: usage: "
               "test_seal_swap.py [manifest bundle]")
         return 1
     manifest_path = argv[0] if len(argv) > 0 else DIST_MANIFEST
     bundle_path = argv[1] if len(argv) > 1 else DIST_BUNDLE
+    if repo is None:
+        repo = REPO
     try:
         work = tempfile.mkdtemp(prefix="seal-swap-")
         try:
             result = verify_swapped_seal(
-                manifest_path, bundle_path, REPO, work)
+                manifest_path, bundle_path, repo, work)
         finally:
             shutil.rmtree(work, ignore_errors=True)
     except (ValueError, OSError) as exc:
@@ -230,6 +246,54 @@ def committed_fixtures_match(manifest_path):
         if sha_file(path) != files[member]:
             return False
     return True
+
+
+def stage_profile_repo(tmp_dir, profile_bytes):
+    """A minimal repo overlay pinning the profile to given bytes.
+
+    Carries the profile doc plus mirrors of the checkout's
+    Aya fixtures and kernel lock (every repo-relative read
+    below the seal paths the check performs), so the
+    isolated legs pin seal behavior without coupling to
+    the live checkout profile state: a profile-only swap
+    leaves the accept leg's outcome to the BPF predicate
+    alone.
+    """
+    assert core.PROFILE_REL == faults.PROFILE_REL
+    assert core.PROFILE_ID == faults.PROFILE_ID
+    repo = os.path.join(tmp_dir, "profile-repo")
+    doc_path = os.path.join(repo, core.PROFILE_REL)
+    os.makedirs(os.path.dirname(doc_path), exist_ok=True)
+    with open(doc_path, "wb") as handle:
+        handle.write(profile_bytes)
+    for fixture in ("swiotlb_lifecycle.bpf.o",
+                    "swiotlb_copy.bpf.o",
+                    "swiotlb_attempt.bpf.o"):
+        src = os.path.join(REPO, "tests", "vm", "fixtures",
+                           "aya", fixture)
+        dst = os.path.join(repo, "tests", "vm", "fixtures",
+                           "aya", fixture)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(src, dst)
+    lock_src = os.path.join(REPO, "tests", "vm",
+                            "kernels.lock.json")
+    lock_dst = os.path.join(repo, "tests", "vm",
+                            "kernels.lock.json")
+    shutil.copyfile(lock_src, lock_dst)
+    return repo
+
+
+def apply_profile_companions(monkeypatch, profile_bytes):
+    """Point the profile companion pins at the given bytes.
+
+    The staged overlay's doc is verified against the
+    faults and battery companion pins (seal-independent
+    owners); pointing both at the staged bytes keeps the
+    isolated legs green in every profile world.
+    """
+    digest = hashlib.sha256(profile_bytes).hexdigest()
+    monkeypatch.setattr(faults, "PROFILE_SHA256", digest)
+    monkeypatch.setattr(core, "PROFILE_SHA256", digest)
 
 
 def build_stale_profile_seal(tmp_dir, profile_bytes, tag):
@@ -445,6 +509,36 @@ def test_cli_refuses_stale_checkout_profile(tmp_path, monkeypatch,
             "from the reviewed profile doc") in out
 
 
+def test_swapped_pins_refuse_tampered_staging(tmp_path,
+                                              monkeypatch):
+    apply_swap(monkeypatch,
+               pins_from_manifest(FIXTURE_MANIFEST))
+    member = sealed_profile_member(FIXTURE_BUNDLE)
+    repo = stage_profile_repo(str(tmp_path), member)
+    apply_profile_companions(monkeypatch, member)
+    real_materialize = core.materialize
+
+    def sabotaged(repo_arg, work, manifest_path, bundle_path):
+        inputs = real_materialize(repo_arg, work, manifest_path,
+                                  bundle_path)
+        with open(inputs["profile"]["path"], "wb") as handle:
+            handle.write(b'{"tampered": true}\n')
+        return inputs
+
+    monkeypatch.setattr(core, "materialize", sabotaged)
+    if not committed_fixtures_match(FIXTURE_MANIFEST):
+        # Drifted fixtures refuse mid-materialization,
+        # before the sabotage runs: same per-world branch
+        # as the materialize and accept legs.
+        reason = "^aya fixture drift: "
+    else:
+        reason = ("staged battery profile differs from "
+                  "the sealed profile member")
+    with pytest.raises(ValueError, match=reason):
+        verify_swapped_seal(FIXTURE_MANIFEST, FIXTURE_BUNDLE,
+                            repo, str(tmp_path / "work"))
+
+
 def test_absent_seal_hard_fails(tmp_path):
     tmp = str(tmp_path)
     gone_manifest = os.path.join(tmp, "absent.json")
@@ -491,12 +585,16 @@ def test_cli_usage_refuses_extra_argv(capsys):
 
 
 def test_cli_accepts_fixture_under_swapped_pins(
-        monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys):
     apply_swap(monkeypatch,
                pins_from_manifest(FIXTURE_MANIFEST))
+    member = sealed_profile_member(FIXTURE_BUNDLE)
+    repo = stage_profile_repo(str(tmp_path), member)
+    apply_profile_companions(monkeypatch, member)
     want = 0 if committed_fixtures_match(
         FIXTURE_MANIFEST) else 1
-    assert main([FIXTURE_MANIFEST, FIXTURE_BUNDLE]) == want
+    assert main([FIXTURE_MANIFEST, FIXTURE_BUNDLE],
+                repo=repo) == want
     out = capsys.readouterr().out
     assert ("PASS seal-swap" in out) == (want == 0)
     assert ("FAIL seal-swap" in out) == (want == 1)
