@@ -3398,6 +3398,263 @@ def self_test_inputs_binding(tmp):
     return ok
 
 
+def self_test_receipt_drift(tmp):
+    """Receipt-time manifest must still equal the judged snapshot."""
+    from types import SimpleNamespace
+    import contextlib
+    import io
+    import vm_process
+    ok = True
+    manifest = {
+        "runner_commit": "self-test",
+        "consumer": {"binary_sha256": "self-test"},
+        "oracle": {"ko_sha256": guest_oracle.KO_SHA256},
+        "guest_inputs": {
+            "skipsync": {"file": core.GUEST_INPUTS_FILE,
+                         "sha256": "a" * 64},
+            "saturation": {"file": core.GUEST_INPUTS_FILE,
+                           "sha256": "b" * 64},
+        },
+    }
+    manifest_path = os.path.join(tmp, "drift-inputs.json")
+
+    def rewrite(doc):
+        with open(manifest_path, "w") as handle:
+            handle.write(json.dumps(doc, indent=2,
+                                    sort_keys=True) + "\n")
+
+    rewrite(manifest)
+    ok = check("receipt-drift-clean",
+               check_manifest_receipt_drift(
+                   manifest_path, manifest, "skipsync")
+               == []) and ok
+    # A post-judgment mutation of the selected case's
+    # digest refuses and names the drifted fields.
+    mutated = json.loads(json.dumps(manifest))
+    mutated["guest_inputs"]["skipsync"]["sha256"] = "0" * 64
+    rewrite(mutated)
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "skipsync")
+    ok = check("receipt-drift-digest",
+               len(bad) == 1 and "drifted" in bad[0]
+               and "guest_inputs" in bad[0],
+               "; ".join(bad)) and ok
+    # Drift confined to the other case's entry still
+    # refuses: the receipt retains the whole manifest,
+    # so the compare covers the whole snapshot.
+    mutated = json.loads(json.dumps(manifest))
+    mutated["guest_inputs"]["saturation"]["sha256"] = \
+        "0" * 64
+    rewrite(mutated)
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "skipsync")
+    ok = check("receipt-drift-other-case",
+               len(bad) == 1 and "drifted" in bad[0],
+               "; ".join(bad)) and ok
+    # A non-digest field mutation refuses the same way.
+    mutated = json.loads(json.dumps(manifest))
+    mutated["runner_commit"] = "drifted-commit"
+    rewrite(mutated)
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "skipsync")
+    ok = check("receipt-drift-field",
+               len(bad) == 1 and "drifted" in bad[0]
+               and "runner_commit" in bad[0],
+               "; ".join(bad)) and ok
+    bad = check_manifest_receipt_drift(
+        os.path.join(tmp, "drift-missing.json"),
+        manifest, "skipsync")
+    ok = check("receipt-drift-unreadable",
+               len(bad) == 1 and "unreadable" in bad[0],
+               "; ".join(bad)) and ok
+    with open(manifest_path, "w") as handle:
+        handle.write("[1, 2]\n")
+    bad = check_manifest_receipt_drift(
+        manifest_path, manifest, "skipsync")
+    ok = check("receipt-drift-shape",
+               len(bad) == 1 and "not a mapping" in bad[0],
+               "; ".join(bad)) and ok
+    # Path level, normal plus saturation: honest evidence
+    # judges PASS with byte-identical receipts, while a
+    # post-judgment on-disk mutation refuses before any
+    # receipt is stamped. The stub guest parses the bound
+    # doc, then drifts the on-disk digest.
+    for case in ("skipsync", "saturation"):
+        names = EXPORT_NAMES[case]
+        path_case = os.path.join(tmp, "drift-%s" % case)
+        os.makedirs(path_case)
+        staged = b'{"case": "%s"}\n' % case.encode()
+        digest = hashlib.sha256(staged).hexdigest()
+        wire = os.path.join(path_case, "wire")
+        os.makedirs(wire, exist_ok=True)
+        if case == "saturation":
+            lc_wire, lc_counts, cp_wire, cp_counts = \
+                scripted_wire(ops=300, drop_lc=(6, 7),
+                              drop_cp=(0, 3))
+            oracle_text = oracle_script_log(ops=300)
+            tag = "flood"
+        else:
+            lc_wire, lc_counts, cp_wire, cp_counts = \
+                scripted_wire()
+            oracle_text = oracle_script_log(witness=True)
+            tag = "w"
+        files = synth_window_files(
+            wire, tag, lc_wire, lc_counts, cp_wire,
+            cp_counts, oracle_text)
+        blob = {name: path.read_bytes()
+                for name, path in files.items()}
+        digests = {"ko": guest_oracle.KO_SHA256}
+        if case == "saturation":
+            digests["test-lc"] = core.TEST_LC_SHA256
+            digests["test-cp"] = core.TEST_CP_SHA256
+        else:
+            digests["lc"] = score.C9_LC_SHA
+            digests["cp"] = score.C9_CP_SHA
+        blob["identity.json"] = (json.dumps(
+            {"release": core.EXPECT_RELEASE,
+             "btf_sha256": guest_oracle.GUEST_BTF_SHA256,
+             "digests": digests}) + "\n").encode()
+        blob["input-verify.json"] = (json.dumps(
+            {"case": case,
+             "guest_inputs_file": core.GUEST_INPUTS_FILE,
+             "guest_inputs_sha256": digest})
+            + "\n").encode()
+        judged = synth_manifest()
+        judged.update({
+            "runner_commit": "self-test",
+            "consumer": {"binary_sha256": "self-test"},
+            "candidate": {},
+            "guest": {},
+            "guest_inputs": {
+                case: {"file": core.GUEST_INPUTS_FILE,
+                       "sha256": digest},
+            },
+        })
+        if case == "saturation":
+            judged["test_objects"] = {
+                "bound": True,
+                "lc": {"sha256": core.TEST_LC_SHA256},
+                "cp": {"sha256": core.TEST_CP_SHA256},
+            }
+        disk_path = os.path.join(path_case, "inputs.json")
+        with open(disk_path, "w") as handle:
+            handle.write(json.dumps(judged, indent=2,
+                                    sort_keys=True) + "\n")
+        staged_path = os.path.join(path_case, "staged.json")
+        with open(staged_path, "wb") as handle:
+            handle.write(staged)
+        mutate = []
+
+        def stub(cmd, timeout=None):
+            export = [arg.split("=", 2)[-1] for arg in cmd
+                      if arg.startswith(
+                          "--rwdir=/tmp/export=")][0]
+            seen = sha_file(os.path.join(
+                export, core.GUEST_INPUTS_FILE))
+            if seen != digest:
+                return SimpleNamespace(
+                    stdout="", stderr="tampered inputs\n",
+                    returncode=1)
+            if mutate:
+                disk = json.loads(open(disk_path).read())
+                disk["guest_inputs"][case]["sha256"] = \
+                    "0" * 64
+                with open(disk_path, "w") as handle:
+                    handle.write(json.dumps(
+                        disk, indent=2, sort_keys=True)
+                        + "\n")
+            for name in names:
+                with open(os.path.join(export, name),
+                          "wb") as handle:
+                    handle.write(blob[name])
+                sidecar = sha_file(os.path.join(export,
+                                                name))
+                with open(os.path.join(export,
+                                       name + ".sha256"),
+                          "w") as handle:
+                    handle.write("%s  %s\n" % (sidecar,
+                                               name))
+            return SimpleNamespace(
+                stdout="guest out\n",
+                stderr="guest console\n", returncode=0)
+
+        saved_guest = vm_process.run_owned_guest
+        vm_process.run_owned_guest = stub
+        try:
+            logged = io.StringIO()
+            with contextlib.redirect_stdout(logged):
+                rc = armed_boot_case(
+                    case,
+                    SimpleNamespace(
+                        out=os.path.join(path_case, "out"),
+                        keep=False),
+                    disk_path, judged, staged_path,
+                    {"prefix": ["vng"], "harness": {}})
+        finally:
+            vm_process.run_owned_guest = saved_guest
+        receipt = os.path.join(path_case, "out", case,
+                               "host-verdict.json")
+        honest = rc == 0
+        detail = "rc=%r" % (rc,)
+        if honest:
+            try:
+                kept = json.loads(open(os.path.join(
+                    path_case, "out", case,
+                    "inputs.json")).read())
+                pinned = sha_file(os.path.join(
+                    path_case, "out", case,
+                    "host-guest-inputs.json"))
+                kept_raw = open(os.path.join(
+                    path_case, "out", case, "inputs.json"),
+                    "rb").read()
+                disk_raw = open(disk_path, "rb").read()
+                honest = (
+                    json.loads(open(receipt).read())[
+                        "verdict"] == "PASS"
+                    and kept == judged
+                    and kept_raw == disk_raw
+                    and pinned == digest)
+                detail = "rc=0 pinned=%s" % pinned[:16]
+            except (OSError, ValueError, KeyError) as exc:
+                honest = False
+                detail = str(exc)[:160]
+        ok = check("receipt-drift-%s-honest" % case,
+                   honest, detail) and ok
+        mutate.append(True)
+        saved_guest = vm_process.run_owned_guest
+        vm_process.run_owned_guest = stub
+        try:
+            logged = io.StringIO()
+            with contextlib.redirect_stdout(logged):
+                rc = armed_boot_case(
+                    case,
+                    SimpleNamespace(
+                        out=os.path.join(path_case,
+                                         "out-drift"),
+                        keep=False),
+                    disk_path, judged, staged_path,
+                    {"prefix": ["vng"], "harness": {}})
+        finally:
+            vm_process.run_owned_guest = saved_guest
+        logged_text = logged.getvalue()
+        kept = logged_text.rsplit("kept at ", 1)[1].strip() \
+            if "kept at " in logged_text else ""
+        refused = (
+            rc == 1 and "drifted" in logged_text
+            and "guest_inputs" in logged_text
+            and not os.path.exists(os.path.join(
+                path_case, "out-drift"))
+            and kept and os.path.isdir(kept))
+        lines = logged_text.strip().splitlines()
+        detail = lines[-1][:160] if lines \
+            else "rc=%r" % (rc,)
+        if kept:
+            shutil.rmtree(kept, ignore_errors=True)
+        ok = check("receipt-drift-%s-refuses" % case,
+                   refused, detail) and ok
+    return ok
+
+
 def self_test_inputs_manifest(tmp):
     """Manifest guest-inputs round-trip without the dist seal."""
     ok = True
@@ -3673,6 +3930,7 @@ def run_self_test(work=None):
         ok = self_test_cmdline_budget(tmp) and ok
         ok = self_test_guest_inputs(tmp) and ok
         ok = self_test_inputs_binding(tmp) and ok
+        ok = self_test_receipt_drift(tmp) and ok
         ok = self_test_inputs_manifest(tmp) and ok
         ok = self_test_console_capture(tmp) and ok
         ok = self_test_identity() and ok
@@ -3823,6 +4081,33 @@ def check_guest_inputs_binding(files, case, manifest, export):
     return sorted(bad)
 
 
+def check_manifest_receipt_drift(manifest_path, manifest,
+                                 case):
+    """Refuse when the on-disk manifest drifts from the judged one.
+
+    Returns a reason list (empty ok): the receipt path
+    retains the on-disk manifest file, so a post-judgment
+    mutation would stamp evidence the host never judged.
+    The re-read must match the in-memory snapshot exactly.
+    """
+    try:
+        with open(manifest_path) as handle:
+            disk = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return ["%s: receipt manifest unreadable: %s"
+                % (case, exc)]
+    if isinstance(disk, dict) and disk == manifest:
+        return []
+    if isinstance(disk, dict):
+        keys = sorted(key for key in set(disk) | set(manifest)
+                      if disk.get(key) != manifest.get(key))
+        detail = "fields %s" % (", ".join(keys),)
+    else:
+        detail = "top level is not a mapping"
+    return ["%s: on-disk inputs manifest drifted from the "
+            "judged snapshot (%s)" % (case, detail)]
+
+
 def save_case_receipts(out, case, tmp, export, files, names,
                        manifest_path, manifest, bad, metrics):
     """Copy one case receipt set; raises OSError on failure.
@@ -3936,6 +4221,12 @@ def armed_boot_case(case, args, manifest_path, manifest,
     bad, metrics = judge_case(verified["files"], case, manifest)
     bad = sorted(bad + check_guest_inputs_binding(
         verified["files"], case, manifest, export))
+    drift_bad = check_manifest_receipt_drift(
+        manifest_path, manifest, case)
+    if drift_bad:
+        print("FAIL vm-battery %s: %s; artifacts kept at %s"
+              % (case, "; ".join(drift_bad), tmp))
+        return 1
     out = Path(args.out) / case
     try:
         save_case_receipts(out, case, tmp, export,
