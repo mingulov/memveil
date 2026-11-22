@@ -11,13 +11,14 @@ those bytes come from: every guard in those runners reads
 its expected values from here, and no other file in the
 repeat path carries seal digests.
 
-Today it names the retained C9 seal: offline proof runs
-against the retained C9 bytes. At the next seal these
-values are replaced with the new seal's values — a
-pin-file change, no logic edits. Re-pin procedure: swap
-the constants below from the new seal's candidate
-manifest (manifest digest, source commit/tree, bundle
-manifest digest, bundle digest/size, member digests),
+Today it names the retained seal (see CANDIDATE_SHA256
+below): offline proof runs against the retained bytes.
+At the next seal these values are replaced with the new
+seal's values — a pin-file change, no logic edits.
+Re-pin procedure: swap the constants below from the new
+seal's candidate manifest (manifest digest, source
+commit/tree, bundle manifest digest, bundle digest/size,
+member digests),
 refresh the Aya fixtures via their README procedure so
 the committed bytes equal the new seal's objects, and
 re-run the offline suites plus the seal-swap check
@@ -41,32 +42,32 @@ flows). The L6 held-open leg keeps its own pin file
 
 # Retained seal manifest digest (sha256 of the sealed
 # candidate.json bytes) and manifest schema.
-CANDIDATE_SHA256 = "ac2503a3ef4269826ae3f9512ca2402d45e767" \
-    "be2601c2893e812ebb6df929a7"
+CANDIDATE_SHA256 = "39f4a22721dba8a6dfab751add6067deb7874689" \
+    "87936485daa954ffe8eaf51d"
 CANDIDATE_SCHEMA = "memveil-candidate/2"
 
 # Sealed source identity (manifest "source" section).
-SOURCE_COMMIT = "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
-SOURCE_TREE = "ac316ebc57a7b9d1aaf91bfcac8b1de410a6f614"
+SOURCE_COMMIT = "3a3d6cb8c8acc1295efdff6df44f2d89d327cc9c"
+SOURCE_TREE = "25d906845f211b8ceb9873a0cbf2949d4a566bb9"
 
 # Sealed bundle (tarball bytes, size, inner manifest).
-BUNDLE_MANIFEST_SHA256 = "b2ba73f2d2ad02c8957171c08e4fbf4a9e689" \
-    "5bec0a7d3074ad5c687e07ad820"
-BUNDLE_SHA256 = "389f1d358e9eb8896c6033ec9ce18f74a1adda10d" \
-    "2502f4a9e2d7f2943cb05ea"
-BUNDLE_SIZE = 1797674
+BUNDLE_MANIFEST_SHA256 = "d2f768990ac3d9150bcb660e38be4ac7a8e09134" \
+    "3fbcd6aafaf2874065ee653e"
+BUNDLE_SHA256 = "96f8dac7dcad44a4eb2f410f0cbbb69eb3204c17" \
+    "3c9496cb44e3f87b16a15cc5"
+BUNDLE_SIZE = 1803786
 
 # Sealed BPF members (sha256 of the object bytes).
-LC_SHA256 = "32f6a353779778981e727f311fe5d1b2c21fc92ae" \
-    "9918765f86bc4f81f58df34"
-CP_SHA256 = "526a6726e24f7725a0e88e28d6994f0475a1589c3de10" \
-    "c7ebef703a03dfa73e8"
-ATTEMPT_SHA256 = "ded931289c83713f62cdb5479fbf8aab03fe344d" \
-    "91a91bdeeee7e76f106979eb"
+LC_SHA256 = "ad69cf0587597a1a8c14048dbb5f1256a604bf20" \
+    "cc8d9f092d8c7b658c41f8e9"
+CP_SHA256 = "29959dcbf9cc4cb40b9813cddf686d4118b0528f" \
+    "29a8edec070504e1265350f8"
+ATTEMPT_SHA256 = "8ee4903f6de717d013ae797e7963fefdb28549f4" \
+    "ee04e3c5d4544a8e9de61d6a"
 
 # Sealed executable member.
-BINARY_SHA256 = "df6b37665220adf72ccc5dd29a36bcd9e91165d0" \
-    "d814de13c6ce5008c5532d7f"
+BINARY_SHA256 = "a1ce97fc97dc86f0da8b54a156e67318ad44084f" \
+    "5ca45f8c3fbf4d91c3674904"
 
 # Sealed profile member. The bound profile doc is
 # reviewed separately (battery_core.PROFILE_SHA256 names

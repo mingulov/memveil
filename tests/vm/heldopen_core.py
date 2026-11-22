@@ -9,9 +9,10 @@ the guest flow drives the consumer with digest-pinned
 sealed objects, and the report step runs the sealed
 executable staged from the same seal.
 
-The seal pins live in heldopen_seal (C9 today, the next seal at
-seal); the pinned guest row is derived from the battery
-runner (battery_core), never re-pinned here. This module
+The seal pins live in heldopen_seal (which names the
+retained seal; the next seal swaps that file); the pinned
+guest row is derived from the battery runner
+(battery_core), never re-pinned here. This module
 materializes the sealed bytes, writes and re-verifies the
 held-open input manifest, and refuses any drift.
 """
