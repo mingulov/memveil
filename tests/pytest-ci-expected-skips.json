@@ -53,6 +53,11 @@
     },
     {
       "count": 1,
+      "id": "tests/vm/test_heldopen.py",
+      "reason": "heldopen armed run needs MEMVEIL_VM_HELDOPEN=1"
+    },
+    {
+      "count": 1,
       "id": "tests/vm/test_lateattach.py",
       "reason": "lateattach armed run needs MEMVEIL_VM_LATEATTACH=1"
     },

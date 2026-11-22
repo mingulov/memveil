@@ -78,6 +78,7 @@
     "tests/vm/test_guest_teardown.py",
     "tests/vm/test_harness_env.py",
     "tests/vm/test_harness_refusal.py",
+    "tests/vm/test_heldopen.py",
     "tests/vm/test_kernel_build.py",
     "tests/vm/test_kernel_matrix.py",
     "tests/vm/test_kernel_matrix_load.py",
