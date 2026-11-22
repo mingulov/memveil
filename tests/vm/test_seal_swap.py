@@ -6,7 +6,10 @@ After the pin-file swap (the candidate_pins constants
 replaced with the new seal's values and the Aya fixtures
 refreshed), this check verifies the swap against the new
 seal files through the DEFAULT guards: the stress
-candidate binding, the faults seal gate, and battery
+candidate binding, the faults seal gate, the bound-profile
+match (sealed member versus the checkout doc, the same
+match the faults preflight enforces, verified again on
+the staged bytes after materialization), and battery
 materialization. Both seal paths are REQUIRED: a missing
 manifest or bundle is a hard failure, never a skip.
 Standalone, from the repo root:
@@ -15,16 +18,21 @@ Standalone, from the repo root:
 default pins verify it). The pytest legs below prove the
 check itself against a committed synthetic seal fixture,
 hermetically (no dist/, no boot): swapped pins accept the
-fixture through all three default guards, unswapped pins
-refuse it, tampered copies refuse under swapped pins, and
-absent paths fail instead of skipping.
+fixture through all four default guards, unswapped pins
+refuse it, tampered copies refuse under swapped pins,
+stale checkout profiles refuse under swapped pins,
+absent paths fail instead of skipping, and unwritable
+scratch fails clean with no traceback.
 """
 
+import gzip
 import hashlib
+import io
 import json
 import os
 import shutil
 import sys
+import tarfile
 import tempfile
 
 import pytest
@@ -62,16 +70,44 @@ def sha_file(path):
     return digest.hexdigest()
 
 
+def sealed_profile_member(bundle_path):
+    """The bound profile member bytes from one seal bundle.
+
+    Reads the pinned member straight out of the tarball
+    so the staged battery profile can be compared against
+    the sealed bytes. Any unreadable bundle or member
+    raises ValueError; nothing here skips.
+    """
+    try:
+        archive = tarfile.open(bundle_path, "r:gz")
+    except (tarfile.TarError, OSError) as exc:
+        raise ValueError("candidate bundle unreadable: %s" % exc)
+    try:
+        member = archive.getmember("bundle/" + PROFILE_MEMBER)
+        if not member.isfile():
+            raise ValueError("bound profile member not a file")
+        return archive.extractfile(member).read()
+    except (KeyError, tarfile.TarError, OSError) as exc:
+        raise ValueError("bound profile member unreadable: %s"
+                         % exc)
+    finally:
+        archive.close()
+
+
 def verify_swapped_seal(manifest_path, bundle_path, repo, work):
     """Verify one seal through the default guards, fully.
 
     Requires both seal paths, then runs the stress
     candidate binding (three sealed objects), the faults
-    seal gate (all five sealed members), and battery
-    materialization (extract plus fixture cross-check)
-    with default pins throughout. Returns the three
-    bindings. Any absence, drift, or mix raises
-    ValueError with a precise reason; nothing here skips.
+    seal gate (all five sealed members), the faults
+    profile gate (sealed member versus the checkout doc,
+    before anything stages), and battery materialization
+    (extract plus fixture cross-check), and finally
+    compares the staged battery profile bytes against
+    the sealed member bytes, with default pins
+    throughout. Returns the four bindings. Any absence,
+    drift, or mix raises ValueError with a precise
+    reason; nothing here skips.
     """
     if not manifest_path or not os.path.isfile(manifest_path):
         raise ValueError("swap seal manifest missing: %r"
@@ -82,10 +118,16 @@ def verify_swapped_seal(manifest_path, bundle_path, repo, work):
     stress_binding = score.verify_candidate_binding(
         manifest_path, bundle_path)
     seal_binding = faults.verify_seal(manifest_path, bundle_path)
+    profile_binding = faults.verify_profile(repo, bundle_path)
     inputs = core.materialize(repo, work, manifest_path,
                               bundle_path)
+    with open(inputs["profile"]["path"], "rb") as handle:
+        staged_bytes = handle.read()
+    if staged_bytes != sealed_profile_member(bundle_path):
+        raise ValueError("staged battery profile differs from "
+                         "the sealed profile member")
     return {"stress": stress_binding, "faults": seal_binding,
-            "inputs": inputs}
+            "profile": profile_binding, "inputs": inputs}
 
 
 def main(argv):
@@ -96,15 +138,16 @@ def main(argv):
         return 1
     manifest_path = argv[0] if len(argv) > 0 else DIST_MANIFEST
     bundle_path = argv[1] if len(argv) > 1 else DIST_BUNDLE
-    work = tempfile.mkdtemp(prefix="seal-swap-")
     try:
-        result = verify_swapped_seal(
-            manifest_path, bundle_path, REPO, work)
+        work = tempfile.mkdtemp(prefix="seal-swap-")
+        try:
+            result = verify_swapped_seal(
+                manifest_path, bundle_path, REPO, work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
     except (ValueError, OSError) as exc:
         print("FAIL seal-swap: %s" % exc)
         return 1
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
     binding = result["faults"]
     print("PASS seal-swap: %s %s source %s bundle %s/%d "
           "files %d" % (
@@ -187,6 +230,80 @@ def committed_fixtures_match(manifest_path):
         if sha_file(path) != files[member]:
             return False
     return True
+
+
+def build_stale_profile_seal(tmp_dir, profile_bytes, tag):
+    """A self-consistent seal whose profile member is stale.
+
+    Copies the swap-proof fixture members, swaps in the
+    given profile bytes, and rebuilds the inner manifest,
+    tarball, and manifest digests to match (deterministic
+    bytes: PAX tar, sorted members, zeroed metadata, gzip
+    mtime=0, size stored as a JSON string like the real
+    seal). Source identity is minted fresh from the tag
+    at runtime, so the helper carries no digests. Only
+    the member-versus-doc match can refuse its output.
+    """
+    with tarfile.open(FIXTURE_BUNDLE, "r:gz") as archive:
+        blobs = {}
+        for info in archive.getmembers():
+            if not info.isfile():
+                continue
+            assert info.name.startswith("bundle/")
+            name = info.name[len("bundle/"):]
+            if name == "MANIFEST.json":
+                continue
+            blobs[name] = archive.extractfile(info).read()
+    assert sorted(blobs) == sorted(FIXTURE_MEMBERS)
+    blobs[PROFILE_MEMBER] = profile_bytes
+    inner = (json.dumps(
+        {"files": {name: hashlib.sha256(blobs[name]).hexdigest()
+                   for name in sorted(blobs)},
+         "tag": tag}, sort_keys=True) + "\n").encode()
+    files = dict(blobs)
+    files["MANIFEST.json"] = inner
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w",
+                      format=tarfile.PAX_FORMAT,
+                      pax_headers={}) as archive:
+        for name in sorted(files):
+            data = files[name]
+            info = tarfile.TarInfo("bundle/" + name)
+            info.size = len(data)
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(data))
+    tarball = gzip.compress(buf.getvalue(), mtime=0)
+    manifest = {
+        "artifacts": [{"name": "bundle.tar.gz",
+                       "sha256": hashlib.sha256(
+                           tarball).hexdigest(),
+                       "size": str(len(tarball))}],
+        "bundle_manifest_sha256": hashlib.sha256(inner).hexdigest(),
+        "files": {name: hashlib.sha256(blobs[name]).hexdigest()
+                  for name in sorted(blobs)},
+        "schema": "memveil-candidate/2",
+        "source": {
+            "commit": hashlib.sha256(
+                b"stale-seal:commit:" + tag.encode()
+            ).hexdigest()[:40],
+            "tree": hashlib.sha256(
+                b"stale-seal:tree:" + tag.encode()
+            ).hexdigest()[:40],
+        },
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+    manifest_path = os.path.join(tmp_dir, "candidate.json")
+    bundle_path = os.path.join(tmp_dir, "bundle.tar.gz")
+    with open(manifest_path, "wb") as handle:
+        handle.write(manifest_bytes)
+    with open(bundle_path, "wb") as handle:
+        handle.write(tarball)
+    return manifest_path, bundle_path
 
 
 def test_fixture_manifest_shape():
@@ -292,6 +409,42 @@ def test_swapped_pins_refuse_tampered_copies(tmp_path,
             bad_manifest, FIXTURE_BUNDLE)
 
 
+def test_swapped_pins_refuse_stale_checkout_profile(tmp_path,
+                                                     monkeypatch):
+    doc_path = os.path.join(REPO, core.PROFILE_REL)
+    with open(doc_path, "rb") as handle:
+        doc = handle.read()
+    member = doc + b"\n"
+    assert json.loads(member.decode("utf-8"))[
+        "profile_id"] == faults.PROFILE_ID
+    manifest_path, bundle_path = build_stale_profile_seal(
+        str(tmp_path), member, "stale-checkout-doc-0")
+    apply_swap(monkeypatch,
+               pins_from_manifest(manifest_path))
+    reason = ("bound profile member differs from "
+              "the reviewed profile doc")
+    with pytest.raises(ValueError, match=reason):
+        verify_swapped_seal(manifest_path, bundle_path, REPO,
+                            str(tmp_path / "work"))
+    with pytest.raises(ValueError, match=reason):
+        faults.verify_profile(REPO, bundle_path)
+
+
+def test_cli_refuses_stale_checkout_profile(tmp_path, monkeypatch,
+                                            capsys):
+    doc_path = os.path.join(REPO, core.PROFILE_REL)
+    with open(doc_path, "rb") as handle:
+        doc = handle.read()
+    manifest_path, bundle_path = build_stale_profile_seal(
+        str(tmp_path), doc + b"\n", "stale-checkout-doc-1")
+    apply_swap(monkeypatch,
+               pins_from_manifest(manifest_path))
+    assert main([manifest_path, bundle_path]) == 1
+    out = capsys.readouterr().out
+    assert ("FAIL seal-swap: bound profile member differs "
+            "from the reviewed profile doc") in out
+
+
 def test_absent_seal_hard_fails(tmp_path):
     tmp = str(tmp_path)
     gone_manifest = os.path.join(tmp, "absent.json")
@@ -314,6 +467,22 @@ def test_cli_absent_seal_exits_nonzero(tmp_path, capsys):
     assert "FAIL seal-swap" in capsys.readouterr().out
     assert main([gone_manifest]) == 1
     assert "FAIL seal-swap" in capsys.readouterr().out
+
+
+def test_cli_unwritable_tmpdir_fails_clean(tmp_path, monkeypatch,
+                                             capsys):
+    def no_tmp(*args, **kwargs):
+        raise OSError("simulated unwritable scratch")
+    monkeypatch.setattr(tempfile, "mkdtemp", no_tmp)
+    assert main([FIXTURE_MANIFEST, FIXTURE_BUNDLE]) == 1
+    out = capsys.readouterr()
+    assert "FAIL seal-swap" in out.out
+    assert "Traceback" not in out.err
+    gone = os.path.join(str(tmp_path), "absent.json")
+    assert main([gone, gone]) == 1
+    out = capsys.readouterr()
+    assert "FAIL seal-swap" in out.out
+    assert "Traceback" not in out.err
 
 
 def test_cli_usage_refuses_extra_argv(capsys):
