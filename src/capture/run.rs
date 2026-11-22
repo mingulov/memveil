@@ -2085,7 +2085,8 @@ pub fn run_collector_with<W: WriterSource>(
 /// Fix for a stamped load/attach refusal code: the shared remedy,
 /// except a verifier rejection earns the evidence-aware text —
 /// link-phase wording when the blamed segment failed linking an
-/// already loaded program (the verifier never ran), otherwise the
+/// already loaded program (the link step itself has no verifier
+/// log), otherwise the
 /// shared tail pointer when replay lines exist and the honest
 /// lineless text when they do not. A refusal that yields no lines
 /// (the blamed object loads fine, as in a link failure) fails
@@ -2849,7 +2850,8 @@ mod tests {
         // loads, then the raw-tracepoint link syscall refuses
         // EACCES. The machine code stays verifier-rejected per
         // the errno contract, but every human-readable word must
-        // name the failed link operation — the verifier never ran.
+        // name the failed link operation — the program loaded fine
+        // and only its link failed.
         let error = aya::programs::ProgramError::from(aya::sys::SyscallError {
             call: "bpf_raw_tracepoint_open",
             io_error: std::io::Error::from_raw_os_error(libc::EACCES),
@@ -3145,8 +3147,8 @@ mod tests {
     fn link_phase_verifier_rejection_replays_nothing() {
         // A genuine link denial parses link-phase with the
         // verifier-rejected machine code —
-        // but the verifier never ran on the blamed program, so
-        // no replay may run (a replay would reach the next
+        // but the blamed program loaded fine and only its link
+        // failed, so no replay may run (a replay would reach the next
         // program and append its foreign verifier log to this
         // link refusal). The machine code and link remedy stay.
         let diagnostic = genuine_link_eacces_diagnostic();
