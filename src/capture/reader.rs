@@ -86,10 +86,10 @@ pub struct ReadError {
 /// Remedy line for a capture-open failure cause, when one applies.
 ///
 /// Matches the fixed open-failure causes exactly (plus the
-/// member-ownership and member-symlink spellings by suffix):
-/// those strings carry no caller bytes, so the CLI prints
-/// both lines unscrubbed. Mid-stream and parse failures may
-/// echo capture bytes and stay single-line.
+/// member-ownership, member-symlink, and member-unreadable
+/// spellings by suffix): those strings carry no caller bytes,
+/// so the CLI prints both lines unscrubbed. Mid-stream and
+/// parse failures may echo capture bytes and stay single-line.
 pub fn read_remedy(cause: &str) -> Option<&'static str> {
     match cause {
         "capture directory does not exist" => {
@@ -120,6 +120,8 @@ pub fn read_remedy(cause: &str) -> Option<&'static str> {
                 )
             } else if cause.ends_with(": member is a symlink") {
                 Some("replace the symlinked capture member with a regular file")
+            } else if cause.ends_with(": unreadable (permission denied)") {
+                Some("check read access to the capture member and retry")
             } else {
                 None
             }
@@ -1947,6 +1949,17 @@ fn open_regular_stream_bytes(raw: &[u8], what: &str) -> Result<i32, ReadError> {
         )
     };
     if fd < 0 {
+        // Read errno before anything can clobber it: a denied
+        // member exists but refuses reads, so it must never
+        // collapse into the missing-member cause downstream.
+        let no = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if no == libc::EACCES {
+            return Err(ReadError {
+                code: READ_IO,
+                line_no: 0,
+                message: format!("{what}: unreadable (permission denied)"),
+            });
+        }
         return Err(ReadError {
             code: READ_IO,
             line_no: 0,
@@ -2087,8 +2100,15 @@ pub fn read_capture_os(
                 }
                 _ => message,
             };
+            // A denied member is an I/O failure on both paths,
+            // like its finalized twin: same text, same code.
+            let code = if message.ends_with(": unreadable (permission denied)") {
+                READ_IO
+            } else {
+                READ_INVALID
+            };
             return Err(ReadError {
-                code: READ_INVALID,
+                code,
                 line_no: 0,
                 message,
             });
@@ -2160,10 +2180,12 @@ pub fn read_capture_os(
         out.devices.insert(device.device_id.clone());
     }
     if !recover {
-        // A finalized session without a readable event file is the
+        // A finalized session without its event file is the
         // finalized twin of the checkpoint path's missing member:
-        // map it to the same actionable cause (with its remedy)
-        // instead of the bare open failure.
+        // map the missing open to the same actionable cause (with
+        // its remedy) instead of the bare open failure. A denied
+        // member keeps its own cause: it exists, so the
+        // missing-capture wording would lie.
         match open_regular_stream_bytes(&join_member(raw, b"events.ndjson"), "events.ndjson") {
             Ok(fd) => out.fd = fd,
             Err(e) if e.message.as_str() == "events.ndjson: cannot open" => {
@@ -3848,6 +3870,18 @@ mod tests {
                 "replace the symlinked capture member with a regular file",
             ),
             (
+                "session.json: unreadable (permission denied)",
+                "check read access to the capture member and retry",
+            ),
+            (
+                "events.ndjson: unreadable (permission denied)",
+                "check read access to the capture member and retry",
+            ),
+            (
+                "checkpoint.json: unreadable (permission denied)",
+                "check read access to the capture member and retry",
+            ),
+            (
                 "not a memveil capture: expected session.json/events.ndjson",
                 "pass a capture directory (session.json and events.ndjson)",
             ),
@@ -3927,6 +3961,64 @@ mod tests {
         std::fs::write(linked.join("events.ndjson"), b"").expect("write events");
         let err = read_capture(linked.to_str().unwrap(), false, default_limits()).unwrap_err();
         assert_eq!(err.message, "checkpoint.json: member is a symlink");
+        assert!(read_remedy(&err.message).is_some());
+    }
+
+    #[test]
+    fn reader_unreadable_members_name_denial() {
+        // A denied member exists, so it names the denial (with
+        // its remedy), never the missing-capture cause: same
+        // text and same code on the finalized and recovery
+        // paths. Root reads through file modes, so the case
+        // only runs unprivileged.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP reader_unreadable_members_name_denial: requires non-root");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TestDir::create("memveil-unreadable").expect("mkdtemp");
+        let denied = std::fs::Permissions::from_mode(0o000);
+        // Finalized twin: denied events beside a valid session.
+        let fin = tmp.path().join("finalized");
+        std::fs::create_dir(&fin).expect("mkdir fin");
+        std::fs::write(fin.join("session.json"), fixture_bytes("attempts/session.json"))
+            .expect("write session");
+        std::fs::write(fin.join("events.ndjson"), fixture_bytes("attempts/events.ndjson"))
+            .expect("write events");
+        std::fs::set_permissions(fin.join("events.ndjson"), denied.clone()).expect("chmod events");
+        let err = read_capture(fin.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.code, READ_IO);
+        assert_eq!(err.message, "events.ndjson: unreadable (permission denied)");
+        assert!(read_remedy(&err.message).is_some());
+        // A denied session names the session member.
+        let fin_session = tmp.path().join("finalized-session");
+        std::fs::create_dir(&fin_session).expect("mkdir fin session");
+        std::fs::write(
+            fin_session.join("session.json"),
+            fixture_bytes("attempts/session.json"),
+        )
+        .expect("write session");
+        std::fs::write(
+            fin_session.join("events.ndjson"),
+            fixture_bytes("attempts/events.ndjson"),
+        )
+        .expect("write events");
+        std::fs::set_permissions(fin_session.join("session.json"), denied.clone())
+            .expect("chmod session");
+        let err = read_capture(fin_session.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.code, READ_IO);
+        assert_eq!(err.message, "session.json: unreadable (permission denied)");
+        assert!(read_remedy(&err.message).is_some());
+        // Recovery twin: denied checkpoint, no final session.
+        let rec = tmp.path().join("recovery");
+        std::fs::create_dir(&rec).expect("mkdir rec");
+        std::fs::write(rec.join("checkpoint.json"), b"{}").expect("write checkpoint");
+        std::fs::write(rec.join("events.ndjson"), b"").expect("write events");
+        std::fs::set_permissions(rec.join("checkpoint.json"), denied).expect("chmod checkpoint");
+        let err = read_capture(rec.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.code, READ_IO);
+        assert_eq!(err.message, "checkpoint.json: unreadable (permission denied)");
         assert!(read_remedy(&err.message).is_some());
     }
 }
