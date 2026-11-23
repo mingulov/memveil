@@ -306,18 +306,166 @@ def test_soak_clock_excludes_nonworkload(monkeypatch):
 
 def test_pool_requires_periodic_proof(tmp_path, monkeypatch):
     import json
-    from types import SimpleNamespace
     m = api()
-    quality = {key: {'status': 'complete_for_scope', 'loss_count': '0'}
-               for key in ('detail', 'aggregate', 'correlation', 'baseline', 'terminal')}
-    (tmp_path / 'session.json').write_text(json.dumps({'quality': quality, 'stop': {}}))
+    stdout = _honest_live_capture(tmp_path)
     events = [{'kind': 'pool_sample', 'ts_ns': '0'}, {'kind': 'bounce_attempt', 'ts_ns': '1'},
               {'kind': 'pool_sample', 'ts_ns': str(4260 * 10**9)}]
     (tmp_path / 'events.ndjson').write_text(''.join(json.dumps(event) + '\n' for event in events))
-    monkeypatch.setattr(m.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=0, stdout=b'{"integrity":{"status":"verified"}}'))
+    _strict_run(monkeypatch, m, stdout)
     with pytest.raises(ValueError, match='pool'):
         m.capture_facts('/unused', tmp_path, True, {'records': [], 'errors': [], 'cleanup': 'detached'},
                         measured(4260)['workload']['window'], str(4261 * 10**9))
+
+
+def _honest_live_capture(tmp_path, events=3, session=None, verdict=None,
+                         integrity=None):
+    """Write a live-shaped capture dir; return its strict-report stdout.
+
+    The session carries the honest live shape the product proves for
+    every finalized live leg: zero-loss detail/aggregate channels, a
+    terminal channel partial for quiescence unproven, the matching
+    stop evidence, and a zero-loss partial verdict. Callers override
+    session/verdict/integrity fields to build dishonest shapes; the
+    strict stdout always renders the (possibly dishonest) verdict the
+    way the product does on exit 4.
+    """
+    import json
+    quality = {key: {'status': 'complete_for_scope', 'loss_count': '0'}
+               for key in ('detail', 'aggregate')}
+    quality.update({key: {'status': 'not_applicable', 'loss_count': None}
+                    for key in ('correlation', 'baseline')})
+    quality['terminal'] = {'status': 'partial', 'loss_count': None,
+                           'scope': 'capture finalization',
+                           'reason': 'stop partial: quiescence unproven'}
+    stop = {'checkpoint_failures': '0', 'outcome': 'partial',
+            'reason': 'quiescence unproven', 'budget_ms': '5000',
+            'elapsed_ms': '101', 'admission_closed': True,
+            'quiescence_observed': False, 'writers_settled': '0',
+            'in_flight_at_close': '0', 'late_submits_drained': '0',
+            'drained_records': '0', 'drain_completed': True,
+            'submit_after_drain': False, 'busy_at_drain': False,
+            'counters_valid': True, 'open_mappings': '0'}
+    shape = {'quality': quality, 'stop': stop,
+             'verdict': {'name': 'partial_known_loss',
+                         'loss_ratio_bps': '0',
+                         'delivered': str(events)}}
+    for key, override in (session or {}).items():
+        if isinstance(override, dict):
+            shape[key].update(override)
+        else:
+            shape[key] = override
+    (tmp_path / 'session.json').write_text(json.dumps(shape))
+    (tmp_path / 'events.ndjson').write_text(''.join(
+        json.dumps({'kind': 'bounce_attempt', 'ts_ns': str(i)}) + '\n'
+        for i in range(events)))
+    report = {'integrity': {'status': 'verified',
+                            'verified_bytes': str(64 * events),
+                            'verified_events': str(events)},
+              'verdict': dict(shape['verdict'])}
+    report['verdict'].update(verdict or {})
+    report['integrity'].update(integrity or {})
+    return json.dumps(report).encode()
+
+
+def _strict_run(monkeypatch, m, stdout, returncode=4):
+    from types import SimpleNamespace
+    calls = []
+    def fake(*args, **kwargs):
+        calls.append(args[0])
+        return SimpleNamespace(returncode=returncode, stdout=stdout)
+    monkeypatch.setattr(m.subprocess, 'run', fake)
+    return calls
+
+
+def test_live_capture_accepts_honest_partial(tmp_path, monkeypatch):
+    m = api()
+    stdout = _honest_live_capture(tmp_path)
+    calls = _strict_run(monkeypatch, m, stdout)
+    facts = m.capture_facts('/unused', tmp_path)
+    assert calls == [['/unused', 'report', '--strict', '--format', 'json',
+                      str(tmp_path)]]
+    assert facts['kinds'] == {'bounce_attempt': '3'}
+    assert facts['stop']['reason'] == 'quiescence unproven'
+    assert facts['session_sha256'] and facts['events_sha256']
+
+
+@pytest.mark.parametrize('returncode', [0, 4])
+def test_live_capture_rejects_complete(tmp_path, monkeypatch, returncode):
+    m = api()
+    stdout = _honest_live_capture(
+        tmp_path, session={'verdict': {'name': 'complete'}},
+        verdict={'name': 'complete'})
+    _strict_run(monkeypatch, m, stdout, returncode)
+    with pytest.raises(ValueError, match='reports complete'):
+        m.capture_facts('/unused', tmp_path)
+
+
+@pytest.mark.parametrize('returncode', [1, 3])
+def test_live_capture_propagates_report_failure(tmp_path, monkeypatch,
+                                                returncode):
+    m = api()
+    stdout = _honest_live_capture(tmp_path)
+    _strict_run(monkeypatch, m, stdout, returncode)
+    with pytest.raises(m.ProductExit) as caught:
+        m.capture_facts('/unused', tmp_path)
+    assert caught.value.product_exit == returncode
+
+
+@pytest.mark.parametrize('verdict,match', [
+    ({'name': 'partial_unknown_loss'}, 'not the honest partial'),
+    ({'name': 'partial_known_loss', 'loss_ratio_bps': '500'},
+     'known loss'),
+    ({'name': 'complete_for_scope'}, 'not the honest partial'),
+    ({'name': 'partial_known_loss', 'delivered': 'many'}, 'unreadable'),
+])
+def test_live_capture_rejects_unknown_or_lossy_verdict(tmp_path, monkeypatch,
+                                                       verdict, match):
+    m = api()
+    stdout = _honest_live_capture(tmp_path, verdict=verdict)
+    _strict_run(monkeypatch, m, stdout)
+    with pytest.raises(ValueError, match=match):
+        m.capture_facts('/unused', tmp_path)
+
+
+def test_live_capture_rejects_integrity_failure(tmp_path, monkeypatch):
+    m = api()
+    stdout = _honest_live_capture(
+        tmp_path, integrity={'status': 'unverified'},
+        verdict={'name': 'partial_unknown_loss'})
+    _strict_run(monkeypatch, m, stdout)
+    with pytest.raises(ValueError, match='integrity'):
+        m.capture_facts('/unused', tmp_path)
+
+
+def test_live_capture_rejects_zero_events(tmp_path, monkeypatch):
+    m = api()
+    stdout = _honest_live_capture(tmp_path, events=0)
+    _strict_run(monkeypatch, m, stdout)
+    with pytest.raises(ValueError, match='no events'):
+        m.capture_facts('/unused', tmp_path)
+
+
+@pytest.mark.parametrize('session,match', [
+    ({'stop': {'drain_completed': False}}, 'honest stop'),
+    ({'stop': {'counters_valid': False}}, 'honest stop'),
+    ({'stop': {'quiescence_observed': True}}, 'honest stop'),
+    ({'stop': {'reason': 'clock failure'}}, 'honest stop'),
+    ({'stop': {'elapsed_ms': '6000'}}, 'budget'),
+    ({'stop': {'in_flight_at_close': '1'}}, 'undrained'),
+    ({'quality': {'terminal': {'status': 'complete_for_scope',
+                               'reason': 'stop complete: all stages proved'}}},
+     'honest terminal'),
+    ({'quality': {'terminal': {'status': 'partial',
+                               'reason': 'stop partial: clock failure'}}},
+     'honest terminal'),
+])
+def test_live_capture_rejects_dishonest_stop(tmp_path, monkeypatch,
+                                             session, match):
+    m = api()
+    stdout = _honest_live_capture(tmp_path, session=session)
+    _strict_run(monkeypatch, m, stdout)
+    with pytest.raises(ValueError, match=match):
+        m.capture_facts('/unused', tmp_path)
 
 
 def test_live_top_requires_cadence():
@@ -611,8 +759,13 @@ def _campaign_window(start_ns, seconds):
 
 
 def _campaign_quality():
-    return {key: {'status': 'complete_for_scope', 'loss_count': '0'}
-            for key in ('detail', 'aggregate', 'correlation', 'baseline', 'terminal')}
+    quality = {key: {'status': 'complete_for_scope', 'loss_count': '0'}
+               for key in ('detail', 'aggregate')}
+    quality.update({key: {'status': 'not_applicable', 'loss_count': None}
+                    for key in ('correlation', 'baseline')})
+    quality['terminal'] = {'status': 'partial', 'loss_count': None,
+                           'reason': 'stop partial: quiescence unproven'}
+    return quality
 
 
 def _campaign_capture(session_bytes, events_bytes, kinds):
@@ -1124,6 +1277,42 @@ def test_verify_live_campaign_refuses_predicate_mismatch(tmp_path):
         else:
             path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
     with pytest.raises(ValueError, match='loss'):
+        _verify(m, export, manifest, 'pool')
+
+
+@pytest.mark.parametrize('terminal', [
+    {'status': 'complete_for_scope', 'loss_count': '0',
+     'reason': 'stop complete: all stages proved'},
+    {'status': 'partial', 'loss_count': None,
+     'reason': 'stop partial: clock failure'},
+])
+def test_verify_live_campaign_refuses_dishonest_terminal(tmp_path, terminal):
+    import hashlib
+    import json
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    session_path = export / 'completed-0/capture/session.json'
+    session = json.loads(session_path.read_bytes())
+    session['quality']['terminal'] = terminal
+    fresh = json.dumps(session, sort_keys=True).encode()
+    session_path.write_bytes(fresh)
+    digest = hashlib.sha256(fresh).hexdigest()
+    for path, nested in ((export / 'campaign.json', True),
+                         (export / 'completed-0/observations.json', False)):
+        doc = json.loads(path.read_bytes())
+        leg = doc['legs'][0] if nested else doc
+        leg['capture']['quality']['terminal'] = terminal
+        leg['capture']['session_sha256'] = digest
+        leg['retained_capture']['session.json']['sha256'] = digest
+        leg['retained_capture']['session.json']['bytes'] = str(len(fresh))
+        if nested:
+            path.write_bytes(json.dumps(doc, sort_keys=True).encode())
+        else:
+            path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
+    with pytest.raises(ValueError, match='honest terminal'):
         _verify(m, export, manifest, 'pool')
 
 
