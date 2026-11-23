@@ -1616,6 +1616,189 @@ def test_identity_scan_nvme_exhaustion_names_the_access(tmp_path, monkeypatch):
     assert isinstance(caught.value.__cause__, OSError)
 
 
+def _fake_block_tree(tmp_path, serials, bare=()):
+    block = tmp_path / 'block'
+    for dev, serial in serials.items():
+        node = block / dev / 'device'
+        node.mkdir(parents=True)
+        (node / 'serial').write_text(serial + '\n')
+    for dev in bare:
+        (block / dev).mkdir(parents=True)
+    return block
+
+
+def _fault_entry_serial(monkeypatch, m, faults):
+    """Fail device/serial reads for the entries in `faults`.
+
+    `faults` maps entry name to a read budget: None faults
+    persistently (every read raises the sr0-shaped bare
+    ENXIO with filename=None), an int faults that many reads
+    then reads through. Returns per-entry raise counts.
+    """
+    import errno
+    real_read_text = Path.read_text
+    raised = {dev: 0 for dev in faults}
+    def faulting(self, *args, **kwargs):
+        dev = self.parent.parent.name
+        if (self.name == 'serial' and self.parent.name == 'device'
+                and dev in faults and (faults[dev] is None
+                                       or raised[dev] < faults[dev])):
+            raised[dev] += 1
+            raise OSError(errno.ENXIO, 'No such device or address')
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(m.Path, 'read_text', faulting)
+    return raised
+
+
+def test_identity_scan_nvme_skips_unreadable_optical(tmp_path, monkeypatch):
+    m = api()
+    token = '0123456789abcdef'
+    assert m.OPTICAL_BLOCK_PREFIXES == ('sr',)
+    block = _fake_block_tree(tmp_path, {'nvme0n1': 'mv-' + token,
+                                        'sr0': 'medium-serial'},
+                             bare=('sda',))
+    raised = _fault_entry_serial(monkeypatch, m, {'sr0': None})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                                   'scratch disk identity scan',
+                                   missing_ok=True,
+                                   skip_prefixes=m.OPTICAL_BLOCK_PREFIXES)
+    assert [p.name for p in matches] == ['nvme0n1']
+    assert raised == {'sr0': 0}
+    assert sleeps == []
+
+
+def test_identity_scan_optical_excluded_by_type_not_value(
+        tmp_path, monkeypatch):
+    m = api()
+    token = '0123456789abcdef'
+    block = _fake_block_tree(tmp_path, {'nvme0n1': 'mv-' + token,
+                                        'sr0': 'mv-' + token})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                                   'scratch disk identity scan',
+                                   missing_ok=True,
+                                   skip_prefixes=m.OPTICAL_BLOCK_PREFIXES)
+    assert [p.name for p in matches] == ['nvme0n1']
+    assert sleeps == []
+
+
+def test_identity_scan_unreadable_nvme_still_fails_closed(
+        tmp_path, monkeypatch):
+    import errno
+    m = api()
+    token = '0123456789abcdef'
+    block = _fake_block_tree(tmp_path, {'nvme0n1': 'mv-' + token,
+                                        'sr0': 'medium-serial'})
+    raised = _fault_entry_serial(monkeypatch, m, {'sr0': None,
+                                                  'nvme0n1': None})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    with pytest.raises(OSError) as caught:
+        m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                             'scratch disk identity scan',
+                             missing_ok=True,
+                             skip_prefixes=m.OPTICAL_BLOCK_PREFIXES)
+    assert 'scratch disk identity scan' in str(caught.value)
+    assert isinstance(caught.value.__cause__, OSError)
+    assert caught.value.__cause__.errno == errno.ENXIO
+    assert caught.value.__cause__.filename is None
+    assert raised['nvme0n1'] == m.IDENTITY_SCAN_ATTEMPTS
+    assert raised['sr0'] == 0
+    assert sleeps == [m.IDENTITY_SCAN_INTERVAL] * \
+        (m.IDENTITY_SCAN_ATTEMPTS - 1)
+
+
+def test_identity_scan_unreadable_nonoptical_still_fails(
+        tmp_path, monkeypatch):
+    import errno
+    m = api()
+    token = '0123456789abcdef'
+    block = _fake_block_tree(tmp_path, {'nvme0n1': 'mv-' + token,
+                                        'sda': 'other-serial'})
+    raised = _fault_entry_serial(monkeypatch, m, {'sda': None})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    with pytest.raises(OSError) as caught:
+        m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                             'scratch disk identity scan',
+                             missing_ok=True,
+                             skip_prefixes=m.OPTICAL_BLOCK_PREFIXES)
+    # The exclusion is optical-only, not nvme-scoping: any
+    # other unreadable entry still fails the scan closed.
+    assert 'scratch disk identity scan' in str(caught.value)
+    assert caught.value.__cause__.errno == errno.ENXIO
+    assert raised == {'sda': m.IDENTITY_SCAN_ATTEMPTS}
+    assert sleeps == [m.IDENTITY_SCAN_INTERVAL] * \
+        (m.IDENTITY_SCAN_ATTEMPTS - 1)
+
+
+def test_identity_scan_optical_exclusion_absent_is_noop(
+        tmp_path, monkeypatch):
+    m = api()
+    token = '0123456789abcdef'
+    block = _fake_block_tree(tmp_path, {'nvme0n1': 'mv-' + token},
+                             bare=('sda',))
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                                   'scratch disk identity scan',
+                                   missing_ok=True,
+                                   skip_prefixes=m.OPTICAL_BLOCK_PREFIXES)
+    assert [p.name for p in matches] == ['nvme0n1']
+    assert sleeps == []
+
+
+@pytest.mark.parametrize('serials,want', [
+    ({'nvme0n1': 'mv-ffffffffffffffff'}, 0),
+    ({'nvme0n1': 'mv-0123456789abcdef',
+      'nvme1n1': 'mv-0123456789abcdef'}, 2),
+])
+def test_identity_scan_absence_and_ambiguity_still_fail_with_sr0_present(
+        tmp_path, monkeypatch, serials, want):
+    m = api()
+    token = '0123456789abcdef'
+    block = _fake_block_tree(tmp_path, dict(serials, sr0='medium-serial'))
+    raised = _fault_entry_serial(monkeypatch, m, {'sr0': None})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                                   'scratch disk identity scan',
+                                   missing_ok=True,
+                                   skip_prefixes=m.OPTICAL_BLOCK_PREFIXES)
+    assert len(matches) == want
+    assert raised == {'sr0': 0}
+    assert sleeps == []
+    with pytest.raises(ValueError, match='missing or ambiguous'):
+        if len(matches) != 1:
+            raise ValueError(
+                'owned scratch disk identity missing or ambiguous')
+
+
+def test_identity_scan_default_still_reads_sr_named(tmp_path, monkeypatch):
+    m = api()
+    token = '0123456789abcdef'
+    net = _fake_nic_tree(tmp_path, {'sr0': m.guest_mac(token)})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    assert [p.name for p in m.scan_sysfs_matches(
+        net, 'address', m.guest_mac(token), 'NIC identity scan')] == ['sr0']
+    assert sleeps == []
+
+
+def test_identity_scan_nvme_flap_still_retries_with_sr0_present(
+        tmp_path, monkeypatch):
+    m = api()
+    token = '0123456789abcdef'
+    block = _fake_block_tree(tmp_path, {'nvme0n1': 'mv-' + token,
+                                        'sr0': 'medium-serial'})
+    raised = _fault_entry_serial(monkeypatch, m, {'sr0': None,
+                                                  'nvme0n1': 2})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                                   'scratch disk identity scan',
+                                   missing_ok=True,
+                                   skip_prefixes=m.OPTICAL_BLOCK_PREFIXES)
+    assert [p.name for p in matches] == ['nvme0n1']
+    assert raised == {'sr0': 0, 'nvme0n1': 2}
+    assert sleeps == [m.IDENTITY_SCAN_INTERVAL] * 2
+
+
 def test_identity_reread_rides_through_flap_then_names_access(
         tmp_path, monkeypatch):
     import errno

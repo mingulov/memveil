@@ -437,6 +437,13 @@ def validate_guest_identity(token, cmdline, guest_boot, host_boot, serial, secto
 
 IDENTITY_SCAN_ATTEMPTS = 11
 IDENTITY_SCAN_INTERVAL = 0.5
+# Block-device name prefixes that can never be the owned
+# scratch disk: the owned disk is nvme with the token serial
+# by construction (host() attaches exactly one nvme device
+# carrying serial mv-<token>), while sr* are SCSI optical
+# drives. An sr drive with no medium raises persistent
+# read-time ENXIO on device/serial, which no retry can fix.
+OPTICAL_BLOCK_PREFIXES = ('sr',)
 
 
 def _transient_sysfs(error):
@@ -451,7 +458,8 @@ def _transient_sysfs(error):
     return error.errno in (errno.ENXIO, errno.ENOENT)
 
 
-def scan_sysfs_matches(root, attribute, value, label, missing_ok=False):
+def scan_sysfs_matches(root, attribute, value, label, missing_ok=False,
+                       skip_prefixes=()):
     """Entries under root whose attribute file reads value.
 
     One clean pass returns the exact match list; a pass
@@ -466,15 +474,24 @@ def scan_sysfs_matches(root, attribute, value, label, missing_ok=False):
     for the caller's unchanged exactly-one check.
     missing_ok skips entries whose attribute is legitimately
     absent (serial-less disks) instead of treating ENOENT as
-    a flap. Exhaustion raises the last flap chained under
-    the scan label, so the next abort names which access
-    raised.
+    a flap. skip_prefixes excludes entries that cannot be
+    the owned node by type: their attribute is never read,
+    so a persistently unreadable excluded entry (an sr
+    optical drive with no medium raises read-time ENXIO on
+    every pass, which no retry can fix) cannot abort the
+    scan. Everything else stays strict: an unreadable
+    non-excluded entry still fails the scan closed after
+    retries, and exhaustion raises the last flap chained
+    under the scan label, so the next abort names which
+    access raised.
     """
     last = None
     for attempt in range(IDENTITY_SCAN_ATTEMPTS):
         try:
             matches = []
             for entry in root.iterdir():
+                if entry.name.startswith(skip_prefixes):
+                    continue
                 try:
                     text = (entry / attribute).read_text()
                 except OSError as error:
@@ -1126,7 +1143,8 @@ def guest(kind, manifest, bundle, deb, token, export, host_boot, digest, local_e
         raise ValueError('owned guest NIC driver differs')
     disks = scan_sysfs_matches(
         Path('/sys/block'), 'device/serial', 'mv-' + token,
-        'scratch disk identity scan', missing_ok=True)
+        'scratch disk identity scan', missing_ok=True,
+        skip_prefixes=OPTICAL_BLOCK_PREFIXES)
     if len(disks) != 1: raise ValueError('owned scratch disk identity missing or ambiguous')
     node = disks[0]
     disk = Path('/dev') / node.name
