@@ -50,6 +50,10 @@ Battery adoption contract: case id ``peer`` (``CASE_ID``),
 (``PEER_ENV``), export prefix ``peer`` with inventory
 ``peer.json``, ``cap-session.json``, ``cap-events.ndjson``,
 ``record.out``, ``record.stderr``.
+
+Terminology: ``the sealed candidate`` is the sealed
+release-candidate bundle under test (engine plus its seal
+bindings).
 """
 
 import hashlib
@@ -605,7 +609,7 @@ def copy_cover_direction(direction):
 
 
 def parse_c9_stream(lines):
-    """Fold validated C9 event lines to agreement counters.
+    """Fold validated sealed-candidate event lines to agreement counters.
 
     Callers validate every line with the schema validator
     first; this fold reads only kind/data counters, the
@@ -687,14 +691,15 @@ def agree_oracle_c9(proven, c9, declared):
     unmap_gap = max(0, total - c9["unmaps"])
     gap = map_gap + unmap_gap
     if gap > declared["total"]:
-        bad.append("C9 gap %d (map %d + unmap %d) exceeds "
+        bad.append("the sealed candidate gap %d (map %d + unmap %d) "
+                   "exceeds "
                    "declared loss %d"
                    % (gap, map_gap, unmap_gap,
                       declared["total"]))
     copy_bytes = sum(c9["copy_bytes_by_dir"].values())
     if copy_bytes <= 0:
-        bad.append("no exercised bounce coverage in C9 "
-                   "copies")
+        bad.append("no exercised bounce coverage in the sealed "
+                   "candidate copies")
     return bad, {"pairs": total, "map_gap": map_gap,
                  "unmap_gap": unmap_gap, "gap": gap,
                  "declared": declared["total"],
@@ -713,7 +718,8 @@ def agree_bounce_dirs(pair_dirs, c9):
                       for name in want)
         if covered <= 0:
             bad.append("oracle direction %s has no covering "
-                       "C9 copy bytes" % (direction,))
+                       "the sealed candidate copy bytes"
+                       % (direction,))
     return bad
 
 
@@ -933,7 +939,7 @@ def judge_entries(name, window):
 
 
 def judge_peer_leg(peer, c9, summary, declared):
-    """Master L11 verdict from opaque exports + validated C9.
+    """Master L11 verdict from opaque exports + a validated sealed candidate.
 
     ``peer`` is the validated ``peer.json`` doc; ``c9`` the
     ``parse_c9_stream`` fold over schema-validated events;
@@ -946,7 +952,7 @@ def judge_peer_leg(peer, c9, summary, declared):
     window completeness per window, traffic re-verify
     (nonzero transient pairs), bracket re-verify (explicit
     pre-existing/held-open), nonzero peer TX/RX plus NIC
-    corroboration, C9 provenance (live, finalized,
+    corroboration, the sealed candidate provenance (live, finalized,
     duration, single profile, single session bound to the
     ready line), same-clock window containment, per-size
     agreement with gaps to declared loss only, and
@@ -983,25 +989,25 @@ def judge_peer_leg(peer, c9, summary, declared):
         bad.append("NIC corroboration tx=%d rx=%d, want "
                    "nonzero both" % (nic_tx, nic_rx))
     if summary.get("synthetic") is not False:
-        bad.append("C9 capture is not live")
+        bad.append("the sealed candidate capture is not live")
     if summary.get("finalized") is not True:
-        bad.append("C9 capture not finalized")
+        bad.append("the sealed candidate capture not finalized")
     if summary.get("end_reason") != "duration":
-        bad.append("C9 end_reason %r, want duration"
+        bad.append("the sealed candidate end_reason %r, want duration"
                    % (summary.get("end_reason"),))
     if len(c9["profiles"]) != 1:
-        bad.append("C9 profiles %r, want exactly one"
+        bad.append("the sealed candidate profiles %r, want exactly one"
                    % (sorted(c9["profiles"]),))
     if c9["sessions"] != {summary.get("id")}:
-        bad.append("C9 event sessions %r do not bind %r"
+        bad.append("the sealed candidate event sessions %r do not bind %r"
                    % (sorted(c9["sessions"]),
                       summary.get("id")))
     ready = peer["c9"]["ready_session"]
     if ready != summary.get("id"):
-        bad.append("C9 ready session %r does not bind %r"
+        bad.append("the sealed candidate ready session %r does not bind %r"
                    % (ready, summary.get("id")))
     if peer["c9"]["window_clock"] != MONO_CLOCK:
-        bad.append("C9 bind clock %r, want %s"
+        bad.append("the sealed candidate bind clock %r, want %s"
                    % (peer["c9"]["window_clock"], MONO_CLOCK))
     start = summary.get("start")
     end = summary.get("end")
@@ -1011,7 +1017,8 @@ def judge_peer_leg(peer, c9, summary, declared):
     if not all(type(value) is int for value in bounds):
         bad.append("window bounds are not integers")
     elif not (start <= opened <= closed <= end):
-        bad.append("oracle window [%d, %d] escapes C9 window "
+        bad.append("oracle window [%d, %d] escapes the sealed candidate "
+                   "window "
                    "[%d, %d]" % (opened, closed, start, end))
     proven = Counter()
     pair_dirs = set()
@@ -1029,9 +1036,9 @@ def judge_peer_leg(peer, c9, summary, declared):
 
 def emit_receipt(peer, c9, summary, declared, agreement,
                  verdict, findings, harness, exports):
-    """R103 Q1 receipt row for the peer leg.
+    """Q1 receipt row for the peer leg.
 
-    Binds harness commit, C9 seal plus executed bytes,
+    Binds harness commit, the sealed candidate plus executed bytes,
     guest/BTF/profile, oracle parameters, workload, and
     exports. ``harness`` carries ``commit`` (str),
     ``dirty`` (bool), ``c9_binary_sha``, and ``c9_seal``
@@ -1206,7 +1213,8 @@ def validate_peer_doc(doc):
     counters parameterize and audit the oracle; ping/NIC
     counters corroborate traffic; opaque key ids plus
     counts carry the pairing structure with no address
-    bits; C9 bind fields (hashes, session, window) tie the
+    bits; the sealed candidate bind fields (hashes, session, window)
+    tie the
     capture file. No command lines, environment text,
     payloads, or DMA addresses may cross: the key inventory
     is exact at every level, so an address field cannot
@@ -1278,22 +1286,22 @@ def validate_peer_doc(doc):
     _sha(bind["binary_sha"], "peer.c9.binary_sha")
     if type(bind["profile"]) is not str \
             or not 1 <= len(bind["profile"]) <= 128:
-        raise ValueError("invalid C9 profile")
+        raise ValueError("invalid sealed-candidate profile")
     if type(bind["caps"]) is not str \
             or not 1 <= len(bind["caps"]) <= 128:
-        raise ValueError("invalid C9 capabilities")
+        raise ValueError("invalid sealed-candidate capabilities")
     _integer(bind["duration_s"], "peer.c9.duration_s")
     if bind["duration_s"] <= 0:
-        raise ValueError("invalid C9 duration")
+        raise ValueError("invalid sealed-candidate duration")
     if bind["record_exit"] != 0:
-        raise ValueError("C9 record failed")
+        raise ValueError("the sealed candidate record failed")
     if type(bind["ready_session"]) is not str or not re.fullmatch(
             r"cap-[0-9]+-[0-9]+|[a-z][a-z0-9_.-]{0,127}",
             bind["ready_session"]):
-        raise ValueError("invalid C9 ready session")
+        raise ValueError("invalid sealed-candidate ready session")
     _integer(bind["ready_start_ns"], "peer.c9.ready_start_ns")
     if bind["window_clock"] != MONO_CLOCK:
-        raise ValueError("invalid C9 bind clock")
+        raise ValueError("invalid sealed-candidate bind clock")
     _integer(bind["mono_open_ns"], "peer.c9.mono_open_ns")
     _integer(bind["mono_close_ns"], "peer.c9.mono_close_ns")
     if bind["mono_open_ns"] > bind["mono_close_ns"]:
@@ -1337,7 +1345,7 @@ def load_schema_validator():
 
 
 def validate_c9_capture(validator, session_path, events_path):
-    """Validate one C9 capture against the product schema.
+    """Validate one sealed-candidate capture against the product schema.
 
     Runs ``check_session`` plus the strict streaming
     validator (per-line schema, sequence, identity, and
