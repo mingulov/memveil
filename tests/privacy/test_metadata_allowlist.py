@@ -20,6 +20,7 @@ reviewed). Exits nonzero on the first violation.
 import glob
 import json
 import contextlib
+import copy
 import io
 import os
 import re
@@ -49,6 +50,33 @@ FORBIDDEN_PROPS = {
 # review here.
 REVIEWED_ALLOWED_PROPS = {"comm", "pid", "tgid"}
 OBSERVER_FROZEN_PROPS = {"cpu", "pid", "tgid", "comm", "cgroup_id", "relation"}
+
+# The reviewed observer block lives at exactly this schema
+# path: a suffix match would exempt a same-named block in an
+# unreviewed location, so only equality exempts.
+OBSERVER_EXACT_PATH = "/properties/observer_context"
+
+# The frozen observer block, byte-identical in every event
+# schema carrying it: property inventory, value bounds, and
+# the relation const. Any drift fails review here.
+OBSERVER_FROZEN = {
+    "additionalProperties": False,
+    "description": "Execution context only, unless a separate "
+                   "adapter proves ownership.",
+    "properties": {
+        "cgroup_id": {"$ref": "#/$defs/opaque_id"},
+        "comm": {"maxLength": 64, "type": "string"},
+        "cpu": {"maximum": 1048575, "minimum": 0,
+                "type": "integer"},
+        "pid": {"maximum": 4194304, "minimum": 0,
+                "type": "integer"},
+        "relation": {"const": "execution_context_only"},
+        "tgid": {"maximum": 4194304, "minimum": 0,
+                 "type": "integer"},
+    },
+    "required": ["relation"],
+    "type": "object",
+}
 
 # --profiles-dir reviewed 2026-10-11: a profile/receipt
 # directory selector (read by doctor/record, read and
@@ -152,14 +180,17 @@ def schema_props(path):
 
 
 def schema_blocks(doc):
-    """Every (path, property-name set) for object schemas
-    carrying properties, so identity-shaped names can be
-    contained to their reviewed block."""
+    """Every (path, property-name set, object node) for
+    object schemas carrying properties, so identity-shaped
+    names can be contained to their reviewed block and the
+    block's frozen shape (bounds and consts included) can be
+    pinned, not just its key inventory."""
     found = []
     def walk(o, path):
         if isinstance(o, dict):
             if isinstance(o.get("properties"), dict):
-                found.append((path, set(o["properties"].keys())))
+                found.append((path, set(o["properties"].keys()),
+                              o))
             for k, v in o.items():
                 walk(v, "%s/%s" % (path, k))
         elif isinstance(o, list):
@@ -170,14 +201,14 @@ def schema_blocks(doc):
 
 
 def observer_frozen_ok(blocks):
-    return all(props == OBSERVER_FROZEN_PROPS
-               for where, props in blocks
-               if where.endswith("/observer_context"))
+    return all(node == OBSERVER_FROZEN
+               for where, props, node in blocks
+               if where == OBSERVER_EXACT_PATH)
 
 
 def observer_leaked(blocks):
-    return sorted({n for where, props in blocks
-                   if not where.endswith("/observer_context")
+    return sorted({n for where, props, node in blocks
+                   if where != OBSERVER_EXACT_PATH
                    for n in props & REVIEWED_ALLOWED_PROPS})
 
 
@@ -199,21 +230,48 @@ def self_check_flag_audit():
 
 
 def self_check_observer_audit():
-    frozen = {"properties": {n: {} for n in OBSERVER_FROZEN_PROPS}}
+    frozen = copy.deepcopy(OBSERVER_FROZEN)
     clean = {"properties": {"observer_context": frozen,
                             "data": {"properties": {"device_id": {}}}}}
     check("observer-clean-accepted",
           observer_frozen_ok(schema_blocks(clean))
           and observer_leaked(schema_blocks(clean)) == [])
+    check("observer-name-inventory",
+          set(OBSERVER_FROZEN["properties"])
+          == OBSERVER_FROZEN_PROPS)
     grown = {"properties": {"observer_context":
-                            {"properties": dict(frozen["properties"],
-                                                uid={})}}}
+                            dict(copy.deepcopy(OBSERVER_FROZEN),
+                                 properties=dict(
+                                     OBSERVER_FROZEN["properties"],
+                                     uid={}))}}
     check("observer-growth-rejected",
           not observer_frozen_ok(schema_blocks(grown)))
     stray = {"properties": {"observer_context": frozen,
                             "data": {"properties": {"comm": {}}}}}
     check("observer-stray-rejected",
           observer_leaked(schema_blocks(stray)) == ["comm"])
+    # A same-named block in an unreviewed location is not
+    # the reviewed block: its identity names leak.
+    smuggled = {"properties": {"extra": {"properties":
+                                        {"observer_context":
+                                         copy.deepcopy(
+                                             OBSERVER_FROZEN)}}}}
+    smuggled_blocks = schema_blocks(smuggled)
+    check("observer-smuggled-path-rejected",
+          observer_leaked(smuggled_blocks) != []
+          and not (observer_frozen_ok(smuggled_blocks)
+                   and not observer_leaked(smuggled_blocks)))
+    # The freeze covers values, not just key names: a
+    # retargeted relation const fails the frozen check.
+    mutated = {"properties": {"observer_context":
+                              copy.deepcopy(OBSERVER_FROZEN)}}
+    mutated["properties"]["observer_context"][
+        "properties"]["relation"]["const"] = "origin"
+    mutated_blocks = schema_blocks(mutated)
+    check("observer-const-rejected",
+          not observer_frozen_ok(mutated_blocks)
+          and not (observer_frozen_ok(mutated_blocks)
+                   and not observer_leaked(mutated_blocks)))
 
 
 def strip_line_comments(text):
