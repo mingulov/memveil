@@ -58,9 +58,9 @@ and never move a Q branch after dispatching on it.
   Claims pair with versions: `ordinary-preview` for `0.1.x`,
   `snp-journal` for `0.2.x`, `security-workflow` for
   `0.3.x`. The shipped template names the required gates,
-  `kernel-matrix/2` and `live-campaign/1`, with empty
-  `trusted_keys`; fill in the key digest from step 0
-  before fixing C.
+  `kernel-matrix/2` and `live-campaign/1`, with a qualifier
+  key digest already trusted in `trusted_keys`: decide reuse
+  vs replace (step 0 confirms which) before fixing C.
 - The qualifier Ed25519 key (step 0). The same key signs
   the artifact checksums, the gate receipts, and the
   remote-check receipts; its derived public bytes go in
@@ -77,7 +77,10 @@ and never move a Q branch after dispatching on it.
 - Keep every scratch path under the ignored `dist/` tree:
   the seal refuses a dirty source tree, and campaign
   receipts record the worktree state, so outputs anywhere
-  else would poison the evidence.
+  else would poison the evidence. Loose files at the
+  `dist/` root are scratch, never release inputs: publish
+  and upload only from a single `retained-<id>/` directory
+  (or a fresh artifacts dir produced in one seal run).
 
 ## 0. Key and policy, before C is fixed
 
@@ -99,10 +102,10 @@ sha256sum "$KEYDIR/qualifier-derived.pub"
 ```
 
 Keep `KEYDIR` exported for the steps below (like
-`CANDIDATE_SHA256` and `DEB`). Put that digest in
-`packaging/candidate-policy.json` at C (`trusted_keys`),
-with the claim, gates, and retention the release needs,
-then fix C with the policy committed.
+`CANDIDATE_SHA256` and `DEB`). Confirm that digest equals
+the `trusted_keys` entry at C (reuse), or replace the
+entry (replace), with the claim, gates, and retention the
+release needs, then fix C with the policy committed.
 
 ## Seal and sign locally
 
@@ -486,9 +489,9 @@ credentials, and the recorded ID is what CI consumes;
 no workflow lists releases. Never pass `--clobber`:
 re-uploads fail closed instead.
 
-12. Dispatch one hosted stage at a time with the ref at
-Q1. Qualify re-verifies independently; import stages
-the bytes:
+12. **Not yet exercised; required from 1.x.** Dispatch
+one hosted stage at a time with the ref at Q1. Qualify
+re-verifies independently; import stages the bytes:
 
 ```sh
 gh workflow run release.yml --ref release-q1 \
@@ -499,8 +502,9 @@ gh workflow run release.yml --ref release-q1 \
   -f source_commit="$C" -f draft_release_id="$DRAFT_RELEASE_ID"
 ```
 
-13. After a green import, record the remote receipt and
-commit Q2. Record four bindings now; do not record
+13. **Not yet exercised; required from 1.x.** After a
+green import, record the remote receipt and commit Q2.
+Record four bindings now; do not record
 `promotion-dry-run/1` here: its check-run is published by
 the dry-run dispatch in step 14 (a later
 remote-execution step), so dispatch dry-run before
@@ -565,8 +569,9 @@ git push origin HEAD:release-q2
 The diff must list exactly the four qualification
 paths (the Q1 three plus `remote.json`).
 
-14. Dispatch dry-run with the ref at Q2, passing the
-recorded import IDs:
+14. **Not yet exercised; required from 1.x.** Dispatch
+dry-run with the ref at Q2, passing the recorded import
+IDs:
 
 ```sh
 gh workflow run release.yml --ref release-q2 \
@@ -581,8 +586,9 @@ from Q2's `remote.json` (run, artifact, signer, custody)
 and ignores the check bindings; promote enforces the
 bindings, so four suffice here.
 
-15. After the dry-run dispatch is green, record the
-provisional dry-run receipt and carry it forward. The
+15. **Not yet exercised; required from 1.x.** After the
+dry-run dispatch is green, record the provisional
+dry-run receipt and carry it forward. The
 dry-run ran at Q2, so the check-run named exactly
 `promotion-dry-run/1` carries head SHA Q2. That
 check-run is published by the dry-run dispatch at
@@ -615,8 +621,9 @@ inputs, the inputs, the base64 signature
 `memveil-candidate`, as in step 6), and the public
 key.
 
-16. Assemble the final promotion evidence: the same
-import coordinates with all five check bindings (the
+16. **Not yet exercised; required from 1.x.** Assemble
+the final promotion evidence: the same import
+coordinates with all five check bindings (the
 four at Q1 plus `promotion-dry-run/1` at Q2 from the
 provisional receipt). Commit the finalized receipt as
 Q3 on a third frozen branch:
@@ -633,8 +640,9 @@ The diff must list exactly the same four
 qualification paths (`remote.json` amended, still
 evidence-only over C).
 
-17. After the dry-run dispatch is green and Q3 is
-frozen, tag `vX.Y.Z` on C (owner step, outside the
+17. **Not yet exercised; required from 1.x.** After the
+dry-run dispatch is green and Q3 is frozen, tag
+`vX.Y.Z` on C (owner step, outside the
 workflow; the version comes from `Cargo.toml` at C):
 
 ```sh
@@ -642,9 +650,10 @@ git tag "v<VERSION>" "$C"
 git push origin "v<VERSION>"
 ```
 
-18. Dispatch promote with the ref at Q3, the same
-recorded import IDs, and `promote_authorization`
-retyping the candidate digest:
+18. **Not yet exercised; required from 1.x.** Dispatch
+promote with the ref at Q3, the same recorded import
+IDs, and `promote_authorization` retyping the candidate
+digest:
 
 ```sh
 gh workflow run release.yml --ref release-q3 \
