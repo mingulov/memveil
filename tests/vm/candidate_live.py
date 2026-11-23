@@ -70,9 +70,14 @@ def product_command(binary, mode, capture, duration):
 
 
 class ProductExit(ValueError):
-    def __init__(self, code, reason='required product command exit'):
-        super().__init__(reason + ' ' + str(code))
+    def __init__(self, code, reason='required product command exit',
+                 detail=''):
+        message = reason + ' ' + str(code)
+        if detail:
+            message += ': ' + detail
+        super().__init__(message)
         self.product_exit = code
+        self.detail = detail
 
 
 def require_product_exit(code):
@@ -142,7 +147,7 @@ def install_guest_deb(deb, local_evidence, timeout=120):
         result = subprocess.run(argv, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         message = ('guest package install timed out: dpkg -i %s: %s'
-                   % (deb, _install_tail(exc.stderr or b'')))
+                   % (deb, _forensics_tail(exc.stderr or b'')))
         try:
             _write_install_log(local_evidence, argv, 'timeout',
                                exc.stdout or b'', exc.stderr or b'')
@@ -154,7 +159,7 @@ def install_guest_deb(deb, local_evidence, timeout=120):
             log=str(Path(local_evidence) / INSTALL_LOG_NAME))
     if result.returncode:
         message = ('guest package install failed: dpkg exit %d: %s'
-                   % (result.returncode, _install_tail(result.stderr)))
+                   % (result.returncode, _forensics_tail(result.stderr)))
         try:
             _write_install_log(local_evidence, argv, result.returncode,
                                result.stdout, result.stderr)
@@ -169,25 +174,31 @@ def install_guest_deb(deb, local_evidence, timeout=120):
     return result.stdout
 
 
-def _install_tail(stream):
-    lines = (stream or b'').decode('utf-8', 'replace').splitlines()
-    tail = lines[-INSTALL_TAIL_LINES:]
-    text = '\n'.join(line for line in tail if line.strip())
-    return text or '(no installer output)'
+def _forensics_tail(stream, lines=INSTALL_TAIL_LINES):
+    text = (stream or b'').decode('utf-8', 'replace').splitlines()
+    tail = text[-lines:]
+    joined = '\n'.join(line for line in tail if line.strip())
+    return joined or '(no output)'
 
 
-def _write_install_log(local_evidence, argv, status, stdout, stderr):
+def _write_bounded_log(path, argv, status, stdout, stderr, limit):
+    """Write one headed transcript; None limit means bounded upstream."""
     header = ('argv: %s\nstatus: %s\n--- stdout ---\n'
               % (argv, status)).encode()
     body = header + (stdout or b'') + b'\n--- stderr ---\n' + (stderr or b'')
-    if len(body) > INSTALL_LOG_LIMIT:
-        body = body[:INSTALL_LOG_LIMIT] + b'\n[truncated]\n'
+    if limit is not None and len(body) > limit:
+        body = body[:limit] + b'\n[truncated]\n'
+    Path(path).write_bytes(body)
+
+
+def _write_install_log(local_evidence, argv, status, stdout, stderr):
+    log = Path(local_evidence) / INSTALL_LOG_NAME
     try:
-        (Path(local_evidence) / INSTALL_LOG_NAME).write_bytes(body)
+        _write_bounded_log(log, argv, status, stdout, stderr,
+                           INSTALL_LOG_LIMIT)
     except OSError as exc:
-        log = str(Path(local_evidence) / INSTALL_LOG_NAME)
         raise ValueError(
-            'guest install forensics unwritable: ' + log) from exc
+            'guest install forensics unwritable: ' + str(log)) from exc
 
 
 def inventory():
@@ -370,25 +381,82 @@ def observe_output(stream, observed):
             observed['refresh_ns'].append(str(time.monotonic_ns()))
 
 
+COLLECTOR_STDERR_LOG = 'collector-stderr.log'
+COLLECTOR_STDERR_LIMIT = 65536
+COLLECTOR_STDERR_LOG_LIMIT = COLLECTOR_STDERR_LIMIT + 4096
+FORENSICS_WARNINGS_LOG = 'forensics-copy-warnings.log'
+OBSERVATIONS_LIMIT = 16 * 1024**2
+
+
+def _drain_bounded(stream, buf, limit):
+    """Drain a pipe into buf keeping the last limit bytes; total."""
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                return
+            buf.extend(chunk)
+            if len(buf) > limit:
+                del buf[:len(buf) - limit]
+    except Exception:
+        return
+
+
+def _persist_collector_stderr(work, argv, status, err_reader, err_buf,
+                              state):
+    """Persist bounded collector stderr for forensics; never raises.
+
+    Joins the drain, writes work/COLLECTOR_STDERR_LOG (the
+    buffer is already bound at the drain, so the file keeps
+    the tail verbatim), and sets state['collector_stderr_tail'].
+    Collector stdout streams through the readiness watcher,
+    so the log's stdout section stays empty by design. A
+    write failure records state['collector_stderr_log_error']
+    and keeps the tail, which the caller also carries in the
+    exception message, so the cause survives even when the
+    log write itself fails. Failure-path only: passing legs
+    keep no such keys.
+    """
+    try:
+        if err_reader is not None:
+            err_reader.join(timeout=5)
+    except Exception:
+        pass
+    try:
+        captured = bytes(err_buf)
+        state['collector_stderr_tail'] = _forensics_tail(captured)
+        _write_bounded_log(Path(work) / COLLECTOR_STDERR_LOG, argv,
+                           status, b'', captured, None)
+    except Exception as exc:
+        state['collector_stderr_log_error'] = type(exc).__name__
+
+
 def leg(binary, disk, mode, work, seconds, pool=False, observation=None, nonce=None):
     state = {} if observation is None else observation
     before = inventory()
     state.update(mode=mode, bpf_before=before, product_exit=None, cleanup_errors=[])
     capture = work / 'capture'
-    proc, primary, reader, pool_oracle = None, None, None, None
+    proc, primary, reader, err_reader, pool_oracle = None, None, None, None, None
+    argv, err_buf = None, bytearray()
     try:
         if mode != 'off':
             observed = {'ready': False, 'refresh_ns': [], 'error': None}
             state['output'] = observed
-            proc = subprocess.Popen(product_command(binary, mode, capture, seconds + 120),
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            argv = product_command(binary, mode, capture, seconds + 120)
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
             reader = threading.Thread(target=observe_output, args=(proc.stdout, observed), daemon=True)
             reader.start()
+            err_reader = threading.Thread(target=_drain_bounded, args=(proc.stderr, err_buf, COLLECTOR_STDERR_LIMIT), daemon=True)
+            err_reader.start()
             deadline = time.monotonic() + 60
             while True:
                 if proc.poll() is not None:
                     state['product_exit'] = proc.returncode
-                    raise ProductExit(proc.returncode, 'collector exited before readiness: exit')
+                    _persist_collector_stderr(work, argv, proc.returncode,
+                                              err_reader, err_buf, state)
+                    raise ProductExit(proc.returncode, 'collector exited before readiness: exit',
+                                      detail=state.get('collector_stderr_tail', ''))
                 if observed['error']: raise ValueError(observed['error'])
                 if observed['ready']: break
                 if time.monotonic() >= deadline: raise ValueError('collector readiness timed out')
@@ -419,6 +487,10 @@ def leg(binary, disk, mode, work, seconds, pool=False, observation=None, nonce=N
     except BaseException as exc:
         primary = exc
         if isinstance(exc, ProductExit): state['product_exit'] = exc.product_exit
+        if proc is not None and 'collector_stderr_tail' not in state:
+            status = proc.returncode if proc.poll() is not None else 'running'
+            _persist_collector_stderr(work, argv, status, err_reader,
+                                      err_buf, state)
         raise
     finally:
         cleanup_failure = None
@@ -441,6 +513,12 @@ def leg(binary, disk, mode, work, seconds, pool=False, observation=None, nonce=N
                 if reader.is_alive(): raise ValueError('collector output reader cleanup incomplete')
                 proc.stdout.close()
         cleanup(stop_reader)
+        def stop_err_reader():
+            if err_reader is not None:
+                err_reader.join(timeout=5)
+                if err_reader.is_alive(): raise ValueError('collector stderr reader cleanup incomplete')
+                proc.stderr.close()
+        cleanup(stop_err_reader)
         def settle(): state['bpf_after'] = settled(before)
         cleanup(settle)
         if primary is None and cleanup_failure is not None: raise cleanup_failure
@@ -451,8 +529,49 @@ CAPTURE_LIMITS = {'events.ndjson': 1024**3, 'session.json': 16 * 1024**2,
                   'session.finalizing': 16 * 1024**2}
 
 
+def _ensure_dir_mode(path, mode):
+    os.chmod(path, mode)
+    if stat.S_IMODE(os.stat(path).st_mode) != mode:
+        raise ValueError('evidence directory mode differs: ' + str(path))
+
+
+def _ensure_dir_fd_mode(fd, label, mode):
+    os.fchmod(fd, mode)
+    if stat.S_IMODE(os.fstat(fd).st_mode) != mode:
+        raise ValueError('evidence directory mode differs: ' + label)
+
+
+def _copy_evidence_file(src_dir_fd, dst_dir_fd, name, limit):
+    """Copy one allowlisted evidence file; return its receipt record.
+
+    Fail-closed like the export path always was: the source
+    must be an owned regular file reached without aliases,
+    the destination is created exclusive with private mode,
+    bytes stream bounded by limit, and the enforced mode is
+    read back, never assumed. Raises FileNotFoundError when
+    the source is absent (the caller decides skip vs fail).
+    """
+    source_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=src_dir_fd)
+    with os.fdopen(source_fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('failure evidence is not an owned regular file')
+        target_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dst_dir_fd)
+        with os.fdopen(target_fd, 'wb') as target:
+            os.fchmod(target.fileno(), 0o600)
+            if stat.S_IMODE(os.fstat(target.fileno()).st_mode) != 0o600:
+                raise ValueError('evidence copy mode differs: ' + name)
+            digest, count = hashlib.sha256(), 0
+            while count < limit:
+                data = source.read(min(65536, limit - count))
+                if not data: break
+                target.write(data); digest.update(data); count += len(data)
+        return {'bytes': str(count), 'sha256': digest.hexdigest(), 'truncated': info.st_size > limit}
+
+
 def retain_capture(work, destination):
     destination.mkdir(mode=0o700)
+    _ensure_dir_mode(destination, 0o700)
     copied = {}
     work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     dest_fd = os.open(destination, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -461,20 +580,11 @@ def retain_capture(work, destination):
         try: capture_fd = os.open('capture', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=work_fd)
         except FileNotFoundError: return copied
         for name, limit in CAPTURE_LIMITS.items():
-            try: source_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=capture_fd)
-            except FileNotFoundError: continue
-            with os.fdopen(source_fd, 'rb') as source:
-                info = os.fstat(source.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                    raise ValueError('failure evidence is not an owned regular file')
-                target_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dest_fd)
-                digest, count = hashlib.sha256(), 0
-                with os.fdopen(target_fd, 'wb') as target:
-                    while count < limit:
-                        data = source.read(min(65536, limit - count))
-                        if not data: break
-                        target.write(data); digest.update(data); count += len(data)
-                copied[name] = {'bytes': str(count), 'sha256': digest.hexdigest(), 'truncated': info.st_size > limit}
+            try:
+                copied[name] = _copy_evidence_file(capture_fd, dest_fd,
+                                                   name, limit)
+            except FileNotFoundError:
+                continue
         return copied
     finally:
         if capture_fd is not None: os.close(capture_fd)
@@ -483,13 +593,153 @@ def retain_capture(work, destination):
 
 def write_observations(path, state):
     data = (json.dumps(state, sort_keys=True) + '\n').encode()
-    if len(data) > 16 * 1024**2: raise ValueError('observations exceed document bound')
+    if len(data) > OBSERVATIONS_LIMIT: raise ValueError('observations exceed document bound')
     with path.open('xb') as stream: stream.write(data)
 
 
-def record_leg(binary, disk, mode, seconds, pool, local, export, ordinal, nonce=None):
-    work = local / ('leg-' + str(ordinal))
+def copy_leg_forensics(work, forensics):
+    """Mirror a leg work dir to host-visible forensics; return warnings.
+
+    Copies the allowlisted capture files plus the leg receipts
+    (observations.json, the collector stderr log when present)
+    from the overlay work dir to the mount-backed forensics dir,
+    enforcing the same 0700/0600 modes the export path uses.
+    Copies what exists: absent files are skipped, and every
+    per-file or directory failure becomes a warning string,
+    never an exception. The caller logs the returned warnings;
+    the leg verdict never depends on this copy. A warnings log
+    is also left beside the mirror when anything degraded.
+    """
+    warnings = []
+    work, forensics = Path(work), Path(forensics)
+    try:
+        forensics.mkdir(mode=0o700, exist_ok=True)
+    except OSError as exc:
+        return ['forensics dir unwritable: %s: %s' % (forensics, exc)]
+    try:
+        _ensure_dir_mode(forensics, 0o700)
+    except (OSError, ValueError) as exc:
+        warnings.append('forensics dir mode differs: %s: %s'
+                        % (forensics, exc))
+    try:
+        work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        warnings.append('leg work unreadable: %s: %s' % (work, exc))
+        _write_forensics_warnings(forensics, warnings)
+        return warnings
+    try:
+        try:
+            dest_fd = os.open(forensics, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            warnings.append('forensics dir unreadable: %s: %s'
+                            % (forensics, exc))
+            _write_forensics_warnings(forensics, warnings)
+            return warnings
+        try:
+            _mirror_capture_dir(work_fd, dest_fd, warnings)
+            for name, limit in (('observations.json', OBSERVATIONS_LIMIT),
+                                (COLLECTOR_STDERR_LOG,
+                                 COLLECTOR_STDERR_LOG_LIMIT)):
+                _mirror_one_file(work_fd, dest_fd, name, limit, warnings)
+        finally:
+            os.close(dest_fd)
+    finally:
+        os.close(work_fd)
+    _write_forensics_warnings(forensics, warnings)
+    return warnings
+
+
+def _mirror_one_file(src_fd, dst_fd, name, limit, warnings):
+    try:
+        receipt = _copy_evidence_file(src_fd, dst_fd, name, limit)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        warnings.append('%s not mirrored: %s' % (name, exc))
+        return
+    if receipt['truncated']:
+        warnings.append('%s exceeds mirror bound; truncated' % name)
+
+
+def _mirror_capture_dir(work_fd, dest_fd, warnings):
+    try:
+        capture_fd = os.open('capture', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=work_fd)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        warnings.append('capture dir unreadable: %s' % exc)
+        return
+    try:
+        try:
+            os.mkdir('capture', 0o700, dir_fd=dest_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            warnings.append('capture mirror unwritable: %s' % exc)
+            return
+        else:
+            try:
+                os.chmod('capture', 0o700, dir_fd=dest_fd)
+            except OSError as exc:
+                warnings.append('capture mirror unwritable: %s' % exc)
+                return
+        try:
+            cap_fd = os.open('capture', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dest_fd)
+        except OSError as exc:
+            warnings.append('capture mirror unreadable: %s' % exc)
+            return
+        try:
+            try:
+                _ensure_dir_fd_mode(cap_fd, 'capture', 0o700)
+            except (OSError, ValueError) as exc:
+                warnings.append('capture mirror mode differs: %s' % exc)
+            for name, limit in CAPTURE_LIMITS.items():
+                _mirror_one_file(capture_fd, cap_fd, name, limit, warnings)
+        finally:
+            os.close(cap_fd)
+    finally:
+        os.close(capture_fd)
+
+
+def _write_forensics_warnings(forensics, warnings):
+    if not warnings:
+        return
+    try:
+        (Path(forensics) / FORENSICS_WARNINGS_LOG).write_text(
+            ''.join(line + '\n' for line in warnings))
+    except OSError:
+        pass
+
+
+def _cleanup_overlay_work(work):
+    """Best-effort removal of overlay leg work after its copies landed."""
+    try:
+        if Path(work).is_symlink():
+            raise ValueError('overlay work is an alias')
+        shutil.rmtree(work)
+    except (OSError, ValueError) as exc:
+        print('candidate live campaign: overlay work cleanup failed: %s: %s'
+              % (work, exc), file=sys.stderr)
+
+
+def record_leg(binary, disk, mode, seconds, pool, local, export, ordinal, nonce=None, *, scratch):
+    """Run one leg on overlay work, mirroring forensics to the mount.
+
+    The collector records under scratch/leg-N on the
+    guest-local overlay (creations on the mount-backed dirs
+    map to another uid, which the product's capture-dir
+    ownership guard refuses); the export keeps its verified
+    shape via retain_capture, and a best-effort mirror of
+    the work dir lands at local/leg-N so per-leg forensics
+    stay host-visible on success and failure alike. The
+    mirror never affects the verdict: copy problems are
+    warnings on stderr, and the overlay work is dropped
+    only after clean copies on a passing leg.
+    """
+    work = Path(scratch) / ('leg-' + str(ordinal))
     work.mkdir(mode=0o700)
+    _ensure_dir_mode(work, 0o700)
+    forensics = Path(local) / ('leg-' + str(ordinal))
     state = {'ordinal': str(ordinal), 'mode': mode, 'status': 'RUNNING'}
     primary = None
     try:
@@ -515,6 +765,13 @@ def record_leg(binary, disk, mode, seconds, pool, local, export, ordinal, nonce=
     except BaseException as exc:
         state['local_receipt_error'] = type(exc).__name__
         if primary is None: primary = exc
+    mirror_warnings = []
+    if work != forensics:
+        mirror_warnings = copy_leg_forensics(work, forensics)
+        for warning in mirror_warnings:
+            print('candidate live campaign: ' + warning, file=sys.stderr)
+    if primary is None and not mirror_warnings and work != forensics:
+        _cleanup_overlay_work(work)
     if primary is not None:
         primary.observation = state
         raise primary
@@ -1315,9 +1572,14 @@ def guest(kind, manifest, bundle, deb, token, export, host_boot, digest, local_e
     if local_evidence != '/tmp/memveil-local-evidence' or export != '/tmp/export':
         raise ValueError('owned evidence mount identity differs')
     local = Path(tempfile.mkdtemp(prefix='campaign-', dir=local_evidence))
+    # Leg work stages on the guest-local overlay: creations on
+    # the mount-backed dirs map to another uid, which the
+    # product's capture-dir ownership guard refuses. The fixed
+    # /tmp parent keeps this independent of any caller TMPDIR.
+    scratch = Path(tempfile.mkdtemp(prefix='campaign-work-', dir='/tmp'))
     def one(mode, seconds, pool=False):
         verify_installed(selected.manifest)
-        observation = record_leg(binary, disk, mode, seconds, pool, local, Path(export), len(result['legs']), token)
+        observation = record_leg(binary, disk, mode, seconds, pool, local, Path(export), len(result['legs']), token, scratch=scratch)
         result['legs'].append(observation)
         write_observations(Path(export) / ('progress-' + observation['ordinal'] + '.json'), result)
         return observation

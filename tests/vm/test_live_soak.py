@@ -422,6 +422,8 @@ def test_failure_retains_capture(tmp_path, monkeypatch, failure):
     m = api()
     local, export = tmp_path / 'local', tmp_path / 'export'
     local.mkdir(); export.mkdir()
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
     error = m.ProductExit(3) if failure == 'product' else ValueError(failure + ' failed')
     def fail(binary, disk, mode, work, seconds, pool=False, observation=None, **kwargs):
         capture = work / 'capture'
@@ -433,8 +435,9 @@ def test_failure_retains_capture(tmp_path, monkeypatch, failure):
         raise error
     monkeypatch.setattr(m, 'leg', fail)
     with pytest.raises(type(error)) as caught:
-        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0)
+        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0, scratch=scratch)
     assert caught.value is error
+    assert (scratch / 'leg-0/capture/checkpoint.json').exists()
     assert (local / 'leg-0/capture/checkpoint.json').exists()
     assert (export / 'failed-0/capture/checkpoint.json').exists()
     receipt = json.loads((local / 'leg-0/observations.json').read_text())
@@ -447,6 +450,8 @@ def test_export_failure_keeps_original_product_exit_and_local_capture(tmp_path, 
     m = api()
     local, export = tmp_path / 'local', tmp_path / 'export'
     local.mkdir(); export.mkdir()
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
     def fail(binary, disk, mode, work, seconds, pool=False, observation=None, **kwargs):
         (work / 'capture').mkdir()
         (work / 'capture/checkpoint.json').write_text('{"synthetic":true}')
@@ -455,8 +460,9 @@ def test_export_failure_keeps_original_product_exit_and_local_capture(tmp_path, 
     monkeypatch.setattr(m, 'leg', fail)
     monkeypatch.setattr(m, 'retain_capture', lambda *a: (_ for _ in ()).throw(OSError('export failed')))
     with pytest.raises(m.ProductExit) as caught:
-        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0)
+        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0, scratch=scratch)
     assert caught.value.product_exit == 3
+    assert (scratch / 'leg-0/capture/checkpoint.json').exists()
     assert (local / 'leg-0/capture/checkpoint.json').exists()
     receipt = json.loads((local / 'leg-0/observations.json').read_text())
     assert receipt['product_exit'] == 3 and receipt['export_error']
@@ -492,6 +498,7 @@ def test_real_leg_applies_measured_top_cadence_guard(tmp_path, monkeypatch, refr
     class Process:
         pid = 123
         stdout = io.BytesIO()
+        stderr = io.BytesIO()
         returncode = None
         def poll(self): return self.returncode
         def send_signal(self, signal): self.returncode = 0
