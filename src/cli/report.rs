@@ -326,17 +326,30 @@ pub fn profiles_manifest_missing(dir: &str) -> bool {
     )
 }
 
+/// Basename of a profiles dir for the lone-install diagnostic.
+///
+/// Directory components never reach stderr (explicit words and
+/// auto-resolved install paths alike); the basename still names
+/// which directory was searched, and the fixed `manifest.txt`
+/// leaf is not caller data. Falls back to the whole input only
+/// for empty or all-slash inputs, which carry no layout.
+fn profiles_dir_basename(dir: &str) -> &str {
+    dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(dir)
+}
+
 /// Lone-install stderr lines: diagnostic naming the searched manifest, fix.
 ///
-/// Both lines carry the verb prefix and newline; the diagnostic names
-/// the exact path the loader probed. Fragments are escaped; write both
-/// lines through the trusted writer so the searched path and the fix
-/// command survive intact.
+/// Both lines carry the verb prefix and newline; the diagnostic
+/// names the searched directory by basename plus the fixed
+/// `manifest.txt` leaf. Fragments are escaped; write both lines
+/// through the trusted writer: neither carries directory
+/// components, so the basename and the fix command survive
+/// intact without leaking filesystem layout.
 pub fn no_profiles_lines(verb: &str, dir: &str) -> Vec<String> {
     vec![
         format!(
             "memveil {verb}: no profiles found: {}/manifest.txt does not exist\n",
-            sanitize_diagnostic(dir)
+            sanitize_diagnostic(profiles_dir_basename(dir))
         ),
         format!(
             "memveil {verb}: fix: run the packaged layout (profiles/ beside bin/), \
@@ -1626,15 +1639,15 @@ mod tests {
     #[test]
     fn no_profiles_lines_shape() {
         // The lone-install shape, byte-exact for both verbs: the
-        // searched manifest path plus the packaged-layout fix.
+        // searched directory by basename plus the fixed leaf,
+        // then the packaged-layout fix.
         for verb in ["doctor", "record"] {
             let lines = super::no_profiles_lines(verb, "/tmp/lone/../profiles");
             assert_eq!(
                 lines,
                 vec![
                     format!(
-                        "memveil {verb}: no profiles found: \
-                         /tmp/lone/../profiles/manifest.txt does not exist\n"
+                        "memveil {verb}: no profiles found: profiles/manifest.txt does not exist\n"
                     ),
                     format!(
                         "memveil {verb}: fix: run the packaged layout (profiles/ beside bin/), \
@@ -1643,11 +1656,33 @@ mod tests {
                 ]
             );
         }
+        // Directory components never survive, explicit or
+        // auto-resolved; a bare name passes through.
+        let lines = super::no_profiles_lines("doctor", "/a/very/long/path");
+        assert!(
+            lines[0].contains("no profiles found: path/manifest.txt does not exist"),
+            "{}",
+            lines[0]
+        );
+        let lines = super::no_profiles_lines("doctor", "profiles");
+        assert!(
+            lines[0].contains("no profiles found: profiles/manifest.txt does not exist"),
+            "{}",
+            lines[0]
+        );
         // A hostile --profiles-dir value stays one escaped line.
         let lines = super::no_profiles_lines("doctor", "/tmp/x\n/tmp/y");
         assert_eq!(lines.len(), 2);
         assert!(
-            lines[0].contains("/tmp/x\\n/tmp/y/manifest.txt"),
+            lines[0].contains("no profiles found: y/manifest.txt does not exist"),
+            "{}",
+            lines[0]
+        );
+        assert_eq!(lines[0].matches('\n').count(), 1);
+        // A control byte in the basename itself escapes too.
+        let lines = super::no_profiles_lines("doctor", "/tmp/a\nb");
+        assert!(
+            lines[0].contains("no profiles found: a\\nb/manifest.txt does not exist"),
             "{}",
             lines[0]
         );

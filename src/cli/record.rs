@@ -398,10 +398,11 @@ pub fn run_record_with(root: &str, profiles_dir: &str, opts: RecordOptions) -> i
         && profiles_manifest_missing(profiles_dir)
     {
         // Lone install: the collector refused on the profiles load
-        // and the manifest is absent, so name the searched path and
-        // the packaged-layout fix. Matching on the refused load
-        // keeps every earlier gate (budget, floor, evidence) ahead
-        // of this shape, exactly as before.
+        // and the manifest is absent, so name the searched
+        // directory by basename and the packaged-layout fix.
+        // Matching on the refused load keeps every earlier gate
+        // (budget, floor, evidence) ahead of this shape,
+        // exactly as before.
         for line in no_profiles_lines("record", profiles_dir) {
             if write_stderr_trusted(&line).is_err() {
                 return EXIT_INTERNAL;

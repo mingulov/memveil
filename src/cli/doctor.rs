@@ -215,8 +215,9 @@ fn doctor_failed(detail: &str) -> i64 {
 
 /// Report a missing profiles tree on stderr; return EXIT_UNAVAILABLE.
 ///
-/// The lone-install shape: the searched manifest path plus the
-/// packaged-layout fix, written trusted so the path survives.
+/// The lone-install shape: the searched directory by basename
+/// plus the fixed leaf and the packaged-layout fix, written
+/// trusted so the basename and fix survive intact.
 fn doctor_unavailable_profiles(dir: &str) -> i64 {
     for line in no_profiles_lines("doctor", dir) {
         if write_stderr_trusted(&line).is_err() {

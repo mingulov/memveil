@@ -120,13 +120,9 @@ fn lone_binary() -> PathBuf {
 #[test]
 fn t32_lone_binary_doctor_and_record() {
     let lone = lone_binary();
-    let prefix = lone
-        .parent()
-        .expect("temp parent")
-        .to_str()
-        .expect("utf-8")
-        .to_string();
-    let manifest = format!("{prefix}/../profiles/manifest.txt");
+    // The auto-resolved install path never reaches stderr: only
+    // the searched directory basename plus the fixed leaf.
+    let manifest = "profiles/manifest.txt";
     // Doctor names the searched manifest plus the fix, exit 3.
     let out = run(&lone, &["doctor"]);
     assert_eq!(out.status.code(), Some(3));
@@ -155,6 +151,31 @@ fn t32_lone_binary_doctor_and_record() {
     );
     assert!(!cap.exists(), "refused record left a capture dir");
     let _ = std::fs::remove_dir_all(lone.parent().expect("temp parent"));
+}
+
+#[test]
+fn t32_explicit_profiles_dir_scrubs_parents() {
+    // An explicit --profiles-dir also prints basename-only: the
+    // caller typed the full path, so echoing parents leaks
+    // layout for no diagnostic gain. Exit stays 3 with fix.
+    let dir = tmp_dir("explicit");
+    let deep = dir.join("r100-private").join("no-profiles");
+    std::fs::create_dir_all(&deep).expect("mkdir");
+    let deep_str = deep.to_str().expect("utf-8");
+    let out = run(&bin(), &["doctor", "--profiles-dir", deep_str]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "memveil doctor: no profiles found: no-profiles/manifest.txt does not exist\n\
+         memveil doctor: fix: run the packaged layout (profiles/ beside bin/), \
+         or pass --profiles-dir DIR\n"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("r100-private"),
+        "parent components leaked"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
