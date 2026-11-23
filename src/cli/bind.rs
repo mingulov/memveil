@@ -6,7 +6,8 @@ use crate::capture::run::{MAX_PROFILE_DOC_BYTES, parse_requested_caps, resolve_o
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::qualify::publish_receipt;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic, write_stderr,
+    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, invalid_capability_message,
+    sanitize_diagnostic, write_stderr,
 };
 use crate::platform::artifact_files::join_root;
 use crate::platform::evidence::{KernelInfo, detect_environment, parse_kernel_triple};
@@ -153,6 +154,15 @@ pub fn parse_bind_args(args: &[String]) -> Result<BindOptions, CliError> {
     if opts.output.is_empty() {
         return Err(CliError {
             message: "missing --output".to_string(),
+        });
+    }
+    // A malformed capability list is a usage error (exit 2),
+    // like record: admission refusals (exit 3) are reserved
+    // for wellformed lists the world cannot satisfy.
+    let ask = parse_requested_caps(&opts.capabilities);
+    if !ask.ok {
+        return Err(CliError {
+            message: invalid_capability_message(&ask.err),
         });
     }
     Ok(opts)
@@ -823,6 +833,22 @@ mod tests {
         let err = parse_bind_args(&["--output".to_string(), "x".to_string(), "stray".to_string()])
             .expect_err("stray rejects");
         assert_eq!(err.message, "unexpected argument: stray");
+    }
+
+    #[test]
+    fn bind_args_bad_capability_lists_ids() {
+        let err = parse_bind_args(&[
+            "--output".to_string(),
+            "x".to_string(),
+            "--capability".to_string(),
+            "bogus".to_string(),
+        ])
+        .expect_err("bad caps reject");
+        assert_eq!(
+            err.message,
+            "unknown capability: bogus; valid capabilities: attempt-trace, mapping-lifecycle, \
+             copy-actual, conversion-observe, conversion-journal, all"
+        );
     }
 
     #[test]

@@ -44,6 +44,9 @@ mirrored by its offline test): swap them in the same
 pass, from the same seal, or its staging legs refuse.
 """
 
+import os
+import tomllib
+
 # Retained seal manifest digest (sha256 of the sealed
 # candidate.json bytes) and manifest schema.
 CANDIDATE_SHA256 = "39f4a22721dba8a6dfab751add6067deb7874689" \
@@ -136,3 +139,18 @@ def seal_pins():
     pins = candidate_pins()
     pins["files"] = seal_files()
     return pins
+
+
+def dist_bundle_tarball(repo):
+    """The checkout dist/ seal's bundle tarball path.
+
+    The packager tags the default bundle memveil-<version>
+    from the built binary (which reports Cargo.toml), so
+    the default resolves from the same manifest instead
+    of duplicating the version: a custom --tag still
+    needs an explicit path, like before.
+    """
+    with open(os.path.join(repo, "Cargo.toml"), "rb") as handle:
+        version = tomllib.load(handle)["package"]["version"]
+    return os.path.join(
+        repo, "dist", "memveil-%s.tar.gz" % version)

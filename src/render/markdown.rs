@@ -90,7 +90,7 @@ pub fn render_markdown(rep: &Report, device_filter: &str) -> String {
     let mut out = String::from("# Memveil report `");
     out.push_str(&escape_text(&rep.session_id));
     out.push_str("`\n\n");
-    for line in summary_lines(rep, escape_markdown) {
+    for line in summary_lines(rep, escape_markdown, &filt) {
         out.push_str("- ");
         out.push_str(&line);
         out.push('\n');

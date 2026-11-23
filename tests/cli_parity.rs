@@ -1246,14 +1246,35 @@ fn bind_refusals() {
         misused.stderr,
         b"memveil bind-profile: bad --profile-id: bad id\n"
     );
-    // Capabilities without a record channel refuse.
-    for cap in ["bogus-cap", "conversion-observe"] {
-        let bad = run(
-            &bin(),
-            &["bind-profile", "--output", path, "--capability", cap],
-        );
-        assert_eq!(bad.status.code(), Some(3), "cap {cap}");
-    }
+    // A malformed capability list is a usage error listing the
+    // valid ids; a wellformed id without a record channel
+    // refuses admission.
+    let bad = run(
+        &bin(),
+        &[
+            "bind-profile",
+            "--output",
+            path,
+            "--capability",
+            "bogus-cap",
+        ],
+    );
+    assert_eq!(bad.status.code(), Some(2));
+    assert_eq!(
+        bad.stderr,
+        b"memveil bind-profile: unknown capability: bogus-cap; valid capabilities: attempt-trace, mapping-lifecycle, copy-actual, conversion-observe, conversion-journal, all\n"
+    );
+    let bad = run(
+        &bin(),
+        &[
+            "bind-profile",
+            "--output",
+            path,
+            "--capability",
+            "conversion-observe",
+        ],
+    );
+    assert_eq!(bad.status.code(), Some(3));
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

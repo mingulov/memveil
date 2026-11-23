@@ -19,8 +19,8 @@ use crate::capture::run::{
 };
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic,
-    write_capture_location, write_stderr,
+    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, invalid_capability_message,
+    sanitize_diagnostic, write_capture_location, write_stderr,
 };
 use crate::model::session::parse_session;
 use crate::platform::artifact_files::{
@@ -168,6 +168,15 @@ pub fn parse_qualify_args(args: &[String]) -> Result<QualifyOptions, CliError> {
     if opts.output.is_empty() {
         return Err(CliError {
             message: "missing --output".to_string(),
+        });
+    }
+    // A malformed capability list is a usage error (exit 2),
+    // like record: admission refusals (exit 3) are reserved
+    // for wellformed lists the world cannot satisfy.
+    let ask = parse_requested_caps(&opts.capabilities);
+    if !ask.ok {
+        return Err(CliError {
+            message: invalid_capability_message(&ask.err),
         });
     }
     Ok(opts)
@@ -1124,6 +1133,17 @@ mod tests {
             err.message.contains("unknown option: --bogus"),
             "{}",
             err.message
+        );
+    }
+
+    #[test]
+    fn qualify_args_bad_capability_lists_ids() {
+        let err = parse_qualify_args(&args(&["--output", "out", "--capability", "bogus"]))
+            .expect_err("bad caps reject");
+        assert_eq!(
+            err.message,
+            "unknown capability: bogus; valid capabilities: attempt-trace, mapping-lifecycle, \
+             copy-actual, conversion-observe, conversion-journal, all"
         );
     }
 

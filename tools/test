@@ -1143,8 +1143,19 @@ PYEOF
     expect_error "missing-dir" 2 report "$ROOT/tests/fixtures/reader/no-such"
     expect_error "unknown-format" 2 report --format yaml \
         "$ROOT/tests/fixtures/attempts"
-    expect_error "equals-format" 2 report --format=json \
-        "$ROOT/tests/fixtures/attempts"
+    "$BIN" report --format=json "$ROOT/tests/fixtures/attempts" \
+        >"$TMP/out" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "equals-format: --flag=value refused, want accept (exit 0)"
+    elif [ ! -s "$TMP/out" ]; then
+        report_bad "equals-format: accepted but printed no report"
+    elif [ -s "$TMP/err" ]; then
+        report_bad "equals-format: stderr must be empty on success"
+    elif ! head -1 "$TMP/out" | grep -q "^{"; then
+        report_bad "equals-format: stdout is not a JSON report"
+    else
+        report_ok "equals-format (exit 0, --flag=value accepted)"
+    fi
     expect_error "unknown-flag" 2 report --nope \
         "$ROOT/tests/fixtures/attempts"
     expect_error "report-no-dir" 2 report
@@ -1171,10 +1182,10 @@ PYEOF
     "$BIN" --version >"$TMP/out" 2>"$TMP/err"
     if [ "$?" -ne 0 ]; then
         report_bad "version: must exit 0"
-    elif [ "$(cat "$TMP/out")" != "memveil-0.1.1" ]; then
+    elif [ "$(cat "$TMP/out")" != "memveil-0.2.0" ]; then
         report_bad "version: unexpected output '$(cat "$TMP/out")'"
     else
-        report_ok "version (memveil-0.1.1)"
+        report_ok "version (memveil-0.2.0)"
     fi
 
     # Match sonames only: resolved paths inherit the checkout directory, so a path containing "bpf" is not linkage.
@@ -2098,7 +2109,7 @@ suite_qualify() {
     # run refuses before the smoke on every host (no discovery).
     qexpect no-object 3 "no object: pass --object PATH" -- \
         --output "$TMP/q-noobj" --bridge "$TMP/nolib.so"
-    qexpect bad-capability 3 "bad capability list" -- \
+    qexpect bad-capability 2 "bad capability list; valid capabilities:" -- \
         --output "$TMP/q-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
@@ -2144,7 +2155,7 @@ suite_qualify() {
         --object "$ROOT/tests/fixtures/elf/ok.o"
     bexpect bind-bad-id 2 "bad --profile-id" -- \
         --output "$TMP/b-id.json" --profile-id 'has space'
-    bexpect bind-bad-capability 3 "bad capability list" -- \
+    bexpect bind-bad-capability 2 "bad capability list; valid capabilities:" -- \
         --output "$TMP/b-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'

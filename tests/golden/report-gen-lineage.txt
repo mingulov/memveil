@@ -4,7 +4,7 @@ summary pool: used unavailable of unavailable capacity
 summary scope: proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded
 verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld
-memveil report gen-lineage-session (synthetic, engine memveil-0.1.1)
+memveil report gen-lineage-session (synthetic, engine memveil-0.2.0)
 window: [1000000000,2500000000)
 duration: 1.500000000 s (1500000000 ns)
 environment: mode=unknown detection=unverified attestation=not_performed (recorded, not verified by memveil) evidence=0

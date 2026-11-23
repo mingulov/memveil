@@ -146,15 +146,19 @@ def verify_seal(candidate_path, bundle_path, pins=None):
     for name, want in pins["files"].items():
         if files.get(name) != want:
             raise ValueError("candidate file drift: %s" % name)
+    # The manifest bytes are already digest-bound above,
+    # so this lookup only navigates them: the bundle entry
+    # is the one carrying the pinned bytes, under whatever
+    # name the seal tagged it (legacy bundle.tar.gz or
+    # versioned memveil-<version>.tar.gz).
     bundle = None
     for entry in manifest.get("artifacts", []):
-        if entry.get("name") == "bundle.tar.gz":
+        if entry.get("sha256") == pins["bundle_sha256"] \
+                and str(entry.get("size")) \
+                == str(pins["bundle_size"]):
             bundle = entry
     if bundle is None:
         raise ValueError("candidate bundle entry missing")
-    if bundle.get("sha256") != pins["bundle_sha256"] \
-            or str(bundle.get("size")) != str(pins["bundle_size"]):
-        raise ValueError("candidate bundle entry drift")
     if not bundle_path or not os.path.isfile(bundle_path):
         raise ValueError("candidate bundle missing: %r" % (bundle_path,))
     if sha_file(bundle_path) != pins["bundle_sha256"]:
@@ -166,9 +170,18 @@ def verify_seal(candidate_path, bundle_path, pins=None):
     except (tarfile.TarError, OSError) as exc:
         raise ValueError("candidate bundle unreadable: %s" % exc)
     try:
-        members = {m.name: m for m in archive.getmembers()
-                   if m.isfile()}
-        inner = members.get("bundle/MANIFEST.json")
+        entries = archive.getmembers()
+        members = {m.name: m for m in entries if m.isfile()}
+        # The tarball bytes are already digest-bound above,
+        # so the top dir is authenticated: read it from the
+        # members instead of pinning one seal's tag.
+        tops = {m.name.rstrip("/").split("/")[0]
+                for m in entries}
+        if len(tops) != 1:
+            raise ValueError(
+                "candidate bundle has no single top dir")
+        root = tops.pop() + "/"
+        inner = members.get(root + "MANIFEST.json")
         if inner is None:
             raise ValueError("candidate bundle lacks inner manifest")
         got = hashlib.sha256(
@@ -176,7 +189,7 @@ def verify_seal(candidate_path, bundle_path, pins=None):
         if got != pins["bundle_manifest_sha256"]:
             raise ValueError("candidate inner manifest drift")
         for name, want in pins["files"].items():
-            member = members.get("bundle/" + name)
+            member = members.get(root + name)
             if member is None:
                 raise ValueError("candidate bundle lacks %s" % name)
             got = hashlib.sha256(
@@ -285,8 +298,15 @@ def verify_profile(repo, bundle_path):
     except (tarfile.TarError, OSError) as exc:
         raise ValueError("candidate bundle unreadable: %s" % exc)
     try:
+        entries = archive.getmembers()
+        tops = {m.name.rstrip("/").split("/")[0]
+                for m in entries}
+        if len(tops) != 1:
+            raise ValueError(
+                "candidate bundle has no single top dir")
         member = archive.getmember(
-            "bundle/profiles/linux-x86_64-7.0-reference.json")
+            tops.pop() + "/profiles/"
+            "linux-x86_64-7.0-reference.json")
         if not member.isfile():
             raise ValueError("bound profile member not a file")
         member_bytes = archive.extractfile(member).read()

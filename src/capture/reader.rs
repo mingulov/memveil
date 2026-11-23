@@ -85,11 +85,11 @@ pub struct ReadError {
 
 /// Remedy line for a capture-open failure cause, when one applies.
 ///
-/// Matches the fixed open-failure causes exactly (plus the two
-/// member-ownership spellings by suffix): those strings carry no
-/// caller bytes, so the CLI prints both lines unscrubbed.
-/// Mid-stream and parse failures may echo capture bytes and stay
-/// single-line.
+/// Matches the fixed open-failure causes exactly (plus the
+/// member-ownership and member-symlink spellings by suffix):
+/// those strings carry no caller bytes, so the CLI prints
+/// both lines unscrubbed. Mid-stream and parse failures may
+/// echo capture bytes and stay single-line.
 pub fn read_remedy(cause: &str) -> Option<&'static str> {
     match cause {
         "capture directory does not exist" => {
@@ -118,6 +118,8 @@ pub fn read_remedy(cause: &str) -> Option<&'static str> {
                 Some(
                     "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
                 )
+            } else if cause.ends_with(": member is a symlink") {
+                Some("replace the symlinked capture member with a regular file")
             } else {
                 None
             }
@@ -2158,7 +2160,22 @@ pub fn read_capture_os(
         out.devices.insert(device.device_id.clone());
     }
     if !recover {
-        out.fd = open_regular_stream_bytes(&join_member(raw, b"events.ndjson"), "events.ndjson")?;
+        // A finalized session without a readable event file is the
+        // finalized twin of the checkpoint path's missing member:
+        // map it to the same actionable cause (with its remedy)
+        // instead of the bare open failure.
+        match open_regular_stream_bytes(&join_member(raw, b"events.ndjson"), "events.ndjson") {
+            Ok(fd) => out.fd = fd,
+            Err(e) if e.message.as_str() == "events.ndjson: cannot open" => {
+                return Err(ReadError {
+                    code: READ_INVALID,
+                    line_no: 0,
+                    message: "not a memveil capture: expected session.json/events.ndjson"
+                        .to_string(),
+                });
+            }
+            Err(e) => return Err(e),
+        }
     }
     if recover && !allow_partial {
         while out.has_more()? {
@@ -2782,13 +2799,14 @@ mod tests {
 
     #[test]
     fn reader_missing() {
-        // Contract: a missing dir or a capture without
-        // session.json enters the recovery path, whose open
-        // failures are READ_INVALID; only a finalized capture
-        // with a missing events file is READ_IO.
+        // Contract: missing members refuse as READ_INVALID on
+        // both paths: the recovery path maps its open failures,
+        // and a finalized capture with a missing events file
+        // maps to the same actionable cause (same text, same
+        // code, since callers match on code, never text).
         let limits = default_limits();
         expect_error(&fixture("no-such-dir"), false, limits, READ_INVALID, 0);
-        expect_error(&fixture("missing-events"), false, limits, READ_IO, 0);
+        expect_error(&fixture("missing-events"), false, limits, READ_INVALID, 0);
         expect_error(&fixture("missing-session"), false, limits, READ_INVALID, 0);
     }
 
@@ -3822,6 +3840,14 @@ mod tests {
                 "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
             ),
             (
+                "checkpoint.json: member is a symlink",
+                "replace the symlinked capture member with a regular file",
+            ),
+            (
+                "events.ndjson: member is a symlink",
+                "replace the symlinked capture member with a regular file",
+            ),
+            (
                 "not a memveil capture: expected session.json/events.ndjson",
                 "pass a capture directory (session.json and events.ndjson)",
             ),
@@ -3845,6 +3871,7 @@ mod tests {
             "line 1: ValidationError(what=x, message=y)",
             "no final session; verified checkpoint prefix 1155 bytes; use --allow-partial to recover",
             "events.ndjson: input is not a regular file",
+            "events.ndjson: cannot open",
             "capture directory does not exist, friend",
         ] {
             assert_eq!(read_remedy(bare), None, "{bare}");
@@ -3870,6 +3897,36 @@ mod tests {
             err.message,
             "not a memveil capture: expected session.json/events.ndjson"
         );
+        assert!(read_remedy(&err.message).is_some());
+        // A finalized session without its event file is the
+        // finalized twin of the missing member: same cause,
+        // same remedy.
+        let lone = tmp.path().join("lone-session");
+        std::fs::create_dir(&lone).expect("mkdir lone");
+        std::fs::write(
+            lone.join("session.json"),
+            fixture_bytes("attempts/session.json"),
+        )
+        .expect("write session");
+        let err = read_capture(lone.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(
+            err.message,
+            "not a memveil capture: expected session.json/events.ndjson"
+        );
+        assert!(read_remedy(&err.message).is_some());
+        // A symlinked checkpoint member names the link, not a
+        // missing capture, and carries its own remedy.
+        let linked = tmp.path().join("linked-ckpt");
+        std::fs::create_dir(&linked).expect("mkdir linked");
+        std::fs::write(linked.join("real-checkpoint.json"), b"{}").expect("write real");
+        std::os::unix::fs::symlink(
+            linked.join("real-checkpoint.json"),
+            linked.join("checkpoint.json"),
+        )
+        .expect("symlink checkpoint");
+        std::fs::write(linked.join("events.ndjson"), b"").expect("write events");
+        let err = read_capture(linked.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "checkpoint.json: member is a symlink");
         assert!(read_remedy(&err.message).is_some());
     }
 }

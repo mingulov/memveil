@@ -140,9 +140,19 @@ def materialize(repo, work, candidate_path, bundle_path):
     except (tarfile.TarError, OSError) as exc:
         raise ValueError("candidate bundle unreadable: %s" % exc)
     try:
-        members = {m.name: m for m in archive.getmembers()
-                   if m.isfile()}
-        inner = members.get("bundle/MANIFEST.json")
+        entries = archive.getmembers()
+        members = {m.name: m for m in entries if m.isfile()}
+        # The tarball bytes are already digest-bound by the
+        # binding check above, so the top dir is
+        # authenticated: read it from the members instead
+        # of pinning one seal's tag.
+        tops = {m.name.rstrip("/").split("/")[0]
+                for m in entries}
+        if len(tops) != 1:
+            raise ValueError(
+                "candidate bundle has no single top dir")
+        root = tops.pop() + "/"
+        inner = members.get(root + "MANIFEST.json")
         if inner is None:
             raise ValueError(
                 "candidate bundle lacks inner manifest")
@@ -169,7 +179,7 @@ def materialize(repo, work, candidate_path, bundle_path):
                  "bpf/swiotlb_copy.bpf.o": "copy.bpf.o",
                  seal.PROFILE_MEMBER: "profile.json"}
         for member, want in sorted(member_shas.items()):
-            entry = members.get("bundle/" + member)
+            entry = members.get(root + member)
             if entry is None:
                 raise ValueError(
                     "candidate bundle lacks %s" % member)

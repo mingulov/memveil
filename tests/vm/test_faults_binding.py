@@ -39,7 +39,7 @@ from test_record3 import _events  # noqa: E402
 
 REPO = faults.REPO
 DIST_MANIFEST = os.path.join(REPO, "dist", "candidate.json")
-DIST_BUNDLE = os.path.join(REPO, "dist", "bundle.tar.gz")
+DIST_BUNDLE = pins.dist_bundle_tarball(REPO)
 SEAL_FILES = ("bin/memveil", "bpf/swiotlb_attempt.bpf.o",
               "bpf/swiotlb_copy.bpf.o", "bpf/swiotlb_lifecycle.bpf.o",
               "profiles/linux-x86_64-7.0-reference.json")
@@ -253,28 +253,31 @@ SYNTH_INNER = b'{"bundle": "synthetic"}'
 def make_seal_pair(tmp, tag="pair", member_over=None, omit=(),
                    inner=SYNTH_INNER, manifest_files=None,
                    manifest_over=None, bundle_sha=None,
-                   bundle_size=None, raw_manifest=None):
+                   bundle_size=None, raw_manifest=None,
+                   entry_name="bundle.tar.gz", root="bundle"):
     """Craft a seal pair plus pins for the pristine bytes.
 
     Pins always describe the unflawed pair, so each flaw
     refuses at its own check with its own reason; the
     manifest digest pin follows the crafted manifest bytes
     so manifest-level flaws reach their own checks instead
-    of stopping at the digest.
+    of stopping at the digest. entry_name/root spell the
+    artifact name and tarball top dir (legacy defaults;
+    versioned seals pass their own tag).
     """
     members = dict(SYNTH_MEMBERS)
     if member_over:
         members.update(member_over)
     for gone in omit:
         members.pop(gone, None)
-    bundle_path = os.path.join(tmp, "%s-bundle.tar.gz" % tag)
+    bundle_path = os.path.join(tmp, "%s-%s" % (tag, entry_name))
     with tarfile.open(bundle_path, "w:gz") as archive:
         if inner is not None:
-            info = tarfile.TarInfo("bundle/MANIFEST.json")
+            info = tarfile.TarInfo(root + "/MANIFEST.json")
             info.size = len(inner)
             archive.addfile(info, io.BytesIO(inner))
         for name in sorted(members):
-            info = tarfile.TarInfo("bundle/" + name)
+            info = tarfile.TarInfo(root + "/" + name)
             info.size = len(members[name])
             archive.addfile(info, io.BytesIO(members[name]))
     manifest_path = os.path.join(tmp, "%s-candidate.json" % tag)
@@ -291,7 +294,7 @@ def make_seal_pair(tmp, tag="pair", member_over=None, omit=(),
             "bundle_manifest_sha256": sha_bytes(inner)
             if inner is not None else "0" * 64,
             "files": files,
-            "artifacts": [{"name": "bundle.tar.gz",
+            "artifacts": [{"name": entry_name,
                            "sha256": bundle_sha or faults.sha_file(
                                bundle_path),
                            "size": bundle_size if bundle_size
@@ -398,14 +401,69 @@ def test_seal_refuses_bundle_entry_flaws(tmp_path):
         tmp, tag="noentry", manifest_over={"artifacts": []})
     with pytest.raises(ValueError, match="bundle entry missing"):
         faults.verify_seal(flawed, bundle_path, pins)
+    # The entry lookup is by pinned bytes, not by name, so
+    # an entry carrying the wrong bytes is the same refusal
+    # as no entry: the pinned bundle entry is missing.
     flawed, _, pins = make_seal_pair(
         tmp, tag="entrysha", bundle_sha="0" * 64)
-    with pytest.raises(ValueError, match="bundle entry drift"):
+    with pytest.raises(ValueError, match="bundle entry missing"):
         faults.verify_seal(flawed, bundle_path, pins)
     flawed, _, pins = make_seal_pair(
         tmp, tag="entrysize", bundle_size=-1)
-    with pytest.raises(ValueError, match="bundle entry drift"):
+    with pytest.raises(ValueError, match="bundle entry missing"):
         faults.verify_seal(flawed, bundle_path, pins)
+
+
+def test_seal_accepts_versioned_name_and_root(tmp_path):
+    tmp = str(tmp_path)
+    manifest_path, bundle_path, pins = make_seal_pair(
+        tmp, tag="versioned", entry_name="memveil-0.2.0.tar.gz",
+        root="memveil-0.2.0")
+    binding = faults.verify_seal(manifest_path, bundle_path, pins)
+    assert binding["files"] == pins["files"]
+    assert binding["bundle"]["sha256"] == pins["bundle_sha256"]
+    assert binding["bundle"]["size"] == pins["bundle_size"]
+
+
+def test_seal_refuses_multi_root_tarball(tmp_path):
+    tmp = str(tmp_path)
+    members = dict(SYNTH_MEMBERS)
+    bundle_path = os.path.join(tmp, "split-bundle.tar.gz")
+    with tarfile.open(bundle_path, "w:gz") as archive:
+        info = tarfile.TarInfo("bundle/MANIFEST.json")
+        info.size = len(SYNTH_INNER)
+        archive.addfile(info, io.BytesIO(SYNTH_INNER))
+        for nth, name in enumerate(sorted(members)):
+            top = "bundle" if nth % 2 == 0 else "other"
+            info = tarfile.TarInfo(top + "/" + name)
+            info.size = len(members[name])
+            archive.addfile(info, io.BytesIO(members[name]))
+    manifest = {
+        "schema": "memveil-candidate/2",
+        "source": {"commit": "c" * 40, "tree": "t" * 40},
+        "bundle_manifest_sha256": sha_bytes(SYNTH_INNER),
+        "files": {name: sha_bytes(data)
+                  for name, data in members.items()},
+        "artifacts": [{"name": "split-bundle.tar.gz",
+                       "sha256": faults.sha_file(bundle_path),
+                       "size": os.path.getsize(bundle_path)}],
+    }
+    manifest_path = os.path.join(tmp, "split-candidate.json")
+    with open(manifest_path, "w") as handle:
+        json.dump(manifest, handle, sort_keys=True)
+    pins = {
+        "candidate_sha256": faults.sha_file(manifest_path),
+        "schema": "memveil-candidate/2",
+        "source_commit": "c" * 40,
+        "source_tree": "t" * 40,
+        "bundle_manifest_sha256": sha_bytes(SYNTH_INNER),
+        "files": {name: sha_bytes(data)
+                  for name, data in members.items()},
+        "bundle_sha256": faults.sha_file(bundle_path),
+        "bundle_size": os.path.getsize(bundle_path),
+    }
+    with pytest.raises(ValueError, match="no single top dir"):
+        faults.verify_seal(manifest_path, bundle_path, pins)
 
 
 def test_seal_refuses_bundle_byte_flaws(tmp_path):

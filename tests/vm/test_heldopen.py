@@ -2180,7 +2180,7 @@ def main(argv):
     parser.add_argument("--out", default="")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--bundle", default="",
-                        help="retained bundle.tar.gz path "
+                        help="retained bundle tarball path "
                              "(required when armed or probing)")
     parser.add_argument("--candidate", default="",
                         help="retained candidate.json path "

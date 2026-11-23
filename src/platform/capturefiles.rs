@@ -217,6 +217,13 @@ impl RecoveryFiles {
             )
         };
         if fd < 0 {
+            // Read errno before anything can clobber it: with
+            // O_NOFOLLOW on a directory fd plus a bare name, ELOOP
+            // names exactly a symlinked member, not a missing one.
+            let no = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if no == libc::ELOOP {
+                return Err(CaptureError::new(format!("{name}: member is a symlink")));
+            }
             return Err(CaptureError::new(format!(
                 "{name}: cannot open regular capture file"
             )));
@@ -504,10 +511,7 @@ mod tests {
         .expect("symlink events");
         let mut files = RecoveryFiles::new();
         let err = files.open(tmp.as_str()).unwrap_err();
-        assert_eq!(
-            err.message,
-            "events.ndjson: cannot open regular capture file"
-        );
+        assert_eq!(err.message, "events.ndjson: member is a symlink");
     }
 
     #[test]

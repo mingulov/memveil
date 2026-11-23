@@ -2039,9 +2039,9 @@ mod tests {
         assert_eq!(rep.session_id, "attempts-3-session");
         assert!(rep.synthetic);
         assert_eq!(rep.engine_version, ENGINE_VERSION);
-        // Parity pin: the single-sourced version stays
-        // byte-identical with Mojo's ENGINE_VERSION.
-        assert_eq!(crate::ENGINE_VERSION, "memveil-0.1.1");
+        // Version pin: fails on a Cargo.toml bump until
+        // every literal copy is moved with it.
+        assert_eq!(crate::ENGINE_VERSION, "memveil-0.2.0");
         assert_eq!(rep.metrics.len(), 14);
         let attempts = metric_by_name(&rep, "bounce_attempts", "");
         assert!(attempts.has_value);

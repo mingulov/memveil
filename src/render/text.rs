@@ -231,26 +231,43 @@ fn fmt_bytes(v: Option<u64>) -> String {
     }
 }
 
-/// Total pool use and capacity across every pool row.
+/// Combined pool occupancy over pools with both gauges.
 ///
-/// Pool gauges carry per-pool dimensions only, so the headline
-/// sums each half over the measured rows; a half with no
-/// measured row stays unavailable. Saturating: hostile totals
-/// clamp instead of wrapping.
-fn pool_totals(rep: &Report) -> (Option<u64>, Option<u64>) {
-    let mut used: Option<u64> = None;
-    let mut cap: Option<u64> = None;
+/// A pool joins the sums only when it measured both halves;
+/// a half from a pool missing the other half never joins
+/// (unknown is not zero, and halves from different pools
+/// never combine). Returns the used and capacity sums over
+/// the fully gauged pools plus the fully gauged count and
+/// the pools seen. Saturating: hostile totals clamp instead
+/// of wrapping.
+fn pool_occupancy(rep: &Report) -> (Option<u64>, Option<u64>, usize, usize) {
+    use std::collections::BTreeMap;
+    let mut gauges: BTreeMap<&str, (Option<u64>, Option<u64>)> = BTreeMap::new();
     for m in &rep.metrics {
-        if !m.has_pool_id || !m.has_value {
+        if !m.has_pool_id {
+            continue;
+        }
+        let entry = gauges.entry(m.pool_id.as_str()).or_insert((None, None));
+        if !m.has_value {
             continue;
         }
         if m.name == "pool_used_bytes" {
-            used = Some(used.unwrap_or(0).saturating_add(m.value));
+            entry.0 = Some(entry.0.unwrap_or(0).saturating_add(m.value));
         } else if m.name == "pool_capacity_bytes" {
-            cap = Some(cap.unwrap_or(0).saturating_add(m.value));
+            entry.1 = Some(entry.1.unwrap_or(0).saturating_add(m.value));
         }
     }
-    (used, cap)
+    let mut used: Option<u64> = None;
+    let mut cap: Option<u64> = None;
+    let mut full = 0;
+    for (u, c) in gauges.values() {
+        if let (Some(u), Some(c)) = (u, c) {
+            full += 1;
+            used = Some(used.unwrap_or(0).saturating_add(*u));
+            cap = Some(cap.unwrap_or(0).saturating_add(*c));
+        }
+    }
+    (used, cap, full, gauges.len())
 }
 
 /// Plain 4-5 line summary answering bouncing, how much, which device.
@@ -260,9 +277,15 @@ fn pool_totals(rep: &Report) -> (Option<u64>, Option<u64>) {
 /// `esc` neutralizes device text for the calling format. The
 /// copies line appears only when a copy channel measured
 /// something; the scope line always states what the numbers do
-/// and do not prove. Whole-capture truth: the display device
-/// filter does not narrow these lines.
-pub fn summary_lines<E: Fn(&str) -> String>(rep: &Report, esc: E) -> Vec<String> {
+/// and do not prove. Whole-capture truth except for one line:
+/// the resolved display device id narrows `summary devices:`
+/// to the recorded devices it names (empty narrows nothing),
+/// while attempts, copies, pool, and scope stay global.
+pub fn summary_lines<E: Fn(&str) -> String>(
+    rep: &Report,
+    esc: E,
+    device_filter: &str,
+) -> Vec<String> {
     let attempts = global_metric_text(rep, "bounce_attempts");
     let attempts_known = global_metric_value(rep, "bounce_attempts").is_some();
     let bytes = match global_metric_value(rep, "requested_bounce_bytes") {
@@ -285,6 +308,9 @@ pub fn summary_lines<E: Fn(&str) -> String>(rep: &Report, esc: E) -> Vec<String>
     } else {
         let mut parts = Vec::new();
         for d in &rep.devices {
+            if !device_filter.is_empty() && d.device_id != device_filter {
+                continue;
+            }
             let a = fmt_count(device_metric_value(rep, "bounce_attempts", &d.device_id));
             let b = fmt_bytes(device_metric_value(
                 rep,
@@ -297,7 +323,11 @@ pub fn summary_lines<E: Fn(&str) -> String>(rep: &Report, esc: E) -> Vec<String>
                 esc(&d.name)
             ));
         }
-        lines.push(format!("summary devices: {}", parts.join("; ")));
+        if parts.is_empty() {
+            lines.push("summary devices: no recorded device matches the filter".to_string());
+        } else {
+            lines.push(format!("summary devices: {}", parts.join("; ")));
+        }
     }
     let to_bounce = global_metric_value(rep, "copy_original_to_bounce_bytes");
     let to_original = global_metric_value(rep, "copy_bounce_to_original_bytes");
@@ -309,12 +339,23 @@ pub fn summary_lines<E: Fn(&str) -> String>(rep: &Report, esc: E) -> Vec<String>
             fmt_bytes(to_original)
         ));
     }
-    let (used, cap) = pool_totals(rep);
-    lines.push(format!(
-        "summary pool: used {} of {} capacity",
-        fmt_bytes(used),
-        fmt_bytes(cap)
-    ));
+    let (used, cap, full, pools) = pool_occupancy(rep);
+    if full == pools {
+        // Covers no pools too: both halves unavailable.
+        lines.push(format!(
+            "summary pool: used {} of {} capacity",
+            fmt_bytes(used),
+            fmt_bytes(cap)
+        ));
+    } else if full == 0 {
+        lines.push("summary pool: occupancy unknown (no pool has both gauges)".to_string());
+    } else {
+        lines.push(format!(
+            "summary pool: used {} of {} capacity (partial: {full} of {pools} pools fully gauged)",
+            fmt_bytes(used),
+            fmt_bytes(cap)
+        ));
+    }
     let scope = match (attempts_known, copies_known) {
         (true, false) => {
             "proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded"
@@ -380,7 +421,7 @@ pub fn render_compact(rep: &Report) -> String {
 pub fn render_text(rep: &Report, device_filter: &str) -> String {
     let filt = resolve_device_filter(&rep.devices, device_filter);
     let mut out = String::new();
-    for line in summary_lines(rep, escape_text) {
+    for line in summary_lines(rep, escape_text, &filt) {
         out.push_str(&line);
         out.push('\n');
     }
@@ -848,10 +889,20 @@ mod tests {
         }
     }
 
+    fn pooled_gap(name: &str, pool_id: &str) -> Metric {
+        Metric {
+            name: name.to_string(),
+            has_value: false,
+            has_pool_id: true,
+            pool_id: pool_id.to_string(),
+            ..Metric::default()
+        }
+    }
+
     #[test]
     fn summary_copies_line_needs_a_measured_copy() {
         let rep = analyze_fixture("tests/fixtures/lifecycle/copy-before-failure");
-        let lines = summary_lines(&rep, escape_text);
+        let lines = summary_lines(&rep, escape_text, "");
         assert_eq!(lines.len(), 5);
         // A measured zero is a value, not an unknown.
         assert_eq!(
@@ -863,7 +914,7 @@ mod tests {
             "summary scope: proves bounce attempts were counted and executed copies were observed; does not prove DMA success"
         );
         let plain = analyze_fixture("tests/fixtures/attempts");
-        let lines = summary_lines(&plain, escape_text);
+        let lines = summary_lines(&plain, escape_text, "");
         assert_eq!(lines.len(), 4);
         assert!(lines.iter().all(|l| !l.starts_with("summary copies:")));
     }
@@ -871,7 +922,7 @@ mod tests {
     #[test]
     fn summary_pool_sums_measured_pool_rows() {
         let rep = analyze_fixture("tests/fixtures/pools/pressure");
-        let lines = summary_lines(&rep, escape_text);
+        let lines = summary_lines(&rep, escape_text, "");
         assert!(lines.contains(&"summary pool: used 900 bytes of 1000 bytes capacity".to_string()));
         let mut two = Report::default();
         two.metrics
@@ -882,17 +933,77 @@ mod tests {
             .push(pooled_metric("pool_used_bytes", 50, "pool-1"));
         two.metrics
             .push(pooled_metric("pool_capacity_bytes", 500, "pool-1"));
-        let lines = summary_lines(&two, escape_text);
+        let lines = summary_lines(&two, escape_text, "");
         assert!(lines.contains(
             &"summary pool: used 150 bytes of 1.5 KiB (1500 bytes) capacity".to_string()
         ));
+        // A measured zero is a value, not an unknown: the pool
+        // counts as fully gauged.
+        let mut zero = Report::default();
+        zero.metrics
+            .push(pooled_metric("pool_used_bytes", 0, "pool-0"));
+        zero.metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
+        let lines = summary_lines(&zero, escape_text, "");
+        assert!(lines.contains(&"summary pool: used 0 bytes of 1000 bytes capacity".to_string()));
+    }
+
+    #[test]
+    fn summary_pool_never_combines_across_pools() {
+        // Halves from different pools never meet: no pool has
+        // both gauges, so no combined occupancy prints.
+        let mut split = Report::default();
+        split
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
+        split
+            .metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-0"));
+        split.metrics.push(pooled_gap("pool_used_bytes", "pool-1"));
+        split
+            .metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-1"));
+        let lines = summary_lines(&split, escape_text, "");
+        assert!(
+            lines
+                .contains(&"summary pool: occupancy unknown (no pool has both gauges)".to_string())
+        );
+        assert!(!lines.iter().any(|l| l.starts_with("summary pool: used ")));
+        // One half alone is unknown too, never zero-filled.
         let mut half = Report::default();
         half.metrics
             .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
-        let lines = summary_lines(&half, escape_text);
+        half.metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-0"));
+        let lines = summary_lines(&half, escape_text, "");
         assert!(
-            lines.contains(&"summary pool: used 100 bytes of unavailable capacity".to_string())
+            lines
+                .contains(&"summary pool: occupancy unknown (no pool has both gauges)".to_string())
         );
+    }
+
+    #[test]
+    fn summary_pool_partial_covers_only_full_pools() {
+        // The combination covers the fully gauged subset only,
+        // and says so with the pool count.
+        let mut mixed = Report::default();
+        mixed
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
+        mixed
+            .metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
+        mixed
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 500, "pool-1"));
+        mixed
+            .metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-1"));
+        let lines = summary_lines(&mixed, escape_text, "");
+        assert!(lines.contains(
+            &"summary pool: used 900 bytes of 1000 bytes capacity (partial: 1 of 2 pools fully gauged)"
+                .to_string()
+        ));
     }
 
     #[test]
@@ -901,7 +1012,7 @@ mod tests {
         both.metrics.push(valued_metric("bounce_attempts", 2));
         both.metrics
             .push(valued_metric("copy_original_to_bounce_bytes", 64));
-        let lines = summary_lines(&both, escape_text);
+        let lines = summary_lines(&both, escape_text, "");
         assert_eq!(
             lines[lines.len() - 1],
             "summary scope: proves bounce attempts were counted and executed copies were observed; does not prove DMA success"
@@ -910,7 +1021,7 @@ mod tests {
         copies_only
             .metrics
             .push(valued_metric("copy_original_to_bounce_bytes", 64));
-        let lines = summary_lines(&copies_only, escape_text);
+        let lines = summary_lines(&copies_only, escape_text, "");
         assert_eq!(
             lines[0],
             "summary: attempts withheld, requested bytes withheld in 0.00 s"
@@ -919,7 +1030,7 @@ mod tests {
             lines[lines.len() - 1],
             "summary scope: proves executed copies were observed (attempts uncounted); does not prove DMA success"
         );
-        let lines = summary_lines(&Report::default(), escape_text);
+        let lines = summary_lines(&Report::default(), escape_text, "");
         assert_eq!(
             lines[lines.len() - 1],
             "summary scope: proves nothing (attempts uncounted); does not prove bouncing occurred, bytes moved, or DMA ran"
@@ -946,7 +1057,7 @@ mod tests {
         rep.metrics.push(scoped_metric("bounce_attempts", 3, "d1"));
         rep.metrics
             .push(scoped_metric("requested_bounce_bytes", 67108864, "d1"));
-        let lines = summary_lines(&rep, escape_text);
+        let lines = summary_lines(&rep, escape_text, "");
         assert_eq!(
             lines[0],
             "summary: attempts 3, requested bytes 64 MiB (67108864 bytes) in 10.03 s"
@@ -955,7 +1066,7 @@ mod tests {
             lines[1],
             "summary devices: d1 (eth0): attempts 3, requested bytes 64 MiB (67108864 bytes); d2 (eth1): attempts unavailable, requested bytes unavailable"
         );
-        let bare = summary_lines(&Report::default(), escape_text);
+        let bare = summary_lines(&Report::default(), escape_text, "");
         assert_eq!(bare[1], "summary devices: none recorded");
     }
 
@@ -967,7 +1078,7 @@ mod tests {
             name: "a\nb|c\x1bd".to_string(),
             ..DeviceEntry::default()
         });
-        let lines = summary_lines(&rep, escape_text);
+        let lines = summary_lines(&rep, escape_text, "");
         assert_eq!(
             lines[1],
             "summary devices: d1 (a\\nb|c�d): attempts unavailable, requested bytes unavailable"
@@ -983,7 +1094,7 @@ mod tests {
             window_end_ns: 100,
             ..Report::default()
         };
-        let lines = summary_lines(&rep, escape_text);
+        let lines = summary_lines(&rep, escape_text, "");
         assert_eq!(
             lines[0],
             "summary: attempts withheld, requested bytes withheld (window unavailable: invalid recorded window)"
@@ -1003,12 +1114,26 @@ mod tests {
     }
 
     #[test]
-    fn summary_ignores_the_display_filter() {
+    fn summary_devices_honors_the_display_filter() {
         let rep = analyze_fixture("tests/fixtures/attempts");
-        let filtered = render_text(&rep, "nope");
-        assert!(filtered.contains(
+        // No filter: the full per-device line, as before.
+        let plain = render_text(&rep, "");
+        assert!(plain.contains(
             "summary devices: dev-1 (testdev0): attempts 3, requested bytes 9 KiB (9216 bytes)"
         ));
+        // Id or catalog name narrows to the recorded device.
+        for filt in ["dev-1", "testdev0"] {
+            let filtered = render_text(&rep, filt);
+            assert!(filtered.contains(
+                "summary devices: dev-1 (testdev0): attempts 3, requested bytes 9 KiB (9216 bytes)"
+            ));
+        }
+        // An unmatched filter prints no per-device values.
+        let filtered = render_text(&rep, "nope");
+        assert!(filtered.contains("summary devices: no recorded device matches the filter"));
+        assert!(!filtered.contains("dev-1 (testdev0)"));
         assert!(!filtered.contains("{device="));
+        // The other headlines stay global under any filter.
+        assert!(filtered.contains("summary: attempts 3, requested bytes 9 KiB (9216 bytes)"));
     }
 }

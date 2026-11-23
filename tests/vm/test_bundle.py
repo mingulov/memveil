@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """F2-6: the extracted shipping bundle through three phases.
 
-Extracts dist/memveil-0.1.1.tar.gz in the guest, verifies every
+Extracts dist/memveil-0.2.0.tar.gz in the guest, verifies every
 file against MANIFEST.json, and runs the extracted record with
 all three channels through oracle-exact, outer-failure, and
 block+vnet phases in one capture, rendered by the extracted
@@ -44,7 +44,7 @@ from vm_boot import (cleanup, guest_artifact_paths, run_guest,
 
 REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BUNDLE_VERSION = "0.1.1"
+BUNDLE_VERSION = "0.2.0"
 TARBALL = os.path.join(REPO, "dist",
                        "memveil-%s.tar.gz" % BUNDLE_VERSION)
 MANIFEST = os.path.join(REPO, "dist",
@@ -500,7 +500,7 @@ def _seal_wire_bundle(tmp_path, name, libgcc=True):
 
     libgcc=True upgrades the fixture through the shaped seal
     (real packaging scripts, lib/memveil/libgcc_s.so.1 member)
-    and binds it as the memveil-0.1.1 artifact the freeze
+    and binds it as the memveil-0.2.0 artifact the freeze
     serves; libgcc=False keeps the minimal seal (a differently
     named runtime lib) for the refusal leg. Names, bytes, and
     bindings are synthetic; only the protocol is real.
@@ -702,28 +702,28 @@ def _sealed_bundle_with_minted_profile(
 
 @pytest.mark.dev_fixture
 def test_bundle_sealed_inputs_wiring(tmp_path):
-    """Sealed inputs resolve the sealed 0.1.1 bundle both sides.
+    """Sealed inputs resolve the sealed memveil-0.2.0 bundle both sides.
 
     Host and guest resolvers agree on the sealed tarball
     identity; the guest record line carries no --bridge and no
     dev-tree path, every resolved byte matches its sealed pin,
     the guest bridge slot and the host identity table agree
     on the sealed runtime member, and the dev defaults name
-    0.1.1 on both sides. Pure resolution: no VM boots.
+    memveil-0.2.0 on both sides. Pure resolution: no VM boots.
     """
     assert os.path.basename(TARBALL) == \
-        "memveil-0.1.1.tar.gz", TARBALL
+        "memveil-0.2.0.tar.gz", TARBALL
     assert os.path.basename(os.path.dirname(MANIFEST)) == \
-        "memveil-0.1.1", MANIFEST
+        "memveil-0.2.0", MANIFEST
     dev = guest_lifecycle.bundle_run_inputs(REPO, None)
     assert dev["mode"] == "dev", dev
     assert os.path.basename(dev["tarball"]) == \
-        "memveil-0.1.1.tar.gz", dev
-    assert dev["root_name"] == "memveil-0.1.1", dev
+        "memveil-0.2.0.tar.gz", dev
+    assert dev["root_name"] == "memveil-0.2.0", dev
     sealed = _seal_wire_bundle(tmp_path, "bundlewire",
                                libgcc=True)
     assert sealed["bundle"].name == \
-        "memveil-0.1.1.tar.gz", sealed["bundle"]
+        "memveil-0.2.0.tar.gz", sealed["bundle"]
     sys.path.insert(0, os.path.join(REPO, "tests"))
     from support.candidate_input import load
     env = _wire_env(sealed)
@@ -739,7 +739,7 @@ def test_bundle_sealed_inputs_wiring(tmp_path):
             "/nonexistent-repo", selected)
         assert run["mode"] == "sealed", run
         assert run["tarball_name"] == \
-            "memveil-0.1.1.tar.gz", run
+            "memveil-0.2.0.tar.gz", run
         assert run["tarball"] == str(sealed["bundle"]), run
         assert run["root"] == str(selected.root), run
         for key, rel in (("bin", "bin/memveil"),

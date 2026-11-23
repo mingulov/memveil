@@ -186,7 +186,7 @@ def self_test_pins():
         ok = check("pins-%s" % rel.rsplit("/", 1)[1].split(".")[0],
                    got == want, got[:16]) and ok
     seal = [REPO / "dist" / "candidate.json",
-            REPO / "dist" / "bundle.tar.gz"]
+            Path(pins.dist_bundle_tarball(REPO))]
     if not all(p.is_file() for p in seal):
         print("ok pins-candidate SKIP (no dist/ seal in tree; "
               "explicit-path seals covered by candidate-flags-*)")
@@ -2388,35 +2388,41 @@ def self_test_forensics(tmp):
 
 # -- Unarmed self-test: explicit seals ------------------------
 
-def build_fixture_seal(root, name, payload):
-    """Write one synthetic seal; returns (candidate, bundle, pins)."""
+def build_fixture_seal(root, name, payload, entry_name="bundle.tar.gz",
+                       top="bundle"):
+    """Write one synthetic seal; returns (candidate, bundle, pins).
+
+    entry_name/top spell the artifact name and tarball top
+    dir (legacy defaults; versioned seals pass their tag).
+    """
     os.makedirs(root, exist_ok=True)
     members = {
-        "bundle/MANIFEST.json": b'{"seal": "%s"}' % name.encode(),
-        "bundle/bpf/swiotlb_lifecycle.bpf.o": b"LC:" + payload,
-        "bundle/bpf/swiotlb_copy.bpf.o": b"CP:" + payload,
-        "bundle/bpf/swiotlb_attempt.bpf.o": b"AT:" + payload,
+        top + "/MANIFEST.json": b'{"seal": "%s"}' % name.encode(),
+        top + "/bpf/swiotlb_lifecycle.bpf.o": b"LC:" + payload,
+        top + "/bpf/swiotlb_copy.bpf.o": b"CP:" + payload,
+        top + "/bpf/swiotlb_attempt.bpf.o": b"AT:" + payload,
     }
-    bundle_path = os.path.join(root, "bundle.tar.gz")
+    bundle_path = os.path.join(root, entry_name)
     with tarfile.open(bundle_path, "w:gz") as archive:
         for mname in sorted(members):
             info = tarfile.TarInfo(mname)
             info.size = len(members[mname])
             info.mtime = 0
             archive.addfile(info, io.BytesIO(members[mname]))
-    inner = hashlib.sha256(members["bundle/MANIFEST.json"]).hexdigest()
+    inner = hashlib.sha256(
+        members[top + "/MANIFEST.json"]).hexdigest()
     files = {"bpf/swiotlb_lifecycle.bpf.o": hashlib.sha256(
-                 members["bundle/bpf/swiotlb_lifecycle.bpf.o"]).hexdigest(),
+                 members[top + "/bpf/swiotlb_lifecycle.bpf.o"]).hexdigest(),
              "bpf/swiotlb_copy.bpf.o": hashlib.sha256(
-                 members["bundle/bpf/swiotlb_copy.bpf.o"]).hexdigest(),
+                 members[top + "/bpf/swiotlb_copy.bpf.o"]).hexdigest(),
              "bpf/swiotlb_attempt.bpf.o": hashlib.sha256(
-                 members["bundle/bpf/swiotlb_attempt.bpf.o"]).hexdigest()}
+                 members[top + "/bpf/swiotlb_attempt.bpf.o"]).hexdigest()}
     manifest = {
         "schema": "memveil-candidate/2",
         "source": {"commit": "c" * 40, "tree": "t" * 40},
         "bundle_manifest_sha256": inner,
         "files": files,
-        "artifacts": [{"name": "bundle.tar.gz",
+        "artifacts": [{"name": entry_name,
                        "sha256": sha_file(bundle_path),
                        "size": os.path.getsize(bundle_path)}],
     }
@@ -2451,6 +2457,19 @@ def self_test_candidate_flags(tmp, pairs):
                    == pins_a["bundle_sha256"]) and ok
     except ValueError as exc:
         ok = check("candidate-flags-accept", False, str(exc)) and ok
+    cand_v, bundle_v, pins_v = build_fixture_seal(
+        os.path.join(tmp, "seal-v"), "v", b"V" * 64,
+        entry_name="memveil-0.2.0.tar.gz", top="memveil-0.2.0")
+    try:
+        binding = core.verify_candidate_binding(
+            cand_v, bundle_v, pins_v)
+        ok = check("candidate-flags-versioned",
+                   binding["files"] == pins_v["files"]
+                   and binding["bundle"]["sha256"]
+                   == pins_v["bundle_sha256"]) and ok
+    except ValueError as exc:
+        ok = check("candidate-flags-versioned", False,
+                   str(exc)) and ok
     cases = []
     # Missing inputs refuse.
     cases.append(("missing-candidate",
@@ -5397,7 +5416,7 @@ def main(argv):
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--bundle", default="",
-                        help="retained bundle.tar.gz path "
+                        help="retained bundle tarball path "
                              "(required when armed)")
     parser.add_argument("--candidate", default="",
                         help="retained candidate.json path "

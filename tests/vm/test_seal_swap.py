@@ -49,7 +49,7 @@ import test_faults as faults  # noqa: E402
 
 REPO = faults.REPO
 DIST_MANIFEST = os.path.join(REPO, "dist", "candidate.json")
-DIST_BUNDLE = os.path.join(REPO, "dist", "bundle.tar.gz")
+DIST_BUNDLE = pins.dist_bundle_tarball(REPO)
 FIXTURE_MANIFEST = os.path.join(
     REPO, "tests", "vm", "fixtures", "swap-proof", "candidate.json")
 FIXTURE_BUNDLE = os.path.join(
@@ -87,7 +87,14 @@ def sealed_profile_member(bundle_path):
     except (tarfile.TarError, OSError) as exc:
         raise ValueError("candidate bundle unreadable: %s" % exc)
     try:
-        member = archive.getmember("bundle/" + PROFILE_MEMBER)
+        entries = archive.getmembers()
+        tops = {m.name.rstrip("/").split("/")[0]
+                for m in entries}
+        if len(tops) != 1:
+            raise ValueError(
+                "candidate bundle has no single top dir")
+        member = archive.getmember(
+            tops.pop() + "/" + PROFILE_MEMBER)
         if not member.isfile():
             raise ValueError("bound profile member not a file")
         return archive.extractfile(member).read()
@@ -187,10 +194,17 @@ def pins_from_manifest(manifest_path):
     """
     with open(manifest_path) as handle:
         manifest = json.load(handle)
+    # Real seals tag the bundle entry by role; the frozen
+    # swap-proof fixture predates roles and keeps its
+    # legacy name. Either identifies the bundle entry.
     entry = None
     for candidate in manifest["artifacts"]:
-        if candidate.get("name") == "bundle.tar.gz":
+        if candidate.get("role") == "bundle":
             entry = candidate
+    if entry is None:
+        for candidate in manifest["artifacts"]:
+            if candidate.get("name") == "bundle.tar.gz":
+                entry = candidate
     if entry is None:
         raise ValueError("swap fixture lacks bundle entry")
     files = manifest["files"]
@@ -429,6 +443,72 @@ def test_swapped_pins_materialize_fixture(tmp_path,
         assert os.path.isfile(inputs[key]["path"])
     assert inputs["candidate"]["files"][
         "bin/memveil"] == pins.BINARY_SHA256
+
+
+def test_swapped_pins_materialize_versioned_seal(tmp_path,
+                                                  monkeypatch):
+    tmp = str(tmp_path)
+    blobs = {}
+    for member, fixture in (
+            ("bpf/swiotlb_lifecycle.bpf.o",
+             "swiotlb_lifecycle.bpf.o"),
+            ("bpf/swiotlb_copy.bpf.o", "swiotlb_copy.bpf.o"),
+            ("bpf/swiotlb_attempt.bpf.o",
+             "swiotlb_attempt.bpf.o")):
+        with open(os.path.join(REPO, "tests", "vm", "fixtures",
+                               "aya", fixture), "rb") as handle:
+            blobs[member] = handle.read()
+    blobs["bin/memveil"] = b"synthetic-versioned-binary"
+    with open(os.path.join(REPO, core.PROFILE_REL),
+              "rb") as handle:
+        blobs[PROFILE_MEMBER] = handle.read()
+    inner = (json.dumps(
+        {"files": {name: hashlib.sha256(blobs[name]).hexdigest()
+                   for name in sorted(blobs)}},
+        sort_keys=True) + "\n").encode()
+    top = "memveil-0.2.0"
+    bundle_path = os.path.join(
+        tmp, "memveil-0.2.0.tar.gz")
+    with tarfile.open(bundle_path, "w:gz") as archive:
+        files = dict(blobs)
+        files["MANIFEST.json"] = inner
+        for name in sorted(files):
+            info = tarfile.TarInfo(top + "/" + name)
+            info.size = len(files[name])
+            archive.addfile(info, io.BytesIO(files[name]))
+    with open(bundle_path, "rb") as handle:
+        tarball = handle.read()
+    manifest = {
+        "artifacts": [{"role": "bundle",
+                       "name": "memveil-0.2.0.tar.gz",
+                       "sha256": hashlib.sha256(
+                           tarball).hexdigest(),
+                       "size": str(len(tarball))}],
+        "bundle_manifest_sha256": hashlib.sha256(
+            inner).hexdigest(),
+        "files": {name: hashlib.sha256(blobs[name]).hexdigest()
+                  for name in sorted(blobs)},
+        "schema": "memveil-candidate/2",
+        "source": {"commit": "c" * 40, "tree": "t" * 40},
+    }
+    manifest_path = os.path.join(tmp, "candidate.json")
+    with open(manifest_path, "w") as handle:
+        json.dump(manifest, handle, sort_keys=True)
+    values = pins_from_manifest(manifest_path)
+    assert type(values["BUNDLE_SIZE"]) is int
+    assert values["BUNDLE_SIZE"] == len(tarball)
+    apply_swap(monkeypatch, values)
+    inputs = core.materialize(
+        REPO, os.path.join(tmp, "inputs"),
+        manifest_path, bundle_path)
+    for member, key in (
+            ("bpf/swiotlb_lifecycle.bpf.o", "lc"),
+            ("bpf/swiotlb_copy.bpf.o", "cp"),
+            ("bpf/swiotlb_attempt.bpf.o", "attempt"),
+            ("bin/memveil", "binary")):
+        assert inputs[key]["sha256"] == hashlib.sha256(
+            blobs[member]).hexdigest()
+        assert os.path.isfile(inputs[key]["path"])
 
 
 def test_default_pins_refuse_fixture():

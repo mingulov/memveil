@@ -5,7 +5,7 @@
 - summary pool: used unavailable of unavailable capacity
 - summary scope: proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded
 - synthetic: yes
-- engine: memveil-0.1.1
+- engine: memveil-0.2.0
 - integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld
 - verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)
 - window: [1000000000,4000000000)
