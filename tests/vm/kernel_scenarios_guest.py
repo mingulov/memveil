@@ -13,6 +13,7 @@ a failed command and never falls back, except the memcg
 scenario's second calibrated run.
 """
 
+import gzip
 import hashlib
 import json
 import os
@@ -60,6 +61,23 @@ BTF_PATH = "/sys/kernel/btf/vmlinux"
 FTRACE_ENABLED = "/proc/sys/kernel/ftrace_enabled"
 CGROUP = "/sys/fs/cgroup"
 MC_GROUP = "mvt_small"
+
+HOOK_EVT = TRACEFS_SYS + "/events/swiotlb/swiotlb_bounced"
+HOOK_FILTER_FUNCS = TRACEFS_SYS + "/available_filter_functions"
+
+WANT_FUNCS = {
+    "map": "swiotlb_tbl_map_single",
+    "unmap": "__swiotlb_tbl_unmap_single",
+    "copy": "swiotlb_bounce",
+    "syncc": "__swiotlb_sync_single_for_cpu",
+    "syncd": "__swiotlb_sync_single_for_device",
+}
+
+CMDLINE_PATH = "/proc/cmdline"
+CONFIG_GZ_PATH = "/proc/config.gz"
+VERSION_PATH = "/proc/version"
+LOCKDOWN_PATH = "/sys/kernel/security/lockdown"
+MODULES_ROOT = "/lib/modules"
 
 _OUT = "/tmp/mv"
 _EXPORT = "/tmp/export"
@@ -201,6 +219,90 @@ def record_artifacts(km, out, mv, mode):
          "bpftool": tool_version(
              "bpftool", km.ARTIFACTS_TOOL_UNRESOLVED)},
         indent=2, sort_keys=True) + "\n")
+
+
+def detect_hooks():
+    """Trace-hook presence map, same shape as the matrix guest."""
+    present = {}
+    present["tp"] = os.path.isdir(HOOK_EVT)
+    try:
+        funcs = Path(HOOK_FILTER_FUNCS).read_text().splitlines()
+    except OSError:
+        funcs = None
+    for key, func in WANT_FUNCS.items():
+        if funcs is None:
+            present[key] = False
+        else:
+            present[key] = func in funcs
+    omitted = [key for key, ok in present.items() if not ok]
+    return present, omitted
+
+
+def write_btf_sha(out, src=BTF_PATH):
+    """Sha256 of the guest BTF, or absent/unreadable sentinel."""
+    try:
+        with open(src, "rb") as handle:
+            raw = handle.read()
+        write(os.path.join(out, "btf-sha.txt"),
+              hashlib.sha256(raw).hexdigest() + "\n")
+    except OSError:
+        write(os.path.join(out, "btf-sha.txt"), "absent\n")
+    except Exception:
+        write(os.path.join(out, "btf-sha.txt"),
+              "unreadable\n")
+
+
+def record_guest_identity(out):
+    """Guest identity set, same files and shapes as the matrix guest.
+
+    Runs once before any scenario: later legs bind-mount over
+    the BTF, disable ftrace, and unmount tracefs, so only a
+    pre-scenario capture describes the booted kernel. A missing
+    modules dir or an unreadable /proc/version fails the run
+    (broken guest environment, as in the matrix guest); the
+    config, BTF, and lockdown captures degrade to explicit
+    sentinels instead.
+    """
+    release = os.uname().release
+    write(os.path.join(out, "uname.txt"),
+          release + "\n" + Path(CMDLINE_PATH).read_text())
+    try:
+        mods = os.readlink(os.path.join(MODULES_ROOT, release))
+        mods_path = os.path.join(MODULES_ROOT, release, mods) \
+            if not os.path.isabs(mods) else mods
+    except OSError:
+        mods_path = os.path.join(MODULES_ROOT, release)
+    if not os.path.isdir(mods_path):
+        fail("guest modules dir missing: %s" % mods_path)
+    write(os.path.join(out, "mods.txt"),
+          release + "\n" + mods_path + "\n")
+    try:
+        with gzip.open(CONFIG_GZ_PATH, "rb") as handle:
+            raw = handle.read()
+        write(os.path.join(out, "configid.txt"),
+              hashlib.sha256(raw).hexdigest() + "\n")
+    except OSError:
+        write(os.path.join(out, "configid.txt"), "absent\n")
+    except Exception:
+        write(os.path.join(out, "configid.txt"),
+              "unreadable\n")
+    write_btf_sha(out, BTF_PATH)
+    try:
+        write(os.path.join(out, "version.txt"),
+              Path(VERSION_PATH).read_text())
+    except OSError as exc:
+        fail("cannot read /proc/version: %s" % exc)
+    try:
+        write(os.path.join(out, "lockdown.txt"),
+              Path(LOCKDOWN_PATH).read_text())
+    except OSError:
+        write(os.path.join(out, "lockdown.txt"), "absent\n")
+    present, omitted = detect_hooks()
+    btf_present = os.path.isfile(BTF_PATH)
+    write(os.path.join(out, "hooks.json"),
+          json.dumps({"present": present, "omitted": omitted,
+                      "btf": btf_present},
+                     indent=2, sort_keys=True) + "\n")
 
 
 def doctor_argv(mv, load_check, cp_object=None):
@@ -935,9 +1037,7 @@ def run(argv):
     if not mv or not os.path.isfile(mv):
         fail("memveil binary missing: %r" % mv)
     record_artifacts(km, out, mv, mode)
-    write(os.path.join(out, "uname.txt"),
-          os.uname().release + "\n"
-          + Path("/proc/cmdline").read_text())
+    record_guest_identity(out)
     subprocess.run(["mount", "-t", "debugfs", "none",
                     "/sys/kernel/debug"],
                    capture_output=True)
