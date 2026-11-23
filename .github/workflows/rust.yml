@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Rust gates: supply-chain policy (cargo-deny over the root
-# and eBPF manifests), the full workspace test suite, and the
-# audited offline pytest selection
+# and eBPF manifests), formatting (cargo fmt --check), lints
+# (clippy with warnings denied), the full workspace test
+# suite, and the audited offline pytest selection
 # (tests/pytest-ci-selection.json).
 # Unprivileged; safe for pull requests.
 #
@@ -90,6 +91,13 @@ jobs:
             --component rust-src
       - name: Install bpf-linker 0.10.4
         run: cargo install bpf-linker --version 0.10.4 --locked
+      - name: Check formatting
+        run: |
+          cargo fmt --check
+      - name: Run clippy
+        run: |
+          export RUSTC="$(rustup which --toolchain 1.100.0 rustc)"
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Warm the cargo cache for offline queries
         run: |
           cargo fetch --locked

@@ -13,18 +13,30 @@ vendored native dependencies.
 ## Build and test
 
 ```sh
-cargo build --release --locked   # build everything
-cargo test --workspace --locked  # Rust suites
+./tools/test fast                # contributor gate: build + Rust tests + offline suites
+./tools/test fast-full           # gate plus the examples suite (adds replay wall time)
 ./tools/test --help              # list harness suites
 ./tools/test reports             # one harness suite
 ```
 
+`./tools/test fast` is the gate to run before
+declaring green: it pins the compiler, builds
+in-tree, runs the full Rust workspace tests,
+then the offline suites (schemas, reports,
+privacy, reader-adversarial, docs).
+Measured wall time on an 8-core Linux host:
+about 7 min cold (fresh target directory), about
+5 min warm. The `fast-full` variant adds about
+2 min for the examples replay. Shared-host load
+moves these by a minute or two either way.
 Run the suites that cover a change; run the
 full gate before declaring green. Do not
 invent test commands: `cargo test` plus
 `tools/test` are the runners. Privileged
 fixtures belong in the designated isolated
-environment.
+environment. See [build](docs/build.md) for the
+raw `cargo` commands and why the lane pins
+`RUSTC`.
 
 ## Style and scope
 

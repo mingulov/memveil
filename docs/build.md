@@ -53,14 +53,32 @@ RUSTUP_TOOLCHAIN cargo ...`).
 Build, test, package, and document generation:
 
 ```sh
-cargo build --release --locked
-cargo test --workspace --locked
+export RUSTC="$(rustup which --toolchain 1.100.0 rustc)"  # one rustc for nested builds (see below)
+env -u RUSTUP_TOOLCHAIN cargo build --release --locked
+env -u RUSTUP_TOOLCHAIN cargo test --workspace --locked --no-fail-fast
 cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings
+./tools/test fast                # contributor gate: build + Rust tests + offline suites
 ./tools/test --help              # list harness suites
 ./tools/test reports             # one harness suite
 python3 scripts/package-tarball.py --out dist
 python3 scripts/gen-docs.py --out /tmp/docs --build
 ```
+
+The `RUSTC` pin matters on hosts with more than one Rust
+toolchain installed: some Rust tests spawn nested cargo
+builds, and nested cargo resolves `rustc` next to its own
+shim, which can mix compiler versions and fail the build
+with `E0514`. Pointing `RUSTC` at the pinned toolchain's
+`rustc` keeps every build on one compiler; the eBPF child
+build still selects its own pinned nightly.
+`./tools/test fast` sets this pin itself, builds in-tree
+(an exported `CARGO_TARGET_DIR` elsewhere breaks profile
+lookup beside the binary, so the lane ignores it), and
+runs the full workspace tests plus the offline suites
+(schemas, reports, privacy, reader-adversarial, docs) in
+one invocation. `./tools/test fast-full` adds the
+examples suite, whose fixed real-time replay costs about
+two minutes.
 
 Public build/test suites work from a standalone clone
 using only this repository. A skipped privileged test is
