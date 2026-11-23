@@ -1376,6 +1376,122 @@ def self_test_boot_tmpdir_guard(tmp):
     return ok
 
 
+def self_test_guest_completion_wait(tmp):
+    """Phase-A completion wait over scripted dmesg streams.
+
+    No guest: the wait's dmesg reads are scripted, so a
+    late completion marker proves the new code waits
+    while the old snapshot-first order fails on the
+    same stream's first frame.
+    """
+    import contextlib
+    import inspect
+    import io
+    import lateattach_guest as guest
+    ok = True
+
+    class _R:
+        def __init__(self, out):
+            self.returncode = 0
+            self.stdout = out
+
+    early = "[2.0] mv-oracle: op=0 mapping=0 held-open\n"
+    full = early + \
+        "[2.0] mv-oracle: script complete ops=4\n"
+    wrong = early + \
+        "[2.0] mv-oracle: script complete ops=3\n"
+    real_sh = guest.sh
+
+    def run_wait(outputs, timeout):
+        calls = []
+        stream = list(outputs)
+
+        def fake(args, timeout=30, **kw):
+            calls.append(list(args))
+            if len(calls) <= len(stream):
+                return _R(stream[len(calls) - 1])
+            return _R(stream[-1])
+
+        guest.sh = fake
+        err = io.StringIO()
+        code = None
+        try:
+            with contextlib.redirect_stderr(err):
+                guest.Gate.wait_oracle_complete(
+                    object(), timeout=timeout,
+                    interval=0.001)
+        except SystemExit as exc:
+            code = exc.code
+        finally:
+            guest.sh = real_sh
+        return code, err.getvalue(), len(calls)
+
+    code, _, calls = run_wait([full], 60)
+    ok = check("wait-immediate",
+               code is None and calls == 1,
+               "code=%r calls=%d" % (code, calls)) and ok
+    code, _, calls = run_wait([early, early, full], 60)
+    ok = check("wait-late",
+               code is None and calls == 3,
+               "code=%r calls=%d" % (code, calls)) and ok
+    code, msg, _ = run_wait([early], 0)
+    ok = check("wait-timeout",
+               code == 1 and "never completed" in msg
+               and "pre-attach script incomplete"
+               not in msg,
+               msg.strip()[-120:]) and ok
+    code, msg, _ = run_wait([wrong], 60)
+    ok = check("wait-badops",
+               code == 1 and "bad ops" in msg,
+               msg.strip()[-120:]) and ok
+
+    # RED: the old order (snapshot first, no wait) fails
+    # on the late stream's first frame with the
+    # misleading message; the completed frame passes.
+    pre = os.path.join(tmp, "wait-pre.log")
+    with open(pre, "w") as handle:
+        handle.write(early)
+    err = io.StringIO()
+    code = None
+    try:
+        with contextlib.redirect_stderr(err):
+            guest.check_pre_attach(pre)
+    except SystemExit as exc:
+        code = exc.code
+    ok = check("wait-red-oldcode",
+               code == 1
+               and "pre-attach script incomplete"
+               in err.getvalue(),
+               "code=%r" % (code,)) and ok
+    with open(pre, "w") as handle:
+        handle.write(full)
+    try:
+        guest.check_pre_attach(pre)
+        ok = check("wait-red-complete", True) and ok
+    except SystemExit as exc:
+        ok = check("wait-red-complete", False,
+                   "code=%r" % (exc.code,)) and ok
+
+    # The phase-A source itself orders the wait between
+    # insmod and the snapshot, with the mapped stamp
+    # taken only once completion is observed.
+    src = inspect.getsource(guest.run_phase_a)
+    insmod_at = src.index("gate.insmod(")
+    wait_at = src.index("gate.wait_oracle_complete(")
+    snap_at = src.index('gate.oracle_log("a-pre-oracle.log")')
+    stamp_at = src.index("mapped_ns = mono_ns()")
+    ok = check("wait-wired",
+               insmod_at < wait_at < snap_at
+               and wait_at < stamp_at < snap_at) and ok
+    ok = check("wait-bounds",
+               30 <= guest.TIMEOUT_ORACLE_COMPLETE <= 60
+               and guest.ORACLE_POLL_INTERVAL >= 0.05,
+               "timeout=%r interval=%r"
+               % (guest.TIMEOUT_ORACLE_COMPLETE,
+                  guest.ORACLE_POLL_INTERVAL)) and ok
+    return ok
+
+
 def run_self_test(work=None):
     """Full offline suite: proofs plus unarmed checks. No boot."""
     print("lateattach self-test (unarmed, offline)")
@@ -1411,6 +1527,7 @@ def run_self_test(work=None):
         ok = self_test_receipt_drift(tmp) and ok
         ok = self_test_vng_argv(tmp) and ok
         ok = self_test_boot_tmpdir_guard(tmp) and ok
+        ok = self_test_guest_completion_wait(tmp) and ok
     finally:
         if not keep:
             shutil.rmtree(tmp, ignore_errors=True)

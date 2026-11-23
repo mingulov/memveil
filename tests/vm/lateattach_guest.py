@@ -66,6 +66,18 @@ TIMEOUT_INSMOD = 600
 TIMEOUT_RMMOD = 120
 TIMEOUT_DMESG = 30
 
+# Phase-A completion wait: the oracle script runs inside
+# module init, but a dmesg snapshot taken the instant
+# insmod returns can still miss the trailing completion
+# record (proven live: missed by ~1ms). The bound dwarfs
+# that lag and any printk/kmsg scheduling delay on a
+# loaded guest while keeping a hung oracle loud; the
+# poll interval matches the wait_ready select granularity
+# so the wait cannot busy-spin the guest.
+TIMEOUT_ORACLE_COMPLETE = 60
+ORACLE_POLL_INTERVAL = 0.1
+COMPLETE_PREFIX = "script complete"
+
 # Readiness stdout without an ack past this is a flood, not
 # a slow attach.
 READY_BUFFER_CAP = 1048576
@@ -449,6 +461,33 @@ class Gate:
         if r.returncode != 0:
             fail("dmesg -C failed: %s" % r.stderr.strip())
 
+    def wait_oracle_complete(
+            self, timeout=TIMEOUT_ORACLE_COMPLETE,
+            interval=ORACLE_POLL_INTERVAL):
+        """Poll dmesg until the oracle script reports completion.
+
+        Fails loudly with a distinct message per mode: the
+        script never completing (no marker within the bound)
+        versus completing with the wrong op count. Callers
+        snapshot only after this returns.
+        """
+        end = time.monotonic() + timeout
+        while True:
+            r = sh(["dmesg"])
+            if r.returncode != 0:
+                fail("dmesg failed")
+            if COMPLETE_PREFIX in r.stdout:
+                if "script complete ops=%d" % OPS \
+                        not in r.stdout:
+                    fail("lateattach: oracle script completed "
+                         "with bad ops (want ops=%d)" % OPS)
+                return
+            if time.monotonic() >= end:
+                fail("lateattach: oracle script never completed "
+                     "within %ds (no 'script complete' in "
+                     "dmesg)" % timeout)
+            time.sleep(interval)
+
     def oracle_log(self, name):
         """Snapshot mv-oracle: lines into work/<name>."""
         dst = os.path.join(self.work, name)
@@ -515,6 +554,7 @@ def run_phase_a(gate, ledger):
     """Traffic first, attach second, release last."""
     gate.clear_dmesg()
     gate.insmod([])
+    gate.wait_oracle_complete()
     mapped_ns = mono_ns()
     pre = gate.oracle_log("a-pre-oracle.log")
     check_pre_attach(pre)
