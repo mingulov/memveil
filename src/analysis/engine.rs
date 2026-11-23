@@ -354,6 +354,7 @@ impl Analyzer {
             rep.metrics.extend(self.pools.metrics(&window, partial));
             rep.limitations.extend(self.pools.limitations());
             rep.pools_withheld_from_detail = self.pools.withheld_from_detail();
+            rep.pool_samples_refused = self.pools.refused_samples();
         }
         if self.regions.sees_regions() {
             rep.metrics.extend(self.regions.metrics(&window, partial));

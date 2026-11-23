@@ -108,6 +108,11 @@ pub struct Report {
     /// prose headline only: no renderer emits this as a metric
     /// row, so JSON keeps its pre-budget shape byte-identically.
     pub pools_withheld_from_detail: u64,
+    /// Pool samples refused after the pool table filled, counted
+    /// for the prose headline only: a nonzero count leaves the
+    /// true pool total unknown, so the headline scopes its
+    /// denominator to tracked pools instead of claiming it.
+    pub pool_samples_refused: u64,
 }
 
 impl Default for Report {
@@ -142,6 +147,7 @@ impl Default for Report {
             detail_delivered: 0,
             verdict: Verdict::default(),
             pools_withheld_from_detail: 0,
+            pool_samples_refused: 0,
         }
     }
 }

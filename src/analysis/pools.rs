@@ -132,6 +132,14 @@ impl<const POOL_N: usize> PoolTracker<POOL_N> {
         self.pools.len().saturating_sub(MAX_POOL_DETAIL) as u64
     }
 
+    /// Pool samples refused after the table filled: each one
+    /// named an untracked pool id, so the true pool total is
+    /// unknown past the tracked count. Prose-only, like the
+    /// withheld count.
+    pub fn refused_samples(&self) -> u64 {
+        self.refused as u64
+    }
+
     /// Human-readable bounds/anomaly notes for the report.
     pub fn limitations(&self) -> Vec<String> {
         let mut out = self.notes.clone();
@@ -711,6 +719,27 @@ mod tests {
         }
         assert_eq!(full.withheld_from_detail(), 0);
         let rows = full.metrics("window [0,2000)", false);
+        assert!(rows.iter().all(|m| m.has_pool_id));
+    }
+
+    #[test]
+    fn exhausted_table_refuses_and_counts() {
+        // Past 1024 tracked pools new ids refuse: each refused
+        // sample named an untracked pool, so the true total is
+        // unknown past the tracked count.
+        let mut t: PoolTracker = PoolTracker::new();
+        for i in 0..1025 {
+            let id = format!("pool-{i:04}");
+            t.consume(&sample(&id, true, 900, true, 1000, "bytes", i as u64 + 1));
+        }
+        assert_eq!(t.refused_samples(), 1);
+        assert_eq!(t.withheld_from_detail(), 768);
+        assert!(
+            t.limitations()
+                .iter()
+                .any(|n| n.contains("1 pool samples refused"))
+        );
+        let rows = t.metrics("window [0,2000)", false);
         assert!(rows.iter().all(|m| m.has_pool_id));
     }
 }
