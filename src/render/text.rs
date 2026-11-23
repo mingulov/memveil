@@ -340,21 +340,50 @@ pub fn summary_lines<E: Fn(&str) -> String>(
         ));
     }
     let (used, cap, full, pools) = pool_occupancy(rep);
-    if full == pools {
-        // Covers no pools too: both halves unavailable.
-        lines.push(format!(
-            "summary pool: used {} of {} capacity",
-            fmt_bytes(used),
-            fmt_bytes(cap)
-        ));
-    } else if full == 0 {
-        lines.push("summary pool: occupancy unknown (no pool has both gauges)".to_string());
+    let withheld = global_metric_value(rep, "pools_withheld_from_detail").unwrap_or(0) as usize;
+    if withheld == 0 {
+        if full == pools {
+            // Covers no pools too: both halves unavailable.
+            lines.push(format!(
+                "summary pool: used {} of {} capacity",
+                fmt_bytes(used),
+                fmt_bytes(cap)
+            ));
+        } else if full == 0 {
+            lines.push(
+                "summary pool: occupancy unknown (no pool has both gauges)".to_string(),
+            );
+        } else {
+            lines.push(format!(
+                "summary pool: used {} of {} capacity (partial: {full} of {pools} pools fully gauged)",
+                fmt_bytes(used),
+                fmt_bytes(cap)
+            ));
+        }
     } else {
-        lines.push(format!(
-            "summary pool: used {} of {} capacity (partial: {full} of {pools} pools fully gauged)",
-            fmt_bytes(used),
-            fmt_bytes(cap)
-        ));
+        // The detail budget withheld pools, so the emitted
+        // rows cover a subset: every branch names the covered
+        // count against the true total. Withheld pools may be
+        // fully gauged in reality, so the gauge claims stay
+        // scoped to the covered set.
+        let total = pools.saturating_add(withheld);
+        if full == pools {
+            lines.push(format!(
+                "summary pool: used {} of {} capacity (covers {pools} of {total} pools)",
+                fmt_bytes(used),
+                fmt_bytes(cap)
+            ));
+        } else if full == 0 {
+            lines.push(format!(
+                "summary pool: occupancy unknown (covers {pools} of {total} pools; no covered pool has both gauges)"
+            ));
+        } else {
+            lines.push(format!(
+                "summary pool: used {} of {} capacity (partial: {full} of {pools} pools fully gauged; covers {pools} of {total} pools)",
+                fmt_bytes(used),
+                fmt_bytes(cap)
+            ));
+        }
     }
     let scope = match (attempts_known, copies_known) {
         (true, false) => {
@@ -1004,6 +1033,130 @@ mod tests {
             &"summary pool: used 900 bytes of 1000 bytes capacity (partial: 1 of 2 pools fully gauged)"
                 .to_string()
         ));
+    }
+
+    #[test]
+    fn summary_pool_qualifies_withheld_detail() {
+        // The detail budget withholds pools, so every headline
+        // branch names the covered count against the true
+        // total; gauge claims stay scoped to the covered set.
+        let mut covered = Report::default();
+        covered.metrics.push(valued_metric(
+            "pools_withheld_from_detail",
+            1,
+        ));
+        covered
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
+        covered
+            .metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
+        let lines = summary_lines(&covered, escape_text, "");
+        assert!(lines.contains(
+            &"summary pool: used 900 bytes of 1000 bytes capacity (covers 1 of 2 pools)"
+                .to_string()
+        ));
+        let mut partial = Report::default();
+        partial.metrics.push(valued_metric(
+            "pools_withheld_from_detail",
+            2,
+        ));
+        partial
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
+        partial
+            .metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
+        partial
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 500, "pool-1"));
+        partial
+            .metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-1"));
+        let lines = summary_lines(&partial, escape_text, "");
+        assert!(lines.contains(
+            &"summary pool: used 900 bytes of 1000 bytes capacity (partial: 1 of 2 pools fully gauged; covers 2 of 4 pools)"
+                .to_string()
+        ));
+        let mut unknown = Report::default();
+        unknown.metrics.push(valued_metric(
+            "pools_withheld_from_detail",
+            1,
+        ));
+        unknown
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
+        unknown
+            .metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-0"));
+        let lines = summary_lines(&unknown, escape_text, "");
+        assert!(lines.contains(
+            &"summary pool: occupancy unknown (covers 1 of 2 pools; no covered pool has both gauges)"
+                .to_string()
+        ));
+    }
+
+    #[test]
+    fn summary_pool_257_pools_end_to_end() {
+        // The 257-pool shape: 257 sampled pools emit 256
+        // per-pool rows plus the withheld count, and the
+        // headline qualifies its total.
+        let tmp = crate::platform::test_support::TestDir::create("memveil-257pools")
+            .expect("mkdtemp");
+        let dir = tmp.path();
+        let root = crate::platform::test_support::repo_root();
+        std::fs::copy(
+            root.join("tests/fixtures/pools/pressure/session.json"),
+            dir.join("session.json"),
+        )
+        .expect("copy session");
+        let raw = std::fs::read_to_string(
+            root.join("tests/fixtures/pools/pressure/events.ndjson"),
+        )
+        .expect("read events");
+        let sample = raw.lines().nth(1).expect("sample line").to_string();
+        assert!(sample.contains("\"pool_id\": \"pool-0\""));
+        let mut events = String::new();
+        for i in 0..257 {
+            let line = sample
+                .replacen("\"seq\": \"2\"", &format!("\"seq\": \"{}\"", i + 1), 1)
+                .replacen("\"pool_id\": \"pool-0\"", &format!("\"pool_id\": \"pool-{i:03}\""), 1);
+            assert_ne!(line, sample);
+            events.push_str(&line);
+            events.push('\n');
+        }
+        std::fs::write(dir.join("events.ndjson"), events).expect("write events");
+        // analyze_fixture only takes repo-relative paths, so run
+        // the same pipeline over the absolute scratch dir.
+        let rep = {
+            use crate::analysis::diagnostics::diagnose_report;
+            use crate::analysis::engine::Analyzer;
+            use crate::capture::reader::{default_limits, read_capture};
+            let mut reader =
+                read_capture(dir.to_str().expect("utf-8"), false, default_limits())
+                    .expect("read capture");
+            let mut analyzer = Analyzer::new(reader.session.clone());
+            while reader.has_more().expect("has_more") {
+                let event = reader.next_event().expect("next event");
+                analyzer.consume(&event).expect("consume");
+            }
+            let mut rep = analyzer
+                .finish(reader.session.window_end_ns, reader.partial)
+                .expect("finish");
+            diagnose_report(&mut rep, false, 0);
+            rep
+        };
+        let lines = summary_lines(&rep, escape_text, "");
+        assert!(
+            lines.iter().any(|l| l.starts_with("summary pool: used ")
+                && l.ends_with("(covers 256 of 257 pools)")),
+            "{lines:?}"
+        );
+        assert!(
+            rep.limitations
+                .iter()
+                .any(|n| n.contains("1 pools withheld from per-pool rows"))
+        );
     }
 
     #[test]
