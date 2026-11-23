@@ -1604,11 +1604,12 @@ enum OsDoctorFail {
 ///
 /// Flags compare as bytes; path values that cannot decode route
 /// as [`UNREADABLE_PATH`], and a capabilities value that cannot
-/// decode routes as `,`, whose empty segments refuse with `bad
-/// capability list` — mirroring Mojo's split, which maps
-/// undecodable segments to empty. An undecodable word in flag
-/// position silences the run: the unknown-option refusal would
-/// echo it.
+/// decode routes as `,`, whose empty segments refuse with the
+/// ID-list diagnostic — mirroring Mojo's split, which maps
+/// undecodable segments to empty. The list validates before the
+/// profiles location resolves, exactly like the UTF-8 path. An
+/// undecodable word in flag position silences the run: the
+/// unknown-option refusal would echo it.
 fn parse_doctor_args_os(args: &[OsString]) -> Result<DoctorOptions, OsDoctorFail> {
     let expanded = expand_flag_eq_os(args, DOCTOR_VALUE_FLAGS_OS);
     let args = &expanded;
@@ -1685,6 +1686,13 @@ fn parse_doctor_args_os(args: &[OsString]) -> Result<DoctorOptions, OsDoctorFail
                 None => return Err(OsDoctorFail::Silent),
             }
         }
+    }
+    // Argv validates before the world is probed: a malformed list
+    // fails here (exit 2) even when the executable path is also
+    // bad, mirroring the UTF-8 path above.
+    let ask = parse_requested_caps(&capabilities);
+    if !ask.ok {
+        return Err(OsDoctorFail::Message(invalid_capability_message(&ask.err)));
     }
     if !has_profiles_dir {
         match resolve_profiles_dir() {
@@ -3211,7 +3219,9 @@ mod tests {
     fn doctor_os_flag_eq_forms() {
         // Inline values match the spaced spelling, including the
         // non-UTF-8 routing: paths route as the stand-in and
-        // capabilities as the empty-segment list.
+        // capabilities validate before the profiles location
+        // resolves, so a malformed raw list refuses with the
+        // ID-list diagnostic even when no profiles dir is given.
         let opts = super::parse_doctor_args_os(&os(&[
             b"--profiles-dir=qd".as_slice(),
             b"--capability=attempt-trace".as_slice(),
@@ -3231,9 +3241,20 @@ mod tests {
         let opts = super::parse_doctor_args_os(&os(&[b"--object=\xff".as_slice()]))
             .expect("raw path parses");
         assert_eq!(opts.object, super::UNREADABLE_PATH);
-        let opts = super::parse_doctor_args_os(&os(&[b"--capability=\xff".as_slice()]))
-            .expect("raw list parses");
-        assert_eq!(opts.capabilities, ",");
+        for raw in [
+            b"--capability=\xff".as_slice(),
+            b"--capability=bogus".as_slice(),
+        ] {
+            match super::parse_doctor_args_os(&os(&[raw])) {
+                Err(super::OsDoctorFail::Message(detail)) => {
+                    assert!(
+                        detail.contains("valid capabilities:"),
+                        "raw list must refuse with IDs, got {detail:?}"
+                    );
+                }
+                other => panic!("raw list must refuse loudly, got {other:?}"),
+            }
+        }
         match super::parse_doctor_args_os(&os(&[b"--json=x".as_slice()])) {
             Err(super::OsDoctorFail::Message(detail)) => {
                 assert_eq!(detail, "unknown option: --json=x");
@@ -3312,8 +3333,10 @@ mod tests {
 
     #[test]
     fn doctor_os_routes_non_utf8_values() {
-        // Paths route as the never-openable stand-in, capabilities
-        // as the empty-segment list; UTF-8 values pass verbatim.
+        // Paths route as the never-openable stand-in; a non-UTF-8
+        // capability value refuses with the ID-list diagnostic
+        // before the profiles location resolves. UTF-8 values
+        // pass verbatim.
         let opts = super::parse_doctor_args_os(&os(&[
             b"--object".as_slice(),
             b"\xff".as_slice(),
@@ -3351,14 +3374,20 @@ mod tests {
             super::parse_doctor_args_os(&os(&[b"--profiles-dir".as_slice(), b"\xff".as_slice()]))
                 .expect("profiles dir routes");
         assert_eq!(opts.profiles_dir, "\0");
-        let opts = super::parse_doctor_args_os(&os(&[
+        match super::parse_doctor_args_os(&os(&[
             b"--capability".as_slice(),
             b"\xff".as_slice(),
             b"--profiles-dir".as_slice(),
             profiles_dir().as_bytes(),
-        ]))
-        .expect("capability routes");
-        assert_eq!(opts.capabilities, ",");
+        ])) {
+            Err(super::OsDoctorFail::Message(detail)) => {
+                assert!(
+                    detail.contains("valid capabilities:"),
+                    "raw capability must refuse with IDs, got {detail:?}"
+                );
+            }
+            other => panic!("raw capability must refuse loudly, got {other:?}"),
+        }
         let opts = super::parse_doctor_args_os(&os(&[
             b"--capability".as_slice(),
             b"attempt-trace".as_slice(),
