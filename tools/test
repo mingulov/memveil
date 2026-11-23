@@ -1979,12 +1979,12 @@ suite_record() {
     fi
     rexpect no-args 2 "missing --output" "" --
     rexpect unknown-flag 2 "unknown option" "" -- --bogus
-    rexpect bad-duration 2 "bad decimal" "" -- \
+    rexpect bad-duration 2 "bad duration: 0" "" -- \
         --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --duration 0
-    rexpect duration-suffix 2 "bad decimal" "" -- \
+    rexpect duration-invalid 2 "bad duration: bogus" "" -- \
         --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
-        --duration 60s
+        --duration bogus
     rexpect device-empty 2 "--device needs a value" "" -- \
         --output "$TMP/r-deve" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --device ""
