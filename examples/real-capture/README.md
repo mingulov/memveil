@@ -1,3 +1,4 @@
+> Legacy demo: recorded with memveil-0.1.0 (schema 0.1.1, integrity `legacy_unverified`). It demonstrates report rendering only and does not qualify current bytes; a fresh capture ships in a later release.
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Worked example: real bounce-attempt capture
 
