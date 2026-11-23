@@ -10,9 +10,10 @@ contract) is superseded.
 
 Standalone runner (no lane wiring). Unarmed, it self-tests the
 harness logic against mock fixtures: a good late-attach pair
-must pass and five targeted mutations (missed held release,
-dangling generation, control with dropped traffic, control
-with a miss, violated attach ordering) must each fail. Armed
+must pass and six targeted mutations (missed held release,
+dangling generation, dropped held sync, control with dropped
+traffic, control with a miss, violated attach ordering) must
+each fail. Armed
 with MEMVEIL_VM_LATE_ATTACH=1 and qualified probes, it boots
 one guest, runs the two-phase late-attach flow, and judges the
 exports with the same functions the self-test exercises.
@@ -358,6 +359,20 @@ def mock_attach_doc():
 def check_mock_pins(tmp):
     """Pin the mock generator to independently counted numbers."""
     bad = []
+    alc, alc_sum = parse_consume_file(str(tmp / "a-lc.txt"))
+    acp, acp_sum = parse_consume_file(str(tmp / "a-cp.txt"))
+    if len(alc) != 1:
+        bad.append("mock: a-lc has %d lines, want 1"
+                   % len(alc))
+    if len(acp) != 2:
+        bad.append("mock: a-cp has %d lines, want 2"
+                   % len(acp))
+    if alc_sum["cnt_obsb"] != HELD_SIZE:
+        bad.append("mock: a-lc bytes %d, want %d"
+                   % (alc_sum["cnt_obsb"], HELD_SIZE))
+    if acp_sum["cnt_obsb"] != 2 * HELD_SIZE:
+        bad.append("mock: a-cp bytes %d, want %d"
+                   % (acp_sum["cnt_obsb"], 2 * HELD_SIZE))
     lc, lc_sum = parse_consume_file(str(tmp / "b-lc.txt"))
     cp, cp_sum = parse_consume_file(str(tmp / "b-cp.txt"))
     if len(lc) != 8:
@@ -421,6 +436,27 @@ def drop_lc_seq(path, victim):
     path.write_text("\n".join(out) + "\n")
 
 
+def drop_cp_seq(path, victim):
+    """Remove one cp line and renumber seqs with a fixed summary."""
+    kept = []
+    for line in path.read_text().splitlines():
+        if line.startswith("summary "):
+            continue
+        fields = dict(part.split("=", 1) for part in
+                      line.split()[1:])
+        if int(fields["seq"]) != victim:
+            kept.append((line, fields))
+    out = []
+    for seq, (line, fields) in enumerate(kept):
+        out.append(re.sub(r" seq=\d+", " seq=%d" % seq, line,
+                          count=1))
+    byte_sum = sum(int(dict(part.split("=", 1) for part in
+                             line.split()[1:])["req"])
+                   for line in out)
+    out.append(mock_summary(len(out), byte_sum))
+    path.write_text("\n".join(out) + "\n")
+
+
 def selftest_boot_tmpdir_guard(tmp):
     """Boot assembly refuses rewritten TMPDIR before spawning."""
     from unittest import mock
@@ -468,7 +504,7 @@ def selftest_boot_tmpdir_guard(tmp):
 
 
 def run_selftest():
-    """Unarmed proof: good mocks pass, five mutations fail."""
+    """Unarmed proof: good mocks pass, six mutations fail."""
     bad = []
     with tempfile.TemporaryDirectory(
             prefix="lateattach-selftest-") as raw:
@@ -501,6 +537,13 @@ def run_selftest():
         bad += selftest_case(tmp, "neg-dangling-gen",
                              dangling, judge_phase_a, True)
 
+        def drop_held_sync(case, doc):
+            drop_cp_seq(case / "a-cp.txt", 0)
+
+        bad += selftest_case(tmp, "neg-held-sync-drop",
+                             drop_held_sync, judge_phase_a,
+                             True)
+
         def drop_control(case, doc):
             drop_lc_seq(case / "b-lc.txt", 4)
 
@@ -529,7 +572,7 @@ def run_selftest():
             print("  " + line)
         return 1
     print("lateattach selftest: PASS: good pair accepted, "
-          "5 mutations rejected")
+          "6 mutations rejected")
     return 0
 
 
