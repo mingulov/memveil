@@ -156,8 +156,9 @@ retains full provenance hashes. Missing or conflicting values remain explicit.
 
 This replays a finished capture in periodic prefixes; it does not follow a
 new workload live. Each summary shows its own measured prefix duration.
-`--compact` prints the short verdict-plus-headlines block per refresh
-instead of the full report; it cannot combine with `--device`.
+Refreshes print the short verdict-plus-headlines block; `--compact`
+is accepted for compatibility and combines with `--device`
+(headlines stay global, the final block honors the filter).
 
 ## 6. Advanced: qualify this machine (privileged)
 

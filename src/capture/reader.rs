@@ -110,6 +110,9 @@ pub fn read_remedy(cause: &str) -> Option<&'static str> {
         "cannot establish final session absence" => {
             Some("check read access to the capture path and retry")
         }
+        "cannot establish absence of final session" => {
+            Some("check read access to the capture path and retry")
+        }
         _ => {
             if cause.ends_with(": not owned by reader") {
                 Some(
@@ -3828,6 +3831,10 @@ mod tests {
             ),
             (
                 "cannot establish final session absence",
+                "check read access to the capture path and retry",
+            ),
+            (
+                "cannot establish absence of final session",
                 "check read access to the capture path and retry",
             ),
         ] {
