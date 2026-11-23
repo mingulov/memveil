@@ -1939,40 +1939,42 @@ mod tests {
     fn doctor2_text_remedy_grouping_edges() {
         // Mixed codes split into first-seen blocks; empty remedies
         // print nothing; an empty code drops the brackets.
-        let mut rep = DoctorReport2::default();
-        rep.verdict = "ready".to_string();
-        rep.caps = vec![
-            DoctorCap {
-                id: "attempt-trace".to_string(),
-                status: "unavailable".to_string(),
-                reason: "r1".to_string(),
-                remedy: "same why".to_string(),
-                reason_code: "code-a".to_string(),
-                evidence: Vec::new(),
-            },
-            DoctorCap {
-                id: "mapping-lifecycle".to_string(),
-                status: "unavailable".to_string(),
-                reason: "r2".to_string(),
-                remedy: "same why".to_string(),
-                reason_code: "code-a".to_string(),
-                evidence: Vec::new(),
-            },
-            DoctorCap {
-                id: "copy-actual".to_string(),
-                status: "unavailable".to_string(),
-                reason: "r3".to_string(),
-                remedy: "other why".to_string(),
-                reason_code: "code-b".to_string(),
-                evidence: Vec::new(),
-            },
-            DoctorCap {
-                id: "conversion-observe".to_string(),
-                status: "unsupported".to_string(),
-                reason: "no channel".to_string(),
-                ..DoctorCap::default()
-            },
-        ];
+        let mut rep = DoctorReport2 {
+            verdict: "ready".to_string(),
+            caps: vec![
+                DoctorCap {
+                    id: "attempt-trace".to_string(),
+                    status: "unavailable".to_string(),
+                    reason: "r1".to_string(),
+                    remedy: "same why".to_string(),
+                    reason_code: "code-a".to_string(),
+                    evidence: Vec::new(),
+                },
+                DoctorCap {
+                    id: "mapping-lifecycle".to_string(),
+                    status: "unavailable".to_string(),
+                    reason: "r2".to_string(),
+                    remedy: "same why".to_string(),
+                    reason_code: "code-a".to_string(),
+                    evidence: Vec::new(),
+                },
+                DoctorCap {
+                    id: "copy-actual".to_string(),
+                    status: "unavailable".to_string(),
+                    reason: "r3".to_string(),
+                    remedy: "other why".to_string(),
+                    reason_code: "code-b".to_string(),
+                    evidence: Vec::new(),
+                },
+                DoctorCap {
+                    id: "conversion-observe".to_string(),
+                    status: "unsupported".to_string(),
+                    reason: "no channel".to_string(),
+                    ..DoctorCap::default()
+                },
+            ],
+            ..Default::default()
+        };
         let text = render_doctor_text2(&rep);
         assert!(
             text.contains("    fix [code-a] (attempt-trace, mapping-lifecycle): same why\n"),
@@ -2010,8 +2012,10 @@ mod tests {
         // Unavailable reports end with exactly one next: line: the
         // record command when recording is possible, else the
         // offline replay. Ready reports carry none.
-        let mut rep = DoctorReport2::default();
-        rep.verdict = "unavailable".to_string();
+        let mut rep = DoctorReport2 {
+            verdict: "unavailable".to_string(),
+            ..Default::default()
+        };
         rep.kernel.eligible_floor = true;
         rep.has_profile = true;
         let text = render_doctor_text2(&rep);
@@ -2095,8 +2099,10 @@ mod tests {
             );
         }
         assert_eq!(super::translate_signal("future:code"), None);
-        let mut rep = DoctorReport2::default();
-        rep.verdict = "ready".to_string();
+        let mut rep = DoctorReport2 {
+            verdict: "ready".to_string(),
+            ..Default::default()
+        };
         rep.guest.signals = vec!["sev-node:absent".to_string(), "future:code".to_string()];
         let text = render_doctor_text2(&rep);
         assert!(

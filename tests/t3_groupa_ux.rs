@@ -19,20 +19,43 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Spawn with a bounded retry on ETXTBSY only.
+///
+/// Under parallel load a sibling thread's still-pre-exec child can hold an
+/// inherited write fd to a freshly-copied binary at our exec instant (POSIX
+/// fork-inheritance race; fd tables are process-global, CLOEXEC applies only
+/// at exec). Holders normally exec within milliseconds, but a wedged box can
+/// stall a fresh fork for seconds, so the budget spans 6 s; every other spawn
+/// error panics immediately, and persistent ETXTBSY still panics (reporting
+/// the retry count). Same pattern as `spawn_output` in
+/// `tests/package_helpers/mod.rs`.
+fn spawn_output(command: &mut Command) -> Output {
+    let mut tries = 0;
+    loop {
+        match command.output() {
+            Ok(out) => return out,
+            Err(err) if err.raw_os_error() == Some(26) && tries < 600 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(err) if tries > 0 => {
+                panic!("run binary: {err} (after {tries} ETXTBSY retries)")
+            }
+            Err(err) => panic!("run binary: {err}"),
+        }
+    }
+}
+
 fn run(bin: &Path, args: &[&str]) -> Output {
-    Command::new(bin)
-        .args(args)
-        .current_dir(repo_root())
-        .output()
-        .expect("run binary")
+    let mut command = Command::new(bin);
+    command.args(args).current_dir(repo_root());
+    spawn_output(&mut command)
 }
 
 fn run_os(bin: &Path, args: &[OsString]) -> Output {
-    Command::new(bin)
-        .args(args)
-        .current_dir(repo_root())
-        .output()
-        .expect("run binary")
+    let mut command = Command::new(bin);
+    command.args(args).current_dir(repo_root());
+    spawn_output(&mut command)
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {
@@ -296,6 +319,35 @@ fn t37_doctor_text_next_and_grouped_remedy() {
     } else {
         assert!(nexts.is_empty(), "{stdout}");
     }
+}
+
+#[test]
+fn spawn_retries_transient_txtbsy() {
+    // A sibling's still-pre-exec child can hold an inherited write fd to a
+    // freshly-copied binary at our exec instant (ETXTBSY); run() must ride
+    // through the transient instead of panicking. Deterministic: the holder
+    // rendezvous guarantees the first spawn attempt hits the busy window.
+    // Same pin as `spawn_retries_transient_txtbsy` in
+    // `tests/package_tarball.rs`.
+    let dir = tmp_dir("txtbsy-pin");
+    let target = dir.join("probe");
+    std::fs::copy("/bin/true", &target).expect("copy probe");
+    let held_path = target.clone();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&held_path)
+            .expect("hold probe");
+        tx.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(held);
+    });
+    rx.recv().unwrap();
+    let out = run(&target, &[]);
+    assert!(out.status.success(), "spawn must survive transient ETXTBSY");
+    handle.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
