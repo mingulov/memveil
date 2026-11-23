@@ -327,22 +327,105 @@ def validate_top_refreshes(refreshes, window):
         raise ValueError('live top refresh burst or cadence gap')
 
 
+STRICT_PARTIAL_EXIT = 4
+
+
+def _verdict_count(value, field):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError('live capture verdict count unreadable: ' + field)
+
+
+def _require_honest_stop(stop):
+    """Pin the live stop to the quiescence-only shape the product proves.
+
+    Each field below is one conjunct of the product's own
+    quiescence-only spillover predicate: admission closed, drain ran
+    clean inside its budget, no busy ring, no submit past the drain,
+    counters sampled, every in-flight submission drained, and
+    quiescence alone unproven. That predicate's truth is exactly what
+    makes the terminal leg known-zero instead of unknown, so a live
+    leg honest enough to pass carries exactly this stop; any other
+    stop shape fails loud here instead of passing silently.
+    """
+    for field, want in (('outcome', 'partial'),
+                        ('reason', 'quiescence unproven'),
+                        ('admission_closed', True),
+                        ('quiescence_observed', False),
+                        ('drain_completed', True),
+                        ('submit_after_drain', False),
+                        ('busy_at_drain', False),
+                        ('counters_valid', True)):
+        if stop.get(field) != want:
+            raise ValueError('live capture stop not the honest stop: '
+                             + field)
+    elapsed = _verdict_count(stop.get('elapsed_ms'), 'stop.elapsed_ms')
+    budget = _verdict_count(stop.get('budget_ms'), 'stop.budget_ms')
+    if elapsed > budget:
+        raise ValueError('live capture stop exceeded its budget')
+    drained = _verdict_count(stop.get('late_submits_drained'),
+                             'stop.late_submits_drained')
+    in_flight = _verdict_count(stop.get('in_flight_at_close'),
+                               'stop.in_flight_at_close')
+    if drained != in_flight:
+        raise ValueError('live capture stop left in-flight submissions '
+                         'undrained')
+
+
 def capture_facts(binary, capture, pool=False, oracle=None, window=None, stop_ns=None):
     from support.candidate_input import candidate
     session = candidate.read_json(capture / 'session.json')
     rendered = subprocess.run([str(binary), 'report', '--strict', '--format', 'json', str(capture)],
                               capture_output=True, timeout=120)
-    require_product_exit(rendered.returncode)
+    if rendered.returncode not in (0, STRICT_PARTIAL_EXIT):
+        raise ProductExit(rendered.returncode)
     report = rendered.stdout
     if len(report) > 16 * 1024 * 1024: raise ValueError('report exceeds document bound')
     parsed = json.loads(report)
+    # This gate deliberately stays on report --strict instead of
+    # weakening to plain report. Plain report exits 0 on every
+    # rendered capture no matter how incomplete, so exit 0 there
+    # proves nothing about terminal quality; --strict is the only
+    # spelling whose exit distinguishes complete from partial, and
+    # the pinned verdict below is what makes exit 4 an honest pass
+    # instead of a blind one.
+    verdict = parsed.get('verdict', {})
+    if rendered.returncode == 0 or verdict.get('name') == 'complete':
+        raise ValueError('live capture reports complete (strict exit %s, '
+                         'verdict %s): impossible on live captures; oracle '
+                         'broken' % (rendered.returncode, verdict.get('name')))
     if parsed.get('integrity', {}).get('status') != 'verified': raise ValueError('capture integrity unverified')
+    if verdict.get('name') != 'partial_known_loss':
+        raise ValueError('live capture verdict not the honest partial: '
+                         + str(verdict.get('name')))
+    if _verdict_count(verdict.get('loss_ratio_bps'), 'loss_ratio_bps') != 0:
+        raise ValueError('live capture carries known loss: '
+                         + str(verdict.get('loss_ratio_bps')) + ' bps')
+    if _verdict_count(verdict.get('delivered'), 'delivered') <= 0:
+        raise ValueError('live capture delivered no events')
+    integrity = parsed.get('integrity', {})
+    if _verdict_count(integrity.get('verified_events'), 'verified_events') <= 0:
+        raise ValueError('live capture verified no events')
+    session_verdict = session.get('verdict', {})
+    if session_verdict.get('name') != 'partial_known_loss':
+        raise ValueError('live session verdict not the honest partial: '
+                         + str(session_verdict.get('name')))
+    if _verdict_count(session_verdict.get('loss_ratio_bps'), 'session loss_ratio_bps') != 0:
+        raise ValueError('live session carries known loss')
     quality = session['quality']
-    for channel in ('detail', 'aggregate', 'correlation', 'baseline', 'terminal'):
+    for channel in ('detail', 'aggregate', 'correlation', 'baseline'):
         value = quality[channel]
         if value.get('loss_count') not in ('0', None): raise ValueError('capture channel loss: ' + channel)
         if value.get('status') not in ('complete_for_scope', 'not_applicable', 'unavailable'):
             raise ValueError('capture channel incomplete: ' + channel)
+    terminal = quality['terminal']
+    if terminal.get('loss_count') not in ('0', None):
+        raise ValueError('capture channel loss: terminal')
+    if terminal.get('status') != 'partial' or terminal.get('reason') != 'stop partial: quiescence unproven':
+        raise ValueError('live capture terminal not the honest terminal: '
+                         + str(terminal.get('reason')))
+    _require_honest_stop(session['stop'])
     kinds, pool_samples = {}, []
     with (capture / 'events.ndjson').open('rb') as stream:
         while True:
@@ -1250,13 +1333,22 @@ def _verify_leg_content(ordinal, leg, files):
             or session.get('stop') != capture.get('stop'):
         raise ValueError('campaign leg capture differs from retained session: '
                          + str(ordinal))
-    for channel in ('detail', 'aggregate', 'correlation', 'baseline', 'terminal'):
+    for channel in ('detail', 'aggregate', 'correlation', 'baseline'):
         value = capture['quality'][channel]
         if value.get('loss_count') not in ('0', None):
             raise ValueError('campaign leg channel loss: ' + channel)
         if value.get('status') not in ('complete_for_scope', 'not_applicable',
                                        'unavailable'):
             raise ValueError('campaign leg channel incomplete: ' + channel)
+    # The terminal replay mirrors the leg gate: a live capture is
+    # partial by product design, so the honest terminal channel is
+    # partial for quiescence unproven, never complete.
+    terminal = capture['quality']['terminal']
+    if terminal.get('loss_count') not in ('0', None):
+        raise ValueError('campaign leg channel loss: terminal')
+    if terminal.get('status') != 'partial' or terminal.get('reason') != 'stop partial: quiescence unproven':
+        raise ValueError('campaign leg terminal not the honest terminal: '
+                         + str(terminal.get('reason')))
     if capture.get('session_sha256') != hashlib.sha256(files['session.json']).hexdigest():
         raise ValueError('campaign leg session digest differs: ' + str(ordinal))
     kinds, pool_samples = _verify_leg_events(files['events.ndjson'])
