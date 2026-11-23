@@ -1918,3 +1918,239 @@ def test_host_success_writes_no_console_files(sealed, monkeypatch, tmp_path):
     evidence = Path(receipt['evidence'])
     assert not (evidence / 'guest-stdout.log').exists()
     assert not (evidence / 'guest-stderr.log').exists()
+
+
+# Verbatim transcript shape of the pinned guest configure
+# refusal: unpack succeeds, only configure is refused on the
+# Depends entry the package database cannot see.
+INSTALL_REFUSAL_STDOUT = (
+    'Selecting previously unselected package memveil.\n'
+    '(Reading database ... 0 files and directories currently installed.)\n'
+    'Preparing to unpack .../memveil_0.2.0-1_amd64.deb ...\n'
+    'Unpacking memveil (0.2.0-1) ...\n'
+)
+INSTALL_REFUSAL_STDERR = (
+    'dpkg: dependency problems prevent configuration of memveil:\n'
+    ' memveil depends on libc6 (>= 2.35); however:\n'
+    '  Package libc6 is not installed.\n'
+    'dpkg: error processing package memveil (--install):\n'
+    ' dependency problems - leaving unconfigured\n'
+)
+
+
+def _stub_installer(path, body):
+    path.write_text('#!/bin/sh\n' + body)
+    path.chmod(0o755)
+    return path
+
+
+def _shadow_path(monkeypatch, bindir):
+    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
+
+
+def _sealed_deb(tmp_path):
+    return tmp_path / 'memveil_0.2.0-1_amd64.deb'
+
+
+def test_guest_install_force_depends_bypasses_empty_package_db(
+        tmp_path, monkeypatch):
+    m = api()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    _stub_installer(bindir / 'dpkg',
+        'test "$1" = --force-depends || exit 2\n'
+        'test "$2" = -i || exit 2\n'
+        'echo "Unpacking memveil (0.2.0-1) ..."\n'
+        'echo "dpkg: warning: depends on libc6 (>= 2.35)" >&2\n'
+        'echo "Setting up memveil (0.2.0-1) ..."\n')
+    _shadow_path(monkeypatch, bindir)
+    evidence = tmp_path / 'local-evidence'
+    evidence.mkdir()
+    out = m.install_guest_deb(_sealed_deb(tmp_path), str(evidence))
+    assert b'Unpacking' in out
+    log = (evidence / m.INSTALL_LOG_NAME).read_bytes()
+    assert b'Setting up' in log and b'--force-depends' in log
+
+
+def test_guest_install_refusal_carries_cause_and_forensics(
+        tmp_path, monkeypatch):
+    import shlex
+    m = api()
+    assert issubclass(m.InstallFailure, ValueError)
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    _stub_installer(bindir / 'dpkg',
+        'printf %s %s\nprintf %s %s >&2\nexit 1\n'
+        % (shlex.quote(INSTALL_REFUSAL_STDOUT), '',
+           shlex.quote(INSTALL_REFUSAL_STDERR), ''))
+    _shadow_path(monkeypatch, bindir)
+    evidence = tmp_path / 'local-evidence'
+    evidence.mkdir()
+    with pytest.raises(m.InstallFailure, match='libc6') as caught:
+        m.install_guest_deb(_sealed_deb(tmp_path), str(evidence))
+    assert 'dependency problems' in str(caught.value)
+    assert 'dpkg exit 1' in str(caught.value)
+    assert caught.value.returncode == 1
+    assert b'leaving unconfigured' in caught.value.stderr
+    assert b'Unpacking' in caught.value.stdout
+    assert caught.value.log == str(evidence / m.INSTALL_LOG_NAME)
+    log = (evidence / m.INSTALL_LOG_NAME).read_bytes()
+    assert INSTALL_REFUSAL_STDOUT.encode() in log
+    assert INSTALL_REFUSAL_STDERR.encode() in log
+
+
+def test_guest_install_missing_installer_refuses_by_name(
+        tmp_path, monkeypatch):
+    m = api()
+    empty = tmp_path / 'empty'
+    empty.mkdir()
+    monkeypatch.setenv('PATH', str(empty))
+    evidence = tmp_path / 'local-evidence'
+    evidence.mkdir()
+    with pytest.raises(ValueError, match='dpkg not found'):
+        m.install_guest_deb(_sealed_deb(tmp_path), str(evidence))
+    assert not (evidence / m.INSTALL_LOG_NAME).exists()
+
+
+def test_guest_install_timeout_keeps_partial_forensics(
+        tmp_path, monkeypatch):
+    m = api()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    _stub_installer(bindir / 'dpkg', 'echo partial-transcript\nsleep 30\n')
+    _shadow_path(monkeypatch, bindir)
+    evidence = tmp_path / 'local-evidence'
+    evidence.mkdir()
+    with pytest.raises(m.InstallFailure, match='timed out'):
+        m.install_guest_deb(
+            _sealed_deb(tmp_path), str(evidence), timeout=0.2)
+    log = (evidence / m.INSTALL_LOG_NAME).read_bytes()
+    assert b'partial-transcript' in log and b'timeout' in log
+
+
+def test_guest_install_unwritable_forensics_is_loud(tmp_path, monkeypatch):
+    m = api()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    _stub_installer(bindir / 'dpkg', 'echo "Setting up memveil ..."\n')
+    _shadow_path(monkeypatch, bindir)
+    blocker = tmp_path / 'blocker'
+    blocker.write_text('not a directory\n')
+    with pytest.raises(ValueError, match='forensics unwritable'):
+        m.install_guest_deb(_sealed_deb(tmp_path), str(blocker))
+
+
+def test_guest_install_failure_keeps_cause_when_forensics_unwritable(
+        tmp_path, monkeypatch):
+    import shlex
+    m = api()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    _stub_installer(bindir / 'dpkg',
+        'printf %s %s\nprintf %s %s >&2\nexit 1\n'
+        % (shlex.quote(INSTALL_REFUSAL_STDOUT), '',
+           shlex.quote(INSTALL_REFUSAL_STDERR), ''))
+    _shadow_path(monkeypatch, bindir)
+    blocker = tmp_path / 'blocker'
+    blocker.write_text('not a directory\n')
+    with pytest.raises(m.InstallFailure) as caught:
+        m.install_guest_deb(_sealed_deb(tmp_path), str(blocker))
+    message = str(caught.value)
+    assert 'libc6' in message
+    assert 'forensics unwritable' in message
+    assert message.index('libc6') < message.index('forensics unwritable')
+    assert 'dpkg exit 1' in message
+    assert caught.value.returncode == 1
+    assert b'leaving unconfigured' in caught.value.stderr
+
+
+def test_checked_keeps_label_only_contract(tmp_path):
+    m = api()
+    helper = _stub_installer(
+        tmp_path / 'helper', 'echo secret-cause >&2\nexit 3\n')
+    with pytest.raises(ValueError,
+                       match='required helper failed: helper') as caught:
+        m.checked([str(helper)], 60)
+    assert 'secret-cause' not in str(caught.value)
+
+
+def _pinned_binary(tmp_path, body):
+    import hashlib
+    binary = tmp_path / 'memveil'
+    binary.write_text(body)
+    binary.chmod(0o755)
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    return binary, {'files': {'bin/memveil': digest}}
+
+
+_VERSION_BODY = '#!/bin/sh\necho memveil 0.2.0-test\n'
+
+
+def test_installed_binary_hash_and_version_prove_identity(tmp_path):
+    m = api()
+    assert m.INSTALLED_BINARY == Path('/usr/bin/memveil')
+    binary, manifest = _pinned_binary(tmp_path, _VERSION_BODY)
+    assert m.verify_installed_binary(manifest, binary) is None
+
+
+def test_installed_binary_hash_mismatch_refuses(tmp_path):
+    m = api()
+    binary, manifest = _pinned_binary(tmp_path, _VERSION_BODY)
+    binary.write_bytes(b'#!/bin/sh\necho other-bytes\n')
+    binary.chmod(0o755)
+    with pytest.raises(ValueError, match='differs'):
+        m.verify_installed_binary(manifest, binary)
+
+
+@pytest.mark.parametrize('body', ['#!/bin/sh\nexit 1\n', '#!/bin/sh\nexit 0\n'])
+def test_installed_binary_silent_or_failing_version_refuses(tmp_path, body):
+    m = api()
+    binary, manifest = _pinned_binary(tmp_path, body)
+    with pytest.raises(ValueError, match='unproved'):
+        m.verify_installed_binary(manifest, binary)
+
+
+def test_installed_binary_alias_and_absence_refuse(tmp_path):
+    m = api()
+    binary, manifest = _pinned_binary(tmp_path, _VERSION_BODY)
+    link = tmp_path / 'link'
+    link.symlink_to(binary)
+    with pytest.raises(ValueError, match='alias'):
+        m.verify_installed_binary(manifest, link)
+    with pytest.raises(ValueError, match='absent'):
+        m.verify_installed_binary(manifest, tmp_path / 'missing')
+
+
+def test_installed_binary_unpinned_closure_refuses(tmp_path):
+    m = api()
+    binary, _ = _pinned_binary(tmp_path, _VERSION_BODY)
+    with pytest.raises(ValueError, match='no pinned digest'):
+        m.verify_installed_binary({'files': {}}, binary)
+
+
+def test_host_guest_argv_install_inputs_unchanged(
+        sealed, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    calls = []
+    def fake_guest(cmd, timeout):
+        calls.append((list(cmd), timeout))
+        return SimpleNamespace(returncode=1, stdout='stub stdout\n',
+                                 stderr='stub stderr\n')
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        with pytest.raises(ValueError, match='guest campaign failed'):
+            m.host('overhead')
+    finally:
+        _restore_sealed(previous)
+    argv = calls[0][0]
+    payload = argv[argv.index('--exec') + 1]
+    assert '--deb' in payload
+    assert '--rpm' not in payload
+    assert 'force-depends' not in payload
