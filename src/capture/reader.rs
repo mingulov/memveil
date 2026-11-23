@@ -3903,8 +3903,11 @@ mod tests {
         // same remedy.
         let lone = tmp.path().join("lone-session");
         std::fs::create_dir(&lone).expect("mkdir lone");
-        std::fs::write(lone.join("session.json"), fixture_bytes("attempts/session.json"))
-            .expect("write session");
+        std::fs::write(
+            lone.join("session.json"),
+            fixture_bytes("attempts/session.json"),
+        )
+        .expect("write session");
         let err = read_capture(lone.to_str().unwrap(), false, default_limits()).unwrap_err();
         assert_eq!(
             err.message,

@@ -260,7 +260,7 @@ fn pool_occupancy(rep: &Report) -> (Option<u64>, Option<u64>, usize, usize) {
     let mut used: Option<u64> = None;
     let mut cap: Option<u64> = None;
     let mut full = 0;
-    for (_, (u, c)) in &gauges {
+    for (u, c) in gauges.values() {
         if let (Some(u), Some(c)) = (u, c) {
             full += 1;
             used = Some(used.unwrap_or(0).saturating_add(*u));
@@ -348,9 +348,7 @@ pub fn summary_lines<E: Fn(&str) -> String>(
             fmt_bytes(cap)
         ));
     } else if full == 0 {
-        lines.push(
-            "summary pool: occupancy unknown (no pool has both gauges)".to_string(),
-        );
+        lines.push("summary pool: occupancy unknown (no pool has both gauges)".to_string());
     } else {
         lines.push(format!(
             "summary pool: used {} of {} capacity (partial: {full} of {pools} pools fully gauged)",
@@ -947,9 +945,7 @@ mod tests {
         zero.metrics
             .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
         let lines = summary_lines(&zero, escape_text, "");
-        assert!(lines.contains(
-            &"summary pool: used 0 bytes of 1000 bytes capacity".to_string()
-        ));
+        assert!(lines.contains(&"summary pool: used 0 bytes of 1000 bytes capacity".to_string()));
     }
 
     #[test]
@@ -963,21 +959,16 @@ mod tests {
         split
             .metrics
             .push(pooled_gap("pool_capacity_bytes", "pool-0"));
-        split
-            .metrics
-            .push(pooled_gap("pool_used_bytes", "pool-1"));
+        split.metrics.push(pooled_gap("pool_used_bytes", "pool-1"));
         split
             .metrics
             .push(pooled_metric("pool_capacity_bytes", 1000, "pool-1"));
         let lines = summary_lines(&split, escape_text, "");
-        assert!(lines.contains(
-            &"summary pool: occupancy unknown (no pool has both gauges)".to_string()
-        ));
         assert!(
-            !lines
-                .iter()
-                .any(|l| l.starts_with("summary pool: used "))
+            lines
+                .contains(&"summary pool: occupancy unknown (no pool has both gauges)".to_string())
         );
+        assert!(!lines.iter().any(|l| l.starts_with("summary pool: used ")));
         // One half alone is unknown too, never zero-filled.
         let mut half = Report::default();
         half.metrics
@@ -985,9 +976,10 @@ mod tests {
         half.metrics
             .push(pooled_gap("pool_capacity_bytes", "pool-0"));
         let lines = summary_lines(&half, escape_text, "");
-        assert!(lines.contains(
-            &"summary pool: occupancy unknown (no pool has both gauges)".to_string()
-        ));
+        assert!(
+            lines
+                .contains(&"summary pool: occupancy unknown (no pool has both gauges)".to_string())
+        );
     }
 
     #[test]

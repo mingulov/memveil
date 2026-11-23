@@ -48,8 +48,8 @@ use crate::cli::record::parse_record_args;
 use crate::cli::report::{
     CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, MAX_RENDERED_BYTES,
     analysis_error_text, check_rendered_size, exit_for_report, expand_flag_eq, expand_flag_eq_os,
-    parse_limit, parse_limit_bytes, refusal_stderr_lines, sanitize_diagnostic, write_capture_location,
-    write_stderr, write_stderr_trusted,
+    parse_limit, parse_limit_bytes, refusal_stderr_lines, sanitize_diagnostic,
+    write_capture_location, write_stderr, write_stderr_trusted,
 };
 use crate::model::event::Event;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
@@ -1791,8 +1791,7 @@ mod tests {
 
     #[test]
     fn top_live_flag_eq_forms() {
-        let opts =
-            parse_top_args(&args(&["--output=out"])).expect("eq output parses");
+        let opts = parse_top_args(&args(&["--output=out"])).expect("eq output parses");
         assert!(opts.has_output);
         assert_eq!(opts.live.output, "out");
         // A bad live capability lists the valid IDs in both

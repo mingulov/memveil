@@ -1263,9 +1263,10 @@ fn doctor_next_line(rep: &DoctorReport2) -> Option<&'static str> {
     // Admission failures surface per capability with their own
     // codes; only the privilege demotion is a failure the
     // suggested sudo record can get past.
-    let blocked = rep.caps.iter().any(|cap| {
-        cap.status == "unavailable" && cap.reason_code != "no-bpf-privilege"
-    });
+    let blocked = rep
+        .caps
+        .iter()
+        .any(|cap| cap.status == "unavailable" && cap.reason_code != "no-bpf-privilege");
     if blocked {
         return Some("next: memveil report examples/real-capture\n");
     }
