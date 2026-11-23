@@ -1189,7 +1189,9 @@ pub fn run_top_os(args: &[OsString]) -> i64 {
     }
     match parse_top_args_os(args) {
         Ok(TopOsArgs::Live) => {
-            let _ = write_stderr(&top_usage());
+            // Fixed compile-time text: the trusted writer keeps its
+            // slashes, so this equals `top --help` stdout byte for byte.
+            let _ = write_stderr_trusted(&top_usage());
             EXIT_INVALID
         }
         Ok(TopOsArgs::Replay(parsed)) => {
@@ -1607,10 +1609,14 @@ mod tests {
         let err = parse_top_args(&args(&["--profiles-dir", "/alt", "capdir"]))
             .expect_err("replay profiles-dir rejects");
         assert_eq!(err.message, "live options need --output DIR");
-        // Live --duration errors surface from the shared parser.
+        // Live --duration errors surface from the shared parser:
+        // one duration grammar, so the error matches report/top.
         let err = parse_top_args(&args(&["--output", "out", "--duration", "nope"]))
             .expect_err("bad live duration rejects");
-        assert_eq!(err.message, "bad decimal: nope");
+        assert_eq!(
+            err.message,
+            "--duration DurationError(message=bad duration: nope)"
+        );
         // --strict flows into the live record options.
         let opts = parse_top_args(&args(&["--output", "out", "--strict"])).expect("parses");
         assert!(opts.strict);
@@ -1798,6 +1804,16 @@ mod tests {
                 "{words:?} must stay live"
             );
         }
+    }
+
+    #[test]
+    fn top_verb_usage_survives_trusted_writer_byte_exact() {
+        // The raw live arm prints usage to stderr through the
+        // trusted writer, which must preserve it byte for byte, so
+        // that usage error equals `top --help` stdout.
+        use crate::cli::report::neutralize_controls;
+        let text = top_usage();
+        assert_eq!(neutralize_controls(&text), text);
     }
 
     #[test]

@@ -24,7 +24,9 @@ use crate::capture::run::{
     loadcheck_bridge_sha, parse_requested_caps, resolve_channel_object, resolve_object,
 };
 use crate::cli::report::{
-    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic, write_stderr,
+    EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, expand_flag_eq, expand_flag_eq_os,
+    invalid_capability_message, no_profiles_lines, profiles_manifest_missing, sanitize_diagnostic,
+    write_stderr, write_stderr_trusted,
 };
 use crate::platform::btf::read_object_map_bytes;
 use crate::platform::capabilities::attempt_loss_exact;
@@ -43,6 +45,24 @@ use std::os::unix::ffi::OsStrExt;
 
 /// Unavailable collection: the requested set is not ready.
 pub const EXIT_UNAVAILABLE: i64 = EXIT_REFUSAL;
+/// Value-taking doctor flags: the `--flag=value` set.
+const DOCTOR_VALUE_FLAGS: &[&str] = &[
+    "--profiles-dir",
+    "--capability",
+    "--object",
+    "--lc-object",
+    "--cp-object",
+    "--bridge",
+];
+/// Byte-wise [`DOCTOR_VALUE_FLAGS`] for the raw parser.
+const DOCTOR_VALUE_FLAGS_OS: &[&[u8]] = &[
+    b"--profiles-dir",
+    b"--capability",
+    b"--object",
+    b"--lc-object",
+    b"--cp-object",
+    b"--bridge",
+];
 const ZLIB: &str = "libz.so.1";
 const OBJECT_BYTES_CAP: usize = 67108864;
 const CMDLINE_CAP: usize = 65536;
@@ -180,6 +200,19 @@ fn doctor_failed(detail: &str) -> i64 {
         Ok(()) => EXIT_INVALID,
         Err(_) => EXIT_INTERNAL,
     }
+}
+
+/// Report a missing profiles tree on stderr; return EXIT_UNAVAILABLE.
+///
+/// The lone-install shape: the searched manifest path plus the
+/// packaged-layout fix, written trusted so the path survives.
+fn doctor_unavailable_profiles(dir: &str) -> i64 {
+    for line in no_profiles_lines("doctor", dir) {
+        if write_stderr_trusted(&line).is_err() {
+            return EXIT_INTERNAL;
+        }
+    }
+    EXIT_UNAVAILABLE
 }
 
 /// One judged capability: status, reason, code, evidence.
@@ -644,7 +677,7 @@ pub fn assess_doctor(opts: &DoctorOptions) -> DoctorReport2 {
     out.profile_reason = decision.reason.clone();
     let ask = parse_requested_caps(&opts.capabilities);
     if !ask.ok {
-        out.summary = format!("unavailable: {}", ask.err);
+        out.summary = format!("unavailable: {}", invalid_capability_message(&ask.err));
         return out;
     }
     out.requested.clone_from(&ask.caps);
@@ -1125,11 +1158,104 @@ fn doctor2_status_text(status: &str) -> String {
     status.to_string()
 }
 
+/// Human words for one guest signal code, text mode only.
+///
+/// Returns `None` for unknown codes, which render raw. Dynamic tails
+/// (`cpu-flags:ok:…`, `asserted:…`, `info:…` values) keep their values
+/// inside the translation; the renderer sanitizes both fragments.
+fn translate_signal(code: &str) -> Option<String> {
+    let fixed: &[(&str, &str)] = &[
+        ("sev-node:present", "SEV-SNP guest device present"),
+        ("sev-node:absent", "SEV-SNP guest device absent"),
+        ("sev-node:denied", "SEV-SNP guest device unreadable"),
+        ("tdx-node:present", "TDX guest device present"),
+        ("tdx-node:absent", "TDX guest device absent"),
+        ("tdx-node:denied", "TDX guest device unreadable"),
+        ("tsm:present", "TSM report interface present"),
+        ("sev-vmpl:denied", "SEV VMPL level unreadable"),
+        ("sev-vmpl:malformed", "SEV VMPL level malformed"),
+        ("cpu-flags:denied", "CPU flags unreadable"),
+        ("cpu-flags:absent", "CPU info absent"),
+        ("cpu-flags:read-error", "CPU info read failed"),
+        ("cpu-flags:ok:none", "no confidential-computing CPU flags"),
+        (
+            "cc-flags:without-node:sev_snp",
+            "SEV-SNP CPU flag without guest node",
+        ),
+        (
+            "cc-flags:without-node:tdx_guest",
+            "TDX CPU flag without guest node",
+        ),
+        (
+            "ordinary:absent-nodes-inference",
+            "ordinary guest inferred (no attestation devices)",
+        ),
+        ("info:btf:read-error", "kernel BTF read failed"),
+        ("info:btf:denied", "kernel BTF unreadable"),
+        ("info:btf:absent", "kernel BTF absent"),
+        ("info:config-gz:present", "kernel config present"),
+        ("info:config-gz:denied", "kernel config unreadable"),
+        ("info:config-gz:absent", "kernel config absent"),
+        ("info:os:read-error", "OS release read failed"),
+        ("info:os:denied", "OS release unreadable"),
+        ("info:os:absent", "OS release absent"),
+        ("info:boot-config:present", "boot config present"),
+        ("info:boot-config:denied", "boot config unreadable"),
+        ("info:boot-config:absent", "boot config absent"),
+        (
+            "info:boot-config:skipped-unsafe-release",
+            "boot config check skipped",
+        ),
+    ];
+    for (known, human) in fixed {
+        if *known == code {
+            return Some(human.to_string());
+        }
+    }
+    if let Some(rest) = code.strip_prefix("sev-vmpl:")
+        && rest.len() == 1
+        && rest.as_bytes()[0].is_ascii_digit()
+    {
+        return Some(format!("SEV VMPL level {rest}"));
+    }
+    if let Some(rest) = code.strip_prefix("cpu-flags:ok:") {
+        return Some(format!("CPU flags: {}", rest.replace('+', ", ")));
+    }
+    if let Some(rest) = code.strip_prefix("asserted:") {
+        return Some(format!("caller-asserted technology: {rest}"));
+    }
+    if let Some(rest) = code.strip_prefix("info:btf:present:") {
+        return Some(format!("kernel BTF present ({rest})"));
+    }
+    if let Some(rest) = code.strip_prefix("info:os:") {
+        return Some(format!("OS {}", rest.replace(':', " ")));
+    }
+    None
+}
+
+/// The next command for an unavailable doctor report, if any.
+///
+/// Recording is impossible when the kernel misses the floor or no
+/// profile covers the host; then the offline replay replaces the
+/// record command. Ready reports carry no next step.
+fn doctor_next_line(rep: &DoctorReport2) -> Option<&'static str> {
+    if rep.verdict != "unavailable" {
+        return None;
+    }
+    if !rep.kernel.eligible_floor || !rep.has_profile {
+        return Some("next: memveil report examples/real-capture\n");
+    }
+    Some("next: sudo memveil record --output /tmp/cap1 --duration 10\n")
+}
+
 /// Render one DoctorReport2 as human-readable text.
 ///
 /// Same shape as the 0.1.0 text, plus one `note:` line per note;
 /// load-unchecked statuses print in words. Every interpolated evidence
 /// fragment passes through the single-line diagnostic sanitizer.
+/// Remedies group by reason code (one block per code, in first-seen
+/// order); signal codes translate to words; an unavailable report
+/// ends with one `next:` command.
 pub fn render_doctor_text2(rep: &DoctorReport2) -> String {
     let mut out = format!("memveil doctor ({}, {} evidence)\n", rep.mode, rep.origin);
     out += &format!(
@@ -1149,8 +1275,22 @@ pub fn render_doctor_text2(rep: &DoctorReport2) -> String {
         out += " (user-asserted)";
     }
     out += "\n";
+    if rep.guest.tech != "ordinary" && rep.guest.tech != "unknown" {
+        out += "note: kernel-reported guest signal; not attested, not a platform qualification.\n";
+    }
     for signal in &rep.guest.signals {
-        out += &format!("  signal: {}\n", sanitize_diagnostic(signal));
+        match translate_signal(signal) {
+            Some(human) => {
+                out += &format!(
+                    "  signal: {} ({})\n",
+                    sanitize_diagnostic(signal),
+                    sanitize_diagnostic(&human)
+                );
+            }
+            None => {
+                out += &format!("  signal: {}\n", sanitize_diagnostic(signal));
+            }
+        }
     }
     if !rep.guest.conflict.is_empty() {
         out += &format!("  conflict: {}\n", sanitize_diagnostic(&rep.guest.conflict));
@@ -1176,8 +1316,46 @@ pub fn render_doctor_text2(rep: &DoctorReport2) -> String {
             sanitize_diagnostic(&doctor2_status_text(&cap.status)),
             sanitize_diagnostic(&cap.reason)
         );
-        if !cap.remedy.is_empty() {
-            out += &format!("    fix: {}\n", sanitize_diagnostic(&cap.remedy));
+    }
+    // One remedy block per (reason code, remedy) pair: identical
+    // remedies print once with their capability list.
+    let mut blocks: Vec<(String, String, Vec<String>)> = Vec::new();
+    for cap in &rep.caps {
+        if cap.remedy.is_empty() {
+            continue;
+        }
+        let mut placed = false;
+        for block in blocks.iter_mut() {
+            if block.0 == cap.reason_code && block.1 == cap.remedy {
+                block.2.push(cap.id.clone());
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            blocks.push((
+                cap.reason_code.clone(),
+                cap.remedy.clone(),
+                vec![cap.id.clone()],
+            ));
+        }
+    }
+    for (code, remedy, ids) in &blocks {
+        let mut names = String::new();
+        for (i, id) in ids.iter().enumerate() {
+            if i != 0 {
+                names += ", ";
+            }
+            names += &sanitize_diagnostic(id);
+        }
+        if code.is_empty() {
+            out += &format!("    fix ({names}): {}\n", sanitize_diagnostic(remedy));
+        } else {
+            out += &format!(
+                "    fix [{}] ({names}): {}\n",
+                sanitize_diagnostic(code),
+                sanitize_diagnostic(remedy)
+            );
         }
     }
     for note in &rep.notes {
@@ -1193,6 +1371,9 @@ pub fn render_doctor_text2(rep: &DoctorReport2) -> String {
     out += "\n";
     out += &format!("verdict: {}\n", sanitize_diagnostic(&rep.verdict));
     out += &format!("summary: {}\n", sanitize_diagnostic(&rep.summary));
+    if let Some(next) = doctor_next_line(rep) {
+        out += next;
+    }
     out
 }
 
@@ -1218,11 +1399,14 @@ pub fn run_doctor_with(root: &str, profiles_dir: &str, as_json: bool) -> i64 {
 
 /// Run the admission-judging doctor flow; return exit code.
 ///
-/// Bad roots, profiles, or capability lists fail with exit 2; a load
-/// check against a fixture root is rejected the same way. Otherwise
-/// the report goes to stdout with exit 0 when the requested set is
-/// ready and 3 when it is unavailable. Passive runs never touch the
-/// bridge.
+/// Bad roots or capability lists fail with exit 2; a load check
+/// against a fixture root is rejected the same way. A missing
+/// profiles tree (no manifest at the searched path) reports the
+/// lone-install shape with exit 3, matching record; a present but
+/// malformed tree keeps the loader diagnostic with exit 2.
+/// Otherwise the report goes to stdout with exit 0 when the
+/// requested set is ready and 3 when it is unavailable. Passive
+/// runs never touch the bridge.
 pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
     if opts.load_check && !opts.root.is_empty() {
         return doctor_failed("--load-check needs the live host");
@@ -1231,11 +1415,14 @@ pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
         return doctor_failed(&format!("cannot open evidence: {e}"));
     }
     if let Err(e) = load_profiles(&opts.profiles_dir) {
+        if profiles_manifest_missing(&opts.profiles_dir) {
+            return doctor_unavailable_profiles(&opts.profiles_dir);
+        }
         return doctor_failed(&format!("cannot load profiles: {e}"));
     }
     let ask = parse_requested_caps(&opts.capabilities);
     if !ask.ok {
-        return doctor_failed(&ask.err);
+        return doctor_failed(&invalid_capability_message(&ask.err));
     }
     let drep = assess_doctor(opts);
     let ready = drep.verdict == "ready" || drep.verdict == "ready-load-unchecked";
@@ -1267,6 +1454,8 @@ pub fn run_doctor(args: &[String]) -> i64 {
             }
         }
     }
+    let expanded = expand_flag_eq(args, DOCTOR_VALUE_FLAGS);
+    let args = &expanded;
     let mut as_json = false;
     let mut profiles_dir = String::new();
     let mut has_profiles_dir = false;
@@ -1328,6 +1517,12 @@ pub fn run_doctor(args: &[String]) -> i64 {
             return doctor_failed(&format!("unknown option: {tok}"));
         }
     }
+    // Argv validates before the world is probed: a malformed list
+    // fails here (exit 2) even when profiles are also missing.
+    let ask = parse_requested_caps(&capabilities);
+    if !ask.ok {
+        return doctor_failed(&invalid_capability_message(&ask.err));
+    }
     if !has_profiles_dir {
         match resolve_profiles_dir() {
             Ok(dir) => profiles_dir = dir,
@@ -1382,6 +1577,8 @@ enum OsDoctorFail {
 /// position silences the run: the unknown-option refusal would
 /// echo it.
 fn parse_doctor_args_os(args: &[OsString]) -> Result<DoctorOptions, OsDoctorFail> {
+    let expanded = expand_flag_eq_os(args, DOCTOR_VALUE_FLAGS_OS);
+    let args = &expanded;
     let mut as_json = false;
     let mut profiles_dir = String::new();
     let mut has_profiles_dir = false;
@@ -1516,10 +1713,10 @@ pub fn run_doctor_os(args: &[OsString]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DoctorOptions, EXIT_UNAVAILABLE, apply_copy_preflight, apply_lifecycle_dma_verify,
-        assess_doctor, cargo_checkout_profiles, copy_preflight_for, default_profiles_dir,
-        doctor_usage, precheck_demotes, render_doctor_json2, render_doctor_text2,
-        resolve_profiles_dir, run_doctor, run_doctor_opts, run_doctor_with,
+        DoctorCap, DoctorOptions, DoctorReport2, EXIT_UNAVAILABLE, apply_copy_preflight,
+        apply_lifecycle_dma_verify, assess_doctor, cargo_checkout_profiles, copy_preflight_for,
+        default_profiles_dir, doctor_usage, precheck_demotes, render_doctor_json2,
+        render_doctor_text2, resolve_profiles_dir, run_doctor, run_doctor_opts, run_doctor_with,
     };
     use crate::capture::run::decide_record;
     use crate::platform::evidence::detect_environment;
@@ -1722,13 +1919,203 @@ mod tests {
 
     #[test]
     fn doctor2_text_fix_lines() {
+        // Identical remedies group into one block naming every
+        // capability; the long why prints once.
         let drep = drep2_for("meta-release-hostile", &profiles_dir());
         let text = render_doctor_text2(&drep);
         assert!(text.contains("tracefs not found"), "{text}");
+        let remedy = remedy_for("tracefs-not-mounted");
+        let blocks = text.lines().filter(|l| l.starts_with("    fix ")).count();
+        assert_eq!(blocks, 1, "{text}");
         assert!(
-            text.contains(&format!("    fix: {}\n", remedy_for("tracefs-not-mounted"))),
+            text.contains(&format!(
+                "    fix [tracefs-not-mounted] (attempt-trace, mapping-lifecycle, copy-actual): {remedy}\n"
+            )),
             "{text}"
         );
+    }
+
+    #[test]
+    fn doctor2_text_remedy_grouping_edges() {
+        // Mixed codes split into first-seen blocks; empty remedies
+        // print nothing; an empty code drops the brackets.
+        let mut rep = DoctorReport2 {
+            verdict: "ready".to_string(),
+            caps: vec![
+                DoctorCap {
+                    id: "attempt-trace".to_string(),
+                    status: "unavailable".to_string(),
+                    reason: "r1".to_string(),
+                    remedy: "same why".to_string(),
+                    reason_code: "code-a".to_string(),
+                    evidence: Vec::new(),
+                },
+                DoctorCap {
+                    id: "mapping-lifecycle".to_string(),
+                    status: "unavailable".to_string(),
+                    reason: "r2".to_string(),
+                    remedy: "same why".to_string(),
+                    reason_code: "code-a".to_string(),
+                    evidence: Vec::new(),
+                },
+                DoctorCap {
+                    id: "copy-actual".to_string(),
+                    status: "unavailable".to_string(),
+                    reason: "r3".to_string(),
+                    remedy: "other why".to_string(),
+                    reason_code: "code-b".to_string(),
+                    evidence: Vec::new(),
+                },
+                DoctorCap {
+                    id: "conversion-observe".to_string(),
+                    status: "unsupported".to_string(),
+                    reason: "no channel".to_string(),
+                    ..DoctorCap::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.contains("    fix [code-a] (attempt-trace, mapping-lifecycle): same why\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("    fix [code-b] (copy-actual): other why\n"),
+            "{text}"
+        );
+        fn blocks(rep: &DoctorReport2) -> usize {
+            render_doctor_text2(rep)
+                .lines()
+                .filter(|l| l.starts_with("    fix "))
+                .count()
+        }
+        assert_eq!(blocks(&rep), 2, "{text}");
+        assert!(!text.contains("conversion-observe):"), "{text}");
+        // Same code but different remedies must not merge.
+        rep.caps[1].remedy = "split why".to_string();
+        let text = render_doctor_text2(&rep);
+        assert_eq!(blocks(&rep), 3, "{text}");
+        // Empty code, nonempty remedy: bare capability list.
+        rep.caps[1].remedy = "same why".to_string();
+        rep.caps[1].reason_code = String::new();
+        rep.caps[2].remedy = String::new();
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.contains("    fix (mapping-lifecycle): same why\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn doctor2_text_next_line() {
+        // Unavailable reports end with exactly one next: line: the
+        // record command when recording is possible, else the
+        // offline replay. Ready reports carry none.
+        let mut rep = DoctorReport2 {
+            verdict: "unavailable".to_string(),
+            ..Default::default()
+        };
+        rep.kernel.eligible_floor = true;
+        rep.has_profile = true;
+        let text = render_doctor_text2(&rep);
+        assert_eq!(text.matches("next: ").count(), 1, "{text}");
+        assert!(
+            text.ends_with("next: sudo memveil record --output /tmp/cap1 --duration 10\n"),
+            "{text}"
+        );
+        rep.kernel.eligible_floor = false;
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
+            "{text}"
+        );
+        rep.kernel.eligible_floor = true;
+        rep.has_profile = false;
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
+            "{text}"
+        );
+        rep.verdict = "ready".to_string();
+        rep.has_profile = true;
+        let text = render_doctor_text2(&rep);
+        assert!(!text.contains("next: "), "{text}");
+        rep.verdict = "ready-load-unchecked".to_string();
+        let text = render_doctor_text2(&rep);
+        assert!(!text.contains("next: "), "{text}");
+    }
+
+    #[test]
+    fn doctor2_text_guest_note() {
+        // A non-ordinary, non-unknown guest verdict carries the
+        // not-attested line verbatim, right after the guest line.
+        let drep = drep2_for("user-asserted-snp", &profiles_dir());
+        let text = render_doctor_text2(&drep);
+        assert!(
+            text.contains(
+                "guest: snp (user-asserted)\n\
+                 note: kernel-reported guest signal; not attested, not a platform qualification.\n"
+            ),
+            "{text}"
+        );
+        let drep = drep2_for("ordinary-7.0", &profiles_dir());
+        let text = render_doctor_text2(&drep);
+        assert!(
+            !text.contains("not attested, not a platform qualification"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn doctor2_text_signal_translation() {
+        // Known codes render as code plus words; unknown codes
+        // render raw; JSON keeps every code raw.
+        let cases: &[(&str, &str)] = &[
+            ("sev-node:absent", "SEV-SNP guest device absent"),
+            ("tdx-node:present", "TDX guest device present"),
+            ("tsm:present", "TSM report interface present"),
+            ("sev-vmpl:2", "SEV VMPL level 2"),
+            ("cpu-flags:ok:none", "no confidential-computing CPU flags"),
+            ("cpu-flags:ok:sev+sev_snp", "CPU flags: sev, sev_snp"),
+            (
+                "cc-flags:without-node:tdx_guest",
+                "TDX CPU flag without guest node",
+            ),
+            (
+                "ordinary:absent-nodes-inference",
+                "ordinary guest inferred (no attestation devices)",
+            ),
+            ("asserted:snp", "caller-asserted technology: snp"),
+            ("info:btf:present:24B", "kernel BTF present (24B)"),
+            ("info:os:ubuntu:24.04", "OS ubuntu 24.04"),
+            ("info:boot-config:absent", "boot config absent"),
+        ];
+        for (code, human) in cases {
+            assert_eq!(
+                super::translate_signal(code).as_deref(),
+                Some(*human),
+                "{code}"
+            );
+        }
+        assert_eq!(super::translate_signal("future:code"), None);
+        let mut rep = DoctorReport2 {
+            verdict: "ready".to_string(),
+            ..Default::default()
+        };
+        rep.guest.signals = vec!["sev-node:absent".to_string(), "future:code".to_string()];
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.contains("  signal: sev-node:absent (SEV-SNP guest device absent)\n"),
+            "{text}"
+        );
+        assert!(text.contains("  signal: future:code\n"), "{text}");
+        let js = render_doctor_json2(&rep);
+        assert!(
+            js.contains("\"signals\": [\"sev-node:absent\", \"future:code\"]"),
+            "{js}"
+        );
+        assert!(!js.contains("SEV-SNP guest device absent"), "{js}");
     }
 
     #[test]
@@ -1826,7 +2213,15 @@ mod tests {
 
     #[test]
     fn exit_bad_profiles() {
+        // A missing profiles tree is unavailable (3), matching
+        // record; only a present-but-malformed tree stays a usage
+        // error (2) with the loader diagnostic.
         let code = run_doctor_with(&fx("ordinary-7.0"), "no-such-profiles", false);
+        assert_eq!(code, EXIT_UNAVAILABLE);
+        let tmp = TestDir::create("memveil-doctor-badman").expect("mkdtemp");
+        std::fs::write(tmp.path().join("manifest.txt"), "p.json\n\n").expect("manifest");
+        let bad = tmp.as_str().to_string();
+        let code = run_doctor_with(&fx("ordinary-7.0"), &bad, false);
         assert_eq!(code, 2);
     }
 
@@ -1878,12 +2273,14 @@ mod tests {
 
     #[test]
     fn exit_profiles_dir_bad_path() {
+        // A --profiles-dir without a manifest is unavailable (3),
+        // matching record.
         assert_eq!(
             run_doctor(&args(&[
                 "--profiles-dir",
                 "tests/fixtures/capabilities/nonexistent-xyz"
             ])),
-            2
+            EXIT_UNAVAILABLE
         );
     }
 
@@ -2642,6 +3039,61 @@ mod tests {
             .iter()
             .map(|w| std::ffi::OsString::from_vec(w.to_vec()))
             .collect()
+    }
+
+    #[test]
+    fn doctor_os_flag_eq_forms() {
+        // Inline values match the spaced spelling, including the
+        // non-UTF-8 routing: paths route as the stand-in and
+        // capabilities as the empty-segment list.
+        let opts = super::parse_doctor_args_os(&os(&[
+            b"--profiles-dir=qd".as_slice(),
+            b"--capability=attempt-trace".as_slice(),
+            b"--object=o.o".as_slice(),
+            b"--lc-object=lc.o".as_slice(),
+            b"--cp-object=cp.o".as_slice(),
+            b"--bridge=br.so".as_slice(),
+        ]))
+        .expect("eq forms parse");
+        assert_eq!(opts.profiles_dir, "qd");
+        assert_eq!(opts.capabilities, "attempt-trace");
+        assert_eq!(opts.object, "o.o");
+        assert_eq!(opts.lc_object, "lc.o");
+        assert_eq!(opts.cp_object, "cp.o");
+        assert_eq!(opts.bridge, "br.so");
+        assert!(opts.has_bridge);
+        let opts = super::parse_doctor_args_os(&os(&[b"--object=\xff".as_slice()]))
+            .expect("raw path parses");
+        assert_eq!(opts.object, super::UNREADABLE_PATH);
+        let opts = super::parse_doctor_args_os(&os(&[b"--capability=\xff".as_slice()]))
+            .expect("raw list parses");
+        assert_eq!(opts.capabilities, ",");
+        match super::parse_doctor_args_os(&os(&[b"--json=x".as_slice()])) {
+            Err(super::OsDoctorFail::Message(detail)) => {
+                assert_eq!(detail, "unknown option: --json=x");
+            }
+            other => panic!("bool eq must fail loudly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctor_flag_eq_and_capability_list() {
+        // The text path accepts --flag=value and validates the
+        // capability list at parse (exit 2), before probing profiles.
+        let code = run_doctor(&args(&[
+            &format!("--profiles-dir={}", fx("profiles-test")),
+            "--capability=attempt-trace",
+        ]));
+        assert_ne!(code, 2);
+        let code = run_doctor(&args(&["--capability=bogus"]));
+        assert_eq!(code, 2);
+        // Argv validates before the world: a bad list wins over a
+        // missing profiles tree.
+        let code = run_doctor(&args(&[
+            "--profiles-dir=no-such-profiles",
+            "--capability=bogus",
+        ]));
+        assert_eq!(code, 2);
     }
 
     #[test]
