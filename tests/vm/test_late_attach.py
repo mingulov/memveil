@@ -24,7 +24,8 @@ consumers then attach and the module unloads, so the held
 mapping's release is the only phase-A traffic the probes can
 observe: one unmap with generation 0 (an explicit miss: the
 map never reached the ring, so the probe honestly reports the
-release as untracked) plus its release bounce. The pre-attach
+release as untracked) plus its release sync and release
+bounce. The pre-attach
 oracle snapshot proves the maps completed before attachment;
 the post snapshot proves the release landed after it.
 
@@ -66,14 +67,15 @@ EXPORT_NAMES = ["identity.json", "a-pre-oracle.log",
                 "attach.json"]
 
 # The only phase-A traffic the probes can observe: the held
-# mapping's exit release (unmap triple) and its release bounce
-# (FROM direction copies back at release). Every map, sync,
-# and other unmap completed pre-attach.
+# mapping's exit release (unmap triple), its release sync, and
+# its release bounce (FROM direction copies back at release).
+# Every map, pre-release sync, and other unmap completed
+# pre-attach.
 HELD_WANT = {
     "maps": [],
     "unmaps": [(HELD_SIZE, HELD_DIR, 1)],
     "syncs_dev": [],
-    "syncs_cpu": [],
+    "syncs_cpu": [(HELD_SIZE, HELD_DIR)],
     "bounces": [(0, HELD_SIZE, HELD_DIR)],
 }
 
@@ -278,7 +280,7 @@ def mock_cp_bounce(todev, direction, seq, ktime, req):
 
 
 def mock_phase_a_files(tmp):
-    """Held release only: one gen-0 unmap plus its bounce."""
+    """Held release only: gen-0 unmap, release sync, bounce."""
     pre, post = mock_oracle_bodies()
     (tmp / "a-pre-oracle.log").write_text(
         mock_oracle_text(pre))
@@ -287,10 +289,12 @@ def mock_phase_a_files(tmp):
                        HELD_SIZE, 0)]
     (tmp / "a-lc.txt").write_text(
         "\n".join(lc + [mock_summary(1, HELD_SIZE)]) + "\n")
-    cp = [mock_cp_bounce(0, HELD_DIR, 0, 2000000001,
+    cp = [mock_cp_sync(0, HELD_DIR, 0, 2000000000,
+                       HELD_SIZE),
+          mock_cp_bounce(0, HELD_DIR, 1, 2000000001,
                          HELD_SIZE)]
     (tmp / "a-cp.txt").write_text(
-        "\n".join(cp + [mock_summary(1, HELD_SIZE)]) + "\n")
+        "\n".join(cp + [mock_summary(2, 2 * HELD_SIZE)]) + "\n")
 
 
 def mock_phase_b_files(tmp):
