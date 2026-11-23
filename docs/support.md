@@ -153,8 +153,10 @@ fallback are not provided.
   re-proves the host. A same-version executable rebuild or unrelated profile
   text change is not automatically detected by the receipt. Attempt-only
   recording can fall back to partial diagnostics.
-- Minimum CPU eligibility is x86-64-v3. The engine's code-generation target
-  remains x86-64-v2, which does not lower the runtime requirement.
+- Minimum CPU eligibility is x86-64-v3, declared by the
+  loader mark. The engine emits the compiler default
+  (x86-64 baseline); the mark declares eligibility, not
+  the generated instruction set.
   The binary carries its runtime closure in `lib/memveil/`
   (the vendored libgcc for the unwinder) with the Aya loader
   statically linked; no bridge ships. Offline verbs (help,

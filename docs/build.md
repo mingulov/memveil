@@ -242,12 +242,14 @@ path, type, size and SHA-256. Verification rejects
 missing, added, changed and escaping entries.
 
 The minimum runtime CPU eligibility is **x86-64-v3**.
-The engine keeps x86-64-v2 code generation; that does
-not lower the runtime requirement. Its single link adds
-the `GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration. The
-build and bundle verifier inspect the actual loadable
-property and refuse an absent, weaker or stronger
-declaration. A compatible glibc loader checks the
+Code generation stays at the compiler default, which is
+x86-64 baseline for the pinned toolchain (rustc 1.100.0
+enables fxsr/sse/sse2 only, per `--print cfg`); the v3
+eligibility is a loader declaration, separate from the
+emitted instruction set. Its single link adds the
+`GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration. The build
+and bundle verifier inspect the actual loadable property
+and refuse an absent, weaker or stronger declaration. A compatible glibc loader checks the
 declaration before library constructors execute. An
 incompatible CPU produces `CPU ISA level is lower than
 required` and exits 127 on the verified loaders. This
