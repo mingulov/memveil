@@ -78,6 +78,19 @@ TIMEOUT_ORACLE_COMPLETE = 60
 ORACLE_POLL_INTERVAL = 0.1
 COMPLETE_PREFIX = "script complete"
 
+# Post-insmod publication trigger, written to /dev/kmsg after the
+# oracle module loads and before the completion wait polls. The
+# pinned guest does not reliably surface the last committed log
+# record to readers (dmesg) or the serial console until a
+# subsequent record commits: live, the oracle's trailing
+# completion record stayed invisible for the full 60s wait in 2/2
+# re-runs and ~293s in a hung-probe boot, surfacing only once
+# later records flowed. One marker record published right after
+# insmod releases the completion record before the wait polls.
+# Fire-and-forget: nothing matches on this tag, so a stale copy
+# cannot false-pass anything; phase B clears it with the rest.
+PHASE_A_TRIGGER = "memveil-lateattach-phase-a-trigger"
+
 # Readiness stdout without an ack past this is a flood, not
 # a slow attach.
 READY_BUFFER_CAP = 1048576
@@ -461,6 +474,18 @@ class Gate:
         if r.returncode != 0:
             fail("dmesg -C failed: %s" % r.stderr.strip())
 
+    def mark_dmesg(self):
+        """Publish one trigger record so the last oracle line surfaces.
+
+        Same shape as the matrix guest's mark: an INFO record on
+        /dev/kmsg. A write failure is guest infra failure, loud.
+        """
+        try:
+            with open("/dev/kmsg", "w") as handle:
+                handle.write("<6>" + PHASE_A_TRIGGER + "\n")
+        except OSError as exc:
+            fail("cannot mark dmesg: %s" % exc)
+
     def wait_oracle_complete(
             self, timeout=TIMEOUT_ORACLE_COMPLETE,
             interval=ORACLE_POLL_INTERVAL):
@@ -554,6 +579,7 @@ def run_phase_a(gate, ledger):
     """Traffic first, attach second, release last."""
     gate.clear_dmesg()
     gate.insmod([])
+    gate.mark_dmesg()
     gate.wait_oracle_complete()
     mapped_ns = mono_ns()
     pre = gate.oracle_log("a-pre-oracle.log")
