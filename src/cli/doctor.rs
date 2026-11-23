@@ -1424,15 +1424,21 @@ pub fn run_doctor_with(root: &str, profiles_dir: &str, as_json: bool) -> i64 {
 
 /// Run the admission-judging doctor flow; return exit code.
 ///
-/// Bad roots or capability lists fail with exit 2; a load check
-/// against a fixture root is rejected the same way. A missing
-/// profiles tree (no manifest at the searched path) reports the
-/// lone-install shape with exit 3, matching record; a present but
-/// malformed tree keeps the loader diagnostic with exit 2.
-/// Otherwise the report goes to stdout with exit 0 when the
-/// requested set is ready and 3 when it is unavailable. Passive
-/// runs never touch the bridge.
+/// Argv validates before the world is probed: a malformed
+/// capability list fails with exit 2 even when the evidence root
+/// or the profiles tree is also bad, exactly like the text entry.
+/// A load check against a fixture root and a bad root fail with
+/// exit 2 next. A missing profiles tree (no manifest at the
+/// searched path) reports the lone-install shape with exit 3,
+/// matching record; a present but malformed tree keeps the
+/// loader diagnostic with exit 2. Otherwise the report goes to
+/// stdout with exit 0 when the requested set is ready and 3 when
+/// it is unavailable. Passive runs never touch the bridge.
 pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
+    let ask = parse_requested_caps(&opts.capabilities);
+    if !ask.ok {
+        return doctor_failed(&invalid_capability_message(&ask.err));
+    }
     if opts.load_check && !opts.root.is_empty() {
         return doctor_failed("--load-check needs the live host");
     }
@@ -1444,10 +1450,6 @@ pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
             return doctor_unavailable_profiles(&opts.profiles_dir);
         }
         return doctor_failed(&format!("cannot load profiles: {e}"));
-    }
-    let ask = parse_requested_caps(&opts.capabilities);
-    if !ask.ok {
-        return doctor_failed(&invalid_capability_message(&ask.err));
     }
     let drep = assess_doctor(opts);
     let ready = drep.verdict == "ready" || drep.verdict == "ready-load-unchecked";
@@ -3187,6 +3189,34 @@ mod tests {
         let code = run_doctor(&args(&[
             "--profiles-dir=no-such-profiles",
             "--capability=bogus",
+        ]));
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn doctor_opts_capability_first() {
+        // The library entry validates argv before the world too: a
+        // bad list wins over a missing profiles tree and a bad
+        // root (exit 2, never the exit-3 manifest shape).
+        let bad = doctor2_opts(
+            "no-such-root".to_string(),
+            "no-such-profiles".to_string(),
+            "bogus",
+            &elf("ok.o"),
+            &elf("lc-ok.o"),
+            &elf("cp-ok.o"),
+        );
+        assert_eq!(run_doctor_opts(&bad), 2);
+    }
+
+    #[test]
+    fn doctor_os_bad_list_wins_over_missing_profiles() {
+        // The raw entry routes a non-UTF-8 list to the
+        // empty-segment refusal, which precedes the profiles gate.
+        let code = super::run_doctor_os(&os(&[
+            b"--profiles-dir".as_slice(),
+            b"r100-no-such-profiles".as_slice(),
+            b"--capability=\xff".as_slice(),
         ]));
         assert_eq!(code, 2);
     }

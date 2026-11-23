@@ -2113,6 +2113,10 @@ suite_qualify() {
         --output "$TMP/q-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
+    qexpect bad-capability-inline 2 "unknown capability: bogus; valid capabilities:" -- \
+        --output="$TMP/q-badcap-inline" \
+        --object="$ROOT/tests/fixtures/elf/ok.o" \
+        --capability=bogus
     qexpect convert-channel 3 "conversion-observe has no record channel" -- \
         --output "$TMP/q-conv" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
@@ -2159,6 +2163,10 @@ suite_qualify() {
         --output "$TMP/b-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
+    bexpect bind-bad-capability-inline 2 "unknown capability: bogus; valid capabilities:" -- \
+        --output="$TMP/b-badcap-inline" \
+        --object="$ROOT/tests/fixtures/elf/ok.o" \
+        --capability=bogus
     bexpect bind-convert 3 "conversion-observe has no record channel" -- \
         --output "$TMP/b-conv" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
