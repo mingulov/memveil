@@ -51,7 +51,9 @@ full confidential first-release gates remain open.
 >   condition was absent.
 > - **Only the exact tested artifact is tested.** Kernel-matrix
 >   results name one binary by hash (see release notes); the
->   matrix ran the `.deb` install of the canonical binary. Rows
+>   matrix ran bundle mode of the canonical binary, byte-identical
+>   to the `.deb` install (all three package binaries share one
+>   sha256). Rows
 >   not listed as PASS for this build were not run on this build.
 >   A machine-local `qualify` receipt records that a smoke
 >   capture worked on one host; it is not release qualification
@@ -90,8 +92,8 @@ A rebuilt package or matching kernel name alone earns no qualification.
 ## Use (tested .deb first)
 
 One canonical binary: the bundle, `.deb`, and `.rpm`
-binaries are byte-identical; the matrix ran the `.deb`
-install of it (see [Known
+binaries are byte-identical; matrix ran bundle mode of
+it, byte-identical to the `.deb` install (see [Known
 issues](docs/release-notes.md#known-issues) and [installed
 packages](docs/install.md)). Verify the download first:
 

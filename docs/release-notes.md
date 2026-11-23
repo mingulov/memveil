@@ -46,7 +46,9 @@ bundle notes below stay as the history of that prerelease.
 >   condition was absent.
 > - **Only the exact tested artifact is tested.** Kernel-matrix
 >   results name one binary by hash (see release notes); the
->   matrix ran the `.deb` install of the canonical binary. Rows
+>   matrix ran bundle mode of the canonical binary, byte-identical
+>   to the `.deb` install (all three package binaries share one
+>   sha256). Rows
 >   not listed as PASS for this build were not run on this build.
 >   A machine-local `qualify` receipt records that a smoke
 >   capture worked on one host; it is not release qualification
@@ -93,8 +95,10 @@ source changes do not qualify older packages.
 One canonical binary: the bundle, `.deb`, and `.rpm`
 binaries are byte-identical (sha256
 `6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d`);
-the matrix ran the `.deb` install of it (T5 step-6
-package receipts `step6-quickstart-logs/`).
+matrix ran bundle mode of it, byte-identical to the
+`.deb` install (matrix mode + binary hash per row in
+`matrix-out/*/artifacts.json`; retained-`.deb` install
+journey `step1-scratch/export/`).
 
 ## What this bundle contains
 
@@ -134,7 +138,7 @@ release bytes). Each artifact's `MANIFEST.json` binds
 its own verified bytes.
 
 The `.deb` entry set is the kernel-matrix-tested one. The
-matrix installed the sealed 0.2.0 `.deb` (seal
+matrix ran bundle mode of the sealed 0.2.0 build (seal
 `08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9`,
 source `bdf641c36addc345f3fb6d8bf925059c6f1fa714`)
 whose `/usr/bin/memveil` is sha256
@@ -252,9 +256,11 @@ Do not silently rewrite a profile hash to make them admitted.
   while the memcg precheck reports `memcg-headroom`
   unknown; only `doctor --load-check` or a record proves
   the load fits. Detection-scenario contract: 12/12 legs
-  green on 2 sealed-bytes runs; formal row receipt
-  pending the R-2 re-run.
-<!-- T6 scenario-contract follow-up: replace the line above with the formal row receipt citation after the scenario re-run on this seal lands -->
+  green on 3 sealed-bytes runs, with formal row receipt
+  `scenarios-out/7.0/receipt.json` (run `20261123T121047Z`,
+  receipt
+  `f4d4a677c98da9cfc8351f0af41e7d9b5af54299f04a612ac247635e11dba611`;
+  judge 12/12, validate/rederive/`--verify-out` PASS).
 
 ## Compatibility
 

@@ -110,8 +110,9 @@ fallback are not provided.
   not a confidential-guest signal (see
   [privacy](privacy.md)).
 - The 7.0 scenario guest admits, and the 12 detection
-  scenarios are 12/12 legs green on 2 sealed-bytes runs
-  (formal row receipt pending the scenario re-run):
+  scenarios are 12/12 legs green on 3 sealed-bytes runs
+  (formal row receipt `scenarios-out/7.0/receipt.json`,
+  run `20261123T121047Z`):
   every negative refuses correctly, `nocaps` drops
   every capability through `setpriv` (CapEff 0 in the
   dropped child), and `memcg` refuses `load-enomem`
@@ -236,8 +237,9 @@ Booted 2026-11-23 with the sealed 0.2.0 build
 source `bdf641c36addc345f3fb6d8bf925059c6f1fa714`,
 binary sha256
 `6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d`):
-one canonical binary; the matrix ran the `.deb` install
-of it. The tarball and `.rpm` binaries are byte-identical
+one canonical binary; matrix ran bundle mode
+of it, byte-identical to the `.deb` install. The tarball
+and `.rpm` binaries are byte-identical
 to the matrix binary, and the clean-VM journey ran the
 retained `.deb` install (T5 step-1 journey receipt
 `step1-scratch/export/` and step-6 package receipts
@@ -340,9 +342,12 @@ scenarios that prove refusal codes and remedies
 (`MEMVEIL_VM_SCENARIOS` arms the `vm-scenarios` lane with
 `MV_DEB` pointing at the deb). Lockdown and BTF absence
 are covered by their matrix rows instead of scenarios.
-Scenario contract: 12/12 legs green on 2 sealed-bytes
-runs; formal row receipt pending the R-2 re-run.
-<!-- T6 scenario-contract follow-up: replace the line above with the formal row receipt citation after the scenario re-run on this seal lands -->
+Scenario contract: 12/12 legs green on 3 sealed-bytes
+runs, with formal row receipt
+`scenarios-out/7.0/receipt.json` (run `20261123T121047Z`,
+receipt
+`f4d4a677c98da9cfc8351f0af41e7d9b5af54299f04a612ac247635e11dba611`;
+judge 12/12, validate/rederive/`--verify-out` PASS).
 
 | Scenario | Record outcome | Remedy family |
 | --- | --- | --- |
