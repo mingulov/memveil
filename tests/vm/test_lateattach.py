@@ -1489,6 +1489,131 @@ def self_test_guest_completion_wait(tmp):
                "timeout=%r interval=%r"
                % (guest.TIMEOUT_ORACLE_COMPLETE,
                   guest.ORACLE_POLL_INTERVAL)) and ok
+
+    # Post-insmod publication trigger: the pinned guest holds
+    # the last committed record from readers until a later
+    # record commits (proven live), so phase A writes one
+    # marker record after insmod, before the wait polls.
+    import builtins
+    real_open = builtins.open
+
+    class _Handle:
+        def __init__(self, store):
+            self.store = store
+
+        def write(self, text):
+            self.store.append(text)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    writes = []
+
+    def fake_kmsg_open(path, mode="r", *args, **kw):
+        if str(path) == "/dev/kmsg" and "w" in mode:
+            return _Handle(writes)
+        return real_open(path, mode, *args, **kw)
+
+    builtins.open = fake_kmsg_open
+    try:
+        guest.Gate.mark_dmesg(object())
+        ok = check("mark-writes",
+                   writes == ["<6>" + guest.PHASE_A_TRIGGER + "\n"],
+                   repr(writes)[:120]) and ok
+    except SystemExit as exc:
+        ok = check("mark-writes", False,
+                   "code=%r" % (exc.code,)) and ok
+    finally:
+        builtins.open = real_open
+
+    def failing_open(path, mode="r", *args, **kw):
+        if str(path) == "/dev/kmsg":
+            raise OSError("read-only")
+        return real_open(path, mode, *args, **kw)
+
+    builtins.open = failing_open
+    err = io.StringIO()
+    code = None
+    try:
+        with contextlib.redirect_stderr(err):
+            guest.Gate.mark_dmesg(object())
+    except SystemExit as exc:
+        code = exc.code
+    finally:
+        builtins.open = real_open
+    ok = check("mark-fails-loud",
+               code == 1 and "cannot mark dmesg" in err.getvalue(),
+               "code=%r %s" % (code, err.getvalue().strip()[-80:])) \
+        and ok
+
+    tag = guest.PHASE_A_TRIGGER
+    ok = check("mark-clean",
+               "mv-oracle:" not in tag
+               and "script complete" not in tag
+               and "held-open" not in tag
+               and "exit-release" not in tag
+               and "ops=" not in tag,
+               repr(tag)) and ok
+
+    insmod_at = src.find("gate.insmod(")
+    mark_at = src.find("gate.mark_dmesg(")
+    ok = check("mark-wired",
+               0 <= insmod_at < mark_at < wait_at,
+               "insmod=%d mark=%d wait=%d"
+               % (insmod_at, mark_at, wait_at)) and ok
+
+    # RED/GREEN over the proven mechanism: pre-trigger dmesg
+    # frames omit the trailing completion record (as live);
+    # the mark publishes it, so later frames carry it. The
+    # old wait-without-mark order times out on the stuck
+    # stream; mark-then-wait passes on the same stream.
+    published = []
+
+    def stuck_open(path, mode="r", *args, **kw):
+        if str(path) == "/dev/kmsg" and "w" in mode:
+            published.append(True)
+            return _Handle([])
+        return real_open(path, mode, *args, **kw)
+
+    def stuck_sh(args, timeout=30, **kw):
+        if published:
+            return _R(full)
+        return _R(early)
+
+    builtins.open = stuck_open
+    guest.sh = stuck_sh
+    err = io.StringIO()
+    code = None
+    try:
+        with contextlib.redirect_stderr(err):
+            guest.Gate.wait_oracle_complete(
+                object(), timeout=0.02, interval=0.001)
+    except SystemExit as exc:
+        code = exc.code
+    finally:
+        guest.sh = real_sh
+        builtins.open = real_open
+    ok = check("mark-red-stuck",
+               code == 1 and "never completed" in err.getvalue(),
+               "code=%r" % (code,)) and ok
+
+    builtins.open = stuck_open
+    guest.sh = stuck_sh
+    code = None
+    try:
+        guest.Gate.mark_dmesg(object())
+        guest.Gate.wait_oracle_complete(
+            object(), timeout=60, interval=0.001)
+        ok = check("mark-green-published", True) and ok
+    except SystemExit as exc:
+        ok = check("mark-green-published", False,
+                   "code=%r" % (exc.code,)) and ok
+    finally:
+        guest.sh = real_sh
+        builtins.open = real_open
     return ok
 
 
