@@ -44,10 +44,11 @@ FORBIDDEN_PROPS = {
 # relation execution_context_only). The shipped collector
 # never sets it, no renderer emits it (pinned by the canary
 # suites), and foreign captures re-persist it verbatim, so
-# these three names are allowed ONLY inside that block. Any
-# new identity-shaped name, any of these names outside the
-# block, or any change to the block's frozen shape fails
-# review here.
+# these three names are allowed ONLY inside that block, in
+# event schemas. Any new identity-shaped name, any of these
+# names outside the block, any change to the block's frozen
+# shape, or the block appearing in any non-event schema
+# fails review here.
 REVIEWED_ALLOWED_PROPS = {"comm", "pid", "tgid"}
 OBSERVER_FROZEN_PROPS = {"cpu", "pid", "tgid", "comm", "cgroup_id", "relation"}
 
@@ -55,6 +56,17 @@ OBSERVER_FROZEN_PROPS = {"cpu", "pid", "tgid", "comm", "cgroup_id", "relation"}
 # path: a suffix match would exempt a same-named block in an
 # unreviewed location, so only equality exempts.
 OBSERVER_EXACT_PATH = "/properties/observer_context"
+OBSERVER_PARENT_PATH = "/properties"
+
+
+def event_schema(schema_id):
+    """True for event schemas: the leak exemption covers the
+    reviewed slot there only. Any other schema gaining an
+    observer_context block fails, even a byte-identical one,
+    because that block was never reviewed for that schema.
+    The exemption cannot smuggle new names: the unscoped
+    freeze below still demands the byte-identical node."""
+    return schema_id.startswith("event-")
 
 # The frozen observer block, byte-identical in every event
 # schema carrying it: property inventory, value bounds, and
@@ -180,17 +192,27 @@ def schema_props(path):
 
 
 def schema_blocks(doc):
-    """Every (path, property-name set, object node) for
-    object schemas carrying properties, so identity-shaped
+    """Every (path, property-name set, object node, schema id)
+    for object schemas carrying properties, so identity-shaped
     names can be contained to their reviewed block and the
     block's frozen shape (bounds and consts included) can be
-    pinned, not just its key inventory."""
+    pinned, not just its key inventory. The reviewed slot is
+    pinned even when shapeless, so a present-but-propertyless
+    observer node fails the freeze loudly instead of passing
+    vacuously by never entering the walk."""
     found = []
+    schema_id = doc.get("$id", "") if isinstance(doc, dict) else ""
     def walk(o, path):
         if isinstance(o, dict):
             if isinstance(o.get("properties"), dict):
                 found.append((path, set(o["properties"].keys()),
-                              o))
+                              o, schema_id))
+            if path == OBSERVER_PARENT_PATH and "observer_context" in o:
+                child = o["observer_context"]
+                if not (isinstance(child, dict)
+                        and isinstance(child.get("properties"), dict)):
+                    found.append((OBSERVER_EXACT_PATH, set(),
+                                  child, schema_id))
             for k, v in o.items():
                 walk(v, "%s/%s" % (path, k))
         elif isinstance(o, list):
@@ -202,13 +224,14 @@ def schema_blocks(doc):
 
 def observer_frozen_ok(blocks):
     return all(node == OBSERVER_FROZEN
-               for where, props, node in blocks
+               for where, props, node, schema in blocks
                if where == OBSERVER_EXACT_PATH)
 
 
 def observer_leaked(blocks):
-    return sorted({n for where, props, node in blocks
-                   if where != OBSERVER_EXACT_PATH
+    return sorted({n for where, props, node, schema in blocks
+                   if not (where == OBSERVER_EXACT_PATH
+                           and event_schema(schema))
                    for n in props & REVIEWED_ALLOWED_PROPS})
 
 
@@ -230,8 +253,13 @@ def self_check_flag_audit():
 
 
 def self_check_observer_audit():
+    # Synthetic stand-ins declare their schema identity like
+    # real files: the leak exemption covers event schemas
+    # only, so the event-shaped controls carry an event id.
+    eid = "event-selfcheck.schema.json"
     frozen = copy.deepcopy(OBSERVER_FROZEN)
-    clean = {"properties": {"observer_context": frozen,
+    clean = {"$id": eid,
+             "properties": {"observer_context": frozen,
                             "data": {"properties": {"device_id": {}}}}}
     check("observer-clean-accepted",
           observer_frozen_ok(schema_blocks(clean))
@@ -239,23 +267,26 @@ def self_check_observer_audit():
     check("observer-name-inventory",
           set(OBSERVER_FROZEN["properties"])
           == OBSERVER_FROZEN_PROPS)
-    grown = {"properties": {"observer_context":
+    grown = {"$id": eid,
+             "properties": {"observer_context":
                             dict(copy.deepcopy(OBSERVER_FROZEN),
                                  properties=dict(
                                      OBSERVER_FROZEN["properties"],
                                      uid={}))}}
     check("observer-growth-rejected",
           not observer_frozen_ok(schema_blocks(grown)))
-    stray = {"properties": {"observer_context": frozen,
+    stray = {"$id": eid,
+             "properties": {"observer_context": frozen,
                             "data": {"properties": {"comm": {}}}}}
     check("observer-stray-rejected",
           observer_leaked(schema_blocks(stray)) == ["comm"])
     # A same-named block in an unreviewed location is not
     # the reviewed block: its identity names leak.
-    smuggled = {"properties": {"extra": {"properties":
-                                        {"observer_context":
-                                         copy.deepcopy(
-                                             OBSERVER_FROZEN)}}}}
+    smuggled = {"$id": eid,
+                "properties": {"extra": {"properties":
+                                         {"observer_context":
+                                          copy.deepcopy(
+                                              OBSERVER_FROZEN)}}}}
     smuggled_blocks = schema_blocks(smuggled)
     check("observer-smuggled-path-rejected",
           observer_leaked(smuggled_blocks) != []
@@ -263,7 +294,8 @@ def self_check_observer_audit():
                    and not observer_leaked(smuggled_blocks)))
     # The freeze covers values, not just key names: a
     # retargeted relation const fails the frozen check.
-    mutated = {"properties": {"observer_context":
+    mutated = {"$id": eid,
+               "properties": {"observer_context":
                               copy.deepcopy(OBSERVER_FROZEN)}}
     mutated["properties"]["observer_context"][
         "properties"]["relation"]["const"] = "origin"
@@ -272,6 +304,29 @@ def self_check_observer_audit():
           not observer_frozen_ok(mutated_blocks)
           and not (observer_frozen_ok(mutated_blocks)
                    and not observer_leaked(mutated_blocks)))
+    # A present-but-shapeless observer node fails loudly
+    # instead of passing vacuously: property-less objects
+    # and non-objects alike never equal the frozen node.
+    for slot in ({"type": "object"}, True):
+        shapeless = {"$id": eid,
+                     "properties": {"observer_context": slot}}
+        shapeless_blocks = schema_blocks(shapeless)
+        check("observer-shapeless-rejected",
+              not observer_frozen_ok(shapeless_blocks)
+              and not (observer_frozen_ok(shapeless_blocks)
+                       and not observer_leaked(shapeless_blocks)))
+    # The exemption covers event schemas only: a
+    # byte-identical block in any other schema leaks its
+    # reviewed names, because that block was never reviewed
+    # for that schema.
+    foreign = {"$id": "doctor-selfcheck.schema.json",
+               "properties": {"observer_context":
+                              copy.deepcopy(OBSERVER_FROZEN)}}
+    foreign_blocks = schema_blocks(foreign)
+    check("observer-foreign-schema-rejected",
+          observer_leaked(foreign_blocks) != []
+          and not (observer_frozen_ok(foreign_blocks)
+                   and not observer_leaked(foreign_blocks)))
 
 
 def strip_line_comments(text):
