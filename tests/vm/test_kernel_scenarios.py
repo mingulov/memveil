@@ -7,6 +7,8 @@ controlled fixture bytes.
 """
 
 import ast
+import gzip
+import hashlib
 import json
 import os
 import subprocess
@@ -770,3 +772,208 @@ def test_record_argv_default_mode_control():
     ok, _ = ks.check_record_finalized(
         {"exit": "0", "exists": "yes"}, "0")
     assert ok
+
+
+def test_scenario_hook_probes_match_matrix_guest():
+    import kernel_matrix_guest as mguest
+    assert scguest.WANT_FUNCS == mguest.WANT_FUNCS
+    assert scguest.HOOK_EVT == mguest.EVT
+    assert scguest.HOOK_FILTER_FUNCS == mguest.FILTER_FUNCS
+    assert scguest.BTF_PATH == "/sys/kernel/btf/vmlinux"
+
+
+def test_scenario_detect_hooks(monkeypatch, tmp_path):
+    hook = tmp_path / "swiotlb_bounced"
+    hook.mkdir()
+    funcs = tmp_path / "available_filter_functions"
+    funcs.write_text("swiotlb_bounce\nsome_other\n")
+    monkeypatch.setattr(scguest, "HOOK_EVT", str(hook))
+    monkeypatch.setattr(scguest, "HOOK_FILTER_FUNCS",
+                        str(funcs))
+    present, omitted = scguest.detect_hooks()
+    assert present == {"tp": True, "map": False,
+                       "unmap": False, "copy": True,
+                       "syncc": False, "syncd": False}
+    assert sorted(omitted) == ["map", "syncc", "syncd",
+                               "unmap"]
+    monkeypatch.setattr(scguest, "HOOK_EVT",
+                        str(tmp_path / "missing"))
+    monkeypatch.setattr(scguest, "HOOK_FILTER_FUNCS",
+                        str(tmp_path / "missing-funcs"))
+    present, omitted = scguest.detect_hooks()
+    assert set(present) == {"tp", "map", "unmap", "copy",
+                            "syncc", "syncd"}
+    assert not any(present.values())
+    assert sorted(omitted) == sorted(present)
+
+
+def test_scenario_write_btf_sha(tmp_path):
+    src = tmp_path / "vmlinux"
+    src.write_bytes(b"btf-bytes")
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.write_btf_sha(str(out), str(src))
+    assert (out / "btf-sha.txt").read_text() == \
+        hashlib.sha256(b"btf-bytes").hexdigest() + "\n"
+    scguest.write_btf_sha(str(out),
+                          str(tmp_path / "missing"))
+    assert (out / "btf-sha.txt").read_text() == "absent\n"
+
+
+class _StubUname:
+    release = "6.6.160-test"
+
+
+def _identity_tree(tmp_path):
+    sysfs = tmp_path / "sysfs"
+    hook = sysfs / "swiotlb_bounced"
+    hook.mkdir(parents=True)
+    (sysfs / "available_filter_functions").write_text(
+        "swiotlb_tbl_map_single\n"
+        "__swiotlb_tbl_unmap_single\n"
+        "swiotlb_bounce\n"
+        "__swiotlb_sync_single_for_cpu\n"
+        "__swiotlb_sync_single_for_device\n")
+    mods = tmp_path / "modules" / _StubUname.release
+    mods.mkdir(parents=True)
+    (tmp_path / "cmdline").write_text("virtme chance\n")
+    with gzip.open(tmp_path / "config.gz", "wb") as handle:
+        handle.write(b"CONFIG_TEST=y\n")
+    (tmp_path / "version").write_text("Linux version test\n")
+    (tmp_path / "lockdown").write_text("[none] test\n")
+    (tmp_path / "vmlinux").write_bytes(b"btf-bytes")
+    return sysfs
+
+
+def _patch_identity(monkeypatch, tmp_path):
+    sysfs = _identity_tree(tmp_path)
+    monkeypatch.setattr(os, "uname", lambda: _StubUname())
+    monkeypatch.setattr(scguest, "HOOK_EVT",
+                        str(sysfs / "swiotlb_bounced"))
+    monkeypatch.setattr(scguest, "HOOK_FILTER_FUNCS",
+                        str(sysfs / "available_filter_functions"))
+    monkeypatch.setattr(scguest, "CMDLINE_PATH",
+                        str(tmp_path / "cmdline"))
+    monkeypatch.setattr(scguest, "CONFIG_GZ_PATH",
+                        str(tmp_path / "config.gz"))
+    monkeypatch.setattr(scguest, "VERSION_PATH",
+                        str(tmp_path / "version"))
+    monkeypatch.setattr(scguest, "LOCKDOWN_PATH",
+                        str(tmp_path / "lockdown"))
+    monkeypatch.setattr(scguest, "MODULES_ROOT",
+                        str(tmp_path / "modules"))
+    monkeypatch.setattr(scguest, "BTF_PATH",
+                        str(tmp_path / "vmlinux"))
+
+
+def test_record_guest_identity_writes_matrix_set(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "uname.txt").read_text() == \
+        "6.6.160-test\nvirtme chance\n"
+    assert (out / "mods.txt").read_text() == \
+        "6.6.160-test\n%s\n" % (
+            tmp_path / "modules" / "6.6.160-test")
+    with gzip.open(tmp_path / "config.gz", "rb") as handle:
+        want_config = hashlib.sha256(handle.read()).hexdigest()
+    assert (out / "configid.txt").read_text() == \
+        want_config + "\n"
+    assert (out / "btf-sha.txt").read_text() == \
+        hashlib.sha256(b"btf-bytes").hexdigest() + "\n"
+    assert (out / "version.txt").read_text() == \
+        "Linux version test\n"
+    assert (out / "lockdown.txt").read_text() == "[none] test\n"
+    hooks = json.loads((out / "hooks.json").read_text())
+    assert set(hooks) == {"present", "omitted", "btf"}
+    assert hooks["present"] == {"tp": True, "map": True,
+                                "unmap": True, "copy": True,
+                                "syncc": True, "syncd": True}
+    assert hooks["omitted"] == []
+    assert hooks["btf"] is True
+
+
+def test_record_guest_identity_resolves_module_symlink(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    target = tmp_path / "real-mods"
+    target.mkdir()
+    link = tmp_path / "modules" / _StubUname.release
+    link.rmdir()
+    link.symlink_to(target)
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "mods.txt").read_text() == \
+        "6.6.160-test\n%s\n" % target
+    link.unlink()
+    link.symlink_to("../real-mods")
+    out2 = tmp_path / "out2"
+    out2.mkdir()
+    scguest.record_guest_identity(str(out2))
+    assert (out2 / "mods.txt").read_text() == \
+        "6.6.160-test\n%s\n" % (
+            tmp_path / "modules" / "6.6.160-test"
+            / "../real-mods")
+
+
+def test_record_guest_identity_absent_sentinels(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    monkeypatch.setattr(scguest, "CONFIG_GZ_PATH",
+                        str(tmp_path / "no-config"))
+    monkeypatch.setattr(scguest, "LOCKDOWN_PATH",
+                        str(tmp_path / "no-lockdown"))
+    monkeypatch.setattr(scguest, "BTF_PATH",
+                        str(tmp_path / "no-btf"))
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "configid.txt").read_text() == "absent\n"
+    assert (out / "lockdown.txt").read_text() == "absent\n"
+    assert (out / "btf-sha.txt").read_text() == "absent\n"
+    hooks = json.loads((out / "hooks.json").read_text())
+    assert hooks["btf"] is False
+
+
+def test_record_guest_identity_truncated_config_unreadable(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    (tmp_path / "config.gz").write_bytes(b"\x1f\x8b\x08\x00")
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "configid.txt").read_text() == \
+        "unreadable\n"
+
+
+def _patch_fail_paths(monkeypatch, tmp_path, out):
+    monkeypatch.setattr(scguest, "_OUT", str(out))
+    monkeypatch.setattr(scguest, "_EXPORT",
+                        str(tmp_path / "no-export"))
+
+
+def test_record_guest_identity_missing_modules_fails(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    monkeypatch.setattr(scguest, "MODULES_ROOT",
+                        str(tmp_path / "no-modules"))
+    out = tmp_path / "out"
+    out.mkdir()
+    _patch_fail_paths(monkeypatch, tmp_path, out)
+    with pytest.raises(SystemExit):
+        scguest.record_guest_identity(str(out))
+
+
+def test_record_guest_identity_unreadable_version_fails(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    monkeypatch.setattr(scguest, "VERSION_PATH",
+                        str(tmp_path / "no-version"))
+    out = tmp_path / "out"
+    out.mkdir()
+    _patch_fail_paths(monkeypatch, tmp_path, out)
+    with pytest.raises(SystemExit):
+        scguest.record_guest_identity(str(out))

@@ -6890,6 +6890,71 @@ def test_row_receipt_scenarios_guest_markers_roundtrip(
     assert ok, detail
 
 
+def test_row_receipt_scenarios_pass_without_hooks_refused(
+        tmp_path):
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    (row / "hooks.json").unlink()
+    with pytest.raises(ValueError, match="guest identity"):
+        km.write_row_receipt(
+            row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+            _scenarios_rootfs_ctx())
+
+
+def _guest_identity_row(monkeypatch, tmp_path):
+    """Synthetic scenario row carrying real guest emission."""
+    row, neg_sha = _scenarios_rootfs_row(
+        tmp_path, _rootfs_record())
+    sysfs = tmp_path / "sysfs"
+    hook = sysfs / "swiotlb_bounced"
+    hook.mkdir(parents=True)
+    (sysfs / "available_filter_functions").write_text(
+        "swiotlb_tbl_map_single\n"
+        "__swiotlb_tbl_unmap_single\n"
+        "swiotlb_bounce\n"
+        "__swiotlb_sync_single_for_cpu\n"
+        "__swiotlb_sync_single_for_device\n")
+    mods = tmp_path / "modules" / "6.6.160-test"
+    mods.mkdir(parents=True)
+    (tmp_path / "cmdline").write_text("virtme chance\n")
+    (tmp_path / "version").write_text("Linux version test\n")
+    (tmp_path / "lockdown").write_text("[none] test\n")
+    (tmp_path / "vmlinux").write_bytes(b"btf-bytes")
+    monkeypatch.setattr(os, "uname",
+                        lambda: SimpleNamespace(
+                            release="6.6.160-test"))
+    monkeypatch.setattr(scguest, "HOOK_EVT", str(hook))
+    monkeypatch.setattr(scguest, "HOOK_FILTER_FUNCS",
+                        str(sysfs / "available_filter_functions"))
+    monkeypatch.setattr(scguest, "CMDLINE_PATH",
+                        str(tmp_path / "cmdline"))
+    monkeypatch.setattr(scguest, "CONFIG_GZ_PATH",
+                        str(tmp_path / "no-config"))
+    monkeypatch.setattr(scguest, "VERSION_PATH",
+                        str(tmp_path / "version"))
+    monkeypatch.setattr(scguest, "LOCKDOWN_PATH",
+                        str(tmp_path / "lockdown"))
+    monkeypatch.setattr(scguest, "MODULES_ROOT",
+                        str(tmp_path / "modules"))
+    monkeypatch.setattr(scguest, "BTF_PATH",
+                        str(tmp_path / "vmlinux"))
+    scguest.record_guest_identity(str(row))
+    return row, neg_sha
+
+
+def test_row_receipt_scenarios_guest_identity_roundtrip(
+        tmp_path, monkeypatch):
+    row, neg_sha = _guest_identity_row(monkeypatch, tmp_path)
+    doc = km.write_row_receipt(
+        row, _scenarios_rootfs_rec(neg_sha), _lock_entry(),
+        _scenarios_rootfs_ctx())
+    assert doc["kernel"]["hooks"]["btf"] is True
+    assert doc["kernel"]["uname"].startswith("6.6.160-test")
+    km.validate_row_receipt(doc)
+    ok, detail = km.rederive_row(row)
+    assert ok, detail
+
+
 def test_row_receipt_scenarios_mixed_tool_marker_roundtrip(
         tmp_path):
     row, neg_sha = _scenarios_rootfs_row(
