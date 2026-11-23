@@ -148,9 +148,10 @@ pub fn report_usage() -> String {
         "       [--strict] [--long-lived-after DURATION] [--max-line-bytes N]\n",
         "       [--max-session-bytes N] [--max-events-bytes N] DIR\n",
         "\n",
-        "Read the capture in DIR, reduce its events to metrics,\n",
-        "and print one report on stdout. Diagnostics go to stderr.\n",
-        "Counts always cover the whole capture window.\n",
+        "Explain one capture: the common case is memveil report DIR\n",
+        "(no root needed). Read the capture in DIR, reduce its events\n",
+        "to metrics, and print one report on stdout. Diagnostics go to\n",
+        "stderr. Counts always cover the whole capture window.\n",
         "\n",
         "  --format NAME     text (default), json, or markdown.\n",
         "  --allow-partial   recover a verified checkpoint prefix, or\n",
@@ -169,10 +170,22 @@ pub fn report_usage() -> String {
         "  --max-events-bytes N\n",
         "                    total work cap, at most 4294967296.\n",
         "\n",
+        "Example:\n",
+        "  memveil report /tmp/cap1\n",
+        "  memveil report --format json /tmp/cap1\n",
+        "\n",
         "Exit 0 for a rendered report (completeness rides in the\n",
         "verdict field), 4 under --strict unless the verdict is\n",
         "complete, and 4 for checkpoint recovery. Invalid input or\n",
         "usage exits 2; corrupt final captures are never recovered.\n",
+        "\n",
+        "RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy\n",
+        "observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential\n",
+        "guests; no attestation; output is not a host-access or\n",
+        "confidentiality verdict. Attempts are not copies; unmap is not\n",
+        "erasure. Exit 0 includes partial evidence \u{2014} read `verdict:` or\n",
+        "use `--strict`. Metadata only; captures carry per-boot/kernel\n",
+        "fingerprints. See docs/support.md.\n",
     )
     .to_string()
 }
@@ -1627,6 +1640,7 @@ mod tests {
         assert!(text.contains("--long-lived-after DURATION"));
         assert!(text.contains("at most 4294967296"));
         assert!(text.contains("Exit 0 for a rendered report"));
-        assert!(text.ends_with("never recovered.\n"));
+        assert!(text.contains("Example:"));
+        assert!(text.ends_with("fingerprints. See docs/support.md.\n"));
     }
 }

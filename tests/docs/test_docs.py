@@ -128,10 +128,10 @@ def unsupported_section(text):
     return text[starts[0]:end]
 
 
-EXPECTED_TOP_ROW = ("  top       observe live or replay one capture with"
-                    " periodic summaries.")
-EXPECTED_RECORD_ROW = ("  record    capture bounce attempts and optional"
-                       " lifecycle/copy channels into a directory.")
+EXPECTED_TOP_ROW = ("  top           watch live, or replay a capture"
+                    " over time")
+EXPECTED_RECORD_ROW = ("  record        capture bounce attempts (+ optional"
+                       " lifecycle/copy) to a directory (root)")
 
 
 def verb_line(text, verb):

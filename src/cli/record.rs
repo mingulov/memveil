@@ -47,16 +47,11 @@ pub fn record_usage() -> String {
         "       [--lc-object PATH] [--cp-object PATH]\n",
         "       [--device NAME] [--strict]\n",
         "\n",
-        "Capture swiotlb bounce attempts into DIR. SEC defaults\n",
-        "to 60; N defaults to 1073741824 (1 GiB, the replay\n",
+        "Capture swiotlb bounce attempts into DIR (needs root): the\n",
+        "common case is sudo memveil record --output DIR --duration 10.\n",
+        "SEC defaults to 60; N defaults to 1073741824 (1 GiB, the replay\n",
         "default) and must lie in 131072..4294967296; a larger\n",
         "capture replays with the same --max-events-bytes.\n",
-        "Without --bridge, the statically linked loader runs\n",
-        "and bridge-bound receipt checks stay unverified: a\n",
-        "local-auto receipt that needs a bridge hash refuses\n",
-        "as bridge-unchecked. Without --object, --lc-object,\n",
-        "or --cp-object, each channel loads its embedded\n",
-        "object bytes; explicit paths win verbatim.\n",
         "Without --profile, the first validated profile passing\n",
         "full identity binding wins, then the first reference\n",
         "profile whose receipt verifies, else the first covering\n",
@@ -86,11 +81,31 @@ pub fn record_usage() -> String {
         "\n",
         "--strict exits 4 unless the record verdict is complete.\n",
         "\n",
+        "artifact overrides (rarely needed):\n",
+        "Without --bridge, the statically linked loader runs\n",
+        "and bridge-bound receipt checks stay unverified: a\n",
+        "local-auto receipt that needs a bridge hash refuses\n",
+        "as bridge-unchecked. Without --object, --lc-object,\n",
+        "or --cp-object, each channel loads its embedded\n",
+        "object bytes; explicit paths win verbatim.\n",
+        "\n",
+        "Example:\n",
+        "  sudo memveil record --output /tmp/cap1 --duration 10\n",
+        "  sudo memveil record --output /tmp/cap2 --duration 30 --capability attempt-trace,mapping-lifecycle\n",
+        "\n",
         "Exit 0 for a finalized capture (including zero-event\n",
         "and signal stops; completeness rides in the session\n",
         "verdict), 4 under --strict unless the verdict is\n",
         "complete, 3 when the run cannot start, 2 on\n",
         "usage errors, 1 on error or unfinalizable output.\n",
+        "\n",
+        "RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy\n",
+        "observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential\n",
+        "guests; no attestation; output is not a host-access or\n",
+        "confidentiality verdict. Attempts are not copies; unmap is not\n",
+        "erasure. Exit 0 includes partial evidence \u{2014} read `verdict:` or\n",
+        "use `--strict`. Metadata only; captures carry per-boot/kernel\n",
+        "fingerprints. See docs/support.md.\n",
     )
     .to_string()
 }
@@ -787,6 +802,7 @@ mod tests {
         assert!(!text.contains("LMB_NATIVE_LIB"));
         assert!(text.contains("--device NAME"));
         assert!(text.contains("literal"));
-        assert!(text.ends_with("usage errors, 1 on error or unfinalizable output.\n"));
+        assert!(text.contains("Example:"));
+        assert!(text.ends_with("fingerprints. See docs/support.md.\n"));
     }
 }

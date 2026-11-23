@@ -181,8 +181,10 @@ pub fn qualify_usage() -> String {
         "       [--profiles-dir DIR] [--capability IDS]\n",
         "       [--lc-object PATH] [--cp-object PATH]\n",
         "\n",
-        "Run a short smoke capture into DIR and, when it\n",
-        "proves the requested channels, publish a\n",
+        "Prove this host can be measured (needs root): the common\n",
+        "case is sudo memveil qualify --output DIR --object PATH\n",
+        "--bridge PATH, which runs a short smoke capture into DIR\n",
+        "and, when it proves the requested channels, publishes a\n",
         "machine-local local-auto receipt under\n",
         "<profiles-dir>/receipts (/var/lib/memveil/receipts\n",
         "for an installed package). --object and --bridge are\n",
@@ -201,6 +203,10 @@ pub fn qualify_usage() -> String {
         "--lc-object and copy-actual needs --cp-object when\n",
         "those channels are wanted, else the run refuses\n",
         "before the smoke.\n",
+        "\n",
+        "Example:\n",
+        "  sudo memveil qualify --output /tmp/q1 --object attempt.bpf.o --bridge bin/memveil\n",
+        "  sudo memveil qualify --output /tmp/q1 --profile my-host.json --object attempt.bpf.o --bridge bin/memveil\n",
     )
     .to_string()
 }

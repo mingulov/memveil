@@ -46,7 +46,7 @@ FROZEN_FLAGS = {
                "--strict", "-h"),
     "top": ("--allow-partial", "--bridge", "--capability",
             "--compact", "--cp-object", "--device",
-            "--duration", "--help", "--interval",
+            "--duration", "--full", "--help", "--interval",
             "--lc-object", "--long-lived-after",
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
@@ -63,8 +63,8 @@ FROZEN_FLAGS = {
                      "-h"),
 }
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
-FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--compact", "--json",
-                          "--load-check", "--strict", "-h")
+FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--compact", "--full",
+                          "--json", "--load-check", "--strict", "-h")
 
 # One-line zsh descriptions; flag presence (not these words)
 # is what the drift guard pins.
@@ -78,6 +78,7 @@ _ZSH_DESC = {
     "--device": "device rows to show",
     "--duration": "capture seconds",
     "--format": "output format",
+    "--full": "full report per refresh",
     "--help": "show help",
     "--interval": "refresh interval",
     "--json": "print the JSON report",
