@@ -1,6 +1,11 @@
-# Ordinary-Linux three-channel recording
+# Ordinary-Linux three-channel recording (maintainer / VM-gate recipe)
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
+Maintainer and VM-gate material: this recipe drives the
+armed VM gates and the laboratory oracle comparisons. It
+is not part of the user quickstart, and a run here is not
+release qualification.
 
 This recipe records bounce attempts, mapping lifecycle, and
 actual executed copies on the admitted ordinary-Linux

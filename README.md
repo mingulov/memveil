@@ -1,14 +1,10 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # memveil
 
-Attempt, lifecycle, and copy capture for swiotlb bounce analysis
-on x86-64 Linux: record real `swiotlb_bounced` tracepoint
-activity, mapping lifetimes, and executed copies into a
-self-describing capture directory, then replay it offline as
-text, JSON, or Markdown. Attempt counts are try-counts with
-requested bytes; actual copies come from the copy channel.
-Pool pressure and diagnostic findings reduce offline over
-captures that carry the corresponding events.
+Is this guest bounce-buffering, how much, on which device,
+and are copies actually happening? MemVeil records SWIOTLB
+bounce attempts, mapping lifetimes and executed copies from
+inside an x86-64 Linux guest, and replays captures offline.
 
 Status: attempt/lifecycle/copy development bundle 0.2.0, with runnable
 build, test, and tarball packaging wrappers. The shipping collector
@@ -93,11 +89,18 @@ A rebuilt package or matching kernel name alone earns no qualification.
 
 ## Use (tested .deb first)
 
-Only the `.deb` binary ran on the kernel matrix; the tarball
-and the `.rpm` carry builds of the same source with
-separately linked binaries that were not matrix-run (see
-[Known issues](docs/release-notes.md#known-issues) and
-[installed packages](docs/install.md)).
+One canonical binary: the bundle, `.deb`, and `.rpm`
+binaries are byte-identical; the matrix ran the `.deb`
+install of it (see [Known
+issues](docs/release-notes.md#known-issues) and [installed
+packages](docs/install.md)). Verify the download first:
+
+    sha256sum -c SHA256SUMS.txt
+    (echo -n "qualifier " && cat signer.pub) > allowed-signers
+    ssh-keygen -Y verify -f allowed-signers -I qualifier -n memveil-candidate -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+
+Expected: every file `OK`, then `Good "memveil-candidate"
+signature for qualifier`. Then install and run:
 
     sudo dpkg -i memveil_0.2.0-1_amd64.deb
     memveil doctor                            # passive host check
@@ -105,6 +108,10 @@ separately linked binaries that were not matrix-run (see
     memveil report --format text /tmp/cap1   # unprivileged replay
 
 **Exit 0 does not mean complete measurement. Read the `verdict:` line, or pass `--strict` in scripts.**
+
+Confidential guests are not qualified; the
+[confidential-guest recipe](docs/recipes/confidential-guest.md)
+states the boundary, and no support claim follows from it.
 
 ## Use (from the tarball)
 
