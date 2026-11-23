@@ -1,0 +1,565 @@
+{
+  "actual": {
+    "channels": null,
+    "checks": [
+      {
+        "detail": "vng exit 0",
+        "name": "vng_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no guest FAIL.txt",
+        "name": "no_fail_txt",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "attempt-trace: match (unavailable/lockdown-confidentiality); mapping-lifecycle: match (unavailable/lockdown-confidentiality); copy-actual: match (unavailable/lockdown-confidentiality)",
+        "name": "doctor",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "doctor exit 3 want 3",
+        "name": "doctor_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "passive matches load-check",
+        "name": "doctor_passive",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "passive doctor exit 3 want 3",
+        "name": "doctor_passive_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "guest ordinary, no sev sysfs",
+        "name": "guest_ordinary",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "booted 7.0.14-070014-generic",
+        "name": "boot_identity",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no built kernel",
+        "name": "boot_config",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no distro kernel",
+        "name": "boot_banner",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "cmdline carries lockdown=confidentiality",
+        "name": "boot_append",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "lockdown is confidentiality",
+        "name": "lockdown_effective",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "omitted match",
+        "name": "omitted",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "artifacts match",
+        "name": "artifacts",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "exports redacted",
+        "name": "export_redacted",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "udev_quiesced",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "all refusals exit 3",
+        "name": "refusals",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "dmesg clean after marker",
+        "name": "dmesg",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "record_finalized",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "report_consistent",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "progs_complete",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "prog_presence",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "window",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "workload",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "aggregate_quality",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "aggregate_bounds",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "floors",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "ceiling",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "recursion_reported",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "channels",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "invariants",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "bytes",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "oracle_bytes",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "sectors",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "sectors_idle",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "oracle_health",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "capture_valid",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "busy_finalized",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "busy_stop_reason",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "busy_span",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "busy_bounds",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "busy_valid",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no admitted caps",
+        "name": "busy_report",
+        "ok": true,
+        "skipped": true
+      }
+    ],
+    "ok": true
+  },
+  "artifacts": {
+    "binary_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "bpf": {
+      "attempt": "81ebd35c1450e905de1eaf2d23ea2827328a221aa8eabf2b4ca4e2f4daa026b6",
+      "copy": "daacd9950fec82d00c9dde5a33a7398d7e3c708d557455ab93b521aa0cf94227",
+      "lifecycle": "0cd5a0c9b961605f0c47fbcf0a5377080e5ca3f624d6c9860a57e816aff4527f"
+    },
+    "bpftool": "bpftool v7.7.0",
+    "bpftrace": "bpftrace v0.25.0",
+    "dpkg_version": "",
+    "mode": "bundle",
+    "status": "measured"
+  },
+  "cleanup": {
+    "busy_chown_error": null,
+    "busy_events_error": null,
+    "timeout": false
+  },
+  "command": {
+    "cpus": 4,
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "bundle",
+    "selector": "--kernels 6.0,6.6,6.11,7.0,debian13,6.12.114-btf,6.12.114-nobtf,7.0.14-lockdown",
+    "source_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "timeout_s": 900,
+    "tool": "tools/kernel-matrix"
+  },
+  "expected": {
+    "attempt-trace": {
+      "reason_class": "lockdown",
+      "verdict": "refused"
+    },
+    "copy-actual": {
+      "reason_class": "lockdown",
+      "verdict": "refused"
+    },
+    "mapping-lifecycle": {
+      "reason_class": "lockdown",
+      "verdict": "refused"
+    }
+  },
+  "files": [
+    {
+      "bytes": 1058,
+      "name": "artifacts.json",
+      "sha256": "7f70bfa0c790765d2a36ad1d2783ff65bbc122ed0bf8d0e948bd6854b3a7e1c0"
+    },
+    {
+      "bytes": 65,
+      "name": "btf-sha.txt",
+      "sha256": "543e568de4447dd7e0f0cc9b78652909e126b66712f8d1fecf721db6d9c4de4f"
+    },
+    {
+      "bytes": 54,
+      "name": "cache.txt",
+      "sha256": "f8da5c691abe3dde21857f257bffec74163a9c71cd131946bb025f1519de0528"
+    },
+    {
+      "bytes": 7,
+      "name": "configid.txt",
+      "sha256": "7925d3e9a9613a093e5eb4054b32aa39de910d2b03ba7e8046c3b4550b8de1e4"
+    },
+    {
+      "bytes": 25,
+      "name": "console.txt",
+      "sha256": "100189a523065b99f9123b5e42043fae20a2703cb1307a470d64d8611291c10b"
+    },
+    {
+      "bytes": 32888,
+      "name": "dmesg.txt",
+      "sha256": "5b9fb97bb3ae7db924ba3182e3e37bddf14148178b82c55158481d6675bff192"
+    },
+    {
+      "bytes": 84,
+      "name": "dmesg_scan.json",
+      "sha256": "378efd1c611af21f9fe157ee82d6ea1330b19b845101be73c5e6b7d0d91ed3ec"
+    },
+    {
+      "bytes": 1,
+      "name": "doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2739,
+      "name": "doctor-passive.json",
+      "sha256": "4cec2274b6e5a0e06f789749538340bea365246af332c5e3379657fd3aa413a1"
+    },
+    {
+      "bytes": 0,
+      "name": "doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "doctor.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 3036,
+      "name": "doctor.json",
+      "sha256": "761660f606608eda04832d3da7702d5856a98b4a426f2fb1122b0e63ba04d0d9"
+    },
+    {
+      "bytes": 0,
+      "name": "doctor.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 242,
+      "name": "hooks.json",
+      "sha256": "086252e49053e3229a82d345d7ce9c4c5c67c0213939db0327df502664aff84b"
+    },
+    {
+      "bytes": 541,
+      "name": "job.json",
+      "sha256": "cd8512c6f387ce8d39dfcdddbd8c6688f59973d83dcd836ada11cf289ac689b3"
+    },
+    {
+      "bytes": 33,
+      "name": "lockdown.txt",
+      "sha256": "88dfbc6bbff1501b48bb82097e63a42d9f933144b28e00861999fadb0db5092d"
+    },
+    {
+      "bytes": 102,
+      "name": "mods.txt",
+      "sha256": "60ffb69f350f5136f4cc4e1e06554aaca43a19b077bab1e5142255140bffeb2f"
+    },
+    {
+      "bytes": 57258,
+      "name": "oracle-inputs.json",
+      "sha256": "9b8d3eb6c23524d1c35bbddd734a06f20bbc533c63bb69509437925f632de47d"
+    },
+    {
+      "bytes": 2,
+      "name": "record-cap-attempt-trace.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "record-cap-attempt-trace.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 319,
+      "name": "record-cap-attempt-trace.out",
+      "sha256": "696c9c54b7f94310110697da583ed9755615f03b78117a81bbf1cb2c50355feb"
+    },
+    {
+      "bytes": 2,
+      "name": "record-cap-copy-actual.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "record-cap-copy-actual.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 319,
+      "name": "record-cap-copy-actual.out",
+      "sha256": "696c9c54b7f94310110697da583ed9755615f03b78117a81bbf1cb2c50355feb"
+    },
+    {
+      "bytes": 2,
+      "name": "record-cap-mapping-lifecycle.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "record-cap-mapping-lifecycle.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 319,
+      "name": "record-cap-mapping-lifecycle.out",
+      "sha256": "696c9c54b7f94310110697da583ed9755615f03b78117a81bbf1cb2c50355feb"
+    },
+    {
+      "bytes": 2,
+      "name": "record-combined.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "record-combined.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 319,
+      "name": "record-combined.out",
+      "sha256": "696c9c54b7f94310110697da583ed9755615f03b78117a81bbf1cb2c50355feb"
+    },
+    {
+      "bytes": 6,
+      "name": "sev-sysfs.txt",
+      "sha256": "5ad38304b535c2987dbd24657c1a11b884984ff600d9f389deb0d4e634fee792"
+    },
+    {
+      "bytes": 961,
+      "name": "uname.txt",
+      "sha256": "70b3bbac201517a3f53d828ec8eb63ad2b3581ee8d6e41ec9b7c6540d124124f"
+    },
+    {
+      "bytes": 213,
+      "name": "version.txt",
+      "sha256": "412f9fc72005925a6583801be8772f928d5005b890fdedbbe9abae2167e3c354"
+    },
+    {
+      "bytes": 1,
+      "name": "vng.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    }
+  ],
+  "id": "7.0.14-lockdown",
+  "kernel": {
+    "boot_label": "v7.0.14",
+    "btf_sha256": "ec3aa895be1da974a3116c24cd31adccc5e49fef1b4b089dc588aa9e32419a05",
+    "btf_status": "measured",
+    "config_sha256": null,
+    "config_status": "absent",
+    "hooks": {
+      "btf": true,
+      "omitted": [
+        "tp",
+        "map",
+        "unmap",
+        "copy",
+        "syncc",
+        "syncd"
+      ],
+      "present": {
+        "copy": false,
+        "map": false,
+        "syncc": false,
+        "syncd": false,
+        "tp": false,
+        "unmap": false
+      }
+    },
+    "lock_source": {
+      "archive_date": "2026-06-27 15:46",
+      "kind": "archive",
+      "modules_manifest_sha256": "921ffc5864bff7d52b128f907d8f4399e422f773f4f66e7798297b6f9bf5ffdb",
+      "vmlinuz_sha256": "3d3d50d77364ff616ddeae0508c68f74501afdee9679682ce3bf59edba5b4aca",
+      "vng_version": "v7.0.14"
+    },
+    "lockdown": "none integrity [confidentiality]",
+    "modules": "7.0.14-070014-generic\n/home/user/.cache/virtme-ng/v7.0.14/amd64/usr/lib/modules/7.0.14-070014-generic",
+    "release": "7.0.14-070014-generic",
+    "tools_expected": {
+      "bpftool": "bpftool v7.7.0",
+      "bpftrace": "bpftrace v0.25.0"
+    },
+    "uname": "7.0.14-070014-generic\nvirtme_hostname=virtme-ng nr_open=2147483584 virtme_link_mods=/home/user/.cache/virtme-ng/v7.0.14/amd64/usr/lib/modules/7.0.14-070014-generic virtme_initmount0=/tmp/export virtme_rw_overlay0=/etc virtme_rw_overlay1=/lib virtme_rw_overlay2=/home virtme_rw_overlay3=/opt virtme_rw_overlay4=/srv virtme_rw_overlay5=/usr virtme_rw_overlay6=/var virtme_rw_overlay7=/tmp virtme_console=ttyS0 console=ttyS0 earlyprintk=serial,ttyS0,115200 quiet loglevel=0 panic=-1 virtme.exec=`cHl0aG9uMyAvaG9tZS91c2VyL3NyYy9tL21lbXZlaWwtd3MvLndvcmt0cmVlcy9jMTAvdDUtbWF0cml4L3Rlc3RzL3ZtL2tlcm5lbF9tYXRyaXhfZ3Vlc3QucHkgL3RtcC9leHBvcnQgL2hvbWUvdXNlci9zcmMvbS9tZW12ZWlsLXdzLy53b3JrdHJlZXMvYzEwL3Q1LW1hdHJpeA==` virtme_chdir=redacted-workdir/.worktrees/c10/t5-matrix quiet loglevel=1 swiotlb=131072,force tsc=nowatchdog lockdown=confidentiality init=/home/user/.local/share/uv/tools/virtme-ng/lib64/python3.14/site-packages/virtme/guest/bin/virtme-ng-init",
+    "version": "Linux version 7.0.14-070014-generic (kernel@balboa) (x86_64-linux-gnu-gcc-15 (Ubuntu 15.2.0-12ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #202606271041 SMP PREEMPT_DYNAMIC Sat Jun 27 13:36:27 UTC 2026"
+  },
+  "losses": {
+    "present": false
+  },
+  "mode": "matrix",
+  "negatives": null,
+  "oracle": {
+    "present": false
+  },
+  "profile": {
+    "consumed": false,
+    "reason": "matrix rows assert lock expectations and doctor verdicts, not shipped profiles",
+    "shipped_id": null
+  },
+  "release": "7.0.14-070014-generic",
+  "run_id": "20261123T104854Z",
+  "schema": "memveil-matrix-row/2",
+  "smoke": false,
+  "source": {
+    "locks": {
+      "cargo_lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+      "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8"
+    },
+    "memveil": {
+      "commit": "bdf641c36addc345f3fb6d8bf925059c6f1fa714",
+      "dirty": false
+    }
+  },
+  "toolchain": {
+    "channel": "1.100.0",
+    "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8",
+    "lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+    "tools": {
+      "bpf_linker": "0.10.4",
+      "cargo": "1.100.0",
+      "rustc": "1.100.0"
+    }
+  },
+  "workload": {
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "bundle"
+  }
+}

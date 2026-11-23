@@ -1,0 +1,99 @@
+{
+  "binary_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+  "deb_role": "memveil_0.2.0-1_amd64.deb",
+  "deb_sha256": "45e0085508fa24b5b1033616ee64e4ef576b6aa05db766fe33bc75e5fd3f9d6e",
+  "export_sha256": {
+    "doctor-json.out": "f6b619d97cdbeba41bca1dd91f812cafe939aaf3fc960f1385d50f1dc2b60c4b",
+    "doctor.out": "6080c2bcb145087e8a81a62315d09f4b16f9b927e2f402ab99a896a2e2508ef3",
+    "dpkg-status.out": "50f5496dfd53428959285a0faa467b278a4cea73b2a88e8e4912e4de39900e2c",
+    "dpkg-verify.out": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "id.out": "5ef391d886d04116cf84b584ae37ef136f83950ab69b7bfb2a6da7506f7b3a57",
+    "operator-seconds.txt": "e854ea72207176a887b83bceb54d72a8a8313a1a6236b2b2f23325263ab65bc0",
+    "os.out": "d43c93b4dbf97db7ff2e09a420b35e582078a5b355efe52f87dc85ec84453bfd",
+    "record.out": "38e6a021cfc3533b6f79bc6e11f2c18b46abff9d43bc90a9edcaf472c1ea0144",
+    "report-json.out": "803dcb9b48a58ee37a90a5d7986c7c67d5f8e728752e507d1c2d1fca8fbd82f5",
+    "report-markdown.out": "42ac8b1e5ea3da03446c242d65828d216cade07cb7059121e2a62082c9e22633",
+    "report-strict.out": "573f66f5e976ec481aa1314367cadac8c68c0aba8ded036cf9b094f59aa86c6a",
+    "report-text.out": "573f66f5e976ec481aa1314367cadac8c68c0aba8ded036cf9b094f59aa86c6a",
+    "strict-verdict-line.txt": "8834dfee6ea72713bf3332ee2c9b115db0ef36454da78ba6a1f15cb7ac5ba8d7",
+    "version.out": "b479ba88652f6b770812e04cbf0909300704dba68867d59e65a6506a5f44f37f"
+  },
+  "guest": {
+    "identity": "uid=0(root) gid=0(root) groups=0(root)",
+    "kernel": "7.0.14-070014-generic",
+    "os": "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\""
+  },
+  "kind": "t5-subset-journey-summary/1",
+  "legs": [
+    {
+      "exit": 1,
+      "leg": "preflight-absent",
+      "note": "clean VM confirmed (dpkg absent)"
+    },
+    {
+      "exit": 0,
+      "leg": "dpkg-install",
+      "note": "retained deb install"
+    },
+    {
+      "exit": 0,
+      "leg": "dpkg-status",
+      "note": "Package: memveil"
+    },
+    {
+      "exit": 0,
+      "leg": "dpkg-verify",
+      "note": "deb verify"
+    },
+    {
+      "exit": 0,
+      "leg": "version",
+      "note": "memveil-0.2.0"
+    },
+    {
+      "exit": 0,
+      "leg": "doctor",
+      "note": "guest ordinary, uid 0"
+    },
+    {
+      "exit": 0,
+      "leg": "doctor-json",
+      "note": "valid JSON"
+    },
+    {
+      "exit": 0,
+      "leg": "record",
+      "note": "ready session=cap-5959264426-188 start_ns=5959264426"
+    },
+    {
+      "exit": 0,
+      "leg": "report-text",
+      "note": "summary: attempts 0, requested bytes 0 bytes in 10.14 s"
+    },
+    {
+      "exit": 0,
+      "leg": "report-json",
+      "note": "report json exit 0"
+    },
+    {
+      "exit": 0,
+      "leg": "report-markdown",
+      "note": "report markdown exit 0"
+    },
+    {
+      "exit": 4,
+      "leg": "report-strict",
+      "note": "verdict: partial_known_loss (loss 0.00%, 0 delivered)"
+    }
+  ],
+  "operator_seconds": "operator_seconds=14",
+  "primary_sources": [
+    ".superpowers/sdd/2026-11-21-mv31-12-semantics/artifacts/t5/step1-scratch/export/",
+    ".superpowers/sdd/2026-11-21-mv31-12-semantics/t5-live-report.md (Step 1)"
+  ],
+  "provenance": "T7-authored summary, NOT tool output. Transcribed from the T5 step-1 clean-VM journey export (primary evidence) and the T5 live report table. Per-file sha256 below binds this summary to the export bytes; the full export stays in the retained (ignored) artifacts dir.",
+  "residual_r1": "record ran uid-0-direct (sudo absent in rootfs-v3); privileged-record substance met (accepted at T5 triage)",
+  "seal": "08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9",
+  "source_commit": "bdf641c36addc345f3fb6d8bf925059c6f1fa714",
+  "verdict": "PASS"
+}

@@ -1,0 +1,862 @@
+{
+  "actual": {
+    "channels": {
+      "attempt": "EXACT (9536 in 9536..9536)"
+    },
+    "checks": [
+      {
+        "detail": "vng exit 0",
+        "name": "vng_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no guest FAIL.txt",
+        "name": "no_fail_txt",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "attempt-trace: match (available/available); mapping-lifecycle: match (unavailable/floor); copy-actual: match (unavailable/floor)",
+        "name": "doctor",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "doctor exit 3 want 3",
+        "name": "doctor_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "passive matches load-check",
+        "name": "doctor_passive",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "passive doctor exit 3 want 3",
+        "name": "doctor_passive_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "guest ordinary, no sev sysfs",
+        "name": "guest_ordinary",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "booted 6.0.19-060019-generic",
+        "name": "boot_identity",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no built kernel",
+        "name": "boot_config",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no distro kernel",
+        "name": "boot_banner",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no extra boot args",
+        "name": "boot_append",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no lockdown arg",
+        "name": "lockdown_effective",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "omitted match",
+        "name": "omitted",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "artifacts match",
+        "name": "artifacts",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "exports redacted",
+        "name": "export_redacted",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "udev quiesced",
+        "name": "udev_quiesced",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "all refusals exit 3",
+        "name": "refusals",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "dmesg clean after marker",
+        "name": "dmesg",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "record exit 0",
+        "name": "record_finalized",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "report exits match record 0",
+        "name": "report_consistent",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "4 bpftool snapshots bracket",
+        "name": "progs_complete",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "programs bracket record",
+        "name": "prog_presence",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "workload 19554701287..21025719490 inside window 14985722904..75086049801",
+        "name": "window",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "phases exact",
+        "name": "workload",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "aggregate partial lower bound",
+        "name": "aggregate_quality",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "all channels reach floor",
+        "name": "floors",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "all channels fit ceiling",
+        "name": "ceiling",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "recursion misses reported",
+        "name": "recursion_reported",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "EXACT",
+        "name": "channels",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "aggregate honesty only below 6.7",
+        "name": "aggregate_bounds",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "workload ratios hold",
+        "name": "invariants",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "byte sums match block total",
+        "name": "bytes",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "oracle bytes match block total",
+        "name": "oracle_bytes",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "sectors exact: data 2097152, scratch 131072",
+        "name": "sectors",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "idle sides silent",
+        "name": "sectors_idle",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "oracle lost no events",
+        "name": "oracle_health",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "capture OK: 9601 events, 9536 attempts, 1140850688 requested bytes",
+        "name": "capture_valid",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "record exit 0",
+        "name": "busy_finalized",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "busy stopped on signal",
+        "name": "busy_stop_reason",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "busy load spans the record",
+        "name": "busy_span",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "HONEST-LOWER-BOUND",
+        "name": "busy_bounds",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "capture OK: 1201005 events, 1200979 attempts, 21117427712 requested bytes",
+        "name": "busy_valid",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "report exits match record 0",
+        "name": "busy_report",
+        "ok": true,
+        "skipped": false
+      }
+    ],
+    "ok": true
+  },
+  "artifacts": {
+    "binary_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "bpf": {
+      "attempt": "81ebd35c1450e905de1eaf2d23ea2827328a221aa8eabf2b4ca4e2f4daa026b6",
+      "copy": "daacd9950fec82d00c9dde5a33a7398d7e3c708d557455ab93b521aa0cf94227",
+      "lifecycle": "0cd5a0c9b961605f0c47fbcf0a5377080e5ca3f624d6c9860a57e816aff4527f"
+    },
+    "bpftool": "bpftool v7.7.0",
+    "bpftrace": "bpftrace v0.25.0",
+    "dpkg_version": "",
+    "mode": "bundle",
+    "status": "measured"
+  },
+  "cleanup": {
+    "busy_chown_error": null,
+    "busy_events_error": null,
+    "timeout": false
+  },
+  "command": {
+    "cpus": 4,
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "bundle",
+    "selector": "--kernels 6.0,6.6,6.11,7.0,debian13,6.12.114-btf,6.12.114-nobtf,7.0.14-lockdown",
+    "source_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "timeout_s": 900,
+    "tool": "tools/kernel-matrix"
+  },
+  "expected": {
+    "attempt-trace": {
+      "reason_class": "live-verified",
+      "verdict": "admitted"
+    },
+    "copy-actual": {
+      "reason_class": "floor-6.11",
+      "verdict": "refused"
+    },
+    "mapping-lifecycle": {
+      "reason_class": "floor-6.11",
+      "verdict": "refused"
+    }
+  },
+  "files": [
+    {
+      "bytes": 1058,
+      "name": "artifacts.json",
+      "sha256": "7f70bfa0c790765d2a36ad1d2783ff65bbc122ed0bf8d0e948bd6854b3a7e1c0"
+    },
+    {
+      "bytes": 278,
+      "name": "blockstat.json",
+      "sha256": "bdb548fb28782e7105558ddd6e95cbc9afa72054ef87feb003ee290471473158"
+    },
+    {
+      "bytes": 65,
+      "name": "btf-sha.txt",
+      "sha256": "e1eb173a8fa9329a69d155b9b8a01dff1009468e70af03e3103dd568a59f4ee4"
+    },
+    {
+      "bytes": 99,
+      "name": "busy/busy.out",
+      "sha256": "10233693f9b574f2dcc7706a6365437bd2eeadc63bb737054f976e35fce85b2a"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/busy.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 6288,
+      "name": "busy/cap/session.json",
+      "sha256": "058c166368ab115489628b25f4a5ee139308591d18cf6c74a0a5840d09316ef9"
+    },
+    {
+      "bytes": 7,
+      "name": "busy/end_reason.txt",
+      "sha256": "3037f94da9d48d4abbbaa27bb97374852648877ee36e8ca7b4b2bcfe7a9c40f7"
+    },
+    {
+      "bytes": 334,
+      "name": "busy/events_summary.json",
+      "sha256": "2cdeed513bd2ed463dde7b0daca4df62ee5eb4e49750242acc8862b23961765c"
+    },
+    {
+      "bytes": 542,
+      "name": "busy/progs0.json",
+      "sha256": "57bd792804d2208150a2cecb72e0c4e523786a27c0fb52ec2649525b367d761c"
+    },
+    {
+      "bytes": 803,
+      "name": "busy/progs1.json",
+      "sha256": "7e6fe90e2e3911b03a06ec8a030e2a9b842dc223d9dfe00f5b8e72332a210f55"
+    },
+    {
+      "bytes": 542,
+      "name": "busy/progs2.json",
+      "sha256": "57bd792804d2208150a2cecb72e0c4e523786a27c0fb52ec2649525b367d761c"
+    },
+    {
+      "bytes": 65,
+      "name": "busy/progs_times.json",
+      "sha256": "221a783d06f134ab6a2a268100c77c5f93f9e314fccaa2a80fd76c6a20b49cd5"
+    },
+    {
+      "bytes": 1,
+      "name": "busy/record.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 99,
+      "name": "busy/record.out",
+      "sha256": "8c7d47c5251a3d12228e8372602af16c74cb322b1561cbb6e90b06c106ca2506"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "busy/report-json.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/report-json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "busy/report.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 13271,
+      "name": "busy/report.json",
+      "sha256": "cb6fa6d125fc31a41dc2470a33844ffa5de51313bd6a71477bc81c4627daeba0"
+    },
+    {
+      "bytes": 7161,
+      "name": "busy/report.out",
+      "sha256": "a94d5ad61fac4249aebbba0e873c67c268c02916bcd840be9cc02a03402bb7dc"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/report.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 111,
+      "name": "busy/times.json",
+      "sha256": "e8476772463a7b8d892f65e8dba17b7ca76c3c61053edd70c0802ee9e47ac063"
+    },
+    {
+      "bytes": 94,
+      "name": "busy/validate.json",
+      "sha256": "20289825dcc45b5fffa16dee0b6d76f1ab487fcf5d05c510e5c84eef148b863e"
+    },
+    {
+      "bytes": 74,
+      "name": "busy/validate.txt",
+      "sha256": "26c8cec6176c7e7e4ea0b893c978568debee3c64cc5e362836c2499912c95c63"
+    },
+    {
+      "bytes": 54,
+      "name": "cache.txt",
+      "sha256": "001bab6b25da2eb31fe3c7fa60c493d0ee50ad481cab0c920ab4404e0350e6c8"
+    },
+    {
+      "bytes": 3606026,
+      "name": "cap/events.ndjson",
+      "sha256": "8ffc0a287e6828fbc4fdaa6a0f3fe0a11f407e9e89d9d88bd488581d5fc94aac"
+    },
+    {
+      "bytes": 6329,
+      "name": "cap/session.json",
+      "sha256": "f9aa767f8fd46f7d758cb976331122a0299241f026eda5d23ff5ed339a345ee6"
+    },
+    {
+      "bytes": 7,
+      "name": "configid.txt",
+      "sha256": "7925d3e9a9613a093e5eb4054b32aa39de910d2b03ba7e8046c3b4550b8de1e4"
+    },
+    {
+      "bytes": 45,
+      "name": "console.txt",
+      "sha256": "088dff050ab2e5b8d1633358a195d990c187d34c57cdf1a1b9a2d85d49b38ef2"
+    },
+    {
+      "bytes": 26,
+      "name": "dev.txt",
+      "sha256": "158b9f89f07273265b17d52f36b2ebd78a9efd01549b3d333d12678550576a0f"
+    },
+    {
+      "bytes": 29463,
+      "name": "dmesg.txt",
+      "sha256": "bd848dd86bb63bae69d552518cf5db06f92b8ce73764c350d7ffb20045da64ad"
+    },
+    {
+      "bytes": 84,
+      "name": "dmesg_scan.json",
+      "sha256": "378efd1c611af21f9fe157ee82d6ea1330b19b845101be73c5e6b7d0d91ed3ec"
+    },
+    {
+      "bytes": 1,
+      "name": "doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2410,
+      "name": "doctor-passive.json",
+      "sha256": "3a1e44a2aa6982633afdde24637c28d8776400703ec9230178c94d8dc359b552"
+    },
+    {
+      "bytes": 0,
+      "name": "doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "doctor.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2664,
+      "name": "doctor.json",
+      "sha256": "98f0f5f42e1b225d5fe9c011d8217592e9ed63a89391b2434cf1ddf14f6ddac1"
+    },
+    {
+      "bytes": 0,
+      "name": "doctor.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 206,
+      "name": "hooks.json",
+      "sha256": "ff7c5a28da6eea8128b17e7973e6e76fadbe0c812dcfeb2c5a4eafa1b9cc58f7"
+    },
+    {
+      "bytes": 552,
+      "name": "job.json",
+      "sha256": "1f67dd1e5e7cbfd9250a9753dd10fddec71e5e4e3e7284cfdf8838725c4254aa"
+    },
+    {
+      "bytes": 33,
+      "name": "lockdown.txt",
+      "sha256": "18099eee1b7af07fcb76f7927d6afe38a8470d07aa01e0d20eddefd270ecc16f"
+    },
+    {
+      "bytes": 98,
+      "name": "mods.txt",
+      "sha256": "c8b72d76b4425cfd8cf53937fab3a9109043fcb221724161f922c8541610748e"
+    },
+    {
+      "bytes": 87609,
+      "name": "oracle-inputs.json",
+      "sha256": "a780f20c7abb08c21d90092bc3f777e9d63d8bf09657e9e4d97b897d208b6ba1"
+    },
+    {
+      "bytes": 168,
+      "name": "oracle.bt",
+      "sha256": "7360f991885500732cebb3938a89417e620d436734165bf884bfd81672828393"
+    },
+    {
+      "bytes": 3,
+      "name": "oracle.keep",
+      "sha256": "d2282520815b52133ade0e6d35fd586693110c7130ac68bde832f60819ab5c4a"
+    },
+    {
+      "bytes": 5,
+      "name": "oracle.mode",
+      "sha256": "0e716a5fef4e6dc1bcfff22ad52f73ca4eee3f4ea8292f4a1918daa32592889f"
+    },
+    {
+      "bytes": 6336,
+      "name": "oracle.stderr",
+      "sha256": "f0999476de9ed5a7eb7aca5c3b61e0ba3c06567cd4fe9abb493adc5b01ecead1"
+    },
+    {
+      "bytes": 6786,
+      "name": "oracle.txt",
+      "sha256": "640add9d180ec9071fe266c79226e2837c682b788a8405277150f44c4aebd1a9"
+    },
+    {
+      "bytes": 542,
+      "name": "progs0.json",
+      "sha256": "57bd792804d2208150a2cecb72e0c4e523786a27c0fb52ec2649525b367d761c"
+    },
+    {
+      "bytes": 802,
+      "name": "progs1.json",
+      "sha256": "b93f95b2b95074b29acd4465c95c97c5605a48037fe56cdcffc78e1c26c1426a"
+    },
+    {
+      "bytes": 802,
+      "name": "progs2.json",
+      "sha256": "b93f95b2b95074b29acd4465c95c97c5605a48037fe56cdcffc78e1c26c1426a"
+    },
+    {
+      "bytes": 542,
+      "name": "progs3.json",
+      "sha256": "57bd792804d2208150a2cecb72e0c4e523786a27c0fb52ec2649525b367d761c"
+    },
+    {
+      "bytes": 83,
+      "name": "progs_times.json",
+      "sha256": "17c90f29f081a9dd60d09504d894d758f46b15fb39ff19eb2134f7bc152b5770"
+    },
+    {
+      "bytes": 2,
+      "name": "record-cap-copy-actual.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "record-cap-copy-actual.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 95,
+      "name": "record-cap-copy-actual.out",
+      "sha256": "211cf83812dd482f4757edfcb3a9506236f18d0cf0021babd650f0ff09943885"
+    },
+    {
+      "bytes": 2,
+      "name": "record-cap-mapping-lifecycle.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "record-cap-mapping-lifecycle.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 101,
+      "name": "record-cap-mapping-lifecycle.out",
+      "sha256": "06bd33d21f257f56ca1a2588f9066768f4d30bd2251b2cf73f3ce01f0e217325"
+    },
+    {
+      "bytes": 2,
+      "name": "record-combined.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "record-combined.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 101,
+      "name": "record-combined.out",
+      "sha256": "06bd33d21f257f56ca1a2588f9066768f4d30bd2251b2cf73f3ce01f0e217325"
+    },
+    {
+      "bytes": 1,
+      "name": "record.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 101,
+      "name": "record.out",
+      "sha256": "31e14b002523a0b28e294ac4d21967b16efe72c30b3f1b9c3c6e2a6dac3a6cbd"
+    },
+    {
+      "bytes": 0,
+      "name": "record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "report-json.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "report-json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "report.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 14047,
+      "name": "report.json",
+      "sha256": "ff979a63f844bd2ab40857c3ab16fb3591c457e56077e7612c196fb3649ee136"
+    },
+    {
+      "bytes": 7612,
+      "name": "report.out",
+      "sha256": "768f8e0ffaaffd4f063bc7af8f12420360f1f0ffd269d94e45bf854edec9ad35"
+    },
+    {
+      "bytes": 0,
+      "name": "report.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 6,
+      "name": "sev-sysfs.txt",
+      "sha256": "5ad38304b535c2987dbd24657c1a11b884984ff600d9f389deb0d4e634fee792"
+    },
+    {
+      "bytes": 1,
+      "name": "udev.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 104,
+      "name": "udev.out",
+      "sha256": "58d1c8354f43fdd48fe3ed94e452e5d45081a1ec44e7862ece4dc31065db8644"
+    },
+    {
+      "bytes": 932,
+      "name": "uname.txt",
+      "sha256": "4668d272e45bba1eaabf1506d2daaa581420c436dc416f7226bc298cba6a5477"
+    },
+    {
+      "bytes": 87,
+      "name": "validate.json",
+      "sha256": "74b761ea8a65eca8aeff72c1079acd699ffc6bff997dde0a519da16d2f66ab08"
+    },
+    {
+      "bytes": 67,
+      "name": "validate.txt",
+      "sha256": "d90f57ee03ce0417b6971caae5d0c52840431d0e4dcae33fc6c6d4ca9b43f0f0"
+    },
+    {
+      "bytes": 224,
+      "name": "version.txt",
+      "sha256": "c605a3af0c4c0dd86735a3c134c8ebd8ebbfe96d6866a1fa7741a3d379478ba6"
+    },
+    {
+      "bytes": 1,
+      "name": "vng.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r0.txt",
+      "sha256": "00db159488b6f18d7792c42bb0abec9a06918589971f596d029810688f596dc7"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r1.txt",
+      "sha256": "b3ee19da50f7b145a9093a46d003ab37ff4ab59a0d4a41903ac5ca0fb831c417"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r2.txt",
+      "sha256": "6b6ae35e8cc927a8dc594f7f35355e21293b575db16913891ef5423f93419f97"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r3.txt",
+      "sha256": "c2001349b70ac45dc1a61e8843e70a014aa334d300d6bcf44c5b4a2caf4ce76a"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r4.txt",
+      "sha256": "d8202c08f5eb931988cfb56769a92dbae1465156bc01334885d6e5c10793218f"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r5.txt",
+      "sha256": "cbddd27b69fac5073ec569182e5f7cdd0fd91aed3ec16ccef1a67a107e05cbfa"
+    },
+    {
+      "bytes": 924,
+      "name": "workload.txt",
+      "sha256": "14829b89fb0e11ab3b21e14a211d9f1ebb34f2e6ee8c18be23187f4133ad67e4"
+    }
+  ],
+  "id": "6.0",
+  "kernel": {
+    "boot_label": "v6.0.19",
+    "btf_sha256": "324a4ddac5b30c1eb1d04e432cbbb22cb885f87a1b7d964da0fabb591527ea61",
+    "btf_status": "measured",
+    "config_sha256": null,
+    "config_status": "absent",
+    "hooks": {
+      "btf": true,
+      "omitted": [
+        "unmap",
+        "syncc",
+        "syncd"
+      ],
+      "present": {
+        "copy": true,
+        "map": true,
+        "syncc": false,
+        "syncd": false,
+        "tp": true,
+        "unmap": false
+      }
+    },
+    "lock_source": {
+      "archive_date": "2025-02-11 10:52",
+      "kind": "archive",
+      "modules_manifest_sha256": "9fb0b54319941e94a75626af6afc6aff7b58230c576f2a15c9e576ee3887566a",
+      "vmlinuz_sha256": "8c324f006ae405cebc65582e134b625821b404604e199ee767a659b454fb284f",
+      "vng_version": "v6.0.19"
+    },
+    "lockdown": "[none] integrity confidentiality",
+    "modules": "6.0.19-060019-generic\n/home/user/.cache/virtme-ng/v6.0.19/amd64/lib/modules/6.0.19-060019-generic",
+    "release": "6.0.19-060019-generic",
+    "tools_expected": {
+      "bpftool": "bpftool v7.7.0",
+      "bpftrace": "bpftrace v0.25.0"
+    },
+    "uname": "6.0.19-060019-generic\nvirtme_hostname=virtme-ng nr_open=2147483584 virtme_link_mods=/home/user/.cache/virtme-ng/v6.0.19/amd64/lib/modules/6.0.19-060019-generic virtme_initmount0=/tmp/export virtme_rw_overlay0=/etc virtme_rw_overlay1=/lib virtme_rw_overlay2=/home virtme_rw_overlay3=/opt virtme_rw_overlay4=/srv virtme_rw_overlay5=/usr virtme_rw_overlay6=/var virtme_rw_overlay7=/tmp virtme_console=ttyS0 console=ttyS0 earlyprintk=serial,ttyS0,115200 quiet loglevel=0 panic=-1 virtme.exec=`cHl0aG9uMyAvaG9tZS91c2VyL3NyYy9tL21lbXZlaWwtd3MvLndvcmt0cmVlcy9jMTAvdDUtbWF0cml4L3Rlc3RzL3ZtL2tlcm5lbF9tYXRyaXhfZ3Vlc3QucHkgL3RtcC9leHBvcnQgL2hvbWUvdXNlci9zcmMvbS9tZW12ZWlsLXdzLy53b3JrdHJlZXMvYzEwL3Q1LW1hdHJpeA==` virtme_chdir=redacted-workdir/.worktrees/c10/t5-matrix quiet loglevel=1 swiotlb=131072,force tsc=nowatchdog init=/home/user/.local/share/uv/tools/virtme-ng/lib64/python3.14/site-packages/virtme/guest/bin/virtme-ng-init",
+    "version": "Linux version 6.0.19-060019-generic (kernel@gloin) (x86_64-linux-gnu-gcc-12 (Ubuntu 12.2.0-10ubuntu1) 12.2.0, GNU ld (GNU Binutils for Ubuntu) 2.39.50.20221224) #202301120739 SMP PREEMPT_DYNAMIC Thu Jan 12 13:28:53 UTC 2023"
+  },
+  "losses": {
+    "busy": {
+      "aggregate": null,
+      "overall": "HONEST-LOWER-BOUND",
+      "per": {
+        "attempt": "HONEST (1200979 <= 3134587)"
+      }
+    },
+    "main": {
+      "allowances": {
+        "attempt": 0
+      },
+      "allowed_total": 0,
+      "attributed": {
+        "attempt": 0
+      },
+      "bounds": {
+        "attempt": [
+          9536,
+          9536
+        ]
+      },
+      "channels": [
+        "attempt"
+      ],
+      "over_reported": false,
+      "overall": "EXACT",
+      "shortfalls": {
+        "attempt": 0
+      },
+      "sum_got": 9536,
+      "sum_hi": 9536,
+      "sum_lo": 9536,
+      "total_short": 0
+    },
+    "present": true
+  },
+  "mode": "matrix",
+  "negatives": null,
+  "oracle": {
+    "lost_events": 0,
+    "mode": "full",
+    "present": true,
+    "stderr_present": true,
+    "text_sha256": "640add9d180ec9071fe266c79226e2837c682b788a8405277150f44c4aebd1a9"
+  },
+  "profile": {
+    "consumed": false,
+    "reason": "matrix rows assert lock expectations and doctor verdicts, not shipped profiles",
+    "shipped_id": null
+  },
+  "release": "6.0.19-060019-generic",
+  "run_id": "20261123T104854Z",
+  "schema": "memveil-matrix-row/2",
+  "smoke": false,
+  "source": {
+    "locks": {
+      "cargo_lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+      "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8"
+    },
+    "memveil": {
+      "commit": "bdf641c36addc345f3fb6d8bf925059c6f1fa714",
+      "dirty": false
+    }
+  },
+  "toolchain": {
+    "channel": "1.100.0",
+    "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8",
+    "lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+    "tools": {
+      "bpf_linker": "0.10.4",
+      "cargo": "1.100.0",
+      "rustc": "1.100.0"
+    }
+  },
+  "workload": {
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "bundle"
+  }
+}

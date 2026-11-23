@@ -1,0 +1,38 @@
+{
+  "id": "7.0",
+  "vng_version": "v7.0.14",
+  "release": "7.0.14-070014-generic",
+  "admitted": [
+    "attempt-trace",
+    "mapping-lifecycle",
+    "copy-actual"
+  ],
+  "duration": 60,
+  "dd_count": 128,
+  "run_id": "20261123T121047Z",
+  "data_serial": "mv0",
+  "scratch_serial": "mv1",
+  "deb": "/tmp/mv-deb/memveil_0.2.0-1_amd64.deb",
+  "repo": "/redacted-workdir/.worktrees/c10/unified",
+  "bpftrace": "/redacted-workdir/artifacts/mv31-12/farm/bin/bpftrace",
+  "bpftool": "/redacted-workdir/artifacts/mv31-12/farm/bin/bpftool",
+  "negatives": {
+    "renamed_field": "60738271956d8e49eb85af5987b9aa4d0e96510f7265f15decb2feaa50c670ec",
+    "widened_layout": "218e1a1835277832e5b243f6bc788ebf7061a2272b68701fdd238801ab4accf7",
+    "wrong_shift": "bc6dc3b2dcfe20c6538de716817d9e3529d8ae1212b6f12ae38e4576b951bb4a",
+    "wrong_argcnt": "3fb18cc800631b5c4198fa26ad83180e5c3fe1d773ba339c09fdfebc45c8ff8a"
+  },
+  "staging": {
+    "reference": "sealed-fixture",
+    "manifest_digest": "08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9",
+    "manifest_commit": "bdf641c36addc345f3fb6d8bf925059c6f1fa714",
+    "copy_sha256": "daacd9950fec82d00c9dde5a33a7398d7e3c708d557455ab93b521aa0cf94227",
+    "bpf_set": null
+  },
+  "deb_host": "/redacted-workdir/.superpowers/sdd/2026-11-21-mv31-12-semantics/artifacts/t4/retained-08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9/memveil_0.2.0-1_amd64.deb",
+  "rootfs": {
+    "image": "/redacted-workdir/artifacts/mv31-12/debian-rootfs-v3.img",
+    "sha256": "1871c86ad512d091667a9c8cb95e38e0ef57170ea3a5c6a969691cd81bdd4070",
+    "mount": "/redacted-workdir/.superpowers/sdd/2026-11-21-mv31-12-semantics/artifacts/t5-r2-rerun/scenarios-out-rootfs-mnt"
+  }
+}

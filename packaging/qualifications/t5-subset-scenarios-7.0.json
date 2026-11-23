@@ -1,0 +1,1983 @@
+{
+  "actual": {
+    "binary_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "negatives": {
+      "renamed_field": "60738271956d8e49eb85af5987b9aa4d0e96510f7265f15decb2feaa50c670ec",
+      "widened_layout": "218e1a1835277832e5b243f6bc788ebf7061a2272b68701fdd238801ab4accf7",
+      "wrong_argcnt": "3fb18cc800631b5c4198fa26ad83180e5c3fe1d773ba339c09fdfebc45c8ff8a",
+      "wrong_shift": "bc6dc3b2dcfe20c6538de716817d9e3529d8ae1212b6f12ae38e4576b951bb4a"
+    },
+    "ok": true,
+    "scenarios": [
+      {
+        "checks": [
+          {
+            "detail": "base positive control ready",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 0 want 0",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 0 want 0",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "finalized exit 4",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "codes agree, no record code line",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "base capture holds attempts and copies",
+            "name": "capture",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "base",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "negative object matches job",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 0 want 0",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (verifier-rejected)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "neg-renamed",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "negative object matches job",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 0 want 0",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 0 want 0",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "finalized exit 4",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "codes agree, no record code line",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "negative capture degrades honestly",
+            "name": "capture",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "neg-layout",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "negative object matches job",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 0 want 0",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 0 want 0",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "finalized exit 4",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "codes agree, no record code line",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "negative capture degrades honestly",
+            "name": "capture",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "neg-shift",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "negative object matches job",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 0 want 0",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 0 want 0",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "finalized exit 4",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "codes agree, no record code line",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "negative capture degrades honestly",
+            "name": "capture",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "neg-argcnt",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "nobody denied tracefs events",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 3 want 3",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (tracefs-denied)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "nonroot",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "CapEff 0 in the dropped child",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 3 want 3",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (load-eperm)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "nocaps",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "tracing disabled",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 3 want 3",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (ftrace-disabled)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "ftrace-off",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "no tracefs or debugfs mount",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 3 want 3",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (tracefs-not-mounted)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "tracefs-unmounted",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "btf reads empty",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 3 want 3",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (btf-truncated)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "btf-empty",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "btf reads a truncated half",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 3 want 3",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (btf-truncated)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "btf-truncated",
+        "status": "ok"
+      },
+      {
+        "checks": [
+          {
+            "detail": "memcg calibrated",
+            "name": "precondition",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "doctor matches",
+            "name": "doctor_passive",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "passive doctor exit 0 want 0",
+            "name": "doctor_passive_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load refuses load-enomem (2 of 3)",
+            "name": "doctor_load",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "load doctor exit 3 want 3",
+            "name": "doctor_load_exit",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "refused exit 3 (load-enomem)",
+            "name": "record",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "record code follows first refusal",
+            "name": "agreement",
+            "ok": true,
+            "skipped": false
+          },
+          {
+            "detail": "scenario refuses, no capture",
+            "name": "capture",
+            "ok": true,
+            "skipped": true
+          },
+          {
+            "detail": "teardown restores base verdict",
+            "name": "teardown",
+            "ok": true,
+            "skipped": false
+          }
+        ],
+        "name": "memcg",
+        "status": "ok"
+      }
+    ]
+  },
+  "artifacts": {
+    "binary_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "bpf": {
+      "attempt": "81ebd35c1450e905de1eaf2d23ea2827328a221aa8eabf2b4ca4e2f4daa026b6",
+      "copy": "daacd9950fec82d00c9dde5a33a7398d7e3c708d557455ab93b521aa0cf94227",
+      "lifecycle": "0cd5a0c9b961605f0c47fbcf0a5377080e5ca3f624d6c9860a57e816aff4527f"
+    },
+    "bpftool": "unresolved",
+    "bpftrace": "unresolved",
+    "dpkg_version": "0.2.0-1",
+    "mode": "deb",
+    "status": "measured"
+  },
+  "cleanup": {
+    "busy_chown_error": null,
+    "busy_events_error": null,
+    "timeout": false
+  },
+  "command": {
+    "cpus": 4,
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "deb",
+    "selector": "--kernel 7.0",
+    "source_sha256": "45e0085508fa24b5b1033616ee64e4ef576b6aa05db766fe33bc75e5fd3f9d6e",
+    "timeout_s": 900,
+    "tool": "tools/kernel-matrix"
+  },
+  "expected": {
+    "caps": {
+      "attempt-trace": {
+        "reason_class": "live-verified",
+        "verdict": "admitted"
+      },
+      "copy-actual": {
+        "reason_class": "live-verified",
+        "verdict": "admitted"
+      },
+      "mapping-lifecycle": {
+        "reason_class": "live-verified",
+        "verdict": "admitted"
+      }
+    }
+  },
+  "files": [
+    {
+      "bytes": 495,
+      "name": "artifacts.json",
+      "sha256": "12ea41b951479225280a59403c2132a1668b99cbe98c6b3f16dc3ca17cda539b"
+    },
+    {
+      "bytes": 65,
+      "name": "btf-sha.txt",
+      "sha256": "543e568de4447dd7e0f0cc9b78652909e126b66712f8d1fecf721db6d9c4de4f"
+    },
+    {
+      "bytes": 54,
+      "name": "cache.txt",
+      "sha256": "f8da5c691abe3dde21857f257bffec74163a9c71cd131946bb025f1519de0528"
+    },
+    {
+      "bytes": 7,
+      "name": "configid.txt",
+      "sha256": "7925d3e9a9613a093e5eb4054b32aa39de910d2b03ba7e8046c3b4550b8de1e4"
+    },
+    {
+      "bytes": 3345,
+      "name": "console.txt",
+      "sha256": "50ae98bdbf1340cc70cc2d266a493f2599794720e3a878bd7c2e7641650e3387"
+    },
+    {
+      "bytes": 13,
+      "name": "dev.txt",
+      "sha256": "79f4a296736b0f935e5eb1eb24321554fd785dd61a2409c8fbd8f813e1696e1a"
+    },
+    {
+      "bytes": 1,
+      "name": "dpkg.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 239,
+      "name": "dpkg.out",
+      "sha256": "da5478ed552c18412a216ef1706be7d45933f85e4905f47524b2bd02c89dda86"
+    },
+    {
+      "bytes": 162,
+      "name": "hooks.json",
+      "sha256": "746b78ce1488df0914c9fee935f99f8ba4f796f65aaa8c02c58ec655dba1a5f8"
+    },
+    {
+      "bytes": 1782,
+      "name": "job.json",
+      "sha256": "fc0797b44839a6c9e3690f4d218b645f4fadcca3384a381195bebf524f17f791"
+    },
+    {
+      "bytes": 33,
+      "name": "lockdown.txt",
+      "sha256": "18099eee1b7af07fcb76f7927d6afe38a8470d07aa01e0d20eddefd270ecc16f"
+    },
+    {
+      "bytes": 57,
+      "name": "mods.txt",
+      "sha256": "69026c38f4c65d41a86baf5dbb6e1d80b2c1edd9960a3d178ebd4ab01abc3e3a"
+    },
+    {
+      "bytes": 339760,
+      "name": "neg/swiotlb_copy-renamed_field.bpf.o",
+      "sha256": "60738271956d8e49eb85af5987b9aa4d0e96510f7265f15decb2feaa50c670ec"
+    },
+    {
+      "bytes": 341240,
+      "name": "neg/swiotlb_copy-widened_layout.bpf.o",
+      "sha256": "218e1a1835277832e5b243f6bc788ebf7061a2272b68701fdd238801ab4accf7"
+    },
+    {
+      "bytes": 341176,
+      "name": "neg/swiotlb_copy-wrong_argcnt.bpf.o",
+      "sha256": "3fb18cc800631b5c4198fa26ad83180e5c3fe1d773ba339c09fdfebc45c8ff8a"
+    },
+    {
+      "bytes": 341320,
+      "name": "neg/swiotlb_copy-wrong_shift.bpf.o",
+      "sha256": "bc6dc3b2dcfe20c6538de716817d9e3529d8ae1212b6f12ae38e4576b951bb4a"
+    },
+    {
+      "bytes": 1273512,
+      "name": "ro-deb/memveil_0.2.0-1_amd64.deb",
+      "sha256": "45e0085508fa24b5b1033616ee64e4ef576b6aa05db766fe33bc75e5fd3f9d6e"
+    },
+    {
+      "bytes": 730,
+      "name": "rootfs.json",
+      "sha256": "3b4bebb395a61fde9f82960eaf26643766d64c48b4c37c4fa2d78f0e377e2ccb"
+    },
+    {
+      "bytes": 734782,
+      "name": "scn-base/cap/events.ndjson",
+      "sha256": "1e19e469ed31ec7a4a66e12ce269d8b0ab05760cdb6fd8ccadf720c278eab45f"
+    },
+    {
+      "bytes": 10229,
+      "name": "scn-base/cap/session.json",
+      "sha256": "5bef0d3e7c0fdf4e4714df65a83b9e51f9acce7dd33edba697ac9a23e8dc8eb5"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-base/doctor-load.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2651,
+      "name": "scn-base/doctor-load.json",
+      "sha256": "1574afa98bc978cca9a19d5e56b8760be6fc332805e040785b1b979757d7533c"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-base/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-base/doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2517,
+      "name": "scn-base/doctor-passive.json",
+      "sha256": "f6b619d97cdbeba41bca1dd91f812cafe939aaf3fc960f1385d50f1dc2b60c4b"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-base/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-base/precondition.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 3,
+      "name": "scn-base/record.exists",
+      "sha256": "8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-base/record.exit",
+      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a"
+    },
+    {
+      "bytes": 99,
+      "name": "scn-base/record.out",
+      "sha256": "75f8bfee2d97787274bb6a2b3c16e16347fec924ccb7e10cae1c6fbd6bf7af67"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-base/record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 99,
+      "name": "scn-base/record.stdout",
+      "sha256": "75f8bfee2d97787274bb6a2b3c16e16347fec924ccb7e10cae1c6fbd6bf7af67"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-base/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-base/workload.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 88,
+      "name": "scn-base/workload.out",
+      "sha256": "369c3a7ea33201407ab0be566fc78210320489ae00d9787a29891e1e8a395936"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-btf-empty/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2549,
+      "name": "scn-btf-empty/doctor-load.json",
+      "sha256": "62357822cc7243a1ac8193afe9f7384c50c79de71a1fff68fef015ea5312e316"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-btf-empty/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-btf-empty/doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2295,
+      "name": "scn-btf-empty/doctor-passive.json",
+      "sha256": "fd25c1896e5c3e82f64a481e36e039c144a1735eab4cedd20f318595d7779fe0"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-btf-empty/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 36,
+      "name": "scn-btf-empty/precondition.json",
+      "sha256": "d460dd50451cd86a0ed84689b9f2ce1ccbcec10682b48a740680b802bb11c15d"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-btf-empty/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-btf-empty/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 183,
+      "name": "scn-btf-empty/record.out",
+      "sha256": "1a1e12217b57d621dbe4bb736cf7da66755b0c1e550f4092010cbc78b4845d42"
+    },
+    {
+      "bytes": 183,
+      "name": "scn-btf-empty/record.stderr",
+      "sha256": "1a1e12217b57d621dbe4bb736cf7da66755b0c1e550f4092010cbc78b4845d42"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-btf-empty/record.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 64,
+      "name": "scn-btf-empty/teardown.json",
+      "sha256": "68a25b09fd6b2373eafa6be01974a54cd4b2d455848bd180f2125d2d44368b47"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-btf-truncated/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2597,
+      "name": "scn-btf-truncated/doctor-load.json",
+      "sha256": "45db5fcb27529ada492743a50966d08ecb7d77571ea13ef68c20fbd27e45274a"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-btf-truncated/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-btf-truncated/doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2343,
+      "name": "scn-btf-truncated/doctor-passive.json",
+      "sha256": "d38a0c744f3a967e88aec9ef271eaf38324d77c8a8595acc03e561c8402ce687"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-btf-truncated/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 88,
+      "name": "scn-btf-truncated/precondition.json",
+      "sha256": "d69def82574bfa25131cb6f0644d1fe64aa751e2290601e278d92048256189ea"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-btf-truncated/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-btf-truncated/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 195,
+      "name": "scn-btf-truncated/record.out",
+      "sha256": "56f557381e2f2c52deb247f14efa44de692fa18e1d82971c84fb786167ba315a"
+    },
+    {
+      "bytes": 195,
+      "name": "scn-btf-truncated/record.stderr",
+      "sha256": "56f557381e2f2c52deb247f14efa44de692fa18e1d82971c84fb786167ba315a"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-btf-truncated/record.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 64,
+      "name": "scn-btf-truncated/teardown.json",
+      "sha256": "68a25b09fd6b2373eafa6be01974a54cd4b2d455848bd180f2125d2d44368b47"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-ftrace-off/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2652,
+      "name": "scn-ftrace-off/doctor-load.json",
+      "sha256": "36caf39e5d9c1befac2982a942383b1d7c6746e79dd19840ae117ca31af87e00"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-ftrace-off/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-ftrace-off/doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2398,
+      "name": "scn-ftrace-off/doctor-passive.json",
+      "sha256": "ff6dea7a84137a990f58f40e9f469cb941cce2f039e0ec8a4ee825e480cf61e9"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-ftrace-off/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 43,
+      "name": "scn-ftrace-off/precondition.json",
+      "sha256": "3555ecc2b615f302af8e8e18cb07f2409f65048c78d2f5840aede57c459b4694"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-ftrace-off/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-ftrace-off/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 205,
+      "name": "scn-ftrace-off/record.out",
+      "sha256": "cc79fcf488bb60ef11255d6716ccd6492744ed3cc5e03e0bc33ec50c964aba41"
+    },
+    {
+      "bytes": 205,
+      "name": "scn-ftrace-off/record.stderr",
+      "sha256": "cc79fcf488bb60ef11255d6716ccd6492744ed3cc5e03e0bc33ec50c964aba41"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-ftrace-off/record.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 65,
+      "name": "scn-ftrace-off/teardown.json",
+      "sha256": "88b07865941a6b4bb642dc5b894f3825dfb63cf1acfa1919330b04289c4bb7fe"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-memcg/att0/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2688,
+      "name": "scn-memcg/att0/doctor-load.json",
+      "sha256": "7c57016c53efc72492a7777d01ead8452bfc615a33ad5ad4ae5eed2da807abcd"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-memcg/att0/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-memcg/att0/doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2293,
+      "name": "scn-memcg/att0/doctor-passive.json",
+      "sha256": "a6462cfe48d02575c848b74f1a6967ed5935fa1172f9984f2fa8fd470349b59a"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-memcg/att0/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-memcg/att0/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-memcg/att0/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 309,
+      "name": "scn-memcg/att0/record.out",
+      "sha256": "f74401a1c3a098e84103fe5f4e22ba41381913c70f9b60dade8c4f37677918fe"
+    },
+    {
+      "bytes": 266,
+      "name": "scn-memcg/att0/record.stderr",
+      "sha256": "5ef62d6ffd7034638327d05a62d2a6f752219e869ca190a3acd5318f25328281"
+    },
+    {
+      "bytes": 43,
+      "name": "scn-memcg/att0/record.stdout",
+      "sha256": "35d7e5f38824f59247d33a5c80623b92a28a48af2ae2448da9ce392249e46a30"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-memcg/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2688,
+      "name": "scn-memcg/doctor-load.json",
+      "sha256": "7c57016c53efc72492a7777d01ead8452bfc615a33ad5ad4ae5eed2da807abcd"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-memcg/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-memcg/doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2293,
+      "name": "scn-memcg/doctor-passive.json",
+      "sha256": "a6462cfe48d02575c848b74f1a6967ed5935fa1172f9984f2fa8fd470349b59a"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-memcg/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 359,
+      "name": "scn-memcg/memcg.json",
+      "sha256": "2db5767690cdff11170f9c2334aa9f0e4e9e955bda029236f8c96ac5a7cf8cdb"
+    },
+    {
+      "bytes": 285,
+      "name": "scn-memcg/precondition.json",
+      "sha256": "4da5d6a4380c6dd3b3a76186a1705740a520cb1345db18eb0df0d8c06bd82829"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-memcg/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-memcg/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 309,
+      "name": "scn-memcg/record.out",
+      "sha256": "f74401a1c3a098e84103fe5f4e22ba41381913c70f9b60dade8c4f37677918fe"
+    },
+    {
+      "bytes": 266,
+      "name": "scn-memcg/record.stderr",
+      "sha256": "5ef62d6ffd7034638327d05a62d2a6f752219e869ca190a3acd5318f25328281"
+    },
+    {
+      "bytes": 43,
+      "name": "scn-memcg/record.stdout",
+      "sha256": "35d7e5f38824f59247d33a5c80623b92a28a48af2ae2448da9ce392249e46a30"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-memcg/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 378484,
+      "name": "scn-neg-argcnt/cap/events.ndjson",
+      "sha256": "781983afb4bb12092c9a30e239032e18fb6ea7d45322d4835ebe337a0a245dd3"
+    },
+    {
+      "bytes": 9858,
+      "name": "scn-neg-argcnt/cap/session.json",
+      "sha256": "6120e7805b2f96564bf098f66f33982246b8d5bfaa5c642e327f90046d0e655d"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-argcnt/doctor-load.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2651,
+      "name": "scn-neg-argcnt/doctor-load.json",
+      "sha256": "1574afa98bc978cca9a19d5e56b8760be6fc332805e040785b1b979757d7533c"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-argcnt/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-argcnt/doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2517,
+      "name": "scn-neg-argcnt/doctor-passive.json",
+      "sha256": "f6b619d97cdbeba41bca1dd91f812cafe939aaf3fc960f1385d50f1dc2b60c4b"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-argcnt/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 87,
+      "name": "scn-neg-argcnt/precondition.json",
+      "sha256": "cacfc73aefd8833f72f46842c99db6fc9ed9a70adaa13c35d4e7e8cd260c908b"
+    },
+    {
+      "bytes": 3,
+      "name": "scn-neg-argcnt/record.exists",
+      "sha256": "8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-argcnt/record.exit",
+      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a"
+    },
+    {
+      "bytes": 101,
+      "name": "scn-neg-argcnt/record.out",
+      "sha256": "bed06d7f43f53ed0adbe9e79485d14f5d405850758ccaae5e5d24938dbdcd824"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-argcnt/record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 101,
+      "name": "scn-neg-argcnt/record.stdout",
+      "sha256": "bed06d7f43f53ed0adbe9e79485d14f5d405850758ccaae5e5d24938dbdcd824"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-argcnt/report-json.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-argcnt/report-json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-argcnt/report-txt.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-argcnt/report-txt.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 21504,
+      "name": "scn-neg-argcnt/report.json",
+      "sha256": "bc6578d310cee0a1d962eb4f55f2fb2665857fb67b8f8f4d79ef8dfb5f962b80"
+    },
+    {
+      "bytes": 9973,
+      "name": "scn-neg-argcnt/report.txt",
+      "sha256": "91667f8809a49b0547cb159098305b545eff392e200df20b2c71530cf11b466b"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-neg-argcnt/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-argcnt/workload.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 90,
+      "name": "scn-neg-argcnt/workload.out",
+      "sha256": "05210ce32f603f77890eb7a219132310afcdc870b2ecb9438fddac0f728cd6f0"
+    },
+    {
+      "bytes": 704516,
+      "name": "scn-neg-layout/cap/events.ndjson",
+      "sha256": "f7c89e20166aa4b786747e3d3d1d6c80e7360e9f0058cd3b41924eee18a3bd91"
+    },
+    {
+      "bytes": 10165,
+      "name": "scn-neg-layout/cap/session.json",
+      "sha256": "ee027cf43c2897eb3bf754c974d57dae35b1fa565488c60218ea3d394bf74d47"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-layout/doctor-load.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2651,
+      "name": "scn-neg-layout/doctor-load.json",
+      "sha256": "1574afa98bc978cca9a19d5e56b8760be6fc332805e040785b1b979757d7533c"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-layout/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-layout/doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2517,
+      "name": "scn-neg-layout/doctor-passive.json",
+      "sha256": "f6b619d97cdbeba41bca1dd91f812cafe939aaf3fc960f1385d50f1dc2b60c4b"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-layout/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 87,
+      "name": "scn-neg-layout/precondition.json",
+      "sha256": "a76a93cf8a55d9b134ee751036a118baa2b61787b12710f3ca9790d165f81709"
+    },
+    {
+      "bytes": 3,
+      "name": "scn-neg-layout/record.exists",
+      "sha256": "8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-layout/record.exit",
+      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a"
+    },
+    {
+      "bytes": 101,
+      "name": "scn-neg-layout/record.out",
+      "sha256": "ae36c2079487ed2db0f0a44154abcf69c4dbac3d0fd0e5b59a633581ddb9b404"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-layout/record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 101,
+      "name": "scn-neg-layout/record.stdout",
+      "sha256": "ae36c2079487ed2db0f0a44154abcf69c4dbac3d0fd0e5b59a633581ddb9b404"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-layout/report-json.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-layout/report-json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-layout/report-txt.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-layout/report-txt.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 23203,
+      "name": "scn-neg-layout/report.json",
+      "sha256": "48d8b0056846448a9eec48104a2c833b85511bf27ba91af8216ae364324cd105"
+    },
+    {
+      "bytes": 10956,
+      "name": "scn-neg-layout/report.txt",
+      "sha256": "3d3c4f5bd1543e85318cc876cbde369ee6e92620c03b32b3e5507ca2e7d8b727"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-neg-layout/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-layout/workload.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 90,
+      "name": "scn-neg-layout/workload.out",
+      "sha256": "213482d71e4af760941cabb68baf038cb3a9cc6d3949650ede4d1e054ed075de"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-renamed/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 3196,
+      "name": "scn-neg-renamed/doctor-load.json",
+      "sha256": "1b248ee3175791faaec68f3abec3803009b098c85026e69e6eba7c8941298505"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-renamed/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-renamed/doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2517,
+      "name": "scn-neg-renamed/doctor-passive.json",
+      "sha256": "f6b619d97cdbeba41bca1dd91f812cafe939aaf3fc960f1385d50f1dc2b60c4b"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-renamed/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 87,
+      "name": "scn-neg-renamed/precondition.json",
+      "sha256": "89befa031399d776a446f0916a5cbacc588f4f6f05d72c66f941aa613bba5033"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-neg-renamed/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-renamed/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 656,
+      "name": "scn-neg-renamed/record.out",
+      "sha256": "d5b1aff1957ab0562ce0610bd8ad695d263b717db0b037a984d4754d99d43fcc"
+    },
+    {
+      "bytes": 613,
+      "name": "scn-neg-renamed/record.stderr",
+      "sha256": "7ed5a1d1eeac58de89cc3a2016881250911bc5bb92a5bb463b67d010b7f9a658"
+    },
+    {
+      "bytes": 43,
+      "name": "scn-neg-renamed/record.stdout",
+      "sha256": "35d7e5f38824f59247d33a5c80623b92a28a48af2ae2448da9ce392249e46a30"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-neg-renamed/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 604739,
+      "name": "scn-neg-shift/cap/events.ndjson",
+      "sha256": "5612e82d51d9baf3f777b471a7c41221b071d7f57c5049797320bae10daa43b0"
+    },
+    {
+      "bytes": 10163,
+      "name": "scn-neg-shift/cap/session.json",
+      "sha256": "f3cd0956b586a40f7f625760179bbc3639fd28440dc920b7951597acd489ea82"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-shift/doctor-load.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2651,
+      "name": "scn-neg-shift/doctor-load.json",
+      "sha256": "1574afa98bc978cca9a19d5e56b8760be6fc332805e040785b1b979757d7533c"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-shift/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-shift/doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2517,
+      "name": "scn-neg-shift/doctor-passive.json",
+      "sha256": "f6b619d97cdbeba41bca1dd91f812cafe939aaf3fc960f1385d50f1dc2b60c4b"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-shift/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 87,
+      "name": "scn-neg-shift/precondition.json",
+      "sha256": "da3cf961184a7d363c8201e981dfceb2438f9ee9312f88e0a412490c64c7af81"
+    },
+    {
+      "bytes": 3,
+      "name": "scn-neg-shift/record.exists",
+      "sha256": "8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-shift/record.exit",
+      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a"
+    },
+    {
+      "bytes": 101,
+      "name": "scn-neg-shift/record.out",
+      "sha256": "afa9b4653345e42a5edb644015ae0b67802c5f58b5fc800f7b6e9505f0d6b3a2"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-shift/record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 101,
+      "name": "scn-neg-shift/record.stdout",
+      "sha256": "afa9b4653345e42a5edb644015ae0b67802c5f58b5fc800f7b6e9505f0d6b3a2"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-shift/report-json.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-shift/report-json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-shift/report-txt.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-neg-shift/report-txt.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 23204,
+      "name": "scn-neg-shift/report.json",
+      "sha256": "0faba2ab624ca2e2a37eeda04e77346d2974662778e61dfb00a98e3601e9355d"
+    },
+    {
+      "bytes": 10958,
+      "name": "scn-neg-shift/report.txt",
+      "sha256": "cf55a051e8e173d33ea0aa8db0c0f463a37796c886dee1d0f34529194548660d"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-neg-shift/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-neg-shift/workload.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 90,
+      "name": "scn-neg-shift/workload.out",
+      "sha256": "e5cb460439d76c6111fc051c39e5742a5f5e50187c1785560bb3b374c2f7047f"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-nocaps/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 3760,
+      "name": "scn-nocaps/doctor-load.json",
+      "sha256": "b0bd7872d1cc60bc6df2bd2ce77549be00b56f56a99a81810675b2ed473f05cf"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-nocaps/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-nocaps/doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 3248,
+      "name": "scn-nocaps/doctor-passive.json",
+      "sha256": "8b3cd9e8df94d1b612427d0c4376d51f7042945a8280f87f33972dff7615e11e"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-nocaps/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 56,
+      "name": "scn-nocaps/precondition.json",
+      "sha256": "521d57c2f68b57d19d64d84d44ab3d1ebda6d742c214928e880724d2e4c7f788"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-nocaps/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-nocaps/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 477,
+      "name": "scn-nocaps/record.out",
+      "sha256": "ac551f493a005871d9c279f82d62748ad88e4437732a645c56ceb64a6316f5f5"
+    },
+    {
+      "bytes": 434,
+      "name": "scn-nocaps/record.stderr",
+      "sha256": "bd145152ff6d13dcc21d6492ee9e114816bafdef3d28dab782752715f7827d41"
+    },
+    {
+      "bytes": 43,
+      "name": "scn-nocaps/record.stdout",
+      "sha256": "35d7e5f38824f59247d33a5c80623b92a28a48af2ae2448da9ce392249e46a30"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-nocaps/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-nonroot/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 3100,
+      "name": "scn-nonroot/doctor-load.json",
+      "sha256": "51eca964ee19751af8d04afb60d34e942219a33db0967bef6fc12f70733afddd"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-nonroot/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-nonroot/doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2803,
+      "name": "scn-nonroot/doctor-passive.json",
+      "sha256": "35f1d2235bd72fcdc277de0600e9d0d038d5141bc80c0c8d7197c58c0eac773b"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-nonroot/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 85,
+      "name": "scn-nonroot/precondition.json",
+      "sha256": "3637aef0a9c903e0bda18d73fede7339c8e01c75246b21fa2e372b4cec4da91c"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-nonroot/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-nonroot/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 356,
+      "name": "scn-nonroot/record.out",
+      "sha256": "1e5d8c36980affe58e77d73527d65c66b291d02791b0b078e4b60df3b63e6713"
+    },
+    {
+      "bytes": 356,
+      "name": "scn-nonroot/record.stderr",
+      "sha256": "1e5d8c36980affe58e77d73527d65c66b291d02791b0b078e4b60df3b63e6713"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-nonroot/record.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 40,
+      "name": "scn-nonroot/teardown.json",
+      "sha256": "dc3fe2a25467c9236608ebc479793bd73660fc7f98b2f30076ada702ddf881ff"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-tracefs-unmounted/doctor-load.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2688,
+      "name": "scn-tracefs-unmounted/doctor-load.json",
+      "sha256": "24abc6daa7893806781e04873417880e6cbb80b538056115b5e6e168440fbe16"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-tracefs-unmounted/doctor-load.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-tracefs-unmounted/doctor-passive.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 2391,
+      "name": "scn-tracefs-unmounted/doctor-passive.json",
+      "sha256": "d09164cdef0d294fdd82bebc9466045f76ad2a7a083792fe0bffba8b8a461abb"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-tracefs-unmounted/doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 281,
+      "name": "scn-tracefs-unmounted/mounts.before.json",
+      "sha256": "46f2a9447097783cc24a345fd2178d4fd697658e647e1c75eff575f7c75867ea"
+    },
+    {
+      "bytes": 3289,
+      "name": "scn-tracefs-unmounted/precondition.json",
+      "sha256": "d67ffd05d834e060737034aa32eee1f84bc447d27c704febe3a858839eb42270"
+    },
+    {
+      "bytes": 2,
+      "name": "scn-tracefs-unmounted/record.exists",
+      "sha256": "9390298f3fb0c5b160498935d79cb139aef28e1c47358b4bbba61862b9c26e59"
+    },
+    {
+      "bytes": 1,
+      "name": "scn-tracefs-unmounted/record.exit",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce"
+    },
+    {
+      "bytes": 215,
+      "name": "scn-tracefs-unmounted/record.out",
+      "sha256": "8394920ca433b56aac2c12d57f52808b9f1b1613d668f46a75a3518fda2d210c"
+    },
+    {
+      "bytes": 215,
+      "name": "scn-tracefs-unmounted/record.stderr",
+      "sha256": "8394920ca433b56aac2c12d57f52808b9f1b1613d668f46a75a3518fda2d210c"
+    },
+    {
+      "bytes": 0,
+      "name": "scn-tracefs-unmounted/record.stdout",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 403,
+      "name": "scn-tracefs-unmounted/teardown.json",
+      "sha256": "1bdc8d4fb1d2ab1d101631de0d4c18e88af7430dd803e6b4099c2af257eadc49"
+    },
+    {
+      "bytes": 1865,
+      "name": "uname.txt",
+      "sha256": "30c3f95c1217a89064f0e4ddc134f34b41782351599623cdd397340047b5194b"
+    },
+    {
+      "bytes": 213,
+      "name": "version.txt",
+      "sha256": "412f9fc72005925a6583801be8772f928d5005b890fdedbbe9abae2167e3c354"
+    },
+    {
+      "bytes": 1,
+      "name": "vng.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    }
+  ],
+  "id": "7.0",
+  "kernel": {
+    "boot_label": "v7.0.14",
+    "btf_sha256": "ec3aa895be1da974a3116c24cd31adccc5e49fef1b4b089dc588aa9e32419a05",
+    "btf_status": "measured",
+    "config_sha256": null,
+    "config_status": "absent",
+    "hooks": {
+      "btf": true,
+      "omitted": [],
+      "present": {
+        "copy": true,
+        "map": true,
+        "syncc": true,
+        "syncd": true,
+        "tp": true,
+        "unmap": true
+      }
+    },
+    "lock_source": {
+      "archive_date": "2026-06-27 15:46",
+      "kind": "archive",
+      "modules_manifest_sha256": "921ffc5864bff7d52b128f907d8f4399e422f773f4f66e7798297b6f9bf5ffdb",
+      "vmlinuz_sha256": "3d3d50d77364ff616ddeae0508c68f74501afdee9679682ce3bf59edba5b4aca",
+      "vng_version": "v7.0.14"
+    },
+    "lockdown": "[none] integrity confidentiality",
+    "modules": "7.0.14-070014-generic\n/lib/modules/7.0.14-070014-generic",
+    "release": "7.0.14-070014-generic",
+    "tools_expected": {
+      "bpftool": "bpftool v7.7.0",
+      "bpftrace": "bpftrace v0.25.0"
+    },
+    "uname": "7.0.14-070014-generic\nvirtme_hostname=virtme-ng nr_open=2147483584 virtme_root_mods=1 virtme_initmount0=/tmp/export virtme_initmount1=/tmp/mv-repo virtme_initmount2=/tmp/mv-deb virtme_rw_overlay0=/etc virtme_rw_overlay1=/lib virtme_rw_overlay2=/home virtme_rw_overlay3=/opt virtme_rw_overlay4=/srv virtme_rw_overlay5=/usr virtme_rw_overlay6=/var virtme_rw_overlay7=/tmp virtme_console=ttyS0 console=ttyS0 earlyprintk=serial,ttyS0,115200 quiet loglevel=0 panic=-1 virtme.exec=`cj0ke1NDRU5BUklPX1JFUE86LS90bXAvbXYtcmVwb307Yj0ke1NDRU5BUklPX0RFQkRJUjotL3RtcC9tdi1kZWJ9O2U9JHtTQ0VOQVJJT19FWFBPUlQ6LS90bXAvZXhwb3J0fTttPSR7U0NFTkFSSU9fTU9VTlRTX0ZJTEU6LS9wcm9jL21vdW50c307dD0kKGNhdCAiJG0iIDI+L2Rldi9udWxsfHx0cnVlKTtwcmludGYgJyVzXG4nICIkdCI7cz0nJztmb3IgZCBpbiAiJHIiICIkYiI7ZG8gWyAtZCAiJGQiIF18fHsgcz0iJHMgJGQiO2NvbnRpbnVlOyB9O2Nhc2UgIiR0IiBpbiAqIiAkZCAiKik7Oyopcz0iJHMgJGQodW5tb3VudGVkKSI7O2VzYWM7ZG9uZTtbIC1mICIkci90ZXN0cy92bS9rZXJuZWxfc2NlbmFyaW9zX2d1ZXN0LnB5IiBdfHxzPSIkcyAkci90ZXN0cy92bS9rZXJuZWxfc2NlbmFyaW9zX2d1ZXN0LnB5IjtbIC1mICIkYi9tZW12ZWlsXzAuMi4wLTFfYW1kNjQuZGViIiBdfHxzPSIkcyAkYi9tZW12ZWlsXzAuMi4wLTFfYW1kNjQuZGViIjtbIC16ICIkcyIgXXx8eyBnPSJzY2VuYXJpbyBtb3VudHMgbWlzc2luZzokcyI7ZWNobyAiJGciO2VjaG8gIiRnIj4iJGUvRkFJTC50eHQiIDI+L2Rldi9udWxsfHx0cnVlO2V4aXQgNDI7fTtweXRob24zIC90bXAvbXYtcmVwby90ZXN0cy92bS9rZXJuZWxfc2NlbmFyaW9zX2d1ZXN0LnB5IC90bXAvZXhwb3J0IC90bXAvbXYtcmVwbw==` virtme_chdir=. quiet loglevel=1 swiotlb=131072,force tsc=nowatchdog init=/bin/sh -- -c \"mount -t tmpfs run /run; mkdir -p /run/virtme/cache; /bin/mount -n -t 9p -o rw,version=9p2000.L,trans=virtio,access=any,msize=524288 virtme.cache /run/virtme/cache; mkdir -p /run/virtme/guesttools; /bin/mount -n -t 9p -o ro,version=9p2000.L,trans=virtio,access=any,msize=524288 virtme.guesttools /run/virtme/guesttools; mount --bind /dev/null /etc/fstab; exec /run/virtme/guesttools/bin/virtme-ng-init\"",
+    "version": "Linux version 7.0.14-070014-generic (kernel@balboa) (x86_64-linux-gnu-gcc-15 (Ubuntu 15.2.0-12ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #202606271041 SMP PREEMPT_DYNAMIC Sat Jun 27 13:36:27 UTC 2026"
+  },
+  "losses": {
+    "present": false
+  },
+  "mode": "scenarios",
+  "negatives": {
+    "renamed_field": "60738271956d8e49eb85af5987b9aa4d0e96510f7265f15decb2feaa50c670ec",
+    "widened_layout": "218e1a1835277832e5b243f6bc788ebf7061a2272b68701fdd238801ab4accf7",
+    "wrong_argcnt": "3fb18cc800631b5c4198fa26ad83180e5c3fe1d773ba339c09fdfebc45c8ff8a",
+    "wrong_shift": "bc6dc3b2dcfe20c6538de716817d9e3529d8ae1212b6f12ae38e4576b951bb4a"
+  },
+  "oracle": {
+    "present": false
+  },
+  "profile": {
+    "consumed": false,
+    "reason": "matrix rows assert lock expectations and doctor verdicts, not shipped profiles",
+    "shipped_id": null
+  },
+  "release": "7.0.14-070014-generic",
+  "run_id": "20261123T121047Z",
+  "schema": "memveil-matrix-row/2",
+  "smoke": false,
+  "source": {
+    "locks": {
+      "cargo_lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+      "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8"
+    },
+    "memveil": {
+      "commit": "00bb3c80c3c5fdb6b3ffbec998c91bd84f3d3f5d",
+      "dirty": false
+    }
+  },
+  "toolchain": {
+    "channel": "1.100.0",
+    "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8",
+    "lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+    "tools": {
+      "bpf_linker": "0.10.4",
+      "cargo": "1.100.0",
+      "rustc": "1.100.0"
+    }
+  },
+  "workload": {
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "deb"
+  }
+}

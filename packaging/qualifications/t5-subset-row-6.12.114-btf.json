@@ -1,0 +1,867 @@
+{
+  "actual": {
+    "channels": {
+      "attempt": "EXACT (22464 in 22464..22464)",
+      "copy": "EXACT (28224 in 28224..28224)",
+      "map": "EXACT (22464 in 22464..22464)",
+      "sync": "EXACT (22464 in 22464..22464)",
+      "unmap": "EXACT (22464 in 22464..22464)"
+    },
+    "checks": [
+      {
+        "detail": "vng exit 0",
+        "name": "vng_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no guest FAIL.txt",
+        "name": "no_fail_txt",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "attempt-trace: match (available/available); mapping-lifecycle: match (available/available); copy-actual: match (available/available)",
+        "name": "doctor",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "doctor exit 0 want 0",
+        "name": "doctor_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "passive matches load-check",
+        "name": "doctor_passive",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "passive doctor exit 0 want 0",
+        "name": "doctor_passive_exit",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "guest ordinary, no sev sysfs",
+        "name": "guest_ordinary",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "booted 6.12.114-mv-6.12.114-btf",
+        "name": "boot_identity",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "config.gz matches the pin",
+        "name": "boot_config",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no distro kernel",
+        "name": "boot_banner",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no extra boot args",
+        "name": "boot_append",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "no lockdown arg",
+        "name": "lockdown_effective",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "omitted match",
+        "name": "omitted",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "artifacts match",
+        "name": "artifacts",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "exports redacted",
+        "name": "export_redacted",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "udev quiesced",
+        "name": "udev_quiesced",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "no refused caps",
+        "name": "refusals",
+        "ok": true,
+        "skipped": true
+      },
+      {
+        "detail": "dmesg clean after marker",
+        "name": "dmesg",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "record exit 0",
+        "name": "record_finalized",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "report exits match record 0",
+        "name": "report_consistent",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "4 bpftool snapshots bracket",
+        "name": "progs_complete",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "programs bracket record",
+        "name": "prog_presence",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "workload 13643888718..15091259478 inside window 9267090532..69399633035",
+        "name": "window",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "phases exact",
+        "name": "workload",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "aggregate complete",
+        "name": "aggregate_quality",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "all channels reach floor",
+        "name": "floors",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "all channels fit ceiling",
+        "name": "ceiling",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "recursion misses reported",
+        "name": "recursion_reported",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "EXACT",
+        "name": "channels",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "aggregate counters match the oracle",
+        "name": "aggregate_bounds",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "workload ratios hold",
+        "name": "invariants",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "byte sums match block total",
+        "name": "bytes",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "oracle bytes match block total",
+        "name": "oracle_bytes",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "sectors exact: data 2097152, scratch 131072",
+        "name": "sectors",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "idle sides silent",
+        "name": "sectors_idle",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "oracle lost no events",
+        "name": "oracle_health",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "capture OK: 118145 events, 22464 attempts, 1140850688 requested bytes",
+        "name": "capture_valid",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "record exit 0",
+        "name": "busy_finalized",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "busy stopped on signal",
+        "name": "busy_stop_reason",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "busy load spans the record",
+        "name": "busy_span",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "HONEST",
+        "name": "busy_bounds",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "capture OK: 1000088 events, 333354 attempts, 3636924416 requested bytes",
+        "name": "busy_valid",
+        "ok": true,
+        "skipped": false
+      },
+      {
+        "detail": "report exits match record 0",
+        "name": "busy_report",
+        "ok": true,
+        "skipped": false
+      }
+    ],
+    "ok": true
+  },
+  "artifacts": {
+    "binary_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "bpf": {
+      "attempt": "81ebd35c1450e905de1eaf2d23ea2827328a221aa8eabf2b4ca4e2f4daa026b6",
+      "copy": "daacd9950fec82d00c9dde5a33a7398d7e3c708d557455ab93b521aa0cf94227",
+      "lifecycle": "0cd5a0c9b961605f0c47fbcf0a5377080e5ca3f624d6c9860a57e816aff4527f"
+    },
+    "bpftool": "bpftool v7.7.0",
+    "bpftrace": "bpftrace v0.25.0",
+    "dpkg_version": "",
+    "mode": "bundle",
+    "status": "measured"
+  },
+  "cleanup": {
+    "busy_chown_error": null,
+    "busy_events_error": null,
+    "timeout": false
+  },
+  "command": {
+    "cpus": 4,
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "bundle",
+    "selector": "--kernels 6.0,6.6,6.11,7.0,debian13,6.12.114-btf,6.12.114-nobtf,7.0.14-lockdown",
+    "source_sha256": "6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d",
+    "timeout_s": 900,
+    "tool": "tools/kernel-matrix"
+  },
+  "expected": {
+    "attempt-trace": {
+      "reason_class": "live-verified",
+      "verdict": "admitted"
+    },
+    "copy-actual": {
+      "reason_class": "live-verified",
+      "verdict": "admitted"
+    },
+    "mapping-lifecycle": {
+      "reason_class": "live-verified",
+      "verdict": "admitted"
+    }
+  },
+  "files": [
+    {
+      "bytes": 1058,
+      "name": "artifacts.json",
+      "sha256": "7f70bfa0c790765d2a36ad1d2783ff65bbc122ed0bf8d0e948bd6854b3a7e1c0"
+    },
+    {
+      "bytes": 278,
+      "name": "blockstat.json",
+      "sha256": "77e04f58304302bd9546517a916f2fe1a195efb80fba9fd1a763226db450e128"
+    },
+    {
+      "bytes": 65,
+      "name": "btf-sha.txt",
+      "sha256": "3ee93d85b8e2ebe3c278782a195ffbeafed8811056ba9c2d9af06f6e4ca1f85c"
+    },
+    {
+      "bytes": 98,
+      "name": "busy/busy.out",
+      "sha256": "fd115992b29b8384815d15f68146a10f7b07e682e88ff9d0ec7dce38f99f5d58"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/busy.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 10815,
+      "name": "busy/cap/session.json",
+      "sha256": "de82dea273e7535829027ab760180155df340a30822928dcd9f50139ad71f8c7"
+    },
+    {
+      "bytes": 7,
+      "name": "busy/end_reason.txt",
+      "sha256": "3037f94da9d48d4abbbaa27bb97374852648877ee36e8ca7b4b2bcfe7a9c40f7"
+    },
+    {
+      "bytes": 442,
+      "name": "busy/events_summary.json",
+      "sha256": "db386dc9111232e824684f5b77b6716be6d2948a6d557ed698a95dfc1721cfa7"
+    },
+    {
+      "bytes": 2276,
+      "name": "busy/progs0.json",
+      "sha256": "c1bbaffeb97b70c7965d760a4c98d34e87c4680d30acbfae85e12d4ba9759fff"
+    },
+    {
+      "bytes": 4372,
+      "name": "busy/progs1.json",
+      "sha256": "038a85d09d4c6050451dfafaf99a164894847bd1cb95c68361ac81f414f45a36"
+    },
+    {
+      "bytes": 2277,
+      "name": "busy/progs2.json",
+      "sha256": "a7c2a0ca692a73b91e39296598dee4cf55c15a397f4bc16e7a1dea5e229898d9"
+    },
+    {
+      "bytes": 63,
+      "name": "busy/progs_times.json",
+      "sha256": "60dc84be2cd2c0f89928e2654ae95a4196373337d3d49ee3f309ac4128d0e258"
+    },
+    {
+      "bytes": 1,
+      "name": "busy/record.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 99,
+      "name": "busy/record.out",
+      "sha256": "e3d187761f39a399267a9a06850b1b865c15629ade1c5d6eaa25be291303ce33"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "busy/report-json.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/report-json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "busy/report.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 24899,
+      "name": "busy/report.json",
+      "sha256": "d2a26390c5cdcce49a789daeb84b3813b4384e03763ec622e3735acb3d2d2fbe"
+    },
+    {
+      "bytes": 12061,
+      "name": "busy/report.out",
+      "sha256": "5909131ddbff90a8309219bf8cf7f5c0f7c30da7fb2bfd81544c061e6c0da86f"
+    },
+    {
+      "bytes": 0,
+      "name": "busy/report.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 109,
+      "name": "busy/times.json",
+      "sha256": "cbeac865c31a3377659483f46a6437de1819c220ca11fe48da34278216fb00da"
+    },
+    {
+      "bytes": 92,
+      "name": "busy/validate.json",
+      "sha256": "1b447afe11f371698ad0d1e632f0e4b2b18487fb74594a286ede143ca9002f33"
+    },
+    {
+      "bytes": 72,
+      "name": "busy/validate.txt",
+      "sha256": "63c22c733c2003a4d07e5a7a31cc2911a3d0446b8d4c2b70f8d0e0b9af7db7d9"
+    },
+    {
+      "bytes": 59,
+      "name": "cache.txt",
+      "sha256": "b255f62a8b4695277353d6e11f5ae7f411712aa034de8f30596451477c252c4d"
+    },
+    {
+      "bytes": 45908798,
+      "name": "cap/events.ndjson",
+      "sha256": "c1e922a05a941f2e791c3ebcfb6baa2bf8d9141bcfebe975c750a75133af6c51"
+    },
+    {
+      "bytes": 10367,
+      "name": "cap/session.json",
+      "sha256": "bdd4ff6c3836545e0e3942b64b5cf07f09ad87cbbc79b468ab1aed417717ec5d"
+    },
+    {
+      "bytes": 65,
+      "name": "configid.txt",
+      "sha256": "deb2f0a7653d546e4d85eba874c953bfadcd0636663b4c988d8be23aea5f8933"
+    },
+    {
+      "bytes": 75,
+      "name": "console.txt",
+      "sha256": "3b904defab70b4944795dea8acadcc4a7773d5795740fec63f434a7ee29c1f50"
+    },
+    {
+      "bytes": 26,
+      "name": "dev.txt",
+      "sha256": "158b9f89f07273265b17d52f36b2ebd78a9efd01549b3d333d12678550576a0f"
+    },
+    {
+      "bytes": 24711,
+      "name": "dmesg.txt",
+      "sha256": "5a12b6d674db8d1c41cef33c43cae0296b1d71b9cb0e4f6c742b7162bfb47a6f"
+    },
+    {
+      "bytes": 84,
+      "name": "dmesg_scan.json",
+      "sha256": "378efd1c611af21f9fe157ee82d6ea1330b19b845101be73c5e6b7d0d91ed3ec"
+    },
+    {
+      "bytes": 1,
+      "name": "doctor-passive.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2541,
+      "name": "doctor-passive.json",
+      "sha256": "65b148cc7568077c17ba4affe7cad03e05705377601d102c0256a509b28e63cb"
+    },
+    {
+      "bytes": 0,
+      "name": "doctor-passive.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "doctor.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 2675,
+      "name": "doctor.json",
+      "sha256": "3629985b49f12bdc7096e4821daa9fb8aa13ce0b7a1a7cf16fe2da3816039eb3"
+    },
+    {
+      "bytes": 0,
+      "name": "doctor.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 162,
+      "name": "hooks.json",
+      "sha256": "746b78ce1488df0914c9fee935f99f8ba4f796f65aaa8c02c58ec655dba1a5f8"
+    },
+    {
+      "bytes": 613,
+      "name": "job.json",
+      "sha256": "854b054294af8f8d050781afc683329bb33c3e6fa14fb9f97b80612dfcd14c81"
+    },
+    {
+      "bytes": 7,
+      "name": "lockdown.txt",
+      "sha256": "7925d3e9a9613a093e5eb4054b32aa39de910d2b03ba7e8046c3b4550b8de1e4"
+    },
+    {
+      "bytes": 109,
+      "name": "mods.txt",
+      "sha256": "73f42003f50167902b84e6054865164dce45f78a9aeaa21b207fde87c23edf5b"
+    },
+    {
+      "bytes": 1058713,
+      "name": "oracle-inputs.json",
+      "sha256": "1a954c77277815fb1943e3d87ee32b3aea44761ad62a9898fc6cc5001a32810e"
+    },
+    {
+      "bytes": 901,
+      "name": "oracle.bt",
+      "sha256": "b5bf88f881b188bb6f3d11d6ab471d43c74fe5fe0b51196b397c5dc10b621f9a"
+    },
+    {
+      "bytes": 30,
+      "name": "oracle.keep",
+      "sha256": "b6de99a896693896bb200fe7d1bb3bce01907b42ee8dd32c387055402ca20f96"
+    },
+    {
+      "bytes": 5,
+      "name": "oracle.mode",
+      "sha256": "0e716a5fef4e6dc1bcfff22ad52f73ca4eee3f4ea8292f4a1918daa32592889f"
+    },
+    {
+      "bytes": 920679,
+      "name": "oracle.stderr",
+      "sha256": "7816defd66c00c408fd8f70b672fb7ee00769833617f914325ed8e1c10e2481b"
+    },
+    {
+      "bytes": 31559,
+      "name": "oracle.txt",
+      "sha256": "83f6909ecb24f577db20791ba892f09b08dfe943defad9cf489e9ff8b575b715"
+    },
+    {
+      "bytes": 2252,
+      "name": "progs0.json",
+      "sha256": "d181a4c9ee6708c4fd43d0aa206474e849404c943eac8f3e792ff4994b676654"
+    },
+    {
+      "bytes": 4292,
+      "name": "progs1.json",
+      "sha256": "b1f7920eb695355005152111aaba7ee9cb40a4735d9a9259f6fbecdcc7a035bf"
+    },
+    {
+      "bytes": 4356,
+      "name": "progs2.json",
+      "sha256": "1ad42f49be8f1d3daf6059c7558fd854f76bcff6128451792801ed27e936a72c"
+    },
+    {
+      "bytes": 2273,
+      "name": "progs3.json",
+      "sha256": "4693fbb64328addef7c132e102a6cc263d6b804a16b5184c5c3af84d7f51c0de"
+    },
+    {
+      "bytes": 81,
+      "name": "progs_times.json",
+      "sha256": "9d94df50443718f832dab849c10f40fc7007b37628b8db589e89b1f9e4751842"
+    },
+    {
+      "bytes": 1,
+      "name": "record.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 99,
+      "name": "record.out",
+      "sha256": "aaf24e0a95f154bac03f76d1d4910ec1fda5cea7421527f871e3fa57575c5ffd"
+    },
+    {
+      "bytes": 0,
+      "name": "record.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "report-json.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 0,
+      "name": "report-json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1,
+      "name": "report.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 24680,
+      "name": "report.json",
+      "sha256": "23d6182bd48f7313d550f79551f641f11017ee2be528e6b2a914aa201c00eab7"
+    },
+    {
+      "bytes": 12076,
+      "name": "report.out",
+      "sha256": "e7ae9049e86ca7e30b66b1ca66999486f2f97eacae990e45dc407142d04d8ca9"
+    },
+    {
+      "bytes": 0,
+      "name": "report.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 6,
+      "name": "sev-sysfs.txt",
+      "sha256": "5ad38304b535c2987dbd24657c1a11b884984ff600d9f389deb0d4e634fee792"
+    },
+    {
+      "bytes": 1,
+      "name": "udev.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 104,
+      "name": "udev.out",
+      "sha256": "58d1c8354f43fdd48fe3ed94e452e5d45081a1ec44e7862ece4dc31065db8644"
+    },
+    {
+      "bytes": 996,
+      "name": "uname.txt",
+      "sha256": "c86674223629dceff266a93e840f5678f5882dd06f8af61f3c07f8506db87734"
+    },
+    {
+      "bytes": 90,
+      "name": "validate.json",
+      "sha256": "9ea632ec8674c6293d844567d1eddafa10c1488fd42c931f6aa630b05ed0de7a"
+    },
+    {
+      "bytes": 70,
+      "name": "validate.txt",
+      "sha256": "2d9cfeb896bd764e1b111e81f498025fc05a8fa21e8f0fa2fa38837096389025"
+    },
+    {
+      "bytes": 188,
+      "name": "version.txt",
+      "sha256": "1d1a2dfd98a513ec3a51ea5dd1e39800fec6e4841e596937497560581815ffd0"
+    },
+    {
+      "bytes": 1,
+      "name": "vng.exit",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r0.txt",
+      "sha256": "b770ec316766a5c02be874371a3d4f9278f727f2a4729c0509d563592d8ad113"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r1.txt",
+      "sha256": "69d49712bf08996a36c1fb82c4aa9655a778afe29c774794c8ef5d6335a28cd3"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r2.txt",
+      "sha256": "f6e2ac640a28c87f68a67b67734265ae6f8bbb3a869a2504c1bdf0b36bd5ef01"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r3.txt",
+      "sha256": "72eac4dd4eec77c3dca649ff751acfa34db3bcad77613ea45f42a93898757996"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r4.txt",
+      "sha256": "20a120335b11e6d213467f7496d1a82c7d104986b3f05d59ffd08db9b1d1a641"
+    },
+    {
+      "bytes": 104,
+      "name": "workload-r5.txt",
+      "sha256": "a8909e04c5a14046be1e649f7c5af9f2c721b398d00ce103fa5c4f7eaf1319a4"
+    },
+    {
+      "bytes": 924,
+      "name": "workload.txt",
+      "sha256": "ba43f615d234beb974dfeb124eb391cb6e099b571ea2f4704616bf6afa93e2a1"
+    }
+  ],
+  "id": "6.12.114-btf",
+  "kernel": {
+    "boot_label": "6.12.114-btf",
+    "btf_sha256": "7ccaed311c67a54a8f82c0c2de857de9b48beee9e147f8dff2f8802627c1b754",
+    "btf_status": "measured",
+    "config_sha256": "d396534fdbc81a3956a85a8fdbba43e4403933ea191013e6f5e301d00a150171",
+    "config_status": "measured",
+    "hooks": {
+      "btf": true,
+      "omitted": [],
+      "present": {
+        "copy": true,
+        "map": true,
+        "syncc": true,
+        "syncd": true,
+        "tp": true,
+        "unmap": true
+      }
+    },
+    "lock_source": {
+      "bzimage_sha256": "bc4e43520c508a7f60af98b634768e176df1cc28636c7afb249f3858fe49821f",
+      "config_sha256": "d396534fdbc81a3956a85a8fdbba43e4403933ea191013e6f5e301d00a150171",
+      "fragments": [
+        "tests/vm/kconfig/base.fragment"
+      ],
+      "fragments_sha256": {
+        "tests/vm/kconfig/base.fragment": "2bbff63922a7f99383927403f54b64ae98e75d0acb66a07fb892aa7db252e5bd"
+      },
+      "kind": "built",
+      "modules_manifest_sha256": "83127eb694df2d79175d3b7d4c94fa246c95b86f56d2baf6a83007be14c677d7",
+      "tarball_sha256": "7a8589912bd7a8adb07fed074283652cf482a35facef8954554654f0154b4af3",
+      "tarball_url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.114.tar.xz",
+      "toolchain": {
+        "gcc": "gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+        "gzip": "gzip 1.14",
+        "ld": "GNU ld (GNU Binutils for Ubuntu) 2.46",
+        "pahole": "v1.31",
+        "vng": "virtme-ng 1.41"
+      }
+    },
+    "lockdown": "absent",
+    "modules": "6.12.114-mv-6.12.114-btf\n/home/user/.cache/memveil-kernels/6.12.114-btf/lib/modules/6.12.114-mv-6.12.114-btf",
+    "release": "6.12.114-mv-6.12.114-btf",
+    "tools_expected": {
+      "bpftool": "bpftool v7.7.0",
+      "bpftrace": "bpftrace v0.25.0"
+    },
+    "uname": "6.12.114-mv-6.12.114-btf\nvirtme_hostname=virtme-ng nr_open=2147483584 virtme_link_mods=/home/user/.cache/memveil-kernels/6.12.114-btf/lib/modules/6.12.114-mv-6.12.114-btf virtme_initmount0=/tmp/export virtme_rw_overlay0=/etc virtme_rw_overlay1=/lib virtme_rw_overlay2=/home virtme_rw_overlay3=/opt virtme_rw_overlay4=/srv virtme_rw_overlay5=/usr virtme_rw_overlay6=/var virtme_rw_overlay7=/tmp virtme_console=ttyS0 console=ttyS0 earlyprintk=serial,ttyS0,115200 quiet loglevel=0 panic=-1 virtme.exec=`cHl0aG9uMyAvaG9tZS91c2VyL3NyYy9tL21lbXZlaWwtd3MvLndvcmt0cmVlcy9jMTAvdDUtbWF0cml4L3Rlc3RzL3ZtL2tlcm5lbF9tYXRyaXhfZ3Vlc3QucHkgL3RtcC9leHBvcnQgL2hvbWUvdXNlci9zcmMvbS9tZW12ZWlsLXdzLy53b3JrdHJlZXMvYzEwL3Q1LW1hdHJpeA==` virtme_chdir=redacted-workdir/.worktrees/c10/t5-matrix rootfstype=virtiofs root=ROOTFS raid=noautodetect ro quiet loglevel=1 swiotlb=131072,force tsc=nowatchdog init=/home/user/.local/share/uv/tools/virtme-ng/lib64/python3.14/site-packages/virtme/guest/bin/virtme-ng-init",
+    "version": "Linux version 6.12.114-mv-6.12.114-btf (memveil@kernel-matrix) (gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, GNU ld (GNU Binutils for Ubuntu) 2.46) #1 SMP PREEMPT_DYNAMIC 2026-10-22 00:00:00 UTC"
+  },
+  "losses": {
+    "busy": {
+      "aggregate": null,
+      "overall": "HONEST",
+      "per": {
+        "attempt": "HONEST (333354 <= 4432942)",
+        "copy": "HONEST (226224 <= 8868271)",
+        "map": "HONEST (167468 <= 4432942)",
+        "sync": "HONEST (107129 <= 4433022)",
+        "unmap": "HONEST (165886 <= 4433022)"
+      }
+    },
+    "main": {
+      "allowances": {
+        "attempt": 0,
+        "copy": 0,
+        "map": 0,
+        "sync": 0,
+        "unmap": 0
+      },
+      "allowed_total": 0,
+      "attributed": {
+        "attempt": 0,
+        "copy": 0,
+        "map": 0,
+        "sync": 0,
+        "unmap": 0
+      },
+      "bounds": {
+        "attempt": [
+          22464,
+          22464
+        ],
+        "copy": [
+          28224,
+          28224
+        ],
+        "map": [
+          22464,
+          22464
+        ],
+        "sync": [
+          22464,
+          22464
+        ],
+        "unmap": [
+          22464,
+          22464
+        ]
+      },
+      "channels": [
+        "attempt",
+        "map",
+        "unmap",
+        "copy",
+        "sync"
+      ],
+      "over_reported": false,
+      "overall": "EXACT",
+      "shortfalls": {
+        "attempt": 0,
+        "copy": 0,
+        "map": 0,
+        "sync": 0,
+        "unmap": 0
+      },
+      "sum_got": 118080,
+      "sum_hi": 118080,
+      "sum_lo": 118080,
+      "total_short": 0
+    },
+    "present": true
+  },
+  "mode": "matrix",
+  "negatives": null,
+  "oracle": {
+    "lost_events": 0,
+    "mode": "full",
+    "present": true,
+    "stderr_present": true,
+    "text_sha256": "83f6909ecb24f577db20791ba892f09b08dfe943defad9cf489e9ff8b575b715"
+  },
+  "profile": {
+    "consumed": false,
+    "reason": "matrix rows assert lock expectations and doctor verdicts, not shipped profiles",
+    "shipped_id": null
+  },
+  "release": "6.12.114-mv-6.12.114-btf",
+  "run_id": "20261123T104854Z",
+  "schema": "memveil-matrix-row/2",
+  "smoke": false,
+  "source": {
+    "locks": {
+      "cargo_lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+      "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8"
+    },
+    "memveil": {
+      "commit": "bdf641c36addc345f3fb6d8bf925059c6f1fa714",
+      "dirty": false
+    }
+  },
+  "toolchain": {
+    "channel": "1.100.0",
+    "ebpf_lock_sha256": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8",
+    "lock_sha256": "bf278bc6cec0e4736337feb590e34e8e24794a4efa245d4020948335dca31a44",
+    "tools": {
+      "bpf_linker": "0.10.4",
+      "cargo": "1.100.0",
+      "rustc": "1.100.0"
+    }
+  },
+  "workload": {
+    "dd_count": 128,
+    "duration_s": 60,
+    "kind": "bundle"
+  }
+}
