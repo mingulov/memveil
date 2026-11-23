@@ -1,3 +1,4 @@
+> Legacy demo: recorded with an older memveil (schema 0.1.2, integrity `legacy_unverified`). It demonstrates report rendering only and does not qualify current bytes; a fresh capture ships in a later release.
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Worked example: recorded three-channel capture
 

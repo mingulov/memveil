@@ -8,7 +8,12 @@ SBOM, checksums, and collected payload manifest
 user-visible changes only; commit history has
 the rest.
 
-## Unreleased
+## v0.2.0 -- 2026-11-23
+
+RnD prerelease on sealed bytes (seal
+`08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9`,
+source `bdf641c36addc345f3fb6d8bf925059c6f1fa714`;
+per-row evidence in [support](docs/support.md)):
 
 - `record`, `report`, and `top` exit 0 for
   valid captures and carry a `verdict` field;
@@ -24,11 +29,12 @@ the rest.
 - Pool sampling persists past the routine
   sample cap under pressure, with the
   thinning named in the session note.
-- Release integrity: every package is
-  checked against the committed tested
-  payload, and releases publish an SBOM
-  with signed build provenance as
-  prereleases without overwrite.
+- Release integrity: releases publish a real
+  SBOM (`memveil.spdx.json`) plus unsigned
+  build provenance (`memveil.provenance.json`,
+  described as such) as prereleases without
+  overwrite. The full tested-payload export
+  follows the post-tag full-matrix repeat.
 - Ratified kernel floors (attempt 6.0,
   lifecycle/copy 6.11, ceiling 7.3, BTF
   required) and the evolution and support

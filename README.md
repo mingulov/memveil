@@ -1,14 +1,10 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # memveil
 
-Attempt, lifecycle, and copy capture for swiotlb bounce analysis
-on x86-64 Linux: record real `swiotlb_bounced` tracepoint
-activity, mapping lifetimes, and executed copies into a
-self-describing capture directory, then replay it offline as
-text, JSON, or Markdown. Attempt counts are try-counts with
-requested bytes; actual copies come from the copy channel.
-Pool pressure and diagnostic findings reduce offline over
-captures that carry the corresponding events.
+Is this guest bounce-buffering, how much, on which device,
+and are copies actually happening? MemVeil records SWIOTLB
+bounce attempts, mapping lifetimes and executed copies from
+inside an x86-64 Linux guest, and replays captures offline.
 
 Status: attempt/lifecycle/copy development bundle 0.2.0, with runnable
 build, test, and tarball packaging wrappers. The shipping collector
@@ -22,6 +18,67 @@ collection, successful DMA, sustained pressure, or
 confidential-memory collection. The original lifecycle preview and
 full confidential first-release gates remain open.
 
+> **What this RnD release is — and is not**
+>
+> MemVeil 0.2.0 is a research-and-development preview for
+> explaining SWIOTLB bounce behaviour from inside an ordinary
+> x86-64 Linux guest. It records bounce *attempts* (try-counts
+> and requested bytes), mapping lifetimes, and executed bounce
+> copies, and replays captures offline. Read this before relying
+> on any number it prints:
+>
+> - **Not qualified on confidential VMs.** Collection is not
+>   qualified on AMD SEV-SNP, Intel TDX, or Hyper-V confidential
+>   guests. One historical SEV-SNP run exists (older binary);
+>   TDX has not been run. Ordinary-Linux results do not transfer.
+>   MemVeil performs **no attestation** and its output is **not evidence about what a host or hypervisor did or could read**, and not a verdict on guest confidentiality.
+>   `doctor`'s guest line (e.g. `guest: snp`) is a kernel-reported
+>   signal, not platform proof.
+> - **Attempts are not copies, and inner success is not DMA
+>   success.** `bounce_attempts` counts tries; only the copy
+>   channel reports bytes actually copied. A successful inner
+>   allocation can still be followed by outer DMA failure.
+>   **Unmapping is not erasure or re-privatization**: an
+>   unmap/release ends a mapping lifetime; it says nothing about
+>   later accessibility of the underlying pages.
+> - **Exit 0 does not mean a complete measurement.** `record`,
+>   `report`, and `top` exit 0 for valid output with *partial*
+>   evidence (live terminal quality is partial by design). Read
+>   the `verdict:` line, or pass `--strict` in scripts (exit 4
+>   unless the verdict is `complete`). Rows shown as
+>   `unavailable`/`withheld` mean "not measured" — never zero.
+>   "No findings" means no diagnostic fired, not that the
+>   condition was absent.
+> - **Only the exact tested artifact is tested.** Kernel-matrix
+>   results name one binary by hash (see release notes); the
+>   matrix ran bundle mode of the canonical binary, byte-identical
+>   to the `.deb` install (all three package binaries share one
+>   sha256). Rows
+>   not listed as PASS for this build were not run on this build.
+>   A machine-local `qualify` receipt records that a smoke
+>   capture worked on one host; it is not release qualification
+>   and does not hash the memveil executable — re-run `qualify`
+>   after any reinstall. Pool samples cannot diagnose sustained
+>   pressure, and saturation (~153k records/s, lower pre-6.7)
+>   degrades to partial/unknown rather than blocking.
+> - **Metadata only, with fingerprints.** Captures contain
+>   allowlisted measurement metadata only — no payload bytes,
+>   keys, PINs, content hashes, raw addresses, full command
+>   lines, or environment dumps (the shipped collector also never
+>   writes process names/ids; the format reserves a
+>   never-rendered execution-context block for other producers —
+>   check a foreign capture before sharing it). Captures *do*
+>   contain a per-boot identifier, device PCI names, and
+>   kernel/build hashes: share a capture like you would share a
+>   `dmesg` — deliberately, not anonymously.
+> - **Privilege.** Recording needs root in the initial user
+>   namespace (BPF load + tracefs); there is no supported
+>   capabilities-only mode. Replay (`report`, `top DIR`) and
+>   passive `doctor` are unprivileged and make no network
+>   connections. This is an RnD prerelease: verify downloads with
+>   the signed `SHA256SUMS.txt`; build from source if you need a
+>   stronger chain — signed release custody returns at 1.x.
+
 The [support table](docs/support.md#capabilities-by-mode) defines the
 capabilities by mode. Two reference profiles ship; kernels are
 admitted through live interface checks, and a bound document
@@ -34,16 +91,29 @@ A rebuilt package or matching kernel name alone earns no qualification.
 
 ## Use (tested .deb first)
 
-Only the `.deb` binary ran on the kernel matrix; the tarball
-and the `.rpm` carry builds of the same source with
-separately linked binaries that were not matrix-run (see
-[Known issues](docs/release-notes.md#known-issues) and
-[installed packages](docs/install.md)).
+One canonical binary: the bundle, `.deb`, and `.rpm`
+binaries are byte-identical; matrix ran bundle mode of
+it, byte-identical to the `.deb` install (see [Known
+issues](docs/release-notes.md#known-issues) and [installed
+packages](docs/install.md)). Verify the download first:
+
+    sha256sum -c SHA256SUMS.txt
+    (echo -n "qualifier " && cat signer.pub) > allowed-signers
+    ssh-keygen -Y verify -f allowed-signers -I qualifier -n memveil-candidate -s SHA256SUMS.txt.sig < SHA256SUMS.txt
+
+Expected: every file `OK`, then `Good "memveil-candidate"
+signature for qualifier`. Then install and run:
 
     sudo dpkg -i memveil_0.2.0-1_amd64.deb
     memveil doctor                            # passive host check
     sudo memveil record --output /tmp/cap1 --duration 10
     memveil report --format text /tmp/cap1   # unprivileged replay
+
+**Exit 0 does not mean complete measurement. Read the `verdict:` line, or pass `--strict` in scripts.**
+
+Confidential guests are not qualified; the
+[confidential-guest recipe](docs/recipes/confidential-guest.md)
+states the boundary, and no support claim follows from it.
 
 ## Use (from the tarball)
 

@@ -31,6 +31,10 @@ Captures never contain payloads, keys, PINs,
 content hashes, raw addresses, full command lines,
 or environment dumps ([privacy](docs/privacy.md)),
 so a leaked capture directory exposes measurement
-metadata, not secrets. The product performs no
-attestation and renders no host-access verdicts;
+metadata, not secrets. Captures contain no secrets,
+but do contain a per-boot identifier and
+kernel/hardware fingerprints; treat a capture like a
+`dmesg` — fine to share deliberately, not anonymous.
+The product performs no attestation and renders no
+host-access verdicts;
 do not report those absences as vulnerabilities.

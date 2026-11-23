@@ -13,6 +13,69 @@ bundle notes below stay as the history of that prerelease.
 
 ## Known issues
 
+> **What this RnD release is — and is not**
+>
+> MemVeil 0.2.0 is a research-and-development preview for
+> explaining SWIOTLB bounce behaviour from inside an ordinary
+> x86-64 Linux guest. It records bounce *attempts* (try-counts
+> and requested bytes), mapping lifetimes, and executed bounce
+> copies, and replays captures offline. Read this before relying
+> on any number it prints:
+>
+> - **Not qualified on confidential VMs.** Collection is not
+>   qualified on AMD SEV-SNP, Intel TDX, or Hyper-V confidential
+>   guests. One historical SEV-SNP run exists (older binary);
+>   TDX has not been run. Ordinary-Linux results do not transfer.
+>   MemVeil performs **no attestation** and its output is **not evidence about what a host or hypervisor did or could read**, and not a verdict on guest confidentiality.
+>   `doctor`'s guest line (e.g. `guest: snp`) is a kernel-reported
+>   signal, not platform proof.
+> - **Attempts are not copies, and inner success is not DMA
+>   success.** `bounce_attempts` counts tries; only the copy
+>   channel reports bytes actually copied. A successful inner
+>   allocation can still be followed by outer DMA failure.
+>   **Unmapping is not erasure or re-privatization**: an
+>   unmap/release ends a mapping lifetime; it says nothing about
+>   later accessibility of the underlying pages.
+> - **Exit 0 does not mean a complete measurement.** `record`,
+>   `report`, and `top` exit 0 for valid output with *partial*
+>   evidence (live terminal quality is partial by design). Read
+>   the `verdict:` line, or pass `--strict` in scripts (exit 4
+>   unless the verdict is `complete`). Rows shown as
+>   `unavailable`/`withheld` mean "not measured" — never zero.
+>   "No findings" means no diagnostic fired, not that the
+>   condition was absent.
+> - **Only the exact tested artifact is tested.** Kernel-matrix
+>   results name one binary by hash (see release notes); the
+>   matrix ran bundle mode of the canonical binary, byte-identical
+>   to the `.deb` install (all three package binaries share one
+>   sha256). Rows
+>   not listed as PASS for this build were not run on this build.
+>   A machine-local `qualify` receipt records that a smoke
+>   capture worked on one host; it is not release qualification
+>   and does not hash the memveil executable — re-run `qualify`
+>   after any reinstall. Pool samples cannot diagnose sustained
+>   pressure, and saturation (~153k records/s, lower pre-6.7)
+>   degrades to partial/unknown rather than blocking.
+> - **Metadata only, with fingerprints.** Captures contain
+>   allowlisted measurement metadata only — no payload bytes,
+>   keys, PINs, content hashes, raw addresses, full command
+>   lines, or environment dumps (the shipped collector also never
+>   writes process names/ids; the format reserves a
+>   never-rendered execution-context block for other producers —
+>   check a foreign capture before sharing it). Captures *do*
+>   contain a per-boot identifier, device PCI names, and
+>   kernel/build hashes: share a capture like you would share a
+>   `dmesg` — deliberately, not anonymously.
+> - **Privilege.** Recording needs root in the initial user
+>   namespace (BPF load + tracefs); there is no supported
+>   capabilities-only mode. Replay (`report`, `top DIR`) and
+>   passive `doctor` are unprivileged and make no network
+>   connections. This is an RnD prerelease: verify downloads with
+>   the signed `SHA256SUMS.txt`; build from source if you need a
+>   stronger chain — signed release custody returns at 1.x.
+
+**Exit 0 does not mean complete measurement. Read the `verdict:` line, or pass `--strict` in scripts.**
+
 Finalized session 0.1.4 captures now bind and verify literal event bytes,
 counts, kinds and contiguous sequences. Report 0.1.4 exposes verified
 bytes/events. Finalized corruption returns 2 with or without partial mode.
@@ -29,9 +92,13 @@ stdout summary preserves the durable capture's exit and reports its path on
 stderr. Full-filesystem and hard-power-cut qualification remain open; these
 source changes do not qualify older packages.
 
-Also note: the `.rpm` and the runtime tarball carry builds of
-the same source as the `.deb` but not byte-identical binaries;
-only the `.deb` binary was run on the kernel matrix.
+One canonical binary: the bundle, `.deb`, and `.rpm`
+binaries are byte-identical (sha256
+`6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d`);
+matrix ran bundle mode of it, byte-identical to the
+`.deb` install (matrix mode + binary hash per row in
+`matrix-out/*/artifacts.json`; retained-`.deb` install
+journey `step1-scratch/export/`).
 
 ## What this bundle contains
 
@@ -71,16 +138,28 @@ release bytes). Each artifact's `MANIFEST.json` binds
 its own verified bytes.
 
 The `.deb` entry set is the kernel-matrix-tested one. The
-matrix and the AWS SEV-SNP run installed the 0.1.0 `.deb`
+matrix ran bundle mode of the sealed 0.2.0 build (seal
+`08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9`,
+source `bdf641c36addc345f3fb6d8bf925059c6f1fa714`)
 whose `/usr/bin/memveil` is sha256
-`ae2d3c13ddad4c093317b90b0e2975cc388ff8566ae8bd4d0c13b7e9ecb2ae5e`.
-The `.rpm` and the runtime tarball are built from the same
-tree and pass their own install lanes, but each install
-layout needs its own RUNPATH, so their binaries carry
-different hashes and were not run on the kernel matrix.
-Package hashes change with every build (the `.deb`
-changelog records the commit and build date); the release
-lists them in `SHA256SUMS.txt`.
+`6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d`.
+The AWS SEV-SNP run installed the older 0.1.0 `.deb`
+(`ae2d3c13...`, historical — see the [support
+appendix](support.md#historical-appendix-010-matrix-superseded)).
+The sealed artifacts, all from the one seal:
+
+| Artifact | sha256 | Size |
+| --- | --- | --- |
+| `memveil-0.2.0.tar.gz` | `1421538887f8fc7673b5edcb55c6633ff6febec6d21257a181fcab4cd20d863e` | 1826844 |
+| `memveil_0.2.0-1_amd64.deb` | `45e0085508fa24b5b1033616ee64e4ef576b6aa05db766fe33bc75e5fd3f9d6e` | 1273512 |
+| `memveil-0.2.0-1.fc44.x86_64.rpm` | `439a32ee2f2fa11ce0636f5eccba52fac6bde098871178513bfd4389f00df0b7` | 1385858 |
+| `memveil-source.tar.gz` | `b8226ace8d843d3cc06c2a94a0f243f889f762b9d564d90ed8cfa3cfcdd52280` | 3375252 |
+| `memveil.spdx.json` | `3e253dd3b88ac9a41c9c6e1f1c0b74e0b611ce94492ec5ff348aa3a1f0ccee86` | 213354 |
+| `memveil.provenance.json` | `62139c3687c0ab3de4714577d025209822b69e37e2ad7007856c9af6df4e6c6e` | 1638 |
+
+These hashes are re-verified by the T5 campaign's
+pre-VM gates (6/6 match `candidate.json`) and the
+release lists them in `SHA256SUMS.txt`.
 Earlier development receipts and CI successes apply to their recorded
 revisions, binaries, BPF objects and environments. They are historical
 evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
@@ -138,27 +217,31 @@ Do not silently rewrite a profile hash to make them admitted.
   (3,118,447 records in 20.33 s on a 4-vCPU guest). A
   busy capture above the 1 GiB default needs
   `report --max-events-bytes` to replay.
-- Rows that refuse, with their codes: 5.15 is below the
-  6.0 floor; 6.0 through 6.10 refuse lifecycle and copy
-  (need 6.11); BTF-less kernels refuse lifecycle and
-  copy (`btf-absent-config`); confidentiality lockdown
-  refuses everything.
+- Rows that refuse, with their codes: 6.0 and 6.6 refuse
+  lifecycle and copy (need 6.11); BTF-less kernels
+  refuse lifecycle and copy (`btf-absent-config`);
+  confidentiality lockdown refuses everything (T5 row
+  receipts `matrix-out/6.0/receipt.json`,
+  `matrix-out/6.6/receipt.json`,
+  `matrix-out/6.12.114-nobtf/receipt.json`,
+  `matrix-out/7.0.14-lockdown/receipt.json`).
 - Saturated busy runs can stop at the 4,194,304-record
-  cap with bytes below the 4 GiB cap (6.11 in the
-  release run; 6.0, 6.10, and 6.12.0 in earlier runs),
-  which the gate accepts as a filled budget. Main-window
-  captures can lose a few map or copy events to BPF
-  trampoline recursion; memveil counts them as
-  `recursion_missed` and reports detail partial (5 to 222
-  events on five rows of the release run). Attempt loss before 6.7 is a lower bound:
+  cap with bytes below the 4 GiB cap, which the gate
+  accepts as a filled budget (no T5 row stopped at the
+  cap; 6.11 stopped there in the earlier 0.1.0 run).
+  Main-window captures can lose a few map or copy events
+  to BPF trampoline recursion; memveil counts them as
+  `recursion_missed` and reports detail partial (T5 7.0
+  row: map SHORT-COVERED, 73 events declared as loss —
+  `matrix-out/7.0/receipt.json`). Attempt loss before 6.7 is a lower bound:
   the 6.0 and 6.6 rows report partial with the
   lower-bound label in detail and aggregate.
 - The 6.18.0 kernel leaves read maps unmapped (640,
-  384, and 1152 across runs); the product reports them
-  open with the kernel-left-open note and the oracle
-  agrees on every channel. This is a
+  384, and 1152 across 0.1.0 runs); the product reports
+  them open with the kernel-left-open note and the
+  oracle agrees on every channel. This is a
   [known kernel issue](kernel-issues.md), not capture
-  loss.
+  loss. 6.18.0 was not re-run in T5.
 - The aggregate attempt claim covers the attempt
   hook's attached interval, stated in the aggregate
   scope text; the busy path allows a 2 s oracle edge
@@ -168,18 +251,23 @@ Do not silently rewrite a profile hash to make them admitted.
   not a confidential-guest signal; see
   [privacy](privacy.md).
 - The BTF-less row proves attempt counts only; bytes
-  stay unproven.
+  stay unproven (`matrix-out/6.12.114-nobtf/receipt.json`).
 - Passive doctor can read `ready (load not checked)`
   while the memcg precheck reports `memcg-headroom`
   unknown; only `doctor --load-check` or a record proves
-  the load fits. Detection scenarios pass 12 of 12 on
-  the 7.0 guest, including the `setpriv` capability
-  drop and the calibrated `memcg` refusal.
+  the load fits. Detection-scenario contract: 12/12 legs
+  green on 3 sealed-bytes runs, with formal row receipt
+  `scenarios-out/7.0/receipt.json` (run `20261123T121047Z`,
+  receipt
+  `f4d4a677c98da9cfc8351f0af41e7d9b5af54299f04a612ac247635e11dba611`;
+  judge 12/12, validate/rederive/`--verify-out` PASS).
 
 ## Compatibility
 
-Current output versions are report `0.1.4`, session `0.1.4`, and event
-`0.1.2`. Readers accept frozen session `0.1.1`/`0.1.2`/`0.1.3`/`0.1.4` and event
+Product `0.2.0` is not a format version: session, event,
+and report `0.1.4` remains the write format (event
+`0.1.2` unchanged). Current output versions are report
+`0.1.4`, session `0.1.4`, and event `0.1.2`. Readers accept frozen session `0.1.1`/`0.1.2`/`0.1.3`/`0.1.4` and event
 `0.1.1`/`0.1.2`. Reports are output only; there is no report-input reader.
 Retained report schemas are reference contracts. Doctor emits `0.1.1`,
 profiles accept `0.1.1`/`0.1.2`, and receipts remain `0.1.0`.

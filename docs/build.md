@@ -84,6 +84,14 @@ Public build/test suites work from a standalone clone
 using only this repository. A skipped privileged test is
 reported as skipped, never as success evidence.
 
+The full `cargo test --workspace` suite needs a git
+checkout: the 92 `package_*` tests clone and stage
+through git, so they fail on a git-free source export
+while `cargo build --release --locked --offline` and
+every VM-free suite pass there. Run the full suite from
+a checkout; a source-tarball build plus the VM-free
+suites is the documented partial alternative.
+
 See [offline fixture generation](fixture-generation.md)
 for compiler-bound provisional fixtures and the complete
 isolated-runner preflight.
