@@ -318,5 +318,48 @@ class RunnerHookTests(unittest.TestCase):
                 runner.operator_checkpoint_recover(case, export, promised)
 
 
+class GuestHookTests(unittest.TestCase):
+    def test_plan_load_binds_nonce_and_scenario(self):
+        import capture_durability_guest as guest
+        import capture_durability_operator as operator
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'checkpoint').mkdir()
+            (root / 'config.json').write_text('{}')
+            plan = operator.write_plan(root / 'checkpoint', NONCE)
+            self.assertEqual(guest.load_operator_plan(root / 'config.json', 'checkpoint', NONCE), plan)
+            with self.assertRaisesRegex(ValueError, '^operator plan ownership drift$'):
+                guest.load_operator_plan(root / 'config.json', 'checkpoint', 'f' * 20)
+
+    def test_workload_markers_validate_under_plan(self):
+        import capture_durability_guest as guest
+        import capture_durability_operator as operator
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mount, export = root / 'mount', root / 'export'
+            mount.mkdir()
+            export.mkdir()
+            plan = operator.write_plan(root, NONCE)
+            observed = guest.run_operator_workload(mount, export, plan)
+            self.assertEqual(observed['bytes_written'], plan['workload']['total_bytes'])
+            window = operator.validate_window(plan, (export / 'oracle.log').read_text())
+            self.assertEqual(window['workload_sha256'], observed['workload_sha256'])
+
+    def test_verdict_write_judges_recovery(self):
+        import capture_durability_guest as guest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            export = root / 'export'
+            export.mkdir()
+            integrity = make_raw_capture(root / 'raw')
+            promised = make_promised(integrity)
+            verdict = guest.write_operator_verdict(export, promised, 'uuid-kept', root / 'raw')
+            self.assertEqual(verdict['status'], 'PASS')
+            retained = json.loads((export / 'operator-verdict.json').read_text())
+            self.assertEqual(retained, verdict)
+            failed = guest.write_operator_verdict(export, promised, 'uuid-changed', root / 'raw')
+            self.assertEqual(failed['status'], 'FAIL')
+
+
 if __name__ == '__main__':
     unittest.main()

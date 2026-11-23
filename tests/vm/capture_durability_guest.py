@@ -19,6 +19,8 @@ sys.path.insert(0, str(ROOT / 'tests/fuzz'))
 from test_checkpoint_writer import independent
 from report_oracle import accepted_report
 from capture_durability import APPROVED_CONFIG_ABSENT_RELEASE, OWNERSHIP_NONCE_LENGTH
+from capture_durability_operator import (
+    OPERATOR_VERDICT_NAME, ORACLE_LOG_NAME, judge_verdict, run_workload)
 from kernel_matrix import modules_manifest_sha
 
 
@@ -59,6 +61,37 @@ def emit(path, doc):
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(doc, sort_keys=True) + '\n')
     temp.replace(path)
+
+
+def load_operator_plan(config_path, scenario, nonce):
+    plan = json.loads((Path(config_path).parent / scenario / 'operator-plan.json').read_text())
+    if plan.get('nonce') != nonce or plan.get('scenario') != scenario:
+        raise ValueError('operator plan ownership drift')
+    return plan
+
+
+def run_operator_workload(mount, export, plan):
+    """Run the arranged sweep on the owned disk; record window markers."""
+    spec = plan['workload']
+    start_ns = time.monotonic_ns()
+    observed = run_workload(mount, spec)
+    end_ns = time.monotonic_ns()
+    rows = [dict(marker='window-start', workload=spec['id'], nonce=plan['nonce'],
+                 mono_ns=str(start_ns), seq='0'),
+            dict(marker='window-end', workload=spec['id'], nonce=plan['nonce'],
+                 mono_ns=str(end_ns), seq='1', bytes_written=str(observed['bytes_written']),
+                 bytes_read=str(observed['bytes_read']),
+                 workload_sha256=observed['workload_sha256'])]
+    Path(export, ORACLE_LOG_NAME).write_text(
+        ''.join(json.dumps(row) + '\n' for row in rows))
+    return observed
+
+
+def write_operator_verdict(export, promised, fs_uuid, capture):
+    verdict = judge_verdict(promised, fs_uuid, capture)
+    Path(export, OPERATOR_VERDICT_NAME).write_text(
+        json.dumps(verdict, indent=2, sort_keys=True) + '\n')
+    return verdict
 
 
 def identity(config):
@@ -225,9 +258,15 @@ def main():
             accepted_report(capture, proc.stdout, proc.returncode, allow_partial=True)
             if proc.returncode != 4 or (capture / 'session.json').exists():
                 raise ValueError('power-cut recovery was not an unfinalized prefix')
-            emit(export / 'result.json', dict(status='PASS', scenario=scenario, nonce=nonce,
+            result = dict(status='PASS', scenario=scenario, nonce=nonce,
                  fs_uuid=uuid, identity=ident, product_exit=proc.returncode,
-                 integrity=doc['capture']['integrity'], report_sha256=hashlib.sha256(proc.stdout).hexdigest()))
+                 integrity=doc['capture']['integrity'], report_sha256=hashlib.sha256(proc.stdout).hexdigest())
+            if scenario == 'checkpoint':
+                verdict = write_operator_verdict(export, promised, uuid, capture)
+                if verdict['status'] != 'PASS':
+                    raise ValueError('operator verdict is not PASS')
+                result['operator_verdict'] = verdict['status']
+            emit(export / 'result.json', result)
             return
         mode = 'checkpoint-2' if scenario == 'checkpoint' else 'none'
         marker = export / 'reached'
@@ -237,6 +276,10 @@ def main():
                 '--object', config['object'], '--bridge', config['bridge'], '--profile', config['profile']]
         with (export / 'record.stderr').open('wb') as err:
             child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=err, env=env)
+            operator_observed = None
+            if scenario == 'checkpoint':
+                plan = load_operator_plan(sys.argv[1], scenario, nonce)
+                operator_observed = run_operator_workload(mount, export, plan)
             if scenario in ('readiness', 'checkpoint'):
                 if scenario == 'readiness':
                     if not select.select([child.stdout], [], [], 30)[0]:
@@ -253,9 +296,13 @@ def main():
                 reserve = (capture / '.finalization-reserve').stat()
                 if reserve.st_blocks * 512 < 17 * 1048576:
                     raise ValueError('readiness reserve is not physically allocated')
-                emit(export / 'barrier.json', dict(nonce=nonce, scenario=scenario,
+                barrier = dict(nonce=nonce, scenario=scenario,
                     fs_uuid=uuid, identity=ident, stopped=True, ready_observed=scenario == 'readiness', marker=marker.read_text(),
-                    integrity=doc['capture']['integrity'], reserve_allocated=reserve.st_blocks * 512))
+                    integrity=doc['capture']['integrity'], reserve_allocated=reserve.st_blocks * 512)
+                if scenario == 'checkpoint':
+                    barrier['operator'] = dict(window=operator_observed,
+                        oracle_log_sha256=digest(export / 'oracle.log'))
+                emit(export / 'barrier.json', barrier)
                 while True:
                     time.sleep(1)
             if scenario not in ('bytes-full', 'inodes-full'):
