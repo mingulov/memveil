@@ -78,8 +78,48 @@ pub struct ReadError {
     pub code: u32,
     /// 1-based event line, or 0 for session/stream-level failures.
     pub line_no: usize,
-    /// Human detail; never matched on.
+    /// Human detail; matched only by [`read_remedy`] over the
+    /// fixed open-failure causes below.
     pub message: String,
+}
+
+/// Remedy line for a capture-open failure cause, when one applies.
+///
+/// Matches the fixed open-failure causes exactly (plus the two
+/// member-ownership spellings by suffix): those strings carry no
+/// caller bytes, so the CLI prints both lines unscrubbed.
+/// Mid-stream and parse failures may echo capture bytes and stay
+/// single-line.
+pub fn read_remedy(cause: &str) -> Option<&'static str> {
+    match cause {
+        "capture directory does not exist" => {
+            Some("check the path spelling and retry with an existing capture directory")
+        }
+        "capture path is not a directory" => {
+            Some("pass a capture directory (a directory holding session.json and events.ndjson)")
+        }
+        "capture directory not owned by reader" => Some(
+            "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+        ),
+        "not a memveil capture: expected session.json/events.ndjson" => {
+            Some("pass a capture directory (session.json and events.ndjson)")
+        }
+        "capture directory is inaccessible or a symlink" => {
+            Some("check read access to every path component and that none is a symlink")
+        }
+        "cannot establish final session absence" => {
+            Some("check read access to the capture path and retry")
+        }
+        _ => {
+            if cause.ends_with(": not owned by reader") {
+                Some(
+                    "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+                )
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Byte limits for one read_capture call.
@@ -2012,6 +2052,13 @@ pub fn read_capture_os(
         }
     } else {
         let no = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if no == libc::ENOTDIR {
+            return Err(ReadError {
+                code: READ_IO,
+                line_no: 0,
+                message: "capture path is not a directory".to_string(),
+            });
+        }
         if no != libc::ENOENT {
             return Err(ReadError {
                 code: READ_IO,
@@ -2025,10 +2072,20 @@ pub fn read_capture_os(
     let session_bytes: Vec<u8>;
     if recover {
         if let Err(e) = files.open_os(dir) {
+            let message = e.to_string();
+            // A directory without capture members is not a
+            // capture at all, whatever else it holds.
+            let message = match message.as_str() {
+                "checkpoint.json: cannot open regular capture file"
+                | "events.ndjson: cannot open regular capture file" => {
+                    "not a memveil capture: expected session.json/events.ndjson".to_string()
+                }
+                _ => message,
+            };
             return Err(ReadError {
                 code: READ_INVALID,
                 line_no: 0,
-                message: e.to_string(),
+                message,
             });
         }
         match files.read_checkpoint(limits.max_session_bytes) {
@@ -2121,7 +2178,7 @@ mod tests {
     use super::{
         CaptureReader, READ_INVALID, READ_IO, READ_PARSE, READ_TOO_BIG, ReaderLimits,
         TAIL_COMPLETE, TAIL_INCOMPLETE, TAIL_INVALID, classify_tail, default_limits,
-        partial_record_definitive, read_capture,
+        partial_record_definitive, read_capture, read_remedy,
     };
     use crate::model::encode::encode_session;
     use crate::model::event::{Event, parse_event};
@@ -3731,9 +3788,81 @@ mod tests {
             .path()
             .join(std::ffi::OsString::from_vec(b"no\xff".to_vec()));
         let err = read_capture_os(missing.as_os_str(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "capture directory does not exist");
+        assert!(read_remedy(&err.message).is_some());
+    }
+
+    #[test]
+    fn read_remedy_pairs_and_gaps() {
+        // Every fixed open cause carries a remedy; member
+        // ownership shares the directory remedy; anything else
+        // (caller bytes, parse detail) stays single-line.
+        for (cause, fix) in [
+            (
+                "capture directory does not exist",
+                "check the path spelling and retry with an existing capture directory",
+            ),
+            (
+                "capture path is not a directory",
+                "pass a capture directory (a directory holding session.json and events.ndjson)",
+            ),
+            (
+                "capture directory not owned by reader",
+                "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+            ),
+            (
+                "checkpoint.json: not owned by reader",
+                "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+            ),
+            (
+                "events.ndjson: not owned by reader",
+                "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+            ),
+            (
+                "not a memveil capture: expected session.json/events.ndjson",
+                "pass a capture directory (session.json and events.ndjson)",
+            ),
+            (
+                "capture directory is inaccessible or a symlink",
+                "check read access to every path component and that none is a symlink",
+            ),
+            (
+                "cannot establish final session absence",
+                "check read access to the capture path and retry",
+            ),
+        ] {
+            assert_eq!(read_remedy(cause), Some(fix), "{cause}");
+        }
+        for bare in [
+            "session.json: ValidationError(what=x, message=y)",
+            "line 1: ValidationError(what=x, message=y)",
+            "no final session; verified checkpoint prefix 1155 bytes; use --allow-partial to recover",
+            "events.ndjson: input is not a regular file",
+            "capture directory does not exist, friend",
+        ] {
+            assert_eq!(read_remedy(bare), None, "{bare}");
+        }
+    }
+
+    #[test]
+    fn open_failures_round_trip_with_remedies() {
+        let tmp = TestDir::create("memveil-read-remedy").expect("mkdtemp");
+        let missing = tmp.path().join("no-such-dir");
+        let err = read_capture(missing.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "capture directory does not exist");
+        assert!(read_remedy(&err.message).is_some());
+        let file = tmp.path().join("plain-file");
+        std::fs::write(&file, b"x").expect("write file");
+        let err = read_capture(file.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "capture path is not a directory");
+        assert!(read_remedy(&err.message).is_some());
+        let empty = tmp.path().join("empty-dir");
+        std::fs::create_dir(&empty).expect("mkdir empty");
+        let err = read_capture(empty.to_str().unwrap(), false, default_limits()).unwrap_err();
         assert_eq!(
             err.message,
-            "capture directory is inaccessible or a symlink"
+            "not a memveil capture: expected session.json/events.ndjson"
         );
+        assert!(read_remedy(&err.message).is_some());
     }
 }

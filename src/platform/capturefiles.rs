@@ -76,6 +76,32 @@ pub fn file_stat(fd: i32) -> Result<[u64; 7], CaptureError> {
     ])
 }
 
+/// True when the named child of fd is a symlink.
+///
+/// An O_PATH probe never follows the child; fstat then names the
+/// link itself. A failed probe answers false: the caller refuses
+/// anyway.
+fn is_symlink(fd: i32, name: &[u8]) -> bool {
+    // SAFETY: NUL-terminated component on a live dir fd.
+    let probe = unsafe {
+        libc::openat(
+            fd,
+            name.as_ptr().cast::<libc::c_char>(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0 as libc::c_uint,
+        )
+    };
+    if probe < 0 {
+        return false;
+    }
+    // SAFETY: zeroed stat outlives the call.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    let rc = unsafe { libc::fstat(probe, &mut st) };
+    close_fd(probe);
+    rc == 0 && (st.st_mode as u32 & libc::S_IFMT) == libc::S_IFLNK
+}
+
 /// Open a capture directory component by component, never a symlink.
 ///
 /// The byte-level walk: refusal messages and check order match
@@ -116,12 +142,33 @@ pub fn open_directory_os(path: &OsStr) -> Result<i32, CaptureError> {
                 0 as libc::c_uint,
             )
         };
-        close_fd(fd);
         if next_fd < 0 {
+            // Read errno before the close, which may clobber it.
+            let no = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if no == libc::ENOENT {
+                close_fd(fd);
+                return Err(CaptureError::new(
+                    "capture directory does not exist".to_string(),
+                ));
+            }
+            // A symlink component also lands on ENOTDIR here:
+            // O_DIRECTORY refuses the traversal before O_NOFOLLOW
+            // can name it. Probe without O_DIRECTORY to tell a
+            // refused symlink from a real non-directory; either
+            // way the walk refuses, so a racing swap can only
+            // mistarget the wording, never open the component.
+            if no == libc::ENOTDIR && !is_symlink(fd, &name) {
+                close_fd(fd);
+                return Err(CaptureError::new(
+                    "capture path is not a directory".to_string(),
+                ));
+            }
+            close_fd(fd);
             return Err(CaptureError::new(
                 "capture directory is inaccessible or a symlink".to_string(),
             ));
         }
+        close_fd(fd);
         fd = next_fd;
     }
     Ok(fd)
@@ -391,15 +438,9 @@ mod tests {
     #[test]
     fn missing_directory_refuses() {
         let err = open_directory("/nonexistent-memveil-cap-xyz").unwrap_err();
-        assert_eq!(
-            err.message,
-            "capture directory is inaccessible or a symlink"
-        );
+        assert_eq!(err.message, "capture directory does not exist");
         let rel = open_directory("nonexistent-memveil-cap-xyz").unwrap_err();
-        assert_eq!(
-            rel.message,
-            "capture directory is inaccessible or a symlink"
-        );
+        assert_eq!(rel.message, "capture directory does not exist");
     }
 
     #[test]
@@ -408,10 +449,7 @@ mod tests {
         let f = tmp.path().join("f");
         std::fs::write(&f, b"x").expect("write f");
         let err = open_directory(f.to_str().unwrap()).unwrap_err();
-        assert_eq!(
-            err.message,
-            "capture directory is inaccessible or a symlink"
-        );
+        assert_eq!(err.message, "capture path is not a directory");
     }
 
     #[test]
@@ -721,7 +759,7 @@ mod tests {
             .join(std::ffi::OsString::from_vec(b"no\xff".to_vec()));
         assert_eq!(
             open_directory_os(missing.as_os_str()).unwrap_err().message,
-            "capture directory is inaccessible or a symlink"
+            "capture directory does not exist"
         );
         let ff_file = tmp
             .path()
@@ -729,7 +767,7 @@ mod tests {
         std::fs::write(&ff_file, b"x").expect("write ff file");
         assert_eq!(
             open_directory_os(ff_file.as_os_str()).unwrap_err().message,
-            "capture directory is inaccessible or a symlink"
+            "capture path is not a directory"
         );
         assert_eq!(
             super::cstr_bytes(b"a\0b").unwrap_err().message,

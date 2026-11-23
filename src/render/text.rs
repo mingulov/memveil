@@ -928,9 +928,11 @@ mod tests {
 
     #[test]
     fn summary_devices_cover_every_catalog_entry() {
-        let mut rep = Report::default();
-        rep.window_start_ns = 0;
-        rep.window_end_ns = 10_030_000_000;
+        let mut rep = Report {
+            window_start_ns: 0,
+            window_end_ns: 10_030_000_000,
+            ..Report::default()
+        };
         rep.metrics.push(valued_metric("bounce_attempts", 3));
         rep.metrics
             .push(valued_metric("requested_bounce_bytes", 67108864));
