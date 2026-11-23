@@ -104,6 +104,10 @@ pub struct Report {
     pub detail_delivered: u64,
     /// Measurement verdict.
     pub verdict: Verdict,
+    /// Pools beyond the per-pool detail budget, counted for the
+    /// prose headline only: no renderer emits this as a metric
+    /// row, so JSON keeps its pre-budget shape byte-identically.
+    pub pools_withheld_from_detail: u64,
 }
 
 impl Default for Report {
@@ -137,6 +141,7 @@ impl Default for Report {
             counter_disagreement: false,
             detail_delivered: 0,
             verdict: Verdict::default(),
+            pools_withheld_from_detail: 0,
         }
     }
 }

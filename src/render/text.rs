@@ -340,7 +340,7 @@ pub fn summary_lines<E: Fn(&str) -> String>(
         ));
     }
     let (used, cap, full, pools) = pool_occupancy(rep);
-    let withheld = global_metric_value(rep, "pools_withheld_from_detail").unwrap_or(0) as usize;
+    let withheld = rep.pools_withheld_from_detail as usize;
     if withheld == 0 {
         if full == pools {
             // Covers no pools too: both halves unavailable.
@@ -1039,9 +1039,7 @@ mod tests {
         // branch names the covered count against the true
         // total; gauge claims stay scoped to the covered set.
         let mut covered = Report::default();
-        covered
-            .metrics
-            .push(valued_metric("pools_withheld_from_detail", 1));
+        covered.pools_withheld_from_detail = 1;
         covered
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1056,9 +1054,7 @@ mod tests {
             )
         );
         let mut partial = Report::default();
-        partial
-            .metrics
-            .push(valued_metric("pools_withheld_from_detail", 2));
+        partial.pools_withheld_from_detail = 2;
         partial
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1077,9 +1073,7 @@ mod tests {
                 .to_string()
         ));
         let mut unknown = Report::default();
-        unknown
-            .metrics
-            .push(valued_metric("pools_withheld_from_detail", 1));
+        unknown.pools_withheld_from_detail = 1;
         unknown
             .metrics
             .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
