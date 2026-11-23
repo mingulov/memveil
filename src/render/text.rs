@@ -1047,8 +1047,10 @@ mod tests {
         // The detail budget withholds pools, so every headline
         // branch names the covered count against the true
         // total; gauge claims stay scoped to the covered set.
-        let mut covered = Report::default();
-        covered.pools_withheld_from_detail = 1;
+        let mut covered = Report {
+            pools_withheld_from_detail: 1,
+            ..Report::default()
+        };
         covered
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1062,8 +1064,10 @@ mod tests {
                     .to_string()
             )
         );
-        let mut partial = Report::default();
-        partial.pools_withheld_from_detail = 2;
+        let mut partial = Report {
+            pools_withheld_from_detail: 2,
+            ..Report::default()
+        };
         partial
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1081,8 +1085,10 @@ mod tests {
             &"summary pool: used 900 bytes of 1000 bytes capacity (partial: 1 of 2 pools fully gauged; covers 2 of 4 pools)"
                 .to_string()
         ));
-        let mut unknown = Report::default();
-        unknown.pools_withheld_from_detail = 1;
+        let mut unknown = Report {
+            pools_withheld_from_detail: 1,
+            ..Report::default()
+        };
         unknown
             .metrics
             .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
@@ -1101,9 +1107,11 @@ mod tests {
         // Refused samples leave the true total unknown, so
         // every headline branch scopes its denominator to
         // tracked pools and names the refused samples.
-        let mut covered = Report::default();
-        covered.pools_withheld_from_detail = 1;
-        covered.pool_samples_refused = 2;
+        let mut covered = Report {
+            pools_withheld_from_detail: 1,
+            pool_samples_refused: 2,
+            ..Report::default()
+        };
         covered
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1117,9 +1125,11 @@ mod tests {
                     .to_string()
             )
         );
-        let mut partial = Report::default();
-        partial.pools_withheld_from_detail = 2;
-        partial.pool_samples_refused = 1;
+        let mut partial = Report {
+            pools_withheld_from_detail: 2,
+            pool_samples_refused: 1,
+            ..Report::default()
+        };
         partial
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1137,9 +1147,11 @@ mod tests {
             &"summary pool: used 900 bytes of 1000 bytes capacity (partial: 1 of 2 pools fully gauged; covers 2 of 4 tracked pools; 1 pool samples refused)"
                 .to_string()
         ));
-        let mut unknown = Report::default();
-        unknown.pools_withheld_from_detail = 1;
-        unknown.pool_samples_refused = 3;
+        let mut unknown = Report {
+            pools_withheld_from_detail: 1,
+            pool_samples_refused: 3,
+            ..Report::default()
+        };
         unknown
             .metrics
             .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
@@ -1159,8 +1171,7 @@ mod tests {
         // through the analysis pipeline. analyze_fixture only
         // takes repo-relative paths, so this runs the same
         // pipeline over an absolute scratch dir.
-        let tmp =
-            crate::platform::test_support::TestDir::create(tag).expect("mkdtemp");
+        let tmp = crate::platform::test_support::TestDir::create(tag).expect("mkdtemp");
         let dir = tmp.path();
         let root = crate::platform::test_support::repo_root();
         std::fs::copy(
@@ -1234,9 +1245,7 @@ mod tests {
         let lines = summary_lines(&rep, escape_text, "");
         assert!(
             lines.iter().any(|l| l.starts_with("summary pool: used ")
-                && l.ends_with(
-                    "(covers 256 of 1024 tracked pools; 1 pool samples refused)"
-                )),
+                && l.ends_with("(covers 256 of 1024 tracked pools; 1 pool samples refused)")),
             "{lines:?}"
         );
         assert!(

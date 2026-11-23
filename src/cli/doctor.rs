@@ -1692,9 +1692,7 @@ fn parse_doctor_args_os(args: &[OsString]) -> Result<DoctorOptions, OsDoctorFail
     // bad, mirroring the UTF-8 path above.
     let ask = parse_requested_caps(&capabilities);
     if !ask.ok {
-        return Err(OsDoctorFail::Message(invalid_capability_message(
-            &ask.err,
-        )));
+        return Err(OsDoctorFail::Message(invalid_capability_message(&ask.err)));
     }
     if !has_profiles_dir {
         match resolve_profiles_dir() {
@@ -3243,7 +3241,10 @@ mod tests {
         let opts = super::parse_doctor_args_os(&os(&[b"--object=\xff".as_slice()]))
             .expect("raw path parses");
         assert_eq!(opts.object, super::UNREADABLE_PATH);
-        for raw in [b"--capability=\xff".as_slice(), b"--capability=bogus".as_slice()] {
+        for raw in [
+            b"--capability=\xff".as_slice(),
+            b"--capability=bogus".as_slice(),
+        ] {
             match super::parse_doctor_args_os(&os(&[raw])) {
                 Err(super::OsDoctorFail::Message(detail)) => {
                     assert!(
