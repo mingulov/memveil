@@ -516,7 +516,8 @@ class HostBindingTests(unittest.TestCase):
              patch.object(capture_durability, 'stop_owned', return_value=None):
             yield
 
-    def fake_boots(self, stage, statuses, tamper=None, tamper_at=1):
+    def fake_boots(self, stage, statuses, tamper=None, tamper_at=1, operator=True):
+        import capture_durability_operator as operator_mod
         calls = []
         inputs = {key: stage.pin[key] for key in ('binary', 'object', 'bridge', 'profile')}
         inputs['shim'] = hashlib.sha256(b'shim').hexdigest()
@@ -542,10 +543,38 @@ class HostBindingTests(unittest.TestCase):
                     nonce=nonce, scenario=scenario, stopped=True, marker=marker,
                     ready_observed=ready, reserve_allocated=17 * 1048576,
                     fs_uuid='owned', identity=claim, integrity=integrity)))
+                if operator and scenario == 'checkpoint':
+                    plan = json.loads((export.parent / 'operator-plan.json').read_text())
+                    spec = plan['workload']
+                    total = str(spec['total_bytes'])
+                    sha = operator_mod.expected_workload_sha(spec)
+                    (export / 'oracle.log').write_text(
+                        json.dumps({'marker': 'window-start', 'workload': spec['id'],
+                                    'nonce': nonce, 'mono_ns': '100', 'seq': '0'}) + '\n'
+                        + json.dumps({'marker': 'window-end', 'workload': spec['id'],
+                                      'nonce': nonce, 'mono_ns': '200', 'seq': '1',
+                                      'bytes_written': total, 'bytes_read': total,
+                                      'workload_sha256': sha}) + '\n')
             else:
                 (export / 'result.json').write_text(json.dumps(dict(
                     status='PASS', scenario=scenario, nonce=nonce,
                     fs_uuid='owned', identity=claim)))
+                if operator and scenario == 'checkpoint' and phase == 'recover':
+                    promised = json.loads((export / 'barrier.json').read_text())
+                    kept = promised['integrity']
+                    (export / 'operator-verdict.json').write_text(json.dumps(dict(
+                        schema=operator_mod.SCHEMA, nonce=nonce, scenario=scenario,
+                        status='PASS', predicates={
+                            'same_uuid_recovery': dict(
+                                status='PASS', promised_fs_uuid='owned',
+                                recovered_fs_uuid='owned'),
+                            'prefix_reverified_from_raw_bytes': dict(
+                                status='PASS',
+                                promised_events_sha256=kept['events_sha256'],
+                                promised_line_count=kept['line_count'],
+                                recovered_events_sha256=kept['events_sha256'],
+                                recovered_line_count=kept['line_count'],
+                                detail='re-verified from raw bytes')})))
             if tamper is not None and len(calls) == tamper_at:
                 tamper()
             return FakeLaunchedChild()
@@ -839,6 +868,37 @@ class HostBindingTests(unittest.TestCase):
             self.assertEqual(aggregate['status'], 'PASS')
             self.assertEqual(aggregate['identity']['config_status_by_scenario'], statuses)
             self.assertEqual(aggregate['identity']['modules_files'], stage.mods_files)
+
+    def test_checkpoint_without_operator_records_refused(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            boots = self.fake_boots(stage, statuses, operator=False)
+            with self.harness(stage, boots):
+                with self.assertRaisesRegex(ValueError, '^operator oracle log absent$'):
+                    capture_durability.execute(args)
+            self.assertEqual(boots.calls, [('readiness', 'capture'), ('readiness', 'recover'),
+                                           ('checkpoint', 'capture')])
+
+    def test_checkpoint_retains_operator_plan_window_and_verdict(self):
+        import capture_durability
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = self.make_stage(tmp)
+            args = self.make_args(stage)
+            statuses = {name: 'absent' for name in capture_durability.SCENARIOS}
+            boots = self.fake_boots(stage, statuses)
+            with self.harness(stage, boots):
+                capture_durability.execute(args)
+            case = stage.root / 'out' / 'ev' / 'checkpoint'
+            plan = json.loads((case / 'operator-plan.json').read_text())
+            self.assertEqual(plan['scenario'], 'checkpoint')
+            window = json.loads((case / 'operator-window.json').read_text())
+            self.assertEqual(window['bytes_written'], str(plan['workload']['total_bytes']))
+            verdict = json.loads((case / 'operator-verdict.json').read_text())
+            self.assertEqual(verdict['status'], 'PASS')
+            self.assertEqual(verdict['nonce'], plan['nonce'])
 
     def test_generated_nonce_fits_20_byte_serial(self):
         import capture_durability

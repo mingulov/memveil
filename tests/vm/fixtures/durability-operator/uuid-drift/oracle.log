@@ -1,0 +1,2 @@
+{"marker": "window-start", "workload": "owned-io-sweep/1", "nonce": "0123456789abcdef0123", "mono_ns": "100", "seq": "0"}
+{"marker": "window-end", "workload": "owned-io-sweep/1", "nonce": "0123456789abcdef0123", "mono_ns": "200", "seq": "1", "bytes_written": "4194304", "bytes_read": "4194304", "workload_sha256": "b75d896511c0cfbfd000fe471d9c39cfda41deb0557fd317ac4d080ebe0105b1"}

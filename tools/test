@@ -1477,6 +1477,7 @@ suite_record_failures() {
     MEMVEIL_TEST_NO_BPF=1 LD_PRELOAD="$(asan_preload)$ROOT/build/shim/capture_faults.so" \
         python3 "$ROOT/tests/cli/test_record_failures.py" || return 1
     python3 "$ROOT/tests/vm/test_capture_durability_oracle.py" || return 1
+    python3 "$ROOT/tests/vm/test_capture_durability_operator.py" || return 1
     MEMVEIL_TEST_NO_BPF=1 LD_PRELOAD="$(asan_preload)$ROOT/build/shim/capture_faults.so" \
         python3 "$ROOT/tests/cli/test_capture_failures.py"
 }
