@@ -165,10 +165,12 @@ pub fn bind_usage() -> String {
         "       [--profiles-dir DIR] [--object PATH] [--lc-object PATH]\n",
         "       [--cp-object PATH] [--capability LIST] [--profile-id ID]\n",
         "\n",
-        "Mint a bound reference-unvalidated profile document for\n",
-        "this host: hook definitions come from the covering\n",
-        "reference, identity bindings and tracepoint format text\n",
-        "are measured live. Register the minted file first in\n",
+        "Create a host-bound profile for qualify (needs root): the\n",
+        "common case is sudo memveil bind-profile --output PATH\n",
+        "--object PATH, which mints a bound reference-unvalidated\n",
+        "profile document for this host: hook definitions come from the\n",
+        "covering reference, identity bindings and tracepoint format\n",
+        "text are measured live. Register the minted file first in\n",
         "the profiles manifest, then run qualify against it.\n",
         "Format text and the kernel image need root reads; run\n",
         "under sudo when they deny the current user.\n",
@@ -180,6 +182,10 @@ pub fn bind_usage() -> String {
         "--object is required: without it the run refuses.\n",
         "Extra channels need --lc-object and --cp-object\n",
         "together.\n",
+        "\n",
+        "Example:\n",
+        "  sudo memveil bind-profile --output my-host.json --object attempt.bpf.o\n",
+        "  sudo memveil bind-profile --output my-host.json --object attempt.bpf.o --profile-id my-host\n",
     )
     .to_string()
 }

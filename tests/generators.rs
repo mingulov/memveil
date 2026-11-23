@@ -29,6 +29,13 @@ const FROZEN_VERBS: [&str; 8] = [
     "version",
 ];
 const FROZEN_TOP_FLAGS: [&str; 3] = ["--help", "--version", "-h"];
+/// Long flags top --help names outside the top-level surface:
+/// the Start line's copy-pasteable commands (--output,
+/// --duration) and the disclaimer footer's --strict pointer.
+/// None of these is a top-level flag (the live guard still
+/// binds FROZEN_TOP_FLAGS alone); they are pinned here so a
+/// typo'd example token fails naming it.
+const FROZEN_TOP_EXAMPLE_FLAGS: [&str; 3] = ["--output", "--duration", "--strict"];
 const FROZEN_FLAGS: [(&str, &[&str]); 6] = [
     (
         "record",
@@ -418,12 +425,14 @@ fn frozen_verbs_match_top_help() {
     // Reverse direction: every long flag top --help names must
     // be frozen, so a newly added top flag fails. --version and
     // -h are bound by the live guard below, not by --help text:
-    // top --help spells --help (in the per-verb pointers) but
-    // never --version, and -h is short.
+    // top --help spells --help (in the verb pointer line) but
+    // never --version, and -h is short. The Start line and the
+    // disclaimer footer name verb-level flags, pinned separately.
     let live_flags = long_flags(&top_help);
     let mut want: BTreeSet<String> = FROZEN_TOP_FLAGS.iter().map(ToString::to_string).collect();
     want.remove("--version");
     want.remove("-h");
+    want.extend(FROZEN_TOP_EXAMPLE_FLAGS.iter().map(ToString::to_string));
     assert_eq!(
         live_flags, want,
         "top --help names {live_flags:?} vs frozen {want:?}"

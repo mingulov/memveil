@@ -141,7 +141,7 @@ fn help_verbs_print_usage_to_stdout() {
             text.starts_with("usage: memveil <record|report"),
             "verb {verb}"
         );
-        assert!(text.contains("Run 'memveil report --help' for report options."));
+        assert!(text.contains("Run 'memveil <verb> --help' for verb options."));
     }
 }
 
@@ -366,41 +366,45 @@ fn help_bytes_pinned_rust() {
     // minting); any wording change re-pins here deliberately.
     const TOP_HELP: &str = r#"usage: memveil <record|report|top|doctor|qualify|bind-profile|help|version> [args]
 
-Attempt/lifecycle/copy capture, live and offline summaries, passive host check. Verbs:
-  record    capture bounce attempts and optional lifecycle/copy channels into a directory.
-  report    read one capture and print metrics.
-  top       observe live or replay one capture with periodic summaries.
-  doctor    inspect the host passively and print capability.
-  qualify   prove this host and mint a local-auto receipt.
-  bind-profile mint a bound profile document for this host.
-  help      print this text.
-  version   print the engine version.
+Explain shared-memory (swiotlb bounce) I/O on x86-64 Linux. Verbs:
+  doctor        can this machine be measured? (passive, no root)
+  record        capture bounce attempts (+ optional lifecycle/copy) to a directory (root)
+  report        explain one capture: text, JSON, or Markdown (no root)
+  top           watch live, or replay a capture over time
+advanced:
+  qualify       prove this host once; store a local receipt for extra channels
+  bind-profile  create a host-bound profile for qualify
+Start: memveil doctor → sudo memveil record --output /tmp/cap1 --duration 10 → memveil report /tmp/cap1
+Run 'memveil <verb> --help' for verb options.
 
-Run 'memveil record --help' for record options.
-Run 'memveil report --help' for report options.
-Run 'memveil top --help' for top options.
-Run 'memveil doctor --help' for doctor options.
-Run 'memveil qualify --help' for qualify options.
-Run 'memveil bind-profile --help' for bind options.
+RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy
+observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential
+guests; no attestation; output is not a host-access or
+confidentiality verdict. Attempts are not copies; unmap is not
+erasure. Exit 0 includes partial evidence — read `verdict:` or
+use `--strict`. Metadata only; captures carry per-boot/kernel
+fingerprints. See docs/support.md.
 "#;
     const HELP_VERB: &str = r#"usage: memveil <record|report|top|doctor|qualify|bind-profile|help|version> [args]
 
-Attempt/lifecycle/copy capture, live and offline summaries, passive host check. Verbs:
-  record    capture bounce attempts and optional lifecycle/copy channels into a directory.
-  report    read one capture and print metrics.
-  top       observe live or replay one capture with periodic summaries.
-  doctor    inspect the host passively and print capability.
-  qualify   prove this host and mint a local-auto receipt.
-  bind-profile mint a bound profile document for this host.
-  help      print this text.
-  version   print the engine version.
+Explain shared-memory (swiotlb bounce) I/O on x86-64 Linux. Verbs:
+  doctor        can this machine be measured? (passive, no root)
+  record        capture bounce attempts (+ optional lifecycle/copy) to a directory (root)
+  report        explain one capture: text, JSON, or Markdown (no root)
+  top           watch live, or replay a capture over time
+advanced:
+  qualify       prove this host once; store a local receipt for extra channels
+  bind-profile  create a host-bound profile for qualify
+Start: memveil doctor → sudo memveil record --output /tmp/cap1 --duration 10 → memveil report /tmp/cap1
+Run 'memveil <verb> --help' for verb options.
 
-Run 'memveil record --help' for record options.
-Run 'memveil report --help' for report options.
-Run 'memveil top --help' for top options.
-Run 'memveil doctor --help' for doctor options.
-Run 'memveil qualify --help' for qualify options.
-Run 'memveil bind-profile --help' for bind options.
+RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy
+observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential
+guests; no attestation; output is not a host-access or
+confidentiality verdict. Attempts are not copies; unmap is not
+erasure. Exit 0 includes partial evidence — read `verdict:` or
+use `--strict`. Metadata only; captures carry per-boot/kernel
+fingerprints. See docs/support.md.
 "#;
     const RECORD_HELP: &str = r#"usage: memveil record --output DIR [--object PATH]
        [--duration SEC] [--max-events-bytes N]
@@ -409,16 +413,11 @@ Run 'memveil bind-profile --help' for bind options.
        [--lc-object PATH] [--cp-object PATH]
        [--device NAME] [--strict]
 
-Capture swiotlb bounce attempts into DIR. SEC defaults
-to 60; N defaults to 1073741824 (1 GiB, the replay
+Capture swiotlb bounce attempts into DIR (needs root): the
+common case is sudo memveil record --output DIR --duration 10.
+SEC defaults to 60; N defaults to 1073741824 (1 GiB, the replay
 default) and must lie in 131072..4294967296; a larger
 capture replays with the same --max-events-bytes.
-Without --bridge, the statically linked loader runs
-and bridge-bound receipt checks stay unverified: a
-local-auto receipt that needs a bridge hash refuses
-as bridge-unchecked. Without --object, --lc-object,
-or --cp-object, each channel loads its embedded
-object bytes; explicit paths win verbatim.
 Without --profile, the first validated profile passing
 full identity binding wins, then the first reference
 profile whose receipt verifies, else the first covering
@@ -448,19 +447,40 @@ filters with its dropped-attempt count.
 
 --strict exits 4 unless the record verdict is complete.
 
+artifact overrides (rarely needed):
+Without --bridge, the statically linked loader runs
+and bridge-bound receipt checks stay unverified: a
+local-auto receipt that needs a bridge hash refuses
+as bridge-unchecked. Without --object, --lc-object,
+or --cp-object, each channel loads its embedded
+object bytes; explicit paths win verbatim.
+
+Example:
+  sudo memveil record --output /tmp/cap1 --duration 10
+  sudo memveil record --output /tmp/cap2 --duration 30 --capability attempt-trace,mapping-lifecycle
+
 Exit 0 for a finalized capture (including zero-event
 and signal stops; completeness rides in the session
 verdict), 4 under --strict unless the verdict is
 complete, 3 when the run cannot start, 2 on
 usage errors, 1 on error or unfinalizable output.
+
+RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy
+observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential
+guests; no attestation; output is not a host-access or
+confidentiality verdict. Attempts are not copies; unmap is not
+erasure. Exit 0 includes partial evidence — read `verdict:` or
+use `--strict`. Metadata only; captures carry per-boot/kernel
+fingerprints. See docs/support.md.
 "#;
     const REPORT_HELP: &str = r#"usage: memveil report [--format text|json|markdown] [--allow-partial]
        [--strict] [--long-lived-after DURATION] [--max-line-bytes N]
        [--max-session-bytes N] [--max-events-bytes N] DIR
 
-Read the capture in DIR, reduce its events to metrics,
-and print one report on stdout. Diagnostics go to stderr.
-Counts always cover the whole capture window.
+Explain one capture: the common case is memveil report DIR
+(no root needed). Read the capture in DIR, reduce its events
+to metrics, and print one report on stdout. Diagnostics go to
+stderr. Counts always cover the whole capture window.
 
   --format NAME     text (default), json, or markdown.
   --allow-partial   recover a verified checkpoint prefix, or
@@ -479,10 +499,22 @@ Counts always cover the whole capture window.
   --max-events-bytes N
                     total work cap, at most 4294967296.
 
+Example:
+  memveil report /tmp/cap1
+  memveil report --format json /tmp/cap1
+
 Exit 0 for a rendered report (completeness rides in the
 verdict field), 4 under --strict unless the verdict is
 complete, and 4 for checkpoint recovery. Invalid input or
 usage exits 2; corrupt final captures are never recovered.
+
+RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy
+observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential
+guests; no attestation; output is not a host-access or
+confidentiality verdict. Attempts are not copies; unmap is not
+erasure. Exit 0 includes partial evidence — read `verdict:` or
+use `--strict`. Metadata only; captures carry per-boot/kernel
+fingerprints. See docs/support.md.
 "#;
     const TOP_VERB_HELP: &str = r#"usage: memveil top [--interval DURATION] [--device NAME]
        [--strict] [--compact] [--full] [--long-lived-after DURATION]
@@ -496,19 +528,15 @@ usage exits 2; corrupt final captures are never recovered.
        [--interval DURATION] [--device NAME]
        [--strict] [--compact] [--full] [--long-lived-after DURATION]
 
-Replay the capture in DIR, printing one short headline
-block per interval of capture time plus a final
-full-window report. Each refresh prints the six-line
+Replay the capture in DIR: the common case is memveil top DIR,
+printing one short headline block per interval of capture time
+plus a final full-window report. Each refresh prints the six-line
 verdict-plus-headlines block; only the final block
 prints the full report.
 With --output, observe the live system instead, retaining
 the capture in DIR while printing the same summaries.
-Live collection resolves absent --bridge, --object,
---lc-object, and --cp-object paths as memveil record
-does: embedded objects and the linked loader unless
-explicit paths name files. Refreshes cover events in
-consumption order; a disordered event below a printed
-horizon reaches the final summary only, never a
+Refreshes cover events in consumption order; a disordered event
+below a printed horizon reaches the final summary only, never a
 revised refresh.
 Diagnostics go to stderr.
 
@@ -532,6 +560,16 @@ Diagnostics go to stderr.
   --full            print the full report per refresh
                     instead of the short headlines block.
 
+artifact overrides (rarely needed):
+Live collection resolves absent --bridge, --object,
+--lc-object, and --cp-object paths as memveil record
+does: embedded objects and the linked loader unless
+explicit paths name files.
+
+Example:
+  memveil top --interval 1s /tmp/cap1
+  sudo memveil top --output /tmp/cap2 --duration 10
+
 DURATION is a decimal count with optional unit s, m, or h
 (bare digits mean seconds); zero and overflow are refused.
 
@@ -539,11 +577,24 @@ Exit 0 for printed summaries (completeness rides in the
 verdict field), 4 under --strict unless the verdict is
 complete, 2 for invalid input or usage. Live mode
 adds 3 for unavailable collection and 1 for errors.
-"#;
-    const DOCTOR_HELP: &str = r#"usage: memveil doctor [--json] [--profiles-dir DIR] [--capability LIST] [--object PATH] [--lc-object PATH] [--cp-object PATH] [--bridge PATH] [--load-check]
 
-Judge every requested capability through record admission
-and print one environment and capability report on stdout.
+RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy
+observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential
+guests; no attestation; output is not a host-access or
+confidentiality verdict. Attempts are not copies; unmap is not
+erasure. Exit 0 includes partial evidence — read `verdict:` or
+use `--strict`. Metadata only; captures carry per-boot/kernel
+fingerprints. See docs/support.md.
+"#;
+    const DOCTOR_HELP: &str = r#"usage: memveil doctor [--json] [--profiles-dir DIR]
+       [--capability LIST] [--object PATH]
+       [--lc-object PATH] [--cp-object PATH]
+       [--bridge PATH] [--load-check]
+
+Ask whether this machine can be measured: the common case is
+memveil doctor (passive, no root needed), which judges every
+requested capability through record admission and prints one
+environment and capability report on stdout.
 Diagnostics go to stderr. Exit 0 when the requested
 capabilities are available, 3 when requested collection
 is unavailable or unknown, 2 on usage or internal errors.
@@ -553,21 +604,38 @@ Passive by default: no BPF load, no bridge access;
 --load-check loads every requested object without attaching.
 
   --json            print the doctor-v0.1.1 JSON report.
-  --profiles-dir DIR  profiles directory (default: executable-relative).
-  --capability LIST   comma-separated capability ids, or all (default all).
-  --object PATH       attempt channel object (default: embedded).
-  --lc-object PATH    lifecycle channel object (default: embedded).
-  --cp-object PATH    copy channel object (default: embedded).
-  --bridge PATH       bridge file hashed into load-check receipt binding (default: linked loader).
-  --load-check        load every requested object without attaching.
+  --profiles-dir DIR
+                    profiles directory (default:
+                    executable-relative).
+  --capability LIST
+                    comma-separated capability ids, or all
+                    (default all).
+  --load-check      load every requested object without
+                    attaching.
+
+artifact overrides (rarely needed):
+  --object PATH     attempt channel object (default:
+                    embedded).
+  --lc-object PATH  lifecycle channel object (default:
+                    embedded).
+  --cp-object PATH  copy channel object (default:
+                    embedded).
+  --bridge PATH     bridge file hashed into load-check
+                    receipt binding (default: linked loader).
+
+Example:
+  memveil doctor
+  memveil doctor --load-check
 "#;
     const QUALIFY_HELP: &str = r#"usage: memveil qualify --output DIR [--object PATH]
        [--bridge PATH] [--profile ID|PATH]
        [--profiles-dir DIR] [--capability IDS]
        [--lc-object PATH] [--cp-object PATH]
 
-Run a short smoke capture into DIR and, when it
-proves the requested channels, publish a
+Prove this host can be measured (needs root): the common
+case is sudo memveil qualify --output DIR --object PATH
+--bridge PATH, which runs a short smoke capture into DIR
+and, when it proves the requested channels, publishes a
 machine-local local-auto receipt under
 <profiles-dir>/receipts (/var/lib/memveil/receipts
 for an installed package). --object and --bridge are
@@ -586,15 +654,21 @@ is always required). mapping-lifecycle needs
 --lc-object and copy-actual needs --cp-object when
 those channels are wanted, else the run refuses
 before the smoke.
+
+Example:
+  sudo memveil qualify --output /tmp/q1 --object attempt.bpf.o --bridge bin/memveil
+  sudo memveil qualify --output /tmp/q1 --profile my-host.json --object attempt.bpf.o --bridge bin/memveil
 "#;
     const BIND_HELP: &str = r#"usage: memveil bind-profile --output PATH [--profile ID|PATH]
        [--profiles-dir DIR] [--object PATH] [--lc-object PATH]
        [--cp-object PATH] [--capability LIST] [--profile-id ID]
 
-Mint a bound reference-unvalidated profile document for
-this host: hook definitions come from the covering
-reference, identity bindings and tracepoint format text
-are measured live. Register the minted file first in
+Create a host-bound profile for qualify (needs root): the
+common case is sudo memveil bind-profile --output PATH
+--object PATH, which mints a bound reference-unvalidated
+profile document for this host: hook definitions come from the
+covering reference, identity bindings and tracepoint format
+text are measured live. Register the minted file first in
 the profiles manifest, then run qualify against it.
 Format text and the kernel image need root reads; run
 under sudo when they deny the current user.
@@ -606,8 +680,12 @@ smoke checks still apply, layout pins do not.
 --object is required: without it the run refuses.
 Extra channels need --lc-object and --cp-object
 together.
+
+Example:
+  sudo memveil bind-profile --output my-host.json --object attempt.bpf.o
+  sudo memveil bind-profile --output my-host.json --object attempt.bpf.o --profile-id my-host
 "#;
-    const VERSION_OUT: &str = r#"memveil-0.1.1
+    const VERSION_OUT: &str = r#"memveil-0.2.0
 "#;
     let cases: &[(&[&str], &str, i32)] = &[
         (&["--help"], TOP_HELP, 0),
