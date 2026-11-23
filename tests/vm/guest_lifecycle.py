@@ -1485,7 +1485,7 @@ def run_topwalk(gate):
     print(f"guest_lifecycle: topwalk exported top_exit={rc}")
 
 
-BUNDLE_VERSION = "0.1.1"
+BUNDLE_VERSION = "0.2.0"
 
 
 def bundle_run_inputs(repo, candidate):
@@ -1547,7 +1547,7 @@ def bundle_record_argv(bundle_bin, objects, profile, cap):
 def run_bundle(gate):
     """Shipped bundle, three phases, extracted-binary report.
 
-    Dev: extracts dist/memveil-0.1.1.tar.gz, verifies every
+    Dev: extracts dist/memveil-0.2.0.tar.gz, verifies every
     file against MANIFEST.json (no symlinks, exact set, exact
     hashes), and proves the shipped BPF copies equal the
     build. Sealed: serves the verified candidate root

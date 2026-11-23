@@ -245,7 +245,7 @@ def self_test_pins():
     except (ValueError, OSError) as exc:
         ok = check("pins-profile", False, str(exc)) and ok
     seal = [REPO / "dist" / "candidate.json",
-            REPO / "dist" / "bundle.tar.gz"]
+            Path(pins.dist_bundle_tarball(REPO))]
     if not all(p.is_file() for p in seal):
         print("ok pins-candidate SKIP (no dist/ seal in tree)")
     else:
@@ -956,7 +956,7 @@ def self_test_manifest(tmp):
 def self_test_manifest_seal(tmp):
     """Full seal materialize when a dist/ seal is present."""
     seal = [REPO / "dist" / "candidate.json",
-            REPO / "dist" / "bundle.tar.gz"]
+            Path(pins.dist_bundle_tarball(REPO))]
     if not all(p.is_file() for p in seal):
         print("ok manifest-seal SKIP (no dist/ seal in tree)")
         return True
@@ -1924,7 +1924,7 @@ def main(argv):
     parser.add_argument("--out", default="")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--bundle", default="",
-                        help="retained bundle.tar.gz path "
+                        help="retained bundle tarball path "
                              "(required when armed)")
     parser.add_argument("--candidate", default="",
                         help="retained candidate.json path "

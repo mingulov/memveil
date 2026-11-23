@@ -238,6 +238,16 @@ VERSION_COPIES = (
      r"- engine: memveil-(\d+\.\d+\.\d+)"),
     ("tests/golden/report-escape.md",
      r"- engine: memveil-(\d+\.\d+\.\d+)"),
+    # Dev-bundle version pins: the 0.2.0 bundle rename left
+    # these on 0.1.1, so they are pinned like the rest.
+    ("tests/vm/guest_lifecycle.py",
+     r"BUNDLE_VERSION = \"(\d+\.\d+\.\d+)\""),
+    ("tests/vm/guest_lifecycle.py",
+     r"dist/memveil-(\d+\.\d+\.\d+)\.tar\.gz"),
+    ("tests/vm/test_bundle.py",
+     r"BUNDLE_VERSION = \"(\d+\.\d+\.\d+)\""),
+    ("tests/vm/test_bundle.py",
+     r"memveil-(\d+\.\d+\.\d+)"),
 )
 
 # TOML copies of the product version: (relative path,
