@@ -1247,14 +1247,26 @@ fn translate_signal(code: &str) -> Option<String> {
 
 /// The next command for an unavailable doctor report, if any.
 ///
-/// Recording is impossible when the kernel misses the floor or no
-/// profile covers the host; then the offline replay replaces the
-/// record command. Ready reports carry no next step.
+/// Recording is impossible when the kernel misses the floor, no
+/// profile covers the host, or a capability admission fails hard
+/// (tracefs, BTF, lockdown, memory); then the offline replay
+/// replaces the record command. A privilege-only failure keeps
+/// the record command: sudo overcomes it. Ready reports carry
+/// no next step.
 fn doctor_next_line(rep: &DoctorReport2) -> Option<&'static str> {
     if rep.verdict != "unavailable" {
         return None;
     }
     if !rep.kernel.eligible_floor || !rep.has_profile {
+        return Some("next: memveil report examples/real-capture\n");
+    }
+    // Admission failures surface per capability with their own
+    // codes; only the privilege demotion is a failure the
+    // suggested sudo record can get past.
+    let blocked = rep.caps.iter().any(|cap| {
+        cap.status == "unavailable" && cap.reason_code != "no-bpf-privilege"
+    });
+    if blocked {
         return Some("next: memveil report examples/real-capture\n");
     }
     Some("next: sudo memveil record --output /tmp/cap1 --duration 10\n")
@@ -2056,6 +2068,64 @@ mod tests {
         rep.verdict = "ready-load-unchecked".to_string();
         let text = render_doctor_text2(&rep);
         assert!(!text.contains("next: "), "{text}");
+    }
+
+    #[test]
+    fn doctor2_text_next_considers_admission() {
+        // A hard admission failure replaces the record command
+        // with the offline replay even when the floor holds
+        // and a profile covers: recording is impossible until
+        // the environment is fixed.
+        let mut rep = DoctorReport2 {
+            verdict: "unavailable".to_string(),
+            ..Default::default()
+        };
+        rep.kernel.eligible_floor = true;
+        rep.has_profile = true;
+        rep.caps.push(DoctorCap {
+            id: "attempt-trace".to_string(),
+            status: "unavailable".to_string(),
+            reason_code: "tracefs-not-mounted".to_string(),
+            ..DoctorCap::default()
+        });
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
+            "{text}"
+        );
+        // A privilege-only failure keeps the record command:
+        // sudo overcomes it.
+        rep.caps[0].reason_code = "no-bpf-privilege".to_string();
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: sudo memveil record --output /tmp/cap1 --duration 10\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn doctor2_tracefs_unmounted_next_is_replay() {
+        // End to end over the shipped fixture: the floor holds
+        // and a profile covers, but tracefs refuses admission,
+        // so the next step is the offline replay, not record.
+        let opts = doctor2_opts(
+            gate_fixture("tracefs-unmounted"),
+            profiles_dir(),
+            "attempt-trace",
+            &elf("ok.o"),
+            &elf("lc-ok.o"),
+            &elf("cp-ok.o"),
+        );
+        let rep = assess_doctor(&opts);
+        assert_eq!(rep.verdict, "unavailable");
+        assert!(rep.kernel.eligible_floor);
+        assert!(rep.has_profile);
+        let text = render_doctor_text2(&rep);
+        assert_eq!(text.matches("next: ").count(), 1, "{text}");
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
+            "{text}"
+        );
     }
 
     #[test]
