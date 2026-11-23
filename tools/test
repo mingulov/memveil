@@ -2025,7 +2025,7 @@ suite_record() {
             --output "$TMP/r-miss" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
             --bridge "$TMP/nolib.so" --profile definitely-not-a-profile
-        rexpect bad-capability 3 "unknown capability: nope" \
+        rexpect bad-capability 2 "unknown capability: nope" \
             "$TMP/r-badcap" -- \
             --output "$TMP/r-badcap" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
