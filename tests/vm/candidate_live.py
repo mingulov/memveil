@@ -1127,6 +1127,7 @@ def host(mode, candidate=None, opts=None):
     except StopIteration: raise ValueError('candidate has no deb artifact')
     from test_attempt_capture import gate_prefix
     from vm_process import run_owned_guest
+    from capture_durability import check_shell_inert_path
     prefix, _ = gate_prefix()
     lock = ROOT / 'build/vm/suite.lock'
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -1136,8 +1137,16 @@ def host(mode, candidate=None, opts=None):
         except BlockingIOError:
             raise ValueError('VM suite lease already owned')
         parent = Path(options['out']) if options.get('out') else None
-        if parent is not None: parent.mkdir(parents=True, exist_ok=True)
+        if parent is not None:
+            # Refused before anything is created: the run dir and
+            # its fixed-name children reach the launcher command
+            # raw, so the parent spelling must be shell-inert.
+            check_shell_inert_path(parent, 'evidence path')
+            parent.mkdir(parents=True, exist_ok=True)
         out = Path(tempfile.mkdtemp(prefix='memveil-candidate-live-', dir=str(parent) if parent else None))
+        # Without --out the run dir inherits TMPDIR, which the
+        # caller check above never saw; one gate covers both.
+        check_shell_inert_path(out, 'evidence path')
         export = out / 'export'
         export.mkdir()
         local_evidence = out / 'local-evidence'

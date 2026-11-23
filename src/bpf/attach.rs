@@ -6,7 +6,7 @@
 //! never guesses which loader to use. The frozen lists pin the exact
 //! programs, kinds, and targets the probes were built for.
 
-use super::session::{Channel, SessionError};
+use super::session::{Channel, SessionError, refusal_name};
 
 /// How one program attaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,19 +138,21 @@ pub fn check_programs(channel: Channel, actual: &[ProgramSpec]) -> Result<(), Se
         let Some(got) = actual.iter().find(|spec| spec.name == want.name) else {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: missing program {}",
-                want.name
+                refusal_name(&want.name)
             )));
         };
         if got.kind != want.kind {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: program {}: want section {:?}, got {:?}",
-                want.name, want.kind, got.kind
+                refusal_name(&want.name),
+                want.kind,
+                got.kind
             )));
         }
         if got.sleepable {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: program {} must not be sleepable",
-                want.name
+                refusal_name(&want.name)
             )));
         }
     }
@@ -158,7 +160,7 @@ pub fn check_programs(channel: Channel, actual: &[ProgramSpec]) -> Result<(), Se
         if !expected.iter().any(|want| want.name == got.name) {
             return Err(SessionError::Geometry(format!(
                 "{channel} channel: unexpected program {}",
-                got.name
+                refusal_name(&got.name)
             )));
         }
     }

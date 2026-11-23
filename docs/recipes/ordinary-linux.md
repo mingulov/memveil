@@ -1,6 +1,11 @@
-# Ordinary-Linux three-channel recording
+# Ordinary-Linux three-channel recording (maintainer / VM-gate recipe)
 
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
+Maintainer and VM-gate material: this recipe drives the
+armed VM gates and the laboratory oracle comparisons. It
+is not part of the user quickstart, and a run here is not
+release qualification.
 
 This recipe records bounce attempts, mapping lifecycle, and
 actual executed copies on the admitted ordinary-Linux
@@ -83,7 +88,7 @@ wrapper:
 Point `VNG` at the wrapper; the module in step 1 still
 builds against the guest kernel's headers through `KDIR`.
 A cross-release `MEMVEIL_ORACLE_KVER` override needs a
-validated profile pin for that release, which the 0.1.1
+validated profile pin for that release, which the 0.2.0
 bundle does not ship, so cross-release runs fail closed.
 The guest kernel identity (image, config, BTF, format,
 build-id) still verifies inside the guest on every run;

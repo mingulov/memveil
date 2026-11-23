@@ -47,6 +47,21 @@ EVENT_VERSION = "0.1.1"
 EVENT_VERSION_NEXT = "0.1.2"
 PROFILE_VERSION = "0.1.1"
 PROFILE_VERSION_NEXT = "0.1.2"
+
+# Registered schema files: the single source of truth for which
+# documents exist. The self-test pins each file's $id to its name
+# below, and the metadata-allowlist audit admits only these names
+# as schema identities (a document's own $id is never trusted).
+SCHEMA_FILES = ("session-v0.1.1.schema.json", "session-v0.1.2.schema.json",
+                "session-v0.1.3.schema.json", "session-v0.1.4.schema.json",
+                "event-v0.1.1.schema.json", "event-v0.1.2.schema.json",
+                "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
+                "report-v0.1.2.schema.json", "report-v0.1.3.schema.json",
+                "report-v0.1.4.schema.json",
+                "profile-v0.1.1.schema.json",
+                "profile-v0.1.2.schema.json",
+                "doctor-v0.1.0.schema.json", "doctor-v0.1.1.schema.json",
+                "receipt-v0.1.0.schema.json")
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
 BPSRE = re.compile(r"(0|[1-9][0-9]{0,3}|10000)")
@@ -1894,16 +1909,7 @@ def run_selftest():
         else:
             results.append((True, "%s: %s" % (label, detail or "ok")))
 
-    schemas = ("session-v0.1.1.schema.json", "session-v0.1.2.schema.json",
-               "session-v0.1.3.schema.json", "session-v0.1.4.schema.json",
-               "event-v0.1.1.schema.json", "event-v0.1.2.schema.json",
-               "report-v0.1.0.schema.json", "report-v0.1.1.schema.json",
-               "report-v0.1.2.schema.json", "report-v0.1.3.schema.json",
-               "report-v0.1.4.schema.json",
-               "profile-v0.1.1.schema.json",
-               "profile-v0.1.2.schema.json",
-               "doctor-v0.1.0.schema.json", "doctor-v0.1.1.schema.json",
-               "receipt-v0.1.0.schema.json")
+    schemas = SCHEMA_FILES
 
     def schema_files():
         for name in schemas:

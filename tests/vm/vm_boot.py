@@ -121,6 +121,10 @@ def run_guest(sub, timeout=900, network=False):
     work = "/tmp/vmgate-work"
     export = tmp / "export"
     export.mkdir()
+    from capture_durability import check_shell_inert_path
+    # The export reaches the launcher command raw, so its
+    # spelling is gated before the boot is assembled.
+    check_shell_inert_path(export, "export path")
     cmd = prefix + [
         "--run", "-m", "6G",
         "--append", "swiotlb=force",

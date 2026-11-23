@@ -16,7 +16,8 @@
 # offline-environment, perf-replay, perf-region,
 # perf-workload, perf-overhead, soak, preview-package,
 # provenance, docs, examples, candidate, candidate-matrix,
-# candidate-custody, candidate-inputs, vm-live-soak.
+# candidate-custody, candidate-inputs, vm-live-soak, fast,
+# fast-full.
 #
 # A skipped suite is reported as skipped, never as success.
 # Exit 0 only when the suite passes; 1 on test failure; 2 on
@@ -33,6 +34,16 @@
 # mode routes before this check and never touches the
 # build tree, so qualification works with an empty dev
 # build tree.
+# The fast lane (fast, fast-full) is the one-command
+# contributor gate: it pins RUSTC to the repository
+# toolchain's rustc, builds the release binary in-tree,
+# runs cargo test --workspace --locked --no-fail-fast, then
+# the offline suites schemas, reports, privacy,
+# reader-adversarial, and docs. fast-full adds the examples
+# suite, whose fixed real-time replay costs about two
+# minutes. An exported CARGO_TARGET_DIR or MEMVEIL_BIN is
+# ignored with a note so the lane always tests this tree's
+# bytes with working profile lookup.
 # MEMVEIL_BIN overrides the binary under test: an absolute
 # slash path must name an executable file, used verbatim
 # (no rebuild, no relink of build/memveil); a relative
@@ -87,6 +98,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [ "$#" = 1 ] && [ "$1" != --help ] && [ "$1" != -h ] && \
+   [ "$1" != fast ] && [ "$1" != fast-full ] && \
    { [ "${MV_BUNDLE_TARBALL+x}" = x ] || [ "${MV_CANDIDATE_MANIFEST+x}" = x ]; }; then
     exec python3 "$ROOT/tests/support/candidate_suite.py" "$1"
 fi
@@ -1131,8 +1143,19 @@ PYEOF
     expect_error "missing-dir" 2 report "$ROOT/tests/fixtures/reader/no-such"
     expect_error "unknown-format" 2 report --format yaml \
         "$ROOT/tests/fixtures/attempts"
-    expect_error "equals-format" 2 report --format=json \
-        "$ROOT/tests/fixtures/attempts"
+    "$BIN" report --format=json "$ROOT/tests/fixtures/attempts" \
+        >"$TMP/out" 2>"$TMP/err"
+    if [ "$?" -ne 0 ]; then
+        report_bad "equals-format: --flag=value refused, want accept (exit 0)"
+    elif [ ! -s "$TMP/out" ]; then
+        report_bad "equals-format: accepted but printed no report"
+    elif [ -s "$TMP/err" ]; then
+        report_bad "equals-format: stderr must be empty on success"
+    elif ! head -1 "$TMP/out" | grep -q "^{"; then
+        report_bad "equals-format: stdout is not a JSON report"
+    else
+        report_ok "equals-format (exit 0, --flag=value accepted)"
+    fi
     expect_error "unknown-flag" 2 report --nope \
         "$ROOT/tests/fixtures/attempts"
     expect_error "report-no-dir" 2 report
@@ -1159,10 +1182,10 @@ PYEOF
     "$BIN" --version >"$TMP/out" 2>"$TMP/err"
     if [ "$?" -ne 0 ]; then
         report_bad "version: must exit 0"
-    elif [ "$(cat "$TMP/out")" != "memveil-0.1.1" ]; then
+    elif [ "$(cat "$TMP/out")" != "memveil-0.2.0" ]; then
         report_bad "version: unexpected output '$(cat "$TMP/out")'"
     else
-        report_ok "version (memveil-0.1.1)"
+        report_ok "version (memveil-0.2.0)"
     fi
 
     # Match sonames only: resolved paths inherit the checkout directory, so a path containing "bpf" is not linkage.
@@ -1284,7 +1307,7 @@ suite_profile_semantics() {
         echo "profile-semantics: pytest not importable" >&2
         return 1
     fi
-    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_harness_env.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" "$ROOT/tests/vm/test_mint_record3.py" "$ROOT/tests/vm/test_oracle_kver.py" "$ROOT/tests/vm/test_guest_teardown.py" "$ROOT/tests/vm/test_gate_kernel.py" "$ROOT/tests/vm/test_kernel_matrix.py" "$ROOT/tests/vm/test_core_layouts.py" "$ROOT/tests/vm/test_fixture_generation.py" "$ROOT/tests/vm/test_kernel_build.py" "$ROOT/tests/vm/test_kernel_matrix_load.py" "$ROOT/tests/vm/test_kernel_scenarios.py" "$ROOT/tests/vm/test_bpf_race_pins.py" -q
+    python3 -m pytest "$ROOT/tests/vm/test_profile_semantics.py" "$ROOT/tests/vm/test_harness_refusal.py" "$ROOT/tests/vm/test_harness_env.py" "$ROOT/tests/vm/test_workflow_results.py" "$ROOT/tests/vm/test_export_validation.py" "$ROOT/tests/vm/test_mint_record3.py" "$ROOT/tests/vm/test_oracle_kver.py" "$ROOT/tests/vm/test_guest_teardown.py" "$ROOT/tests/vm/test_gate_kernel.py" "$ROOT/tests/vm/test_kernel_matrix.py" "$ROOT/tests/vm/test_core_layouts.py" "$ROOT/tests/vm/test_fixture_generation.py" "$ROOT/tests/vm/test_kernel_build.py" "$ROOT/tests/vm/test_kernel_matrix_load.py" "$ROOT/tests/vm/test_kernel_scenarios.py" "$ROOT/tests/vm/test_bpf_race_pins.py" "$ROOT/tests/vm/test_bpf_negatives.py" -q
 }
 
 suite_vm_kernels() {
@@ -1350,7 +1373,8 @@ suite_vm_lifecycle() {
         "$ROOT/tests/vm/test_canonical.py" \
         "$ROOT/tests/vm/test_record3.py" \
         "$ROOT/tests/vm/test_bundle.py" \
-        "$ROOT/tests/vm/test_faults.py" -q
+        "$ROOT/tests/vm/test_faults.py" \
+        "$ROOT/tests/vm/test_faults_binding.py" -q
 }
 
 suite_vm_copy() {
@@ -1609,6 +1633,88 @@ suite_examples() {
     python3 "$ROOT/tests/docs/test_examples.py"
 }
 
+fast_cargo() {
+    # Cargo with the ambient toolchain override cleared so
+    # the repository pins win (see docs/build.md).
+    env -u RUSTUP_TOOLCHAIN cargo "$@"
+}
+
+suite_fast() {
+    # Contributor fast lane: release build, full Rust
+    # workspace tests, then the offline harness suites.
+    # fast-full adds the examples suite. Exit 0 only when
+    # every stage passes; test stages all run so one red
+    # never masks the rest.
+    variant=$1
+    # Pin every cargo in this lane (including the nested
+    # builds the generator tests spawn) at the repository
+    # toolchain's rustc: nested cargo resolves rustc next
+    # to its own shim, so parallel shims on a
+    # multi-toolchain host mix compiler versions and fail
+    # the build with E0514. The eBPF child build clears
+    # this override before selecting its pinned nightly.
+    if ! RUSTC="$(rustup which --toolchain 1.100.0 rustc 2>/dev/null)"; then
+        echo "fast: need rustup toolchain 1.100.0" >&2
+        echo "fast: fix: rustup toolchain install 1.100.0" >&2
+        return 1
+    fi
+    if [ -z "$RUSTC" ]; then
+        echo "fast: need rustup toolchain 1.100.0" >&2
+        echo "fast: fix: rustup toolchain install 1.100.0" >&2
+        return 1
+    fi
+    export RUSTC
+    echo "fast: RUSTC=$RUSTC"
+    # Build in-tree: profile lookup resolves beside the
+    # executable, so an out-of-tree target dir breaks it
+    # and false-reds the packaging suites.
+    if [ "${CARGO_TARGET_DIR+x}" = x ]; then
+        echo "fast: ignoring exported CARGO_TARGET_DIR=$CARGO_TARGET_DIR (lane builds in-tree)" >&2
+        unset CARGO_TARGET_DIR
+    fi
+    # Test this tree's bytes: a stale override binary would
+    # green the lane on bytes the workspace tests never saw.
+    if [ "${MEMVEIL_BIN+x}" = x ]; then
+        echo "fast: ignoring exported MEMVEIL_BIN=$MEMVEIL_BIN (lane tests the tree build)" >&2
+        unset MEMVEIL_BIN
+    fi
+    cd "$ROOT" || return 1
+    fast_start=$SECONDS
+    fast_failed=""
+    fast_run() {
+        fast_label=$1
+        shift
+        echo "fast: --- $fast_label ---"
+        fast_stage_start=$SECONDS
+        if "$@"; then
+            echo "fast: $fast_label ok in $((SECONDS - fast_stage_start))s"
+        else
+            echo "fast: $fast_label FAILED in $((SECONDS - fast_stage_start))s" >&2
+            fast_failed="$fast_failed $fast_label"
+        fi
+    }
+    echo "fast: --- build ---"
+    fast_stage_start=$SECONDS
+    if ! fast_cargo build --release --locked; then
+        echo "fast: build FAILED in $((SECONDS - fast_stage_start))s" >&2
+        return 1
+    fi
+    echo "fast: build ok in $((SECONDS - fast_stage_start))s"
+    fast_run cargo-test fast_cargo test --workspace --locked --no-fail-fast
+    for fast_suite in schemas reports privacy reader-adversarial docs; do
+        fast_run "$fast_suite" "$ROOT/tools/test" "$fast_suite"
+    done
+    if [ "$variant" = fast-full ]; then
+        fast_run examples "$ROOT/tools/test" examples
+    fi
+    if [ -z "$fast_failed" ]; then
+        echo "fast: PASS ($variant, all stages green in $((SECONDS - fast_start))s)"
+        return 0
+    fi
+    echo "fast: FAIL:$fast_failed" >&2
+    return 1
+}
+
 
 
 
@@ -1620,15 +1726,17 @@ suite_examples() {
 
 
 suite_doctor() {
-    if [ ! -f "$ROOT/build/test-tmp/doctor2.json" ]; then
-        echo "doctor: missing build/test-tmp/doctor2.json" >&2
-        return 1
-    fi
-    if ! "$ROOT/tools/validate-schemas" --check-doctor \
-        "$ROOT/build/test-tmp/doctor2.json" >/dev/null 2>&1; then
-        echo "doctor: oracle rejected doctor2.json" >&2
-        return 1
-    fi
+    # No fixture prerequisite: the suite judges the built
+    # binary live. A previous revision required a
+    # unit-test-written JSON sidecar; the producer went
+    # away with the Mojo tests while the check stayed,
+    # failing every clean checkout. The fixture render is
+    # pinned by the doctor unit tests and the schema
+    # oracle still judges every live JSON below, so the
+    # sidecar carried no unique coverage. Every input
+    # here is generated fresh in $TMP from the binary
+    # under test, never read from ambient build
+    # leftovers, so a stale file cannot mask a break.
     BIN="$(memveil_bin)"
     if [ ! -x "$BIN" ]; then
         echo "doctor: missing $BIN (run $(memveil_build_hint) first)" >&2
@@ -1871,12 +1979,12 @@ suite_record() {
     fi
     rexpect no-args 2 "missing --output" "" --
     rexpect unknown-flag 2 "unknown option" "" -- --bogus
-    rexpect bad-duration 2 "bad decimal" "" -- \
+    rexpect bad-duration 2 "bad duration: 0" "" -- \
         --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --duration 0
-    rexpect duration-suffix 2 "bad decimal" "" -- \
+    rexpect duration-invalid 2 "bad duration: bogus" "" -- \
         --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
-        --duration 60s
+        --duration bogus
     rexpect device-empty 2 "--device needs a value" "" -- \
         --output "$TMP/r-deve" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --device ""
@@ -1917,7 +2025,7 @@ suite_record() {
             --output "$TMP/r-miss" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
             --bridge "$TMP/nolib.so" --profile definitely-not-a-profile
-        rexpect bad-capability 3 "unknown capability: nope" \
+        rexpect bad-capability 2 "unknown capability: nope" \
             "$TMP/r-badcap" -- \
             --output "$TMP/r-badcap" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
@@ -2001,10 +2109,14 @@ suite_qualify() {
     # run refuses before the smoke on every host (no discovery).
     qexpect no-object 3 "no object: pass --object PATH" -- \
         --output "$TMP/q-noobj" --bridge "$TMP/nolib.so"
-    qexpect bad-capability 3 "bad capability list" -- \
+    qexpect bad-capability 2 "bad capability list; valid capabilities:" -- \
         --output "$TMP/q-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
+    qexpect bad-capability-inline 2 "unknown capability: bogus; valid capabilities:" -- \
+        --output="$TMP/q-badcap-inline" \
+        --object="$ROOT/tests/fixtures/elf/ok.o" \
+        --capability=bogus
     qexpect convert-channel 3 "conversion-observe has no record channel" -- \
         --output "$TMP/q-conv" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
@@ -2047,10 +2159,14 @@ suite_qualify() {
         --object "$ROOT/tests/fixtures/elf/ok.o"
     bexpect bind-bad-id 2 "bad --profile-id" -- \
         --output "$TMP/b-id.json" --profile-id 'has space'
-    bexpect bind-bad-capability 3 "bad capability list" -- \
+    bexpect bind-bad-capability 2 "bad capability list; valid capabilities:" -- \
         --output "$TMP/b-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
+    bexpect bind-bad-capability-inline 2 "unknown capability: bogus; valid capabilities:" -- \
+        --output="$TMP/b-badcap-inline" \
+        --object="$ROOT/tests/fixtures/elf/ok.o" \
+        --capability=bogus
     bexpect bind-convert 3 "conversion-observe has no record channel" -- \
         --output "$TMP/b-conv" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
@@ -2151,7 +2267,7 @@ if [ $# -gt 1 ]; then
     usage >&2
     exit 2
 fi
-if [ "$1" != "--help" ] && [ "$1" != "-h" ]; then
+if [ "$1" != "--help" ] && [ "$1" != "-h" ] && [ "$1" != fast ] && [ "$1" != fast-full ]; then
     rust_bin_setup || exit 1
 fi
 case "$1" in
@@ -2295,6 +2411,12 @@ case "$1" in
         ;;
     examples)
         suite_examples
+        ;;
+    fast)
+        suite_fast fast
+        ;;
+    fast-full)
+        suite_fast fast-full
         ;;
     *)
         echo "test: unknown suite: $1" >&2

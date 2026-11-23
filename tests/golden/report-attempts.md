@@ -1,12 +1,16 @@
 # Memveil report `attempts-3-session`
 
+- summary: attempts 3, requested bytes 9 KiB (9216 bytes) in 3.00 s
+- summary devices: dev-1 (testdev0): attempts 3, requested bytes 9 KiB (9216 bytes)
+- summary pool: used unavailable of unavailable capacity
+- summary scope: proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded
 - synthetic: yes
-- engine: memveil-0.1.1
+- engine: memveil-0.2.0
 - integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld
 - verdict: partial_unknown_loss (loss >=0.00%, 3 delivered)
 - window: [1000000000,4000000000)
 - duration: 3.000000000 s (3000000000 ns)
-- environment: mode=unknown detection=unverified attestation=not_performed evidence=0
+- environment: mode=unknown detection=unverified attestation=not_performed (recorded, not verified by memveil) evidence=0
 - recorded kernel.release: unavailable (no captured provenance)
 - recorded profile.decision: unavailable (no captured provenance)
 - recorded measurement\_scope: unavailable (no captured provenance)

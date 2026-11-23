@@ -319,6 +319,40 @@ def test_export_healthy_lifecycle_identity(tmp_path,monkeypatch):
     validate_lifecycle_exports({'identity.json':path},'oracle')
 
 
+def _vm_boot_seams(monkeypatch,tmp_path):
+    import vm_boot
+    monkeypatch.syspath_prepend(str(vm_boot.TESTS))
+    monkeypatch.setattr(vm_boot,'REPO',tmp_path)
+    monkeypatch.setattr(vm_boot,'gate_prefix',lambda:(['vng'],{}))
+    monkeypatch.setattr('harness_env.check_harness_versions',lambda vng:{})
+    monkeypatch.setattr('lifecycle_env.ensure_oracle_module',lambda **kw:None)
+    monkeypatch.setattr('support.candidate_input.load',lambda:None)
+    return vm_boot
+
+
+def test_vm_boot_rewritten_tmpdir_refused_before_boot(tmp_path,monkeypatch):
+    import tempfile
+    from unittest import mock
+    vm_boot=_vm_boot_seams(monkeypatch,tmp_path)
+    hostile=tmp_path/'t"mp';hostile.mkdir()
+    monkeypatch.setenv('TMPDIR',str(hostile))
+    monkeypatch.setattr(tempfile,'tempdir',None)
+    with mock.patch('vm_process.run_owned_guest') as spawned:
+        with pytest.raises(ValueError,match='launcher shell'):
+            vm_boot.run_guest('record3')
+    assert spawned.call_count==0
+
+
+def test_vm_boot_honest_tmpdir_reaches_boot(tmp_path,monkeypatch):
+    from unittest import mock
+    vm_boot=_vm_boot_seams(monkeypatch,tmp_path)
+    with mock.patch('vm_process.run_owned_guest') as spawned:
+        spawned.side_effect=ValueError('sentinel-reached-boot')
+        with pytest.raises(ValueError,match='sentinel-reached-boot'):
+            vm_boot.run_guest('record3')
+    assert spawned.call_count==1
+
+
 def test_retained_multiset_rejects_compensating_corruption():
     from consume import check_retained_script
     assert check_retained_script([lc(size=513)],[],4,-1,'loss')

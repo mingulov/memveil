@@ -7,7 +7,9 @@ baseline observations into conversion request counts and
 guest-physical state unions. It runs offline over any capture
 that carries those records; live conversion probes are not
 qualified, so live captures carry no region source and every
-region row stays unavailable with its reason.
+region row stays unavailable with its reason. Unmapping is not
+erasure or reprivatization: an unmap/release ends a mapping
+lifetime and never mutates region state.
 
 ## Interval model
 

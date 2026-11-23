@@ -97,6 +97,10 @@ def run_guest(mode, profile, obj, duration):
     work = "/tmp/vmgate-work"
     export = tmp / "export"
     export.mkdir()
+    from capture_durability import check_shell_inert_path
+    # The export reaches the launcher command raw, so its
+    # spelling is gated before the boot is assembled.
+    check_shell_inert_path(export, "export path")
     cmd = prefix + [
         "--run", "-m", "6G", "--disable-microvm",
         "--network", "user",
@@ -327,6 +331,40 @@ def global_metric(report, name):
         ):
             return m
     return None
+
+
+def test_run_guest_rewritten_tmpdir_refused_before_boot(tmp_path,
+                                                         monkeypatch):
+    import sys
+    from unittest import mock
+    monkeypatch.setenv("MEMVEIL_VM_ATTEMPTS", "1")
+    hostile = tmp_path / 't"mp'
+    hostile.mkdir()
+    monkeypatch.setenv("TMPDIR", str(hostile))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "gate_prefix",
+                        lambda: (["vng"], {}))
+    with mock.patch("vm_process.run_owned_guest") as spawned:
+        with pytest.raises(ValueError, match="launcher shell"):
+            run_guest("correctness", "/tmp/x/profile.json",
+                      "/tmp/x/attempt.bpf.o", 10)
+    assert spawned.call_count == 0
+
+
+def test_run_guest_honest_tmpdir_reaches_boot(tmp_path, monkeypatch):
+    import sys
+    from unittest import mock
+    monkeypatch.setenv("MEMVEIL_VM_ATTEMPTS", "1")
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "gate_prefix",
+                        lambda: (["vng"], {}))
+    with mock.patch("vm_process.run_owned_guest") as spawned:
+        spawned.side_effect = ValueError("sentinel-reached-boot")
+        with pytest.raises(ValueError, match="sentinel-reached-boot"):
+            run_guest("correctness", "/tmp/x/profile.json",
+                      "/tmp/x/attempt.bpf.o", 10)
+    assert spawned.call_count == 1
 
 
 def test_correctness():

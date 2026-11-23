@@ -16,7 +16,7 @@ fn binary_version_prints_engine_version() {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "memveil-0.1.1\n",
+            "memveil-0.2.0\n",
             "flag {flag} must print ENGINE_VERSION"
         );
     }
@@ -42,7 +42,7 @@ fn version_ignores_trailing_args() {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "memveil-0.1.1\n",
+            "memveil-0.2.0\n",
             "flag {flag} with trailing args must print ENGINE_VERSION"
         );
     }

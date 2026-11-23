@@ -1,3 +1,4 @@
+> Legacy demo: recorded with an older memveil (schema 0.1.2, integrity `legacy_unverified`). It demonstrates report rendering only and does not qualify current bytes; a fresh capture ships in a later release.
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Worked example: recorded three-channel capture
 
@@ -9,7 +10,7 @@ Recorded live in a disposable guest (kernel 7.0.0-34-generic)
 with the packaged `record` verb and all three channels selected
 (`attempt-trace,mapping-lifecycle,copy-actual`). The recorded
 profile decision names the narrow profile that kernel was
-captured under; the 0.1.1 bundle ships reference profiles
+captured under; the 0.2.0 bundle ships reference profiles
 only, and this historical capture qualifies no rebuilt
 package. The capture ran three workload phases: a 2-operation
 oracle phase

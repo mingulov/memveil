@@ -166,11 +166,16 @@ mod tests {
         assert!(md.contains("brack\\[et\\]"));
         assert!(md.contains("amp&amp;lt;"));
         assert!(!md.contains("pipe|tick"));
+        // The summary bullet and the devices table each render
+        // the name once, escaped; neither row splits.
         let hits: Vec<&str> = md
             .split('\n')
             .filter(|ln| ln.contains("MV-CANARY-NAME"))
             .collect();
-        assert_eq!(hits.len(), 1);
+        assert_eq!(hits.len(), 2);
+        for ln in &hits {
+            assert!(ln.contains("pipe\\|tick"), "escaped name per row");
+        }
 
         assert!(json.contains("\\u001b"));
         assert!(json.contains("\\u007f"));

@@ -22,13 +22,17 @@
 //! error escapes as a failure.
 
 use crate::capture::live::LiveWriter;
-use crate::capture::run::{RecordOptions, repair_warning_for, run_collector_with};
+use crate::capture::run::{
+    RecordOptions, parse_requested_caps, repair_warning_for, run_collector_with,
+};
 #[cfg(test)]
 use crate::cli::doctor::default_profiles_dir;
 use crate::cli::doctor::resolve_profiles_dir;
+use crate::cli::durations::parse_duration_s;
 use crate::cli::report::{
-    CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL,
-    final_capture_summary, refusal_stderr_lines, sanitize_diagnostic, write_stderr,
+    CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, expand_flag_eq,
+    final_capture_summary, invalid_capability_message, no_profiles_lines,
+    profiles_manifest_missing, refusal_stderr_lines, sanitize_diagnostic, write_stderr,
     write_stderr_trusted,
 };
 use crate::platform::stdout::write_stdout;
@@ -43,16 +47,11 @@ pub fn record_usage() -> String {
         "       [--lc-object PATH] [--cp-object PATH]\n",
         "       [--device NAME] [--strict]\n",
         "\n",
-        "Capture swiotlb bounce attempts into DIR. SEC defaults\n",
-        "to 60; N defaults to 1073741824 (1 GiB, the replay\n",
+        "Capture swiotlb bounce attempts into DIR (needs root): the\n",
+        "common case is sudo memveil record --output DIR --duration 10.\n",
+        "SEC defaults to 60; N defaults to 1073741824 (1 GiB, the replay\n",
         "default) and must lie in 131072..4294967296; a larger\n",
         "capture replays with the same --max-events-bytes.\n",
-        "Without --bridge, the statically linked loader runs\n",
-        "and bridge-bound receipt checks stay unverified: a\n",
-        "local-auto receipt that needs a bridge hash refuses\n",
-        "as bridge-unchecked. Without --object, --lc-object,\n",
-        "or --cp-object, each channel loads its embedded\n",
-        "object bytes; explicit paths win verbatim.\n",
         "Without --profile, the first validated profile passing\n",
         "full identity binding wins, then the first reference\n",
         "profile whose receipt verifies, else the first covering\n",
@@ -82,11 +81,31 @@ pub fn record_usage() -> String {
         "\n",
         "--strict exits 4 unless the record verdict is complete.\n",
         "\n",
+        "artifact overrides (rarely needed):\n",
+        "Without --bridge, the statically linked loader runs\n",
+        "and bridge-bound receipt checks stay unverified: a\n",
+        "local-auto receipt that needs a bridge hash refuses\n",
+        "as bridge-unchecked. Without --object, --lc-object,\n",
+        "or --cp-object, each channel loads its embedded\n",
+        "object bytes; explicit paths win verbatim.\n",
+        "\n",
+        "Example:\n",
+        "  sudo memveil record --output /tmp/cap1 --duration 10\n",
+        "  sudo memveil record --output /tmp/cap2 --duration 30 --capability attempt-trace,mapping-lifecycle\n",
+        "\n",
         "Exit 0 for a finalized capture (including zero-event\n",
         "and signal stops; completeness rides in the session\n",
         "verdict), 4 under --strict unless the verdict is\n",
         "complete, 3 when the run cannot start, 2 on\n",
         "usage errors, 1 on error or unfinalizable output.\n",
+        "\n",
+        "RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy\n",
+        "observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential\n",
+        "guests; no attestation; output is not a host-access or\n",
+        "confidentiality verdict. Attempts are not copies; unmap is not\n",
+        "erasure. Exit 0 includes partial evidence \u{2014} read `verdict:` or\n",
+        "use `--strict`. Metadata only; captures carry per-boot/kernel\n",
+        "fingerprints. See docs/support.md.\n",
     )
     .to_string()
 }
@@ -126,8 +145,25 @@ fn parse_decimal_u64(text: &str) -> Result<u64, CliError> {
     Ok(v)
 }
 
+/// Value-taking record flags: the `--flag=value` set.
+const RECORD_VALUE_FLAGS: &[&str] = &[
+    "--duration",
+    "--max-events-bytes",
+    "--output",
+    "--object",
+    "--bridge",
+    "--profile",
+    "--profiles-dir",
+    "--lc-object",
+    "--cp-object",
+    "--capability",
+    "--device",
+];
+
 /// Parse record arguments without the leading verb.
 pub fn parse_record_args(args: &[String]) -> Result<RecordOptions, CliError> {
+    let expanded = expand_flag_eq(args, RECORD_VALUE_FLAGS);
+    let args = &expanded;
     let mut opts = RecordOptions::default();
     let mut i = 0;
     while i < args.len() {
@@ -138,7 +174,14 @@ pub fn parse_record_args(args: &[String]) -> Result<RecordOptions, CliError> {
                     message: "--duration needs a value".to_string(),
                 });
             }
-            opts.duration_s = parse_decimal_u64(&args[i + 1])?;
+            match parse_duration_s(&args[i + 1]) {
+                Ok(s) => opts.duration_s = s,
+                Err(e) => {
+                    return Err(CliError {
+                        message: format!("--duration {e}"),
+                    });
+                }
+            }
             i += 2;
         } else if tok == "--max-events-bytes" {
             if i + 1 >= args.len() {
@@ -298,6 +341,15 @@ pub fn parse_record_args(args: &[String]) -> Result<RecordOptions, CliError> {
             message: "missing --output".to_string(),
         });
     }
+    // A malformed capability list is a usage error (exit 2), like
+    // doctor: admission refusals (exit 3) are reserved for wellformed
+    // lists the world cannot satisfy.
+    let ask = parse_requested_caps(&opts.capabilities);
+    if !ask.ok {
+        return Err(CliError {
+            message: invalid_capability_message(&ask.err),
+        });
+    }
     Ok(opts)
 }
 
@@ -333,10 +385,31 @@ fn record_done_line(end_reason: &str, outcome: &str, exit_code: i64) -> String {
 /// and is never root-joined). Refusals print one
 /// diagnostic and exit 3 before any BPF or output
 /// resource exists.
+/// Prefix of the collector diagnostic when profiles fail to load.
+const PROFILES_LOAD_PREFIX: &str = "cannot load profiles: ";
+
 pub fn run_record_with(root: &str, profiles_dir: &str, opts: RecordOptions) -> i64 {
     let mut writer = LiveWriter::new();
     let output = opts.output.clone();
     let result = run_collector_with(root, profiles_dir, opts, &mut writer);
+    if result.exit_code == EXIT_REFUSAL
+        && result.outcome.is_empty()
+        && result.diagnostic.starts_with(PROFILES_LOAD_PREFIX)
+        && profiles_manifest_missing(profiles_dir)
+    {
+        // Lone install: the collector refused on the profiles load
+        // and the manifest is absent, so name the searched
+        // directory by basename and the packaged-layout fix.
+        // Matching on the refused load keeps every earlier gate
+        // (budget, floor, evidence) ahead of this shape,
+        // exactly as before.
+        for line in no_profiles_lines("record", profiles_dir) {
+            if write_stderr_trusted(&line).is_err() {
+                return EXIT_INTERNAL;
+            }
+        }
+        return EXIT_REFUSAL;
+    }
     if result.outcome == "finalized" {
         // A published capture lands root-owned under sudo;
         // hand it to the invoking user. Warn-only: the
@@ -409,7 +482,10 @@ pub fn run_record(args: &[String]) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_profiles_dir, parse_record_args, record_done_line, record_usage};
+    use super::EXIT_REFUSAL;
+    use super::{
+        default_profiles_dir, parse_record_args, record_done_line, record_usage, run_record_with,
+    };
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
@@ -419,6 +495,15 @@ mod tests {
         let mut words = vec!["--output", "out", "--object", "obj.o"];
         words.extend(extra.iter());
         args(&words)
+    }
+
+    #[test]
+    fn record_missing_profiles_is_refusal() {
+        // A profiles tree without a manifest refuses (3) with the
+        // lone-install shape before admission runs, matching doctor.
+        let opts = parse_record_args(&base(&[])).expect("base parses");
+        let code = run_record_with("", "no-such-profiles", opts);
+        assert_eq!(code, EXIT_REFUSAL);
     }
 
     #[test]
@@ -545,16 +630,112 @@ mod tests {
 
     #[test]
     fn record_args_duration_edges() {
-        let opts = parse_record_args(&base(&["--duration", "7"])).expect("duration parses");
-        assert_eq!(opts.duration_s, 7);
+        // One duration grammar: bare seconds plus s/m/h suffixes,
+        // shared with top and report; errors name the flag.
+        for (text, want) in [("7", 7), ("7s", 7), ("2m", 120), ("1h", 3600)] {
+            let opts = parse_record_args(&base(&["--duration", text])).expect("duration parses");
+            assert_eq!(opts.duration_s, want, "{text}");
+        }
         for bad in ["0", "00", "abc", "12x", "18446744073709551616"] {
             let err =
                 parse_record_args(&base(&["--duration", bad])).expect_err("bad duration rejects");
-            assert_eq!(err.message, format!("bad decimal: {bad}"));
+            assert_eq!(
+                err.message,
+                format!("--duration DurationError(message=bad duration: {bad})")
+            );
         }
+        let err = parse_record_args(&base(&["--duration", "18446744074s"]))
+            .expect_err("overflow rejects");
+        assert_eq!(
+            err.message,
+            "--duration DurationError(message=duration overflows nanoseconds)"
+        );
         let err = parse_record_args(&args(&["--output", "o", "--duration"]))
             .expect_err("missing value rejects");
         assert_eq!(err.message, "--duration needs a value");
+    }
+
+    #[test]
+    fn record_args_flag_eq_forms() {
+        // Every value flag accepts --flag=value, identical to the
+        // spaced spelling; boolean flags never split.
+        let opts = parse_record_args(&args(&[
+            "--output=/tmp/cap-eq",
+            "--duration=10s",
+            "--max-events-bytes=131072",
+            "--object=obj.o",
+            "--bridge=br.so",
+            "--profile=prof",
+            "--profiles-dir=qd",
+            "--lc-object=lc.o",
+            "--cp-object=cp.o",
+            "--capability=attempt-trace,mapping-lifecycle",
+            "--device=eth0",
+            "--strict",
+        ]))
+        .expect("eq forms parse");
+        assert_eq!(opts.output, "/tmp/cap-eq");
+        assert_eq!(opts.duration_s, 10);
+        assert_eq!(opts.max_events_bytes, 131072);
+        assert_eq!(opts.object, "obj.o");
+        assert_eq!(opts.bridge, "br.so");
+        assert!(opts.has_bridge);
+        assert_eq!(opts.profile, "prof");
+        assert!(opts.has_profile);
+        assert_eq!(opts.profiles_dir, "qd");
+        assert!(opts.has_profiles_dir);
+        assert_eq!(opts.lc_object, "lc.o");
+        assert_eq!(opts.cp_object, "cp.o");
+        assert_eq!(opts.capabilities, "attempt-trace,mapping-lifecycle");
+        assert_eq!(opts.device, "eth0");
+        assert!(opts.has_device);
+        assert!(opts.strict);
+        // Values may contain `=`; empty inline values match the
+        // spaced empty-value errors.
+        let opts =
+            parse_record_args(&args(&["--output=o", "--device=a=b"])).expect("embedded eq parses");
+        assert_eq!(opts.device, "a=b");
+        let err = parse_record_args(&args(&["--output="])).expect_err("empty eq rejects");
+        assert_eq!(err.message, "--output needs a value");
+        let err = parse_record_args(&base(&["--strict=x"])).expect_err("bool eq rejects");
+        assert_eq!(err.message, "unknown option: --strict=x");
+        let err = parse_record_args(&base(&["--bogus=x"])).expect_err("unknown eq rejects");
+        assert_eq!(err.message, "unknown option: --bogus=x");
+    }
+
+    #[test]
+    fn record_args_capability_list_validated() {
+        // Malformed lists fail at parse (exit 2) naming the valid
+        // ids; wellformed lists pass through to admission.
+        for bad in ["bogus", "attempt-trace,nope", "attempt-trace,,copy-actual"] {
+            let err =
+                parse_record_args(&base(&["--capability", bad])).expect_err("bad list rejects");
+            assert!(
+                err.message.contains("valid capabilities: "),
+                "{}",
+                err.message
+            );
+        }
+        let err = parse_record_args(&base(&["--capability", "bogus"])).expect_err("bogus rejects");
+        assert_eq!(
+            err.message,
+            "unknown capability: bogus; valid capabilities: attempt-trace, mapping-lifecycle, \
+             copy-actual, conversion-observe, conversion-journal, all"
+        );
+        let err = parse_record_args(&base(&["--capability", "copy-actual"]))
+            .expect_err("missing base rejects");
+        assert!(
+            err.message.starts_with("attempt-trace is required;"),
+            "{}",
+            err.message
+        );
+        // The absent flag (empty default) and wellformed lists parse.
+        let opts = parse_record_args(&base(&[])).expect("default parses");
+        assert_eq!(opts.capabilities, "");
+        for good in ["all", "attempt-trace", "attempt-trace,copy-actual"] {
+            let opts = parse_record_args(&base(&["--capability", good])).expect("good list parses");
+            assert_eq!(opts.capabilities, good);
+        }
     }
 
     #[test]
@@ -622,6 +803,7 @@ mod tests {
         assert!(!text.contains("LMB_NATIVE_LIB"));
         assert!(text.contains("--device NAME"));
         assert!(text.contains("literal"));
-        assert!(text.ends_with("usage errors, 1 on error or unfinalizable output.\n"));
+        assert!(text.contains("Example:"));
+        assert!(text.ends_with("fingerprints. See docs/support.md.\n"));
     }
 }

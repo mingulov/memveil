@@ -11,6 +11,7 @@ Exports carry .sha256 sidecars; the exact inventory is
 checked host-side. No DMA addresses ever cross: consumer
 files hold decoded facts only.
 """
+import errno
 import hashlib
 import json
 import os
@@ -29,6 +30,30 @@ CP_SITES = ("mv_sync_device:__swiotlb_sync_single_for_device,"
             "mv_sync_cpu:__swiotlb_sync_single_for_cpu,"
             "mv_bounce:swiotlb_bounce,"
             "mv_bounce_exit:swiotlb_bounce")
+
+# Pre-readiness finalization reserve the record writer
+# fallocates before signaling readiness, mirrored from
+# the product's src/capture/writer.rs
+# FINALIZE_RESERVE_BYTES (EventWriter::prepare refuses
+# pre-readiness with ENOSPC when the output filesystem
+# cannot grant it). The f4 staging derives its size from
+# this, never from a bare number; the host pins
+# re-check the mirror against the product source.
+FINALIZE_RESERVE_BYTES = 17 * 1024 * 1024
+
+# f4 capture headroom past the reserve: the staging
+# files plus the baseline line and the few events a
+# slow guest persists between the ready line and the
+# post-readiness fill. 1 MiB is orders past the modeled
+# ~68 KiB need and noise against the 6 GiB guest.
+F4_HEADROOM_BYTES = 1024 * 1024
+
+# Exit the record binary reports for a cannot-start
+# refusal (product: src/capture/collector.rs
+# EXIT_REFUSAL): a pre-readiness death with this exit
+# is a classified refusal; any other pre-readiness
+# death is unexpected.
+EXIT_REFUSAL = 3
 
 
 def fail(msg):
@@ -191,6 +216,23 @@ def assert_topwalk_memveil_binding(ledger, selected):
             "candidate binary")
 
 
+# Sealed faults binding: the only guest release, oracle
+# bytes, live BTF, and profile the faults flow admits.
+# The host re-hashes every pin against its source before
+# boot; this guest re-hashes the bytes it actually loads
+# before use, so only the exact qualified guest reaches
+# the first scenario.
+FAULTS_RELEASE = "7.0.14-070014-generic"
+FAULTS_KO_SHA256 = "923c708278a8dc0ad96a897bb2d3ed75ef35a521" \
+    "428a87fdb07d58d30cd58cfc"
+FAULTS_BTF_SHA256 = "ec3aa895be1da974a3116c24cd31adccc5e49fef" \
+    "1b4b089dc588aa9e32419a05"
+FAULTS_PROFILE_MEMBER = \
+    "profiles/linux-x86_64-7.0-reference.json"
+FAULTS_KO_FIXTURE = ("tests", "vm", "fixtures", "ko",
+                     "memveil_dma_oracle-7.0.14-070014-generic.ko")
+
+
 class Gate:
     """One subcommand run: paths, checks, consumer control."""
 
@@ -200,11 +242,16 @@ class Gate:
         self.work = work
         self.export_dir = export
         self.repo = repo
-        # The bundle leg runs the packaged record, never the
-        # dev consumer, so it carries no consumer prerequisite.
-        self.consume = None if sub == "bundle" else os.path.join(
-            repo, "build", "vm", "mv_consume")
-        self.bridge = guest_bridge_input(repo, sub, self.candidate)
+        # The bundle and faults legs run the packaged
+        # record directly, never the dev consumer, so they
+        # carry no consumer prerequisite.
+        self.consume = None if sub in ("bundle", "faults") \
+            else os.path.join(repo, "build", "vm", "mv_consume")
+        # The faults leg loads through the statically linked
+        # record loader, so it carries no bridge prerequisite
+        # either; every other leg keeps its bridge input.
+        self.bridge = None if sub == "faults" \
+            else guest_bridge_input(repo, sub, self.candidate)
         self.lc_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_lifecycle.bpf.o")
         self.cp_obj = os.path.join(
@@ -219,16 +266,21 @@ class Gate:
         self.oracle_loaded = False
         self.cp_test_obj = os.path.join(
             repo, "build", "bpf", "swiotlb_copy-test.bpf.o")
-        self.ko = os.path.join(
-            repo, "build", "vm", "oracle", "memveil_dma_oracle.ko")
+        # The faults leg loads the reviewed pinned-guest
+        # fixture, never a host-built module; every other leg
+        # keeps its built module path.
+        self.ko = os.path.join(repo, *FAULTS_KO_FIXTURE) \
+            if sub == "faults" else os.path.join(
+                repo, "build", "vm", "oracle",
+                "memveil_dma_oracle.ko")
         if os.geteuid() != 0:
             fail("guest flow requires root")
         os.makedirs(work, exist_ok=True)
         os.makedirs(export, exist_ok=True)
-        required = [self.bridge, self.lc_obj, self.cp_obj,
-                    self.ko]
-        if self.consume is not None:
-            required = [self.consume] + required
+        required = [path for path in
+                    (self.consume, self.bridge, self.lc_obj,
+                     self.cp_obj, self.ko)
+                    if path is not None]
         for path in required:
             if not os.path.isfile(path):
                 fail(f"missing {path}")
@@ -237,11 +289,66 @@ class Gate:
         with open("/proc/cmdline") as fh:
             if "swiotlb=force" not in fh.read():
                 fail("guest lacks swiotlb=force")
+        if sub == "faults":
+            self._faults_preflight()
+
+    def _faults_preflight(self):
+        """Bind the sealed faults inputs before any guest work.
+
+        The candidate carries the verified record binary,
+        the three channel objects, and the guest-matched
+        profile; without it the leg fails closed instead of
+        running dev-tree bytes. The oracle fixture is
+        re-hashed here and the release plus live BTF pinned,
+        so only the exact qualified guest reaches the first
+        scenario.
+        """
+        if self.candidate is None:
+            fail("faults needs the verified candidate inputs")
+        if os.uname().release != FAULTS_RELEASE:
+            fail("guest booted release %r, expected %r"
+                 % (os.uname().release, FAULTS_RELEASE))
+        self.faults_bin = str(self.candidate.path("bin/memveil"))
+        self.faults_attempt = str(self.candidate.path(
+            "bpf/swiotlb_attempt.bpf.o"))
+        self.faults_profile = str(self.candidate.path(
+            FAULTS_PROFILE_MEMBER))
+        profiles_dir = self.candidate.path(
+            "profiles/manifest.txt").parent
+        try:
+            listed = profiles_dir.joinpath(
+                "manifest.txt").read_text().split()
+        except OSError:
+            fail("sealed profiles manifest unreadable")
+        if os.path.basename(self.faults_profile) not in listed:
+            fail("bound profile not listed by its sealed manifest")
+        self.faults_profiles_dir = str(profiles_dir)
+        if sha_file(self.ko) != FAULTS_KO_SHA256:
+            fail("faults oracle bytes differ from the fixture")
+        try:
+            with open("/sys/kernel/btf/vmlinux", "rb") as handle:
+                btf = hashlib.sha256(handle.read()).hexdigest()
+        except OSError as exc:
+            fail("faults live BTF unreadable: %s" % exc)
+        if btf != FAULTS_BTF_SHA256:
+            fail("faults live BTF differs from the pinned bytes")
 
     def identity(self):
         release = os.uname().release
         with open("/proc/cmdline") as fh:
             cmdline = fh.read().strip()
+        if self.sub == "faults":
+            with open("/sys/kernel/btf/vmlinux", "rb") as fh:
+                btf = hashlib.sha256(fh.read()).hexdigest()
+            return {"release": release, "cmdline": cmdline,
+                    "btf_sha256": btf,
+                    "digests": {
+                        "binary": sha_file(self.faults_bin),
+                        "attempt": sha_file(self.faults_attempt),
+                        "lc": sha_file(self.lc_obj),
+                        "cp": sha_file(self.cp_obj),
+                        "profile": sha_file(self.faults_profile),
+                        "ko": sha_file(self.ko)}}
         from lifecycle_env import module_build_identity
         config_btf = module_build_identity()
         doc = {"release": release, "swiotlb_force": "swiotlb=force" in cmdline,
@@ -1137,8 +1244,18 @@ def verify_extracted_bundle(root):
     return manifest
 
 
-def await_record_ready(rec, work, errname="record.stderr"):
-    """Wait for the record readiness line; fail with stderr tail."""
+def await_record_ready(rec, work, errname="record.stderr",
+                       allow_refusal=False):
+    """Wait for the record readiness line; classify early death.
+
+    Returns (ready, tail) on the ready line. A
+    pre-readiness death with the refusal exit returns
+    (None, tail) only with allow_refusal; any other
+    pre-readiness death (wrong exit, signal, timeout)
+    fails loudly, as does a refusal where readiness was
+    staged. Callers that staged readiness keep the
+    default and never silently ledger a refusal.
+    """
     def tail():
         try:
             with open(os.path.join(work, errname),
@@ -1157,13 +1274,72 @@ def await_record_ready(rec, work, errname="record.stderr"):
                 break
         if rec.poll() is not None:
             break
-    if ready is None:
+    if ready is not None:
+        return ready, tail
+    rc = rec.poll()
+    if rc is None:
         try:
             rec.kill()
         except OSError:
             pass
         fail("record never reached readiness: " + tail())
-    return ready, tail
+    if rc == EXIT_REFUSAL:
+        if allow_refusal:
+            return None, tail
+        fail("record refused pre-readiness, readiness "
+             "staged: " + tail())
+    if rc < 0:
+        fail(f"record died pre-readiness (signal {-rc}): {tail()}")
+    fail(f"record died pre-readiness (exit {rc}): {tail()}")
+
+
+def drain_done_line(rec):
+    """Last non-empty stdout line past the ready line.
+
+    Record prints exactly one stdout summary at exit,
+    so past the consumed ready line the remainder
+    holds only that run verdict (plus blank padding,
+    if any). Empty when record printed nothing past
+    readiness; the host judge refuses the empty line.
+    """
+    done = ""
+    for line in rec.stdout.read().splitlines():
+        if line.strip():
+            done = line.strip()
+    return done
+
+
+def f4_fs_bytes():
+    """f4 output filesystem size: reserve plus headroom."""
+    return FINALIZE_RESERVE_BYTES + F4_HEADROOM_BYTES
+
+
+def f4_admits_start(fs_bytes):
+    """True when a filesystem admits the f4 reserve plus headroom."""
+    return fs_bytes >= f4_fs_bytes()
+
+
+def fill_to_full(path):
+    """Grow a filler file until its filesystem reports full.
+
+    Unbuffered 4 KiB writes so each ENOSPC surfaces at
+    the failing write rather than at close, leaving
+    under a page free. ENOSPC anywhere (open, write,
+    close) means the postcondition already holds and
+    returns quietly; any other errno, or a zero-byte
+    write without error, fails loudly: a filler that
+    stops any other way proves nothing about fullness.
+    """
+    chunk = b"x" * 4096
+    try:
+        with open(path, "ab", buffering=0) as handle:
+            while True:
+                if handle.write(chunk) == 0:
+                    fail("filler wrote zero bytes "
+                         "without error")
+    except OSError as exc:
+        if exc.errno != errno.ENOSPC:
+            fail(f"filler failed: {exc}")
 
 
 def _read_int_file(path):
@@ -1309,7 +1485,7 @@ def run_topwalk(gate):
     print(f"guest_lifecycle: topwalk exported top_exit={rc}")
 
 
-BUNDLE_VERSION = "0.1.1"
+BUNDLE_VERSION = "0.2.0"
 
 
 def bundle_run_inputs(repo, candidate):
@@ -1371,7 +1547,7 @@ def bundle_record_argv(bundle_bin, objects, profile, cap):
 def run_bundle(gate):
     """Shipped bundle, three phases, extracted-binary report.
 
-    Dev: extracts dist/memveil-0.1.1.tar.gz, verifies every
+    Dev: extracts dist/memveil-0.2.0.tar.gz, verifies every
     file against MANIFEST.json (no symlinks, exact set, exact
     hashes), and proves the shipped BPF copies equal the
     build. Sealed: serves the verified candidate root
@@ -1592,24 +1768,26 @@ def run_faults(gate):
     refuse with exit 3 and zero BPF residue; SIGTERM mid-capture
     (1ch and 3ch) must stop bounded with a signal end reason,
     with a cut oracle snapshot proving the flood was mid-flight;
-    a full output filesystem must fail honestly without a
-    masquerading session; paced and burst 300-op floods compare
+    a full output filesystem must publish an honest error
+    session; paced and burst 300-op floods compare
     1ch against 3ch capture; background flood during attach must
     not leak pre-window records. The faults.json ledger carries
     every scenario's exit, stderr tail, BPF inventory pair, and
     the seconds waited for kernel-deferred map IDs to settle.
     """
-    memveil = os.path.join(gate.repo, "build", "memveil")
-    attempt_obj = os.path.join(
-        gate.repo, "build", "bpf", "swiotlb_attempt.bpf.o")
-    profile = os.path.join(
-        gate.repo, "build", "vm", "record3-profile.json")
-    for path in (memveil, attempt_obj, profile):
-        if not os.path.isfile(path):
-            fail(f"missing {path}")
+    # Sealed inputs, bound and re-hashed by the faults
+    # preflight: the verified record binary, the attempt
+    # object, and the guest-matched profile. The lifecycle
+    # and copy objects ride on the gate (sealed there too).
+    memveil = gate.faults_bin
+    attempt_obj = gate.faults_attempt
+    profile = gate.faults_profile
+    profiles_dir = gate.faults_profiles_dir
     gate.write_json("identity.json", gate.identity())
+    shutil.copyfile(profile,
+                    os.path.join(gate.work, "profile.json"))
     ledger = []
-    names = ["identity.json"]
+    names = ["identity.json", "profile.json"]
 
     def trunc(src, tag):
         with open(src, "rb") as fh:
@@ -1629,8 +1807,8 @@ def run_faults(gate):
                     "--object", attempt_obj,
                     "--lc-object", lc_obj,
                     "--cp-object", cp_obj,
-                    "--bridge", gate.bridge,
                     "--profile", profile,
+                    "--profiles-dir", profiles_dir,
                     "--capability",
                     "attempt-trace,mapping-lifecycle,copy-actual"],
                    timeout=60)
@@ -1658,8 +1836,8 @@ def run_faults(gate):
                 "--duration", str(duration),
                 "--output", cap,
                 "--object", attempt_obj,
-                "--bridge", gate.bridge,
-                "--profile", profile]
+                "--profile", profile,
+                "--profiles-dir", profiles_dir]
         if caps != ("attempt-trace",):
             args += ["--lc-object", gate.lc_obj,
                      "--cp-object", gate.cp_obj,
@@ -1780,15 +1958,25 @@ def run_faults(gate):
     })
     names.append("f3b-report.json")
 
+    # f4: mid-capture fullness. The filesystem admits
+    # the writer's pre-readiness reserve plus headroom,
+    # and the filler grows only AFTER the ready line
+    # proves the reserve landed and capture started:
+    # ENOSPC must strike mid-capture (honest exit 1,
+    # events kept), never pre-readiness (exit 3
+    # refusal, no capture). The ready line is
+    # program-order proof: the product prints it after
+    # the reserve fallocate, attach, and baseline
+    # append, and the fill below runs strictly after
+    # this call returns that line.
     mnt = os.path.join(gate.work, "full")
     os.makedirs(mnt)
-    r = sh(["mount", "-t", "tmpfs", "-o", "size=64k",
+    r = sh(["mount", "-t", "tmpfs", "-o",
+            f"size={f4_fs_bytes() // 1024}k",
             "memveil-full", mnt])
     if r.returncode != 0:
         fail(f"tmpfs mount failed: {r.stderr.strip()}")
     try:
-        with open(os.path.join(mnt, "filler"), "wb") as fh:
-            fh.write(b"x" * 57344)
         before = gate.bpf_inventory()
         gate.clear_dmesg()
         cap = os.path.join(mnt, "cap")
@@ -1799,8 +1987,8 @@ def run_faults(gate):
              "--object", attempt_obj,
              "--lc-object", gate.lc_obj,
              "--cp-object", gate.cp_obj,
-             "--bridge", gate.bridge,
              "--profile", profile,
+             "--profiles-dir", profiles_dir,
              "--capability",
              "attempt-trace,mapping-lifecycle,copy-actual"],
             stdout=subprocess.PIPE,
@@ -1811,7 +1999,9 @@ def run_faults(gate):
             start_new_session=True,
         )
         ready, _ = await_record_ready(
-            rec, gate.work, "f4-record.stderr")
+            rec, gate.work, "f4-record.stderr",
+            allow_refusal=False)
+        fill_to_full(os.path.join(mnt, "filler"))
         gate.insmod(["mv_oracle_witness=1",
                      "mv_oracle_delay_ms=100",
                      "mv_oracle_scenario=1"])
@@ -1823,11 +2013,18 @@ def run_faults(gate):
             rec.kill()
             rec.wait()
             fail("f4: record did not exit")
+        done = drain_done_line(rec)
         gate.oracle_log("f4-oracle.log")
         with open(os.path.join(gate.work, "f4-record.stderr"),
                   "rb") as fh:
             err = fh.read()[-512:].decode("utf-8", "replace")
         after, settle = gate.settled_inventory(before)
+        for name in ("session.json", "events.ndjson"):
+            src = os.path.join(cap, name)
+            if not os.path.isfile(src):
+                fail(f"f4: capture lacks {name}")
+            shutil.copyfile(
+                src, os.path.join(gate.work, "f4-" + name))
         ledger.append({
             "scenario": "f4", "exit": rc, "stderr": err,
             "progs_before": before["progs"],
@@ -1840,8 +2037,10 @@ def run_faults(gate):
             "events_kept": os.path.isfile(
                 os.path.join(cap, "events.ndjson")),
             "ready": ready,
+            "done": done,
         })
-        names.append("f4-oracle.log")
+        names += ["f4-oracle.log", "f4-session.json",
+                  "f4-events.ndjson"]
     finally:
         r = sh(["umount", mnt])
         if r.returncode != 0:

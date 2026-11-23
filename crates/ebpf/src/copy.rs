@@ -45,7 +45,13 @@ const MV_ARGS_BOUNCE: i64 = 5;
 const MV_IO_TLB_SHIFT: u32 = 11;
 
 /// 32 MiB holds the measured dd burst (196,608 records, ~11 MiB).
+#[cfg(not(feature = "test-ring"))]
 const MV_RING_BYTES: u32 = 33_554_432;
+/// Saturation-test ring capacity in bytes (4 KiB exhausts under STOP).
+/// Test-only: selected by the `test-ring` feature for the flood-leg
+/// fixtures, never shipped; every other map and program is identical.
+#[cfg(feature = "test-ring")]
+const MV_RING_BYTES: u32 = 4096;
 
 /// Claim-table slot count (one entry per slot).
 const MV_CLAIM_SLOTS: u32 = 4096;

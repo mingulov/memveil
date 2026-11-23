@@ -29,12 +29,13 @@ use aya_ebpf::{
     EbpfContext as _,
 };
 use memveil_ebpf_common::{
-    decode_offsets_table, OffsetsTable, MV_CNT_EMITTED, MV_CNT_EMITTED_BYTES, MV_CNT_FLAGS,
-    MV_CNT_LEN, MV_CNT_OBSERVED, MV_CNT_OBSERVED_BYTES, MV_CNT_SUBMIT_FAIL, MV_CTX_READ_CAP,
-    MV_FLAG_BYTE_COVERAGE, MV_FLAG_EMITTED_BYTES_WRAP, MV_FLAG_EMITTED_WRAP, MV_FLAG_FORCE,
-    MV_FLAG_OBSERVED_BYTES_WRAP, MV_FLAG_OBSERVED_WRAP, MV_FLAG_SUBMIT_WRAP, MV_MAGIC, MV_NAME_MAX,
-    MV_OFF_FLAGS, MV_OFF_KTIME, MV_OFF_MAGIC, MV_OFF_NAME, MV_OFF_NAME_LEN, MV_OFF_SEQ,
-    MV_OFF_SIZE, MV_OFF_VERSION, MV_PAYLOAD_LEN, MV_VERSION,
+    bound_ctx_off, decode_offsets_table, OffsetsTable, MV_CNT_EMITTED, MV_CNT_EMITTED_BYTES,
+    MV_CNT_FLAGS, MV_CNT_LEN, MV_CNT_OBSERVED, MV_CNT_OBSERVED_BYTES, MV_CNT_SUBMIT_FAIL,
+    MV_CTX_READ_CAP, MV_FIXED_MAX, MV_FLAG_BYTE_COVERAGE, MV_FLAG_EMITTED_BYTES_WRAP,
+    MV_FLAG_EMITTED_WRAP, MV_FLAG_FORCE, MV_FLAG_OBSERVED_BYTES_WRAP, MV_FLAG_OBSERVED_WRAP,
+    MV_FLAG_SUBMIT_WRAP, MV_MAGIC, MV_NAME_MAX, MV_OFF_FLAGS, MV_OFF_KTIME, MV_OFF_MAGIC,
+    MV_OFF_NAME, MV_OFF_NAME_LEN, MV_OFF_SEQ, MV_OFF_SIZE, MV_OFF_VERSION, MV_PAYLOAD_LEN,
+    MV_VERSION,
 };
 
 use crate::common::{count_fetch_add, count_or};
@@ -140,7 +141,12 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
     // Step 2c: read the size slot. A short context fails here: the firing's
     // size is unknowable, so the byte aggregate loses coverage (sticky bit)
     // on top of the counted reject.
-    let size = match unsafe { ctx.read_at::<u64>(offsets.size_off as usize) } {
+    let Some(size_off) = bound_ctx_off(offsets.size_off, MV_FIXED_MAX - 8) else {
+        mv_raise(MV_FLAG_BYTE_COVERAGE);
+        mv_submit_fail();
+        return 0;
+    };
+    let size = match unsafe { ctx.read_at::<u64>(size_off) } {
         Ok(size) => size,
         Err(_) => {
             mv_raise(MV_FLAG_BYTE_COVERAGE);
@@ -162,7 +168,11 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
     // Step 4: read and validate the __data_loc pair. The kernel record length
     // is unknown here, so the read cap is the extent oracle and probe_read
     // failure covers actual shortness; both reject identically.
-    let loc = match unsafe { ctx.read_at::<u32>(offsets.loc_off as usize) } {
+    let Some(loc_off) = bound_ctx_off(offsets.loc_off, MV_FIXED_MAX - 4) else {
+        mv_submit_fail();
+        return 0;
+    };
+    let loc = match unsafe { ctx.read_at::<u32>(loc_off) } {
         Ok(loc) => loc,
         Err(_) => {
             mv_submit_fail();
@@ -188,7 +198,11 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
     let name_dst = unsafe {
         core::slice::from_raw_parts_mut(payload.as_mut_ptr().add(MV_OFF_NAME), dlen as usize)
     };
-    let name_src = unsafe { (ctx.as_ptr() as *const u8).add(off as usize) };
+    let Some(name_off) = bound_ctx_off(off, MV_CTX_READ_CAP as u32 - 1) else {
+        mv_submit_fail();
+        return 0;
+    };
+    let name_src = unsafe { (ctx.as_ptr() as *const u8).add(name_off) };
     if unsafe { bpf_probe_read_kernel_buf(name_src, name_dst) }.is_err() {
         mv_submit_fail();
         return 0;
@@ -206,7 +220,11 @@ pub fn mv_swiotlb_attempt(ctx: TracePointContext) -> u32 {
         }
     }
     // Step 5b: read the force byte at its tabled offset.
-    let force = match unsafe { ctx.read_at::<u8>(offsets.force_off as usize) } {
+    let Some(force_off) = bound_ctx_off(offsets.force_off, MV_FIXED_MAX - 1) else {
+        mv_submit_fail();
+        return 0;
+    };
+    let force = match unsafe { ctx.read_at::<u8>(force_off) } {
         Ok(force) => force,
         Err(_) => {
             mv_submit_fail();

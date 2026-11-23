@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Fixed canonical lifecycle/copy windows in the VM.
 
+PARTLY SUPERSEDED by tests/vm/test_battery.py cases
+`canonical-c` (scenario 3) and `canonical-e` (scenario 4);
+scenarios 1, 2, and 5 (windows n/s/r) stay here with no
+replacement this round. Kept until the reviewed removal
+step.
+
 Five single-purpose windows (oracle 0.4.0 scenarios 1..5):
 nested overlapping mappings, a request-only cpu sync, a
 clamped over-sync, a sync after unmap (early return), and

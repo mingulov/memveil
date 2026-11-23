@@ -78,8 +78,55 @@ pub struct ReadError {
     pub code: u32,
     /// 1-based event line, or 0 for session/stream-level failures.
     pub line_no: usize,
-    /// Human detail; never matched on.
+    /// Human detail; matched only by [`read_remedy`] over the
+    /// fixed open-failure causes below.
     pub message: String,
+}
+
+/// Remedy line for a capture-open failure cause, when one applies.
+///
+/// Matches the fixed open-failure causes exactly (plus the
+/// member-ownership, member-symlink, and member-unreadable
+/// spellings by suffix): those strings carry no caller bytes,
+/// so the CLI prints both lines unscrubbed. Mid-stream and
+/// parse failures may echo capture bytes and stay single-line.
+pub fn read_remedy(cause: &str) -> Option<&'static str> {
+    match cause {
+        "capture directory does not exist" => {
+            Some("check the path spelling and retry with an existing capture directory")
+        }
+        "capture path is not a directory" => {
+            Some("pass a capture directory (a directory holding session.json and events.ndjson)")
+        }
+        "capture directory not owned by reader" => Some(
+            "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+        ),
+        "not a memveil capture: expected session.json/events.ndjson" => {
+            Some("pass a capture directory (session.json and events.ndjson)")
+        }
+        "capture directory is inaccessible or a symlink" => {
+            Some("check read access to every path component and that none is a symlink")
+        }
+        "cannot establish final session absence" => {
+            Some("check read access to the capture path and retry")
+        }
+        "cannot establish absence of final session" => {
+            Some("check read access to the capture path and retry")
+        }
+        _ => {
+            if cause.ends_with(": not owned by reader") {
+                Some(
+                    "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+                )
+            } else if cause.ends_with(": member is a symlink") {
+                Some("replace the symlinked capture member with a regular file")
+            } else if cause.ends_with(": unreadable (permission denied)") {
+                Some("check read access to the capture member and retry")
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// Byte limits for one read_capture call.
@@ -1902,6 +1949,17 @@ fn open_regular_stream_bytes(raw: &[u8], what: &str) -> Result<i32, ReadError> {
         )
     };
     if fd < 0 {
+        // Read errno before anything can clobber it: a denied
+        // member exists but refuses reads, so it must never
+        // collapse into the missing-member cause downstream.
+        let no = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if no == libc::EACCES {
+            return Err(ReadError {
+                code: READ_IO,
+                line_no: 0,
+                message: format!("{what}: unreadable (permission denied)"),
+            });
+        }
         return Err(ReadError {
             code: READ_IO,
             line_no: 0,
@@ -2012,6 +2070,13 @@ pub fn read_capture_os(
         }
     } else {
         let no = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if no == libc::ENOTDIR {
+            return Err(ReadError {
+                code: READ_IO,
+                line_no: 0,
+                message: "capture path is not a directory".to_string(),
+            });
+        }
         if no != libc::ENOENT {
             return Err(ReadError {
                 code: READ_IO,
@@ -2025,10 +2090,27 @@ pub fn read_capture_os(
     let session_bytes: Vec<u8>;
     if recover {
         if let Err(e) = files.open_os(dir) {
+            let message = e.to_string();
+            // A directory without capture members is not a
+            // capture at all, whatever else it holds.
+            let message = match message.as_str() {
+                "checkpoint.json: cannot open regular capture file"
+                | "events.ndjson: cannot open regular capture file" => {
+                    "not a memveil capture: expected session.json/events.ndjson".to_string()
+                }
+                _ => message,
+            };
+            // A denied member is an I/O failure on both paths,
+            // like its finalized twin: same text, same code.
+            let code = if message.ends_with(": unreadable (permission denied)") {
+                READ_IO
+            } else {
+                READ_INVALID
+            };
             return Err(ReadError {
-                code: READ_INVALID,
+                code,
                 line_no: 0,
-                message: e.to_string(),
+                message,
             });
         }
         match files.read_checkpoint(limits.max_session_bytes) {
@@ -2098,7 +2180,24 @@ pub fn read_capture_os(
         out.devices.insert(device.device_id.clone());
     }
     if !recover {
-        out.fd = open_regular_stream_bytes(&join_member(raw, b"events.ndjson"), "events.ndjson")?;
+        // A finalized session without its event file is the
+        // finalized twin of the checkpoint path's missing member:
+        // map the missing open to the same actionable cause (with
+        // its remedy) instead of the bare open failure. A denied
+        // member keeps its own cause: it exists, so the
+        // missing-capture wording would lie.
+        match open_regular_stream_bytes(&join_member(raw, b"events.ndjson"), "events.ndjson") {
+            Ok(fd) => out.fd = fd,
+            Err(e) if e.message.as_str() == "events.ndjson: cannot open" => {
+                return Err(ReadError {
+                    code: READ_INVALID,
+                    line_no: 0,
+                    message: "not a memveil capture: expected session.json/events.ndjson"
+                        .to_string(),
+                });
+            }
+            Err(e) => return Err(e),
+        }
     }
     if recover && !allow_partial {
         while out.has_more()? {
@@ -2121,7 +2220,7 @@ mod tests {
     use super::{
         CaptureReader, READ_INVALID, READ_IO, READ_PARSE, READ_TOO_BIG, ReaderLimits,
         TAIL_COMPLETE, TAIL_INCOMPLETE, TAIL_INVALID, classify_tail, default_limits,
-        partial_record_definitive, read_capture,
+        partial_record_definitive, read_capture, read_remedy,
     };
     use crate::model::encode::encode_session;
     use crate::model::event::{Event, parse_event};
@@ -2722,13 +2821,14 @@ mod tests {
 
     #[test]
     fn reader_missing() {
-        // Contract: a missing dir or a capture without
-        // session.json enters the recovery path, whose open
-        // failures are READ_INVALID; only a finalized capture
-        // with a missing events file is READ_IO.
+        // Contract: missing members refuse as READ_INVALID on
+        // both paths: the recovery path maps its open failures,
+        // and a finalized capture with a missing events file
+        // maps to the same actionable cause (same text, same
+        // code, since callers match on code, never text).
         let limits = default_limits();
         expect_error(&fixture("no-such-dir"), false, limits, READ_INVALID, 0);
-        expect_error(&fixture("missing-events"), false, limits, READ_IO, 0);
+        expect_error(&fixture("missing-events"), false, limits, READ_INVALID, 0);
         expect_error(&fixture("missing-session"), false, limits, READ_INVALID, 0);
     }
 
@@ -3731,9 +3831,203 @@ mod tests {
             .path()
             .join(std::ffi::OsString::from_vec(b"no\xff".to_vec()));
         let err = read_capture_os(missing.as_os_str(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "capture directory does not exist");
+        assert!(read_remedy(&err.message).is_some());
+    }
+
+    #[test]
+    fn read_remedy_pairs_and_gaps() {
+        // Every fixed open cause carries a remedy; member
+        // ownership shares the directory remedy; anything else
+        // (caller bytes, parse detail) stays single-line.
+        for (cause, fix) in [
+            (
+                "capture directory does not exist",
+                "check the path spelling and retry with an existing capture directory",
+            ),
+            (
+                "capture path is not a directory",
+                "pass a capture directory (a directory holding session.json and events.ndjson)",
+            ),
+            (
+                "capture directory not owned by reader",
+                "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+            ),
+            (
+                "checkpoint.json: not owned by reader",
+                "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+            ),
+            (
+                "events.ndjson: not owned by reader",
+                "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
+            ),
+            (
+                "checkpoint.json: member is a symlink",
+                "replace the symlinked capture member with a regular file",
+            ),
+            (
+                "events.ndjson: member is a symlink",
+                "replace the symlinked capture member with a regular file",
+            ),
+            (
+                "session.json: unreadable (permission denied)",
+                "check read access to the capture member and retry",
+            ),
+            (
+                "events.ndjson: unreadable (permission denied)",
+                "check read access to the capture member and retry",
+            ),
+            (
+                "checkpoint.json: unreadable (permission denied)",
+                "check read access to the capture member and retry",
+            ),
+            (
+                "not a memveil capture: expected session.json/events.ndjson",
+                "pass a capture directory (session.json and events.ndjson)",
+            ),
+            (
+                "capture directory is inaccessible or a symlink",
+                "check read access to every path component and that none is a symlink",
+            ),
+            (
+                "cannot establish final session absence",
+                "check read access to the capture path and retry",
+            ),
+            (
+                "cannot establish absence of final session",
+                "check read access to the capture path and retry",
+            ),
+        ] {
+            assert_eq!(read_remedy(cause), Some(fix), "{cause}");
+        }
+        for bare in [
+            "session.json: ValidationError(what=x, message=y)",
+            "line 1: ValidationError(what=x, message=y)",
+            "no final session; verified checkpoint prefix 1155 bytes; use --allow-partial to recover",
+            "events.ndjson: input is not a regular file",
+            "events.ndjson: cannot open",
+            "capture directory does not exist, friend",
+        ] {
+            assert_eq!(read_remedy(bare), None, "{bare}");
+        }
+    }
+
+    #[test]
+    fn open_failures_round_trip_with_remedies() {
+        let tmp = TestDir::create("memveil-read-remedy").expect("mkdtemp");
+        let missing = tmp.path().join("no-such-dir");
+        let err = read_capture(missing.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "capture directory does not exist");
+        assert!(read_remedy(&err.message).is_some());
+        let file = tmp.path().join("plain-file");
+        std::fs::write(&file, b"x").expect("write file");
+        let err = read_capture(file.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "capture path is not a directory");
+        assert!(read_remedy(&err.message).is_some());
+        let empty = tmp.path().join("empty-dir");
+        std::fs::create_dir(&empty).expect("mkdir empty");
+        let err = read_capture(empty.to_str().unwrap(), false, default_limits()).unwrap_err();
         assert_eq!(
             err.message,
-            "capture directory is inaccessible or a symlink"
+            "not a memveil capture: expected session.json/events.ndjson"
         );
+        assert!(read_remedy(&err.message).is_some());
+        // A finalized session without its event file is the
+        // finalized twin of the missing member: same cause,
+        // same remedy.
+        let lone = tmp.path().join("lone-session");
+        std::fs::create_dir(&lone).expect("mkdir lone");
+        std::fs::write(
+            lone.join("session.json"),
+            fixture_bytes("attempts/session.json"),
+        )
+        .expect("write session");
+        let err = read_capture(lone.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(
+            err.message,
+            "not a memveil capture: expected session.json/events.ndjson"
+        );
+        assert!(read_remedy(&err.message).is_some());
+        // A symlinked checkpoint member names the link, not a
+        // missing capture, and carries its own remedy.
+        let linked = tmp.path().join("linked-ckpt");
+        std::fs::create_dir(&linked).expect("mkdir linked");
+        std::fs::write(linked.join("real-checkpoint.json"), b"{}").expect("write real");
+        std::os::unix::fs::symlink(
+            linked.join("real-checkpoint.json"),
+            linked.join("checkpoint.json"),
+        )
+        .expect("symlink checkpoint");
+        std::fs::write(linked.join("events.ndjson"), b"").expect("write events");
+        let err = read_capture(linked.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.message, "checkpoint.json: member is a symlink");
+        assert!(read_remedy(&err.message).is_some());
+    }
+
+    #[test]
+    fn reader_unreadable_members_name_denial() {
+        // A denied member exists, so it names the denial (with
+        // its remedy), never the missing-capture cause: same
+        // text and same code on the finalized and recovery
+        // paths. Root reads through file modes, so the case
+        // only runs unprivileged.
+        // SAFETY: pure id query.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP reader_unreadable_members_name_denial: requires non-root");
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TestDir::create("memveil-unreadable").expect("mkdtemp");
+        let denied = std::fs::Permissions::from_mode(0o000);
+        // Finalized twin: denied events beside a valid session.
+        let fin = tmp.path().join("finalized");
+        std::fs::create_dir(&fin).expect("mkdir fin");
+        std::fs::write(
+            fin.join("session.json"),
+            fixture_bytes("attempts/session.json"),
+        )
+        .expect("write session");
+        std::fs::write(
+            fin.join("events.ndjson"),
+            fixture_bytes("attempts/events.ndjson"),
+        )
+        .expect("write events");
+        std::fs::set_permissions(fin.join("events.ndjson"), denied.clone()).expect("chmod events");
+        let err = read_capture(fin.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.code, READ_IO);
+        assert_eq!(err.message, "events.ndjson: unreadable (permission denied)");
+        assert!(read_remedy(&err.message).is_some());
+        // A denied session names the session member.
+        let fin_session = tmp.path().join("finalized-session");
+        std::fs::create_dir(&fin_session).expect("mkdir fin session");
+        std::fs::write(
+            fin_session.join("session.json"),
+            fixture_bytes("attempts/session.json"),
+        )
+        .expect("write session");
+        std::fs::write(
+            fin_session.join("events.ndjson"),
+            fixture_bytes("attempts/events.ndjson"),
+        )
+        .expect("write events");
+        std::fs::set_permissions(fin_session.join("session.json"), denied.clone())
+            .expect("chmod session");
+        let err = read_capture(fin_session.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.code, READ_IO);
+        assert_eq!(err.message, "session.json: unreadable (permission denied)");
+        assert!(read_remedy(&err.message).is_some());
+        // Recovery twin: denied checkpoint, no final session.
+        let rec = tmp.path().join("recovery");
+        std::fs::create_dir(&rec).expect("mkdir rec");
+        std::fs::write(rec.join("checkpoint.json"), b"{}").expect("write checkpoint");
+        std::fs::write(rec.join("events.ndjson"), b"").expect("write events");
+        std::fs::set_permissions(rec.join("checkpoint.json"), denied).expect("chmod checkpoint");
+        let err = read_capture(rec.to_str().unwrap(), false, default_limits()).unwrap_err();
+        assert_eq!(err.code, READ_IO);
+        assert_eq!(
+            err.message,
+            "checkpoint.json: unreadable (permission denied)"
+        );
+        assert!(read_remedy(&err.message).is_some());
     }
 }

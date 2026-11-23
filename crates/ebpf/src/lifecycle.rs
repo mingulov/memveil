@@ -46,7 +46,13 @@ const MV_ARGS_UNMAP: i64 = 6;
 /// `DMA_ATTR_SKIP_CPU_SYNC` is bit 5 (`dma-mapping.h`).
 const MV_DMA_ATTR_SKIP_CPU_SYNC: u64 = 1 << 5;
 /// Lifecycle ring capacity in bytes (32 MiB holds the measured `dd` burst).
+#[cfg(not(feature = "test-ring"))]
 const MV_RING_BYTES: u32 = 33_554_432;
+/// Saturation-test ring capacity in bytes (4 KiB exhausts under STOP).
+/// Test-only: selected by the `test-ring` feature for the flood-leg
+/// fixtures, never shipped; every other map and program is identical.
+#[cfg(feature = "test-ring")]
+const MV_RING_BYTES: u32 = 4096;
 /// Compare-and-swap retries for one generation allocation.
 const MV_CAS_RETRIES: u32 = 8;
 

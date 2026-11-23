@@ -15,7 +15,7 @@ use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
 use crate::capture::reader::{
     DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES, ReaderLimits,
-    read_capture, read_capture_os,
+    read_capture, read_capture_os, read_remedy,
 };
 use crate::cli::durations::parse_duration_ns;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
@@ -148,9 +148,10 @@ pub fn report_usage() -> String {
         "       [--strict] [--long-lived-after DURATION] [--max-line-bytes N]\n",
         "       [--max-session-bytes N] [--max-events-bytes N] DIR\n",
         "\n",
-        "Read the capture in DIR, reduce its events to metrics,\n",
-        "and print one report on stdout. Diagnostics go to stderr.\n",
-        "Counts always cover the whole capture window.\n",
+        "Explain one capture: the common case is memveil report DIR\n",
+        "(no root needed). Read the capture in DIR, reduce its events\n",
+        "to metrics, and print one report on stdout. Diagnostics go to\n",
+        "stderr. Counts always cover the whole capture window.\n",
         "\n",
         "  --format NAME     text (default), json, or markdown.\n",
         "  --allow-partial   recover a verified checkpoint prefix, or\n",
@@ -169,10 +170,22 @@ pub fn report_usage() -> String {
         "  --max-events-bytes N\n",
         "                    total work cap, at most 4294967296.\n",
         "\n",
+        "Example:\n",
+        "  memveil report /tmp/cap1\n",
+        "  memveil report --format json /tmp/cap1\n",
+        "\n",
         "Exit 0 for a rendered report (completeness rides in the\n",
         "verdict field), 4 under --strict unless the verdict is\n",
         "complete, and 4 for checkpoint recovery. Invalid input or\n",
         "usage exits 2; corrupt final captures are never recovered.\n",
+        "\n",
+        "RnD preview: ordinary-Linux SWIOTLB attempt/lifecycle/copy\n",
+        "observer. Not qualified on SEV-SNP/TDX/Hyper-V confidential\n",
+        "guests; no attestation; output is not a host-access or\n",
+        "confidentiality verdict. Attempts are not copies; unmap is not\n",
+        "erasure. Exit 0 includes partial evidence \u{2014} read `verdict:` or\n",
+        "use `--strict`. Metadata only; captures carry per-boot/kernel\n",
+        "fingerprints. See docs/support.md.\n",
     )
     .to_string()
 }
@@ -300,6 +313,51 @@ pub fn refusal_stderr_lines(verb: &str, diagnostic: &str, code: &str, fix: &str)
     out
 }
 
+/// True when `<dir>/manifest.txt` is absent, not merely unreadable.
+///
+/// Only [`std::io::ErrorKind::NotFound`] counts: a present but
+/// malformed manifest, or a profiles path that is not a directory,
+/// keeps its loader diagnostic instead of this shape.
+pub fn profiles_manifest_missing(dir: &str) -> bool {
+    let probe = format!("{dir}/manifest.txt");
+    matches!(
+        std::fs::symlink_metadata(&probe),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// Basename of a profiles dir for the lone-install diagnostic.
+///
+/// Directory components never reach stderr (explicit words and
+/// auto-resolved install paths alike); the basename still names
+/// which directory was searched, and the fixed `manifest.txt`
+/// leaf is not caller data. Falls back to the whole input only
+/// for empty or all-slash inputs, which carry no layout.
+fn profiles_dir_basename(dir: &str) -> &str {
+    dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(dir)
+}
+
+/// Lone-install stderr lines: diagnostic naming the searched manifest, fix.
+///
+/// Both lines carry the verb prefix and newline; the diagnostic
+/// names the searched directory by basename plus the fixed
+/// `manifest.txt` leaf. Fragments are escaped; write both lines
+/// through the trusted writer: neither carries directory
+/// components, so the basename and the fix command survive
+/// intact without leaking filesystem layout.
+pub fn no_profiles_lines(verb: &str, dir: &str) -> Vec<String> {
+    vec![
+        format!(
+            "memveil {verb}: no profiles found: {}/manifest.txt does not exist\n",
+            sanitize_diagnostic(profiles_dir_basename(dir))
+        ),
+        format!(
+            "memveil {verb}: fix: run the packaged layout (profiles/ beside bin/), \
+             or pass --profiles-dir DIR\n"
+        ),
+    ]
+}
+
 /// Raw write(2) on fd 2 with an EINTR retry loop.
 fn write_fd2(raw: &[u8]) -> Result<(), StderrError> {
     let total = raw.len();
@@ -356,6 +414,119 @@ fn is_option(text: &str) -> bool {
     text.as_bytes().first() == Some(&0x2d)
 }
 
+/// Split one `--flag=value` word into its flag and inline value.
+///
+/// Returns `None` unless the word starts with `--` and carries `=`;
+/// the split lands on the first `=`, so values may contain more.
+/// Single-dash words never split.
+pub fn split_flag_eq(tok: &str) -> Option<(&str, &str)> {
+    if tok.len() > 2
+        && tok.as_bytes().starts_with(b"--")
+        && let Some(eq) = tok.find('=')
+    {
+        return Some((&tok[..eq], &tok[eq + 1..]));
+    }
+    None
+}
+
+/// Byte-wise [`split_flag_eq`] over a raw argv word.
+pub fn split_flag_eq_bytes(raw: &[u8]) -> Option<(&[u8], &[u8])> {
+    if raw.len() > 2
+        && raw.starts_with(b"--")
+        && let Some(eq) = raw.iter().position(|&b| b == 0x3d)
+    {
+        return Some((&raw[..eq], &raw[eq + 1..]));
+    }
+    None
+}
+
+/// Expand `--flag=value` words for known value flags into pairs.
+///
+/// Only flags in `value_flags` split, into the bare flag plus the
+/// inline value (which may itself contain `=`); every other word
+/// passes through untouched, so unknown-option errors keep echoing
+/// the original token and boolean flags never gain an inline form.
+/// A word in value position never splits: the parsers consume the
+/// word after a bare value flag unconditionally, so the expansion
+/// tracks the same consumption (a bare value flag arms the next
+/// word; an inline word never does). Callers parse the expansion
+/// exactly like spaced words, so both spellings share every error
+/// path.
+pub fn expand_flag_eq(args: &[String], value_flags: &[&str]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut value_next = false;
+    for arg in args {
+        if value_next {
+            out.push(arg.clone());
+            value_next = false;
+            continue;
+        }
+        if value_flags.contains(&arg.as_str()) {
+            out.push(arg.clone());
+            value_next = true;
+            continue;
+        }
+        let mut split = false;
+        if let Some((flag, value)) = split_flag_eq(arg)
+            && value_flags.contains(&flag)
+        {
+            out.push(flag.to_string());
+            out.push(value.to_string());
+            split = true;
+        }
+        if !split {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
+/// Byte-wise [`expand_flag_eq`] over raw argv words.
+///
+/// Value-position words pass through untouched, exactly like the
+/// text form: a bare value flag arms the next word.
+pub fn expand_flag_eq_os(args: &[OsString], value_flags: &[&[u8]]) -> Vec<OsString> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let mut out = Vec::with_capacity(args.len());
+    let mut value_next = false;
+    for arg in args {
+        if value_next {
+            out.push(arg.clone());
+            value_next = false;
+            continue;
+        }
+        if value_flags.contains(&arg.as_bytes()) {
+            out.push(arg.clone());
+            value_next = true;
+            continue;
+        }
+        let mut split = false;
+        if let Some((flag, value)) = split_flag_eq_bytes(arg.as_bytes())
+            && value_flags.contains(&flag)
+        {
+            out.push(OsString::from_vec(flag.to_vec()));
+            out.push(OsString::from_vec(value.to_vec()));
+            split = true;
+        }
+        if !split {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
+/// Accepted `--capability` ids: the three record channels, the two
+/// journal-only names (parseable, refused later as channel-less),
+/// and the `all` alias.
+pub const CAPABILITY_IDS: &str =
+    "attempt-trace, mapping-lifecycle, copy-actual, conversion-observe, conversion-journal, all";
+
+/// Usage detail for a rejected `--capability` list: the parser reason
+/// plus the accepted ids, so the error teaches the vocabulary.
+pub fn invalid_capability_message(err: &str) -> String {
+    format!("{err}; valid capabilities: {CAPABILITY_IDS}")
+}
+
 /// Strict decimal limit: 1..cap, no leading zeros.
 pub(crate) fn parse_limit(text: &str, what: &str, cap: u64) -> Result<usize, CliError> {
     parse_limit_bytes(text.as_bytes(), what, cap)
@@ -393,8 +564,19 @@ pub(crate) fn parse_limit_bytes(raw: &[u8], what: &str, cap: u64) -> Result<usiz
     Ok(v as usize)
 }
 
+/// Value-taking report flags: the `--flag=value` set.
+const REPORT_VALUE_FLAGS: &[&str] = &[
+    "--format",
+    "--long-lived-after",
+    "--max-line-bytes",
+    "--max-session-bytes",
+    "--max-events-bytes",
+];
+
 /// Parse report arguments without the leading verb.
 pub fn parse_report_args(args: &[String]) -> Result<ReportOptions, CliError> {
+    let expanded = expand_flag_eq(args, REPORT_VALUE_FLAGS);
+    let args = &expanded;
     let mut opts = ReportOptions::default();
     let mut i = 0;
     while i < args.len() {
@@ -511,6 +693,15 @@ struct ReportArgsOs {
 /// the run when they cannot decode. Error precedence and
 /// recorded values match [`parse_report_args`] exactly.
 fn parse_report_args_os(args: &[OsString]) -> Result<ReportArgsOs, OsParseFail> {
+    const FLAGS: &[&[u8]] = &[
+        b"--format",
+        b"--long-lived-after",
+        b"--max-line-bytes",
+        b"--max-session-bytes",
+        b"--max-events-bytes",
+    ];
+    let expanded = expand_flag_eq_os(args, FLAGS);
+    let args = &expanded;
     let mut opts = ReportOptions::default();
     let mut dir_os = OsString::new();
     let mut i = 0;
@@ -702,6 +893,29 @@ fn report_failed(prefix: &str, detail: &str) -> i64 {
     }
 }
 
+/// Read failure with a remedy line when one applies.
+///
+/// Open failures with a fixed cause print cause plus fix; every
+/// other read failure keeps today's single scrubbed line.
+fn report_read_failed(detail: &str) -> i64 {
+    match read_remedy(detail) {
+        Some(fix) => {
+            // Fixed literals, no caller bytes: both lines keep
+            // their prose (including the expected-files slash).
+            let cause = format!("memveil report: cannot read capture: {detail}\n");
+            let remedy = format!("memveil report: fix: {fix}\n");
+            match write_stderr_trusted(&cause) {
+                Ok(()) => match write_stderr_trusted(&remedy) {
+                    Ok(()) => EXIT_INVALID,
+                    Err(_) => EXIT_INTERNAL,
+                },
+                Err(_) => EXIT_INTERNAL,
+            }
+        }
+        None => report_failed("memveil report: cannot read capture: ", detail),
+    }
+}
+
 /// Run the report verb; return the process exit code.
 ///
 /// `args` excludes the program name and the report word. The rendered
@@ -740,14 +954,14 @@ fn run_report_parsed(opts: &ReportOptions, dir_os: Option<&OsStr>) -> i64 {
     };
     let mut reader = match opened {
         Ok(reader) => reader,
-        Err(e) => return report_failed("memveil report: cannot read capture: ", &e.message),
+        Err(e) => return report_read_failed(&e.message),
     };
     let mut analyzer = Analyzer::new(reader.session.clone());
     loop {
         let more = match reader.has_more() {
             Ok(more) => more,
             Err(e) => {
-                return report_failed("memveil report: cannot read capture: ", &e.message);
+                return report_read_failed(&e.message);
             }
         };
         if !more {
@@ -756,7 +970,7 @@ fn run_report_parsed(opts: &ReportOptions, dir_os: Option<&OsStr>) -> i64 {
         let ev = match reader.next_event() {
             Ok(ev) => ev,
             Err(e) => {
-                return report_failed("memveil report: cannot read capture: ", &e.message);
+                return report_read_failed(&e.message);
             }
         };
         if let Err(e) = analyzer.consume(&ev) {
@@ -881,6 +1095,106 @@ mod tests {
     }
 
     #[test]
+    fn report_flag_eq_forms() {
+        // Every value flag accepts --flag=value, identical to the
+        // spaced spelling; boolean flags never split.
+        let opts = parse_report_args(&args(&[
+            "--format=json",
+            "--allow-partial",
+            "--strict",
+            "--long-lived-after=90s",
+            "--max-line-bytes=1024",
+            "--max-session-bytes=2048",
+            "--max-events-bytes=4096",
+            "capdir",
+        ]))
+        .expect("eq forms parse");
+        assert_eq!(opts.format, "json");
+        assert!(opts.allow_partial);
+        assert!(opts.strict);
+        assert_eq!(opts.long_lived_after_ns, 90_000_000_000);
+        assert_eq!(opts.max_line_bytes, 1024);
+        assert_eq!(opts.max_session_bytes, 2048);
+        assert_eq!(opts.max_events_bytes, 4096);
+        assert_eq!(opts.dir, "capdir");
+        // Errors match the spaced spelling exactly.
+        let err =
+            parse_report_args(&args(&["--format=yaml", "d"])).expect_err("bad format rejects");
+        assert_eq!(err.message, "unknown format: yaml");
+        let err = parse_report_args(&args(&["--strict=x", "d"])).expect_err("bool eq rejects");
+        assert_eq!(err.message, "unknown option: --strict=x");
+        let err = parse_report_args(&args(&["--bogus=x", "d"])).expect_err("unknown eq rejects");
+        assert_eq!(err.message, "unknown option: --bogus=x");
+    }
+
+    #[test]
+    fn expand_flag_eq_vectors() {
+        use super::{expand_flag_eq, expand_flag_eq_os, split_flag_eq};
+        assert_eq!(split_flag_eq("--format=json"), Some(("--format", "json")));
+        assert_eq!(split_flag_eq("--device=a=b"), Some(("--device", "a=b")));
+        assert_eq!(split_flag_eq("--flag="), Some(("--flag", "")));
+        assert_eq!(split_flag_eq("--format"), None);
+        assert_eq!(split_flag_eq("-h=x"), None);
+        assert_eq!(split_flag_eq("plain"), None);
+        let out = expand_flag_eq(&args(&["--format=json", "--strict", "d"]), &["--format"]);
+        assert_eq!(out, args(&["--format", "json", "--strict", "d"]));
+        // Unknown and boolean flags pass through untouched.
+        let out = expand_flag_eq(&args(&["--bogus=x", "--strict=x"]), &["--format"]);
+        assert_eq!(out, args(&["--bogus=x", "--strict=x"]));
+        // A word in value position never splits, even when it
+        // spells another known flag inline.
+        let out = expand_flag_eq(
+            &args(&["--profiles-dir", "--object=x"]),
+            &["--profiles-dir", "--object"],
+        );
+        assert_eq!(out, args(&["--profiles-dir", "--object=x"]));
+        // A consumed flag-word does not arm the next word: only
+        // genuine flag position does.
+        let out = expand_flag_eq(
+            &args(&["--profiles-dir", "--capability", "--object=x"]),
+            &["--profiles-dir", "--capability", "--object"],
+        );
+        assert_eq!(
+            out,
+            args(&["--profiles-dir", "--capability", "--object", "x"])
+        );
+        // An inline word never arms the next word either.
+        let out = expand_flag_eq(
+            &args(&["--format=json", "--object=x"]),
+            &["--format", "--object"],
+        );
+        assert_eq!(out, args(&["--format", "json", "--object", "x"]));
+        // Byte-level expansion keeps raw value bytes.
+        let raw = expand_flag_eq_os(
+            &os(&[b"--format=json".as_slice(), b"d".as_slice()]),
+            &[b"--format".as_slice()],
+        );
+        assert_eq!(
+            raw,
+            os(&[b"--format".as_slice(), b"json".as_slice(), b"d".as_slice()])
+        );
+        // The raw arm tracks value position the same way.
+        let raw = expand_flag_eq_os(
+            &os(&[b"--profiles-dir".as_slice(), b"--object=x".as_slice()]),
+            &[b"--profiles-dir".as_slice(), b"--object".as_slice()],
+        );
+        assert_eq!(
+            raw,
+            os(&[b"--profiles-dir".as_slice(), b"--object=x".as_slice()])
+        );
+    }
+
+    #[test]
+    fn invalid_capability_message_lists_ids() {
+        let msg = super::invalid_capability_message("unknown capability: bogus");
+        assert_eq!(
+            msg,
+            "unknown capability: bogus; valid capabilities: attempt-trace, mapping-lifecycle, \
+             copy-actual, conversion-observe, conversion-journal, all"
+        );
+    }
+
+    #[test]
     fn report_missing_dir() {
         let err = parse_report_args(&args(&[])).expect_err("empty rejects");
         assert_eq!(err.message, "missing capture directory");
@@ -940,6 +1254,26 @@ mod tests {
             os_fail_message(&[b"--bogus".as_slice()]),
             "unknown option: --bogus"
         );
+    }
+
+    #[test]
+    fn report_os_flag_eq_forms() {
+        // Inline values follow the spaced echo/silence rules: a
+        // decodable inline format parses beside a raw directory,
+        // while an undecodable one silences the run.
+        let dir =
+            super::parse_report_args_os(&os(&[b"--format=json".as_slice(), b"\xff".as_slice()]))
+                .expect("eq form parses");
+        assert_eq!(dir.opts.format, "json");
+        assert_eq!(
+            dir.dir_os.as_bytes(),
+            b"\xff".as_slice(),
+            "raw directory survives"
+        );
+        assert!(os_is_silent(&[
+            b"--format=\xff".as_slice(),
+            b"d".as_slice()
+        ]));
     }
 
     #[test]
@@ -1303,6 +1637,84 @@ mod tests {
     }
 
     #[test]
+    fn no_profiles_lines_shape() {
+        // The lone-install shape, byte-exact for both verbs: the
+        // searched directory by basename plus the fixed leaf,
+        // then the packaged-layout fix.
+        for verb in ["doctor", "record"] {
+            let lines = super::no_profiles_lines(verb, "/tmp/lone/../profiles");
+            assert_eq!(
+                lines,
+                vec![
+                    format!(
+                        "memveil {verb}: no profiles found: profiles/manifest.txt does not exist\n"
+                    ),
+                    format!(
+                        "memveil {verb}: fix: run the packaged layout (profiles/ beside bin/), \
+                         or pass --profiles-dir DIR\n"
+                    ),
+                ]
+            );
+        }
+        // Directory components never survive, explicit or
+        // auto-resolved; a bare name passes through.
+        let lines = super::no_profiles_lines("doctor", "/a/very/long/path");
+        assert!(
+            lines[0].contains("no profiles found: path/manifest.txt does not exist"),
+            "{}",
+            lines[0]
+        );
+        let lines = super::no_profiles_lines("doctor", "profiles");
+        assert!(
+            lines[0].contains("no profiles found: profiles/manifest.txt does not exist"),
+            "{}",
+            lines[0]
+        );
+        // A hostile --profiles-dir value stays one escaped line.
+        let lines = super::no_profiles_lines("doctor", "/tmp/x\n/tmp/y");
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains("no profiles found: y/manifest.txt does not exist"),
+            "{}",
+            lines[0]
+        );
+        assert_eq!(lines[0].matches('\n').count(), 1);
+        // A control byte in the basename itself escapes too.
+        let lines = super::no_profiles_lines("doctor", "/tmp/a\nb");
+        assert!(
+            lines[0].contains("no profiles found: a\\nb/manifest.txt does not exist"),
+            "{}",
+            lines[0]
+        );
+        assert_eq!(lines[0].matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn profiles_manifest_missing_vectors() {
+        use crate::platform::test_support::TestDir;
+        // A nonexistent tree and a tree without a manifest count.
+        assert!(super::profiles_manifest_missing(
+            "/tmp/memveil-no-such-tree-xyz"
+        ));
+        let tmp = TestDir::create("memveil-prof-miss").expect("mkdtemp");
+        assert!(super::profiles_manifest_missing(tmp.as_str()));
+        // A present manifest does not count, trailing slash or not.
+        std::fs::write(tmp.path().join("manifest.txt"), "p.json\n").expect("manifest");
+        assert!(!super::profiles_manifest_missing(tmp.as_str()));
+        assert!(!super::profiles_manifest_missing(&format!(
+            "{}/",
+            tmp.as_str()
+        )));
+        // A profiles path that is not a directory keeps the loader
+        // diagnostic: probing under it fails, but nothing is missing.
+        let file = tmp.path().join("plain");
+        std::fs::write(&file, "x").expect("plain file");
+        assert!(!super::profiles_manifest_missing(
+            file.to_str().expect("utf-8")
+        ));
+    }
+
+    #[test]
     fn sanitize_and_neutralize_vectors() {
         let clean = sanitize_diagnostic("opt \u{1b}[2J\nnext\u{7f} é");
         assert!(!clean.as_bytes().contains(&0x1b));
@@ -1324,6 +1736,7 @@ mod tests {
         assert!(text.contains("--long-lived-after DURATION"));
         assert!(text.contains("at most 4294967296"));
         assert!(text.contains("Exit 0 for a rendered report"));
-        assert!(text.ends_with("never recovered.\n"));
+        assert!(text.contains("Example:"));
+        assert!(text.ends_with("fingerprints. See docs/support.md.\n"));
     }
 }

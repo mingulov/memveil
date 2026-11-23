@@ -19,11 +19,13 @@ sys.path.insert(0, str(ROOT / 'tools'))
 sys.path.insert(0, str(ROOT / 'tests/package'))
 import kernel_matrix as km
 import candidate as c
-from test_kernel_matrix import _admitted_entry
-from test_candidate import (_ephemeral_key, _write_policy,
-                            _write_qualification, _signed_gate,
-                            _matrix_lock, _write_real_matrix_row,
-                            sha)
+from test_kernel_matrix import (_admitted_entry, _distro_entry,
+                                _distro_source, _ev_pass,
+                                _row_ctx, _row_job)
+from test_candidate import (_emit_matrix_events, _ephemeral_key,
+                            _write_policy, _write_qualification,
+                            _signed_gate, _matrix_lock,
+                            _write_real_matrix_row, sha)
 
 
 def _matrix_manifest(commit='c' * 40, policy_sha='9' * 64):
@@ -89,6 +91,177 @@ def test_export_accepts_consistent_row(tmp_path):
         for name, value in sorted(c.expected_payload(doc).items()))
     with pytest.raises(FileExistsError):
         km.export_tested_candidate(tmp_path, lock, doc, output)
+
+
+def _write_real_distro_matrix_row(m, matrix_dir, doc):
+    """Honest distro matrix row bound to a sealed manifest.
+
+    Twin of the archive real-row builder over the distro
+    lock entry: the same predicate-backed evidence, plus
+    the distro banner/version transcription and the
+    absent guest config a measured distro row records.
+    """
+    ev = _ev_pass()
+    ev['entry'] = _distro_entry()
+    ev['uname_text'] = ('6.12.57-amd64\nswiotlb=131072,force '
+                        'virtme_link_mods=/cache/usr/lib/'
+                        'modules/6.12.57-amd64\n')
+    ev['mods_text'] = ('6.12.57-amd64\n/cache/usr/lib/modules/'
+                       '6.12.57-amd64\n')
+    ev['cache_dir'] = '/cache'
+    ev['version_text'] = _distro_source()['banner'] + '\n'
+    ev['configid_text'] = 'absent\n'
+    ev['duration'] = 60
+    hooks = json.loads(ev['hooks_text'])
+    hooks['btf'] = True
+    ev['hooks_text'] = json.dumps(hooks)
+    for field in ('miss_snaps', 'busy_miss_snaps'):
+        ev[field] = [[nsecs, text]
+                     for nsecs, text in ev[field]]
+    ev['candidate_sha256'] = m.digest_bytes(m.canonical(doc))
+    ev['candidate_files'] = copy.deepcopy(doc['files'])
+    measured = json.loads(ev['artifacts_text'])
+    measured['binary']['sha256'] = doc['files']['bin/memveil']
+    for channel in ('attempt', 'lifecycle', 'copy'):
+        measured['bpf'][channel] = \
+            doc['files']['bpf/swiotlb_%s.bpf.o' % channel]
+    ev['artifacts_text'] = json.dumps(measured)
+    ev['persisted']['counter_snapshot'] = \
+        2 * len(ev['counters'])
+    ev['oracle_mode'] = 'full'
+    ev['unpaired_count'] = 0
+    ev['unpaired_bytes'] = 0
+    ev['unpaired_error'] = None
+    ev['busy_events_bytes'] = 1048576
+    matrix_dir = Path(matrix_dir)
+    row = matrix_dir / ev['entry']['id']
+    row.mkdir(parents=True)
+    job = _row_job()
+    job.update(id=ev['entry']['id'],
+               vng_version=km.row_boot_label(ev['entry']),
+               release=ev['entry']['release'],
+               run_id='20261101T000000Z')
+    files = {'job.json': json.dumps(job),
+             'vng.exit': ev['vng_exit'],
+             'vng-cmd.txt':
+             'sudo -n vng --run 0x7f8a1b2c3d4e '
+             '--rwdir=/tmp/export=/work/0123456789abcdef\n',
+             'artifacts.json': ev['artifacts_text'],
+             'uname.txt': ev['uname_text'],
+             'mods.txt': ev['mods_text'],
+             'configid.txt': ev['configid_text'],
+             'version.txt': ev['version_text'],
+             'hooks.json': ev['hooks_text'],
+             'btf-sha.txt': '2' * 64,
+             'oracle.txt': ev['oracle_text'],
+             'oracle.stderr': ev['oracle_stderr'],
+             'oracle.mode': 'full',
+             'doctor.json': ev['doctor_text'],
+             'doctor.exit': ev['doctor_exit'],
+             'doctor-passive.json': ev['doctor_passive_text'],
+             'doctor-passive.exit':
+             ev['doctor_passive_exit'],
+             'sev-sysfs.txt': ev['sev_sysfs_text'],
+             'dmesg.txt': ev['dmesg_text'],
+             'dmesg_scan.json': ev['dmesg_scan_text'],
+             'cap/session.json': ev['session_text'],
+             'record.exit': ev['record_exit'],
+             'report.exit': ev['report_exit'],
+             'report-json.exit': ev['report_json_exit'],
+             'workload.txt': ev['workload_text'],
+             'blockstat.json': ev['blockstat_text'],
+             'udev.exit': ev['udev_exit'],
+             'udev.out': ev['udev_out'],
+             'busy/record.exit': ev['busy_record_exit'],
+             'busy/end_reason.txt': ev['busy_end_reason'],
+             'busy/report.exit': ev['busy_report_exit'],
+             'busy/report-json.exit':
+             ev['busy_report_json_exit'],
+             'busy/times.json': ev['busy_times_text'],
+             'busy/busy.out': ev['busy_out_text'],
+             'busy/cap/session.json': ev['busy_session_text']}
+    for name, value in files.items():
+        target = row / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(value)
+    (row / 'cap' / 'events.ndjson').write_text(
+        _emit_matrix_events(ev))
+    for field, subdir, count in (('miss_snaps', '', 4),
+                                 ('busy_miss_snaps', 'busy',
+                                  3)):
+        snaps = ev[field]
+        base = row / subdir if subdir else row
+        (base / 'progs_times.json').write_text(json.dumps(
+            {str(idx): snaps[idx][0]
+             for idx in range(count)}))
+        for idx in range(count):
+            (base / ('progs%d.json' % idx)).write_text(
+                snaps[idx][1])
+    summary = {'sha256': sha(b'fixture-busy-events'),
+               'bytes': ev['busy_events_bytes'],
+               'counts': ev['busy_persisted'],
+               'counters': ev['busy_counters'],
+               'counters_error': ev['busy_counters_error']}
+    (row / 'busy' / 'events_summary.json').write_text(
+        json.dumps(summary))
+    (row / 'validate.json').write_text(json.dumps(
+        {'rc': ev['validate_rc'],
+         'out': ev['validate_out']}) + '\n')
+    (row / 'busy' / 'validate.json').write_text(json.dumps(
+        {'rc': ev['busy_validate_rc'],
+         'out': ev['busy_validate_out']}) + '\n')
+    ev['export_redact_error'] = km.scan_export_redaction(
+        row, skip={'receipt.json', 'oracle-inputs.json'}
+        | km.REDACT_SKIP_LOCAL)
+    rec = km.evaluate_row(ev)
+    assert rec['ok'], rec
+    rec.update(run_id='20261101T000000Z', elapsed=1.0,
+               timeout=False, release=ev['entry']['release'])
+    job.update(run_id=rec['run_id'])
+    (row / 'job.json').write_text(json.dumps(job))
+    (row / 'oracle-inputs.json').write_text(json.dumps(ev))
+    ctx = _row_ctx(
+        kernel_selector='--kernel ' + ev['entry']['id'],
+        source_sha256=m.artifact(doc, 'deb')['sha256'])
+    ctx['source']['memveil'] = {'commit': doc['source']['commit'],
+                                'dirty': False}
+    ctx['toolchain']['lock_sha256'] = \
+        doc['toolchain']['cargo_lock_sha256']
+    receipt = km.write_row_receipt(row, rec, ev['entry'], ctx)
+    (matrix_dir / (ev['entry']['id'] + '.json')).write_text(
+        json.dumps(rec))
+    (matrix_dir / 'summary.json').write_text(json.dumps([rec]))
+    return ev, rec, receipt, row
+
+
+def test_export_rejects_distro_receipt_source_drift(
+        tmp_path):
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    doc = _matrix_manifest()
+    ev, rec, receipt, row = _write_real_distro_matrix_row(
+        c, tmp_path, doc)
+    lock = _matrix_lock(copy.deepcopy(ev['entry']))
+    assert km.verify_tested_rows(
+        tmp_path, lock, doc) == {ev['entry']['id']:
+                                 rec['checks']}
+    output = tmp_path / 'tested.txt'
+    assert km.export_tested_candidate(
+        tmp_path, lock, doc, output) == c.expected_payload(doc)
+    receipt['kernel']['lock_source']['packages'][0][
+        'sha256'] = '0' * 64
+    assert receipt['kernel']['lock_source'] != \
+        lock['kernels'][0]['source']
+    (row / 'receipt.json').write_text(json.dumps(receipt))
+    with pytest.raises(ValueError,
+                      match='kernel source differs'):
+        km.verify_tested_rows(tmp_path, lock, doc)
+    refused = tmp_path / 'refused.txt'
+    with pytest.raises(ValueError,
+                      match='kernel source differs'):
+        km.export_tested_candidate(tmp_path, lock, doc,
+                                   refused)
+    assert not refused.exists()
 
 
 @pytest.mark.parametrize('damage,blame', [

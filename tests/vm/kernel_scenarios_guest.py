@@ -13,6 +13,7 @@ a failed command and never falls back, except the memcg
 scenario's second calibrated run.
 """
 
+import gzip
 import hashlib
 import json
 import os
@@ -60,6 +61,23 @@ BTF_PATH = "/sys/kernel/btf/vmlinux"
 FTRACE_ENABLED = "/proc/sys/kernel/ftrace_enabled"
 CGROUP = "/sys/fs/cgroup"
 MC_GROUP = "mvt_small"
+
+HOOK_EVT = TRACEFS_SYS + "/events/swiotlb/swiotlb_bounced"
+HOOK_FILTER_FUNCS = TRACEFS_SYS + "/available_filter_functions"
+
+WANT_FUNCS = {
+    "map": "swiotlb_tbl_map_single",
+    "unmap": "__swiotlb_tbl_unmap_single",
+    "copy": "swiotlb_bounce",
+    "syncc": "__swiotlb_sync_single_for_cpu",
+    "syncd": "__swiotlb_sync_single_for_device",
+}
+
+CMDLINE_PATH = "/proc/cmdline"
+CONFIG_GZ_PATH = "/proc/config.gz"
+VERSION_PATH = "/proc/version"
+LOCKDOWN_PATH = "/sys/kernel/security/lockdown"
+MODULES_ROOT = "/lib/modules"
 
 _OUT = "/tmp/mv"
 _EXPORT = "/tmp/export"
@@ -150,6 +168,23 @@ def sha_file(path):
     return digest.hexdigest()
 
 
+def tool_version(name, unresolved):
+    """First --version line, or the unresolved marker.
+
+    The scenario guest never sees the host tool paths, so it
+    probes its own PATH; a missing or version-unreadable tool
+    records the explicit marker instead of failing or omitting
+    the key (a real --version first line is never the marker).
+    """
+    path = shutil.which(name)
+    if path is not None:
+        proc = sh([path, "--version"])
+        for line in (proc.stdout or "").splitlines():
+            if line.strip():
+                return line.strip()
+    return unresolved
+
+
 def record_artifacts(km, out, mv, mode):
     if mode == "deb":
         roots = ["/usr/lib/memveil"]
@@ -178,8 +213,96 @@ def record_artifacts(km, out, mv, mode):
     write(os.path.join(out, "artifacts.json"), json.dumps(
         {"mode": mode, "binary": {"path": mv,
                                  "sha256": km.sha_file(mv)},
-         "dpkg_version": dpkg_version, "bpf": bpf},
+         "dpkg_version": dpkg_version, "bpf": bpf,
+         "bpftrace": tool_version(
+             "bpftrace", km.ARTIFACTS_TOOL_UNRESOLVED),
+         "bpftool": tool_version(
+             "bpftool", km.ARTIFACTS_TOOL_UNRESOLVED)},
         indent=2, sort_keys=True) + "\n")
+
+
+def detect_hooks():
+    """Trace-hook presence map, same shape as the matrix guest."""
+    present = {}
+    present["tp"] = os.path.isdir(HOOK_EVT)
+    try:
+        funcs = Path(HOOK_FILTER_FUNCS).read_text().splitlines()
+    except OSError:
+        funcs = None
+    for key, func in WANT_FUNCS.items():
+        if funcs is None:
+            present[key] = False
+        else:
+            present[key] = func in funcs
+    omitted = [key for key, ok in present.items() if not ok]
+    return present, omitted
+
+
+def write_btf_sha(out, src=BTF_PATH):
+    """Sha256 of the guest BTF, or absent/unreadable sentinel."""
+    try:
+        with open(src, "rb") as handle:
+            raw = handle.read()
+        write(os.path.join(out, "btf-sha.txt"),
+              hashlib.sha256(raw).hexdigest() + "\n")
+    except OSError:
+        write(os.path.join(out, "btf-sha.txt"), "absent\n")
+    except Exception:
+        write(os.path.join(out, "btf-sha.txt"),
+              "unreadable\n")
+
+
+def record_guest_identity(out):
+    """Guest identity set, same files and shapes as the matrix guest.
+
+    Runs once before any scenario: later legs bind-mount over
+    the BTF, disable ftrace, and unmount tracefs, so only a
+    pre-scenario capture describes the booted kernel. A missing
+    modules dir or an unreadable /proc/version fails the run
+    (broken guest environment, as in the matrix guest); the
+    config, BTF, and lockdown captures degrade to explicit
+    sentinels instead.
+    """
+    release = os.uname().release
+    write(os.path.join(out, "uname.txt"),
+          release + "\n" + Path(CMDLINE_PATH).read_text())
+    try:
+        mods = os.readlink(os.path.join(MODULES_ROOT, release))
+        mods_path = os.path.join(MODULES_ROOT, release, mods) \
+            if not os.path.isabs(mods) else mods
+    except OSError:
+        mods_path = os.path.join(MODULES_ROOT, release)
+    if not os.path.isdir(mods_path):
+        fail("guest modules dir missing: %s" % mods_path)
+    write(os.path.join(out, "mods.txt"),
+          release + "\n" + mods_path + "\n")
+    try:
+        with gzip.open(CONFIG_GZ_PATH, "rb") as handle:
+            raw = handle.read()
+        write(os.path.join(out, "configid.txt"),
+              hashlib.sha256(raw).hexdigest() + "\n")
+    except OSError:
+        write(os.path.join(out, "configid.txt"), "absent\n")
+    except Exception:
+        write(os.path.join(out, "configid.txt"),
+              "unreadable\n")
+    write_btf_sha(out, BTF_PATH)
+    try:
+        write(os.path.join(out, "version.txt"),
+              Path(VERSION_PATH).read_text())
+    except OSError as exc:
+        fail("cannot read /proc/version: %s" % exc)
+    try:
+        write(os.path.join(out, "lockdown.txt"),
+              Path(LOCKDOWN_PATH).read_text())
+    except OSError:
+        write(os.path.join(out, "lockdown.txt"), "absent\n")
+    present, omitted = detect_hooks()
+    btf_present = os.path.isfile(BTF_PATH)
+    write(os.path.join(out, "hooks.json"),
+          json.dumps({"present": present, "omitted": omitted,
+                      "btf": btf_present},
+                     indent=2, sort_keys=True) + "\n")
 
 
 def doctor_argv(mv, load_check, cp_object=None):
@@ -191,11 +314,27 @@ def doctor_argv(mv, load_check, cp_object=None):
     return argv
 
 
-def record_argv(mv, dest, duration, cp_object=None):
+def record_strict(name):
+    """Finalizing legs run record under --strict.
+
+    Base and the three degrading negatives finalize a
+    capture whose session verdict is never complete, so
+    strict record exits 4 there; the eight refusal legs
+    cannot start and exit 3 without the flag. The strict
+    set is exactly the workload set: only a finalizing
+    leg runs the workload.
+    """
+    return name in WORKLOAD_SCENARIOS
+
+
+def record_argv(mv, dest, duration, cp_object=None,
+                strict=False):
     argv = [mv, "record", "--output", dest, "--duration",
            str(duration), "--capability", ALL_CAPS]
     if cp_object:
         argv += ["--cp-object", cp_object]
+    if strict:
+        argv.append("--strict")
     return argv
 
 
@@ -229,13 +368,14 @@ def run_doctor(sdir, mv, name, load_check, cp_object,
 
 
 def run_record(sdir, mv, cap, duration, cp_object, wrap,
-               with_workload, load, dev):
+               with_workload, load, dev, strict):
     rec_stdout = open(os.path.join(sdir, "record.stdout"),
                       "w")
     rec_stderr = open(os.path.join(sdir, "record.stderr"),
                       "w")
     proc = subprocess.Popen(
-        wrap(record_argv(mv, cap, duration, cp_object)),
+        wrap(record_argv(mv, cap, duration, cp_object,
+                         strict=strict)),
         stdout=rec_stdout, stderr=rec_stderr,
         start_new_session=True)
     if with_workload:
@@ -342,7 +482,7 @@ def scenario_base(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 10,
                None, ctx["plain"], True, ctx["load"],
-               ctx["dev"])
+               ctx["dev"], strict=record_strict("base"))
     teardown_proof(sdir, mv)
 
 
@@ -365,7 +505,7 @@ def scenario_negative(ctx, name):
     run_record(sdir, mv, os.path.join(sdir, "cap"),
                10 if with_workload else 5, cp_object,
                ctx["plain"], with_workload, ctx["load"],
-               ctx["dev"])
+               ctx["dev"], strict=record_strict(name))
     if name in REPORT_SCENARIOS:
         run_reports(sdir, mv, os.path.join(sdir, "cap"))
     teardown_proof(sdir, mv)
@@ -415,7 +555,8 @@ def scenario_nonroot(ctx):
                wrap_nonroot)
     run_record(sdir, mv,
                os.path.join(nobody_dir, "rec"), 5, None,
-               wrap_nonroot, False, ctx["load"], ctx["dev"])
+               wrap_nonroot, False, ctx["load"], ctx["dev"],
+               strict=record_strict("nonroot"))
     teardown_proof(sdir, mv)
 
 
@@ -442,7 +583,7 @@ def scenario_nocaps(ctx):
                wrap_nocaps)
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, wrap_nocaps, False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"], strict=record_strict("nocaps"))
     teardown_proof(sdir, mv)
 
 
@@ -467,7 +608,8 @@ def scenario_ftrace_off(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("ftrace-off"))
     restored = None
     if orig is not None:
         try:
@@ -524,7 +666,8 @@ def scenario_tracefs_unmounted(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("tracefs-unmounted"))
     mount_log = []
     for entry in sorted(found,
                         key=lambda e: e["point"]):
@@ -588,7 +731,8 @@ def scenario_btf_empty(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("btf-empty"))
     sh(["umount", BTF_PATH], timeout=60)
     _, restored_sha = _btf_orig()
     teardown_proof(sdir, mv)
@@ -629,7 +773,8 @@ def scenario_btf_truncated(ctx):
                ctx["plain"])
     run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                None, ctx["plain"], False, ctx["load"],
-               ctx["dev"])
+               ctx["dev"],
+               strict=record_strict("btf-truncated"))
     sh(["umount", BTF_PATH], timeout=60)
     _, restored_sha = _btf_orig()
     teardown_proof(sdir, mv)
@@ -708,7 +853,8 @@ def scenario_memcg(ctx):
                    ctx["plain"])
         run_record(sdir, mv, os.path.join(sdir, "cap"), 5,
                    None, ctx["plain"], False, ctx["load"],
-                   ctx["dev"])
+                   ctx["dev"],
+                   strict=record_strict("memcg"))
         teardown_proof(sdir, mv)
         return
     for num in range(2):
@@ -819,7 +965,8 @@ def _memcg_attempt(ctx, sdir, num):
                wrap)
     run_doctor(attdir, mv, "doctor-load", True, None, wrap)
     run_record(attdir, mv, os.path.join(attdir, "cap"), 5,
-               None, wrap, False, ctx["load"], ctx["dev"])
+               None, wrap, False, ctx["load"], ctx["dev"],
+               strict=record_strict("memcg"))
     oom_after = _cg_oom(MC_GROUP)
     exits = []
     for leaf in ("doctor-passive.exit", "doctor-load.exit",
@@ -890,9 +1037,7 @@ def run(argv):
     if not mv or not os.path.isfile(mv):
         fail("memveil binary missing: %r" % mv)
     record_artifacts(km, out, mv, mode)
-    write(os.path.join(out, "uname.txt"),
-          os.uname().release + "\n"
-          + Path("/proc/cmdline").read_text())
+    record_guest_identity(out)
     subprocess.run(["mount", "-t", "debugfs", "none",
                     "/sys/kernel/debug"],
                    capture_output=True)

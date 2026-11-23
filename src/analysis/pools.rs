@@ -124,6 +124,22 @@ impl<const POOL_N: usize> PoolTracker<POOL_N> {
             .collect()
     }
 
+    /// Pools beyond the per-pool detail budget: their gauges
+    /// never entered per-pool rows, so the prose headline
+    /// qualifies its total against this count. Prose-only: no
+    /// metric row carries it, keeping JSON byte-identical.
+    pub fn withheld_from_detail(&self) -> u64 {
+        self.pools.len().saturating_sub(MAX_POOL_DETAIL) as u64
+    }
+
+    /// Pool samples refused after the table filled: each one
+    /// named an untracked pool id, so the true pool total is
+    /// unknown past the tracked count. Prose-only, like the
+    /// withheld count.
+    pub fn refused_samples(&self) -> u64 {
+        self.refused as u64
+    }
+
     /// Human-readable bounds/anomaly notes for the report.
     pub fn limitations(&self) -> Vec<String> {
         let mut out = self.notes.clone();
@@ -228,7 +244,9 @@ impl<const POOL_N: usize> PoolTracker<POOL_N> {
     /// dropped tail) without latching tracker state: gauge
     /// coverage degrades and the proved streak reads zero in
     /// this view only, so a partial snapshot cannot alter
-    /// later facts.
+    /// later facts. Past the detail budget the per-pool rows
+    /// stop; the withheld count travels prose-only through
+    /// [`PoolTracker::withheld_from_detail`], never as a row.
     pub fn metrics(&self, window: &str, overlay_detail_loss: bool) -> Vec<Metric> {
         let mut out = Vec::new();
         let kept = self.pools.len().min(MAX_POOL_DETAIL);
@@ -667,5 +685,61 @@ mod tests {
         assert_eq!(t.streak_of("p1").unwrap(), 2);
         t.consume(&sample("p1", true, 900, true, 1000, "bytes", 4));
         assert_eq!(t.pressured_pools().len(), 1);
+    }
+
+    #[test]
+    fn detail_budget_withholds_and_counts() {
+        // Past 256 pools the per-pool rows stop and the
+        // withheld count travels prose-only through the
+        // accessor, never as a metric row, so JSON renders
+        // byte-identically with or without the budget.
+        let mut t: PoolTracker = PoolTracker::new();
+        for i in 0..257 {
+            let id = format!("pool-{i:03}");
+            t.consume(&sample(&id, true, 900, true, 1000, "bytes", i as u64 + 1));
+        }
+        assert_eq!(t.withheld_from_detail(), 1);
+        let rows = t.metrics("window [0,2000)", false);
+        assert!(rows.iter().all(|m| m.has_pool_id));
+        assert!(find(&rows, "pool_used_bytes", "pool-000").has_value);
+        assert!(
+            rows.iter()
+                .all(|m| !m.has_pool_id || m.pool_id != "pool-256")
+        );
+        assert!(
+            t.limitations()
+                .iter()
+                .any(|n| n.contains("1 pools withheld from per-pool rows"))
+        );
+        // Full coverage withholds nothing.
+        let mut full: PoolTracker = PoolTracker::new();
+        for i in 0..256 {
+            let id = format!("pool-{i:03}");
+            full.consume(&sample(&id, true, 900, true, 1000, "bytes", i as u64 + 1));
+        }
+        assert_eq!(full.withheld_from_detail(), 0);
+        let rows = full.metrics("window [0,2000)", false);
+        assert!(rows.iter().all(|m| m.has_pool_id));
+    }
+
+    #[test]
+    fn exhausted_table_refuses_and_counts() {
+        // Past 1024 tracked pools new ids refuse: each refused
+        // sample named an untracked pool, so the true total is
+        // unknown past the tracked count.
+        let mut t: PoolTracker = PoolTracker::new();
+        for i in 0..1025 {
+            let id = format!("pool-{i:04}");
+            t.consume(&sample(&id, true, 900, true, 1000, "bytes", i as u64 + 1));
+        }
+        assert_eq!(t.refused_samples(), 1);
+        assert_eq!(t.withheld_from_detail(), 768);
+        assert!(
+            t.limitations()
+                .iter()
+                .any(|n| n.contains("1 pool samples refused"))
+        );
+        let rows = t.metrics("window [0,2000)", false);
+        assert!(rows.iter().all(|m| m.has_pool_id));
     }
 }

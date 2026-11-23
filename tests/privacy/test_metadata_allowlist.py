@@ -20,14 +20,40 @@ reviewed). Exits nonzero on the first violation.
 import glob
 import json
 import contextlib
+import copy
 import io
 import os
 import re
+import runpy
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 RUST = REPO
+
+# Registered schema filenames, the single source of truth shared
+# with the schema self-test (tools/validate-schemas pins each
+# file's $id to its name). Schema identity below always verifies
+# against this set; a document's own $id is never trusted.
+VALIDATOR = runpy.run_path(os.path.join(REPO, "tools", "validate-schemas"))
+REGISTERED_SCHEMA_FILES = frozenset(VALIDATOR["SCHEMA_FILES"])
+_REGISTERED_DOCS = {}
+
+
+def _matches_registered(name, doc):
+    """True when `doc` equals the registered file `name` on
+    disk: an unattested identity claim verifies only as the
+    genuine registered content, never by $id alone. Missing
+    or unreadable files verify nothing (fail closed)."""
+    if name not in REGISTERED_SCHEMA_FILES:
+        return False
+    if name not in _REGISTERED_DOCS:
+        try:
+            with open(os.path.join(REPO, "schemas", name)) as handle:
+                _REGISTERED_DOCS[name] = json.load(handle)
+        except (OSError, ValueError):
+            return False
+    return doc == _REGISTERED_DOCS[name]
 
 FORBIDDEN_PROPS = {
     "payload", "payload_bytes", "key", "key_material", "private_key",
@@ -37,6 +63,62 @@ FORBIDDEN_PROPS = {
     "username", "ip_address", "mac_address",
 }
 
+# comm/pid/tgid reviewed 2026-11-22: the event schema's
+# reserved observer_context block names the observing
+# execution context (cpu/pid/tgid/comm/cgroup_id under
+# relation execution_context_only). The shipped collector
+# never sets it, no renderer emits it (pinned by the canary
+# suites), and foreign captures re-persist it verbatim, so
+# these three names are allowed ONLY inside that block, in
+# event schemas. Any new identity-shaped name, any of these
+# names outside the block, any change to the block's frozen
+# shape, or the block appearing in any non-event schema
+# fails review here.
+REVIEWED_ALLOWED_PROPS = {"comm", "pid", "tgid"}
+OBSERVER_FROZEN_PROPS = {"cpu", "pid", "tgid", "comm", "cgroup_id", "relation"}
+
+# The reviewed observer block lives at exactly these schema
+# path segments: the walker compares segment vectors, never a
+# joined string, so only equality exempts and a "/" inside a
+# key cannot collide with the reviewed path.
+OBSERVER_EXACT_PATH = ("properties", "observer_context")
+OBSERVER_PARENT_PATH = ("properties",)
+
+
+def event_schema(schema_id):
+    """True for event schemas: the leak exemption covers the
+    reviewed slot there only. `schema_id` is always a verified
+    registered filename (or ""), never a document's own $id, so
+    an unreviewed schema claiming an event- ID still fails. Any
+    other schema gaining an observer_context block fails, even a
+    byte-identical one, because that block was never reviewed
+    for that schema. The exemption cannot smuggle new names:
+    the unscoped freeze below still demands the byte-identical
+    node."""
+    return schema_id.startswith("event-")
+
+# The frozen observer block, byte-identical in every event
+# schema carrying it: property inventory, value bounds, and
+# the relation const. Any drift fails review here.
+OBSERVER_FROZEN = {
+    "additionalProperties": False,
+    "description": "Execution context only, unless a separate "
+                   "adapter proves ownership.",
+    "properties": {
+        "cgroup_id": {"$ref": "#/$defs/opaque_id"},
+        "comm": {"maxLength": 64, "type": "string"},
+        "cpu": {"maximum": 1048575, "minimum": 0,
+                "type": "integer"},
+        "pid": {"maximum": 4194304, "minimum": 0,
+                "type": "integer"},
+        "relation": {"const": "execution_context_only"},
+        "tgid": {"maximum": 4194304, "minimum": 0,
+                 "type": "integer"},
+    },
+    "required": ["relation"],
+    "type": "object",
+}
+
 # --profiles-dir reviewed 2026-10-11: a profile/receipt
 # directory selector (read by doctor/record, read and
 # written by qualify). It adds no data source, no
@@ -44,16 +126,19 @@ FORBIDDEN_PROPS = {
 # channel; the invoking operator chooses which profile
 # set to trust, exactly like --profile/--object.
 # --compact: cli/top.rs parse_top_args selects presentation only.
+# --full: cli/top.rs parse_top_args selects full per-refresh
+# reports instead of headlines. Both add no collection,
+# environment or payload source.
 # --strict: parse_report_args/parse_top_args/parse_record_args select partial-evidence exit policy.
 # --profile-id: cli/bind.rs parse_bind_args names the profile being generated.
 # These existing selectors add no collection, environment or payload source.
 ALLOWED_FLAGS = {
     "--allow-partial", "--bridge", "--capability", "--cp-object",
-    "--device", "--duration", "--format", "--help", "--interval",
-    "--json", "--lc-object", "--load-check", "--long-lived-after",
-    "--max-events-bytes", "--max-line-bytes", "--max-session-bytes",
-    "--object", "--output", "--profile", "--profiles-dir",
-    "--compact", "--strict", "--profile-id",
+    "--device", "--duration", "--format", "--full", "--help",
+    "--interval", "--json", "--lc-object", "--load-check",
+    "--long-lived-after", "--max-events-bytes", "--max-line-bytes",
+    "--max-session-bytes", "--object", "--output", "--profile",
+    "--profiles-dir", "--compact", "--strict", "--profile-id",
 }
 
 # SUDO_UID/SUDO_GID reviewed 2026-10-11: read once by
@@ -135,6 +220,59 @@ def schema_props(path):
     return names
 
 
+def schema_blocks(doc, origin=None):
+    """Every (path segments, property-name set, object node,
+    verified schema id) for object schemas carrying properties,
+    so identity-shaped names can be contained to their reviewed
+    block and the block's frozen shape (bounds and consts
+    included) can be pinned, not just its key inventory. The
+    reviewed slot is pinned even when shapeless, so a
+    present-but-propertyless observer node fails the freeze
+    loudly instead of passing vacuously by never entering the
+    walk. `origin` is the registered filename the document was
+    read from; without one the document's own $id verifies
+    only when it names a registered file whose on-disk content
+    the document equals, so an unreviewed schema claiming an
+    event- ID — registered or not — is never exempt."""
+    found = []
+    if origin is None:
+        claimed = doc.get("$id", "") if isinstance(doc, dict) else ""
+        verified = claimed if _matches_registered(claimed, doc) else ""
+    else:
+        verified = origin if origin in REGISTERED_SCHEMA_FILES else ""
+    def walk(o, path):
+        if isinstance(o, dict):
+            if isinstance(o.get("properties"), dict):
+                found.append((path, set(o["properties"].keys()),
+                              o, verified))
+            if path == OBSERVER_PARENT_PATH and "observer_context" in o:
+                child = o["observer_context"]
+                if not (isinstance(child, dict)
+                        and isinstance(child.get("properties"), dict)):
+                    found.append((OBSERVER_EXACT_PATH, set(),
+                                  child, verified))
+            for k, v in o.items():
+                walk(v, path + (k,))
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                walk(v, path + (i,))
+    walk(doc, ())
+    return found
+
+
+def observer_frozen_ok(blocks):
+    return all(node == OBSERVER_FROZEN
+               for where, props, node, schema in blocks
+               if where == OBSERVER_EXACT_PATH)
+
+
+def observer_leaked(blocks):
+    return sorted({n for where, props, node, schema in blocks
+                   if not (where == OBSERVER_EXACT_PATH
+                           and event_schema(schema))
+                   for n in props & REVIEWED_ALLOWED_PROPS})
+
+
 def audit_flags(flags):
     check("flags-frozen", flags == ALLOWED_FLAGS,
           "extra %s missing %s"
@@ -152,6 +290,126 @@ def self_check_flag_audit():
         check('flags-sensitivity', rejected, 'flag inventory mutation was accepted')
 
 
+def self_check_observer_audit():
+    # Synthetic stand-ins declare their schema identity like
+    # real files: the leak exemption covers registered event
+    # schemas only, so the event-shaped controls carry a
+    # registered event id.
+    eid = "event-v0.1.2.schema.json"
+    frozen = copy.deepcopy(OBSERVER_FROZEN)
+    clean = {"$id": eid,
+             "properties": {"observer_context": frozen,
+                            "data": {"properties": {"device_id": {}}}}}
+    check("observer-clean-accepted",
+          observer_frozen_ok(schema_blocks(clean, origin=eid))
+          and observer_leaked(schema_blocks(clean, origin=eid)) == [])
+    check("observer-name-inventory",
+          set(OBSERVER_FROZEN["properties"])
+          == OBSERVER_FROZEN_PROPS)
+    grown = {"$id": eid,
+             "properties": {"observer_context":
+                            dict(copy.deepcopy(OBSERVER_FROZEN),
+                                 properties=dict(
+                                     OBSERVER_FROZEN["properties"],
+                                     uid={}))}}
+    check("observer-growth-rejected",
+          not observer_frozen_ok(schema_blocks(grown, origin=eid)))
+    stray = {"$id": eid,
+             "properties": {"observer_context": frozen,
+                            "data": {"properties": {"comm": {}}}}}
+    check("observer-stray-rejected",
+          observer_leaked(schema_blocks(stray, origin=eid)) == ["comm"])
+    # A same-named block in an unreviewed location is not
+    # the reviewed block: its identity names leak.
+    smuggled = {"$id": eid,
+                "properties": {"extra": {"properties":
+                                         {"observer_context":
+                                          copy.deepcopy(
+                                              OBSERVER_FROZEN)}}}}
+    smuggled_blocks = schema_blocks(smuggled, origin=eid)
+    check("observer-smuggled-path-rejected",
+          observer_leaked(smuggled_blocks) != []
+          and not (observer_frozen_ok(smuggled_blocks)
+                   and not observer_leaked(smuggled_blocks)))
+    # The freeze covers values, not just key names: a
+    # retargeted relation const fails the frozen check.
+    mutated = {"$id": eid,
+               "properties": {"observer_context":
+                              copy.deepcopy(OBSERVER_FROZEN)}}
+    mutated["properties"]["observer_context"][
+        "properties"]["relation"]["const"] = "origin"
+    mutated_blocks = schema_blocks(mutated, origin=eid)
+    check("observer-const-rejected",
+          not observer_frozen_ok(mutated_blocks)
+          and not (observer_frozen_ok(mutated_blocks)
+                   and not observer_leaked(mutated_blocks)))
+    # A present-but-shapeless observer node fails loudly
+    # instead of passing vacuously: property-less objects
+    # and non-objects alike never equal the frozen node.
+    for slot in ({"type": "object"}, True):
+        shapeless = {"$id": eid,
+                     "properties": {"observer_context": slot}}
+        shapeless_blocks = schema_blocks(shapeless, origin=eid)
+        check("observer-shapeless-rejected",
+              not observer_frozen_ok(shapeless_blocks)
+              and not (observer_frozen_ok(shapeless_blocks)
+                       and not observer_leaked(shapeless_blocks)))
+    # The exemption covers event schemas only: a
+    # byte-identical block in any other schema leaks its
+    # reviewed names, because that block was never reviewed
+    # for that schema.
+    foreign = {"$id": "doctor-v0.1.1.schema.json",
+               "properties": {"observer_context":
+                              copy.deepcopy(OBSERVER_FROZEN)}}
+    foreign_blocks = schema_blocks(foreign, origin="doctor-v0.1.1.schema.json")
+    check("observer-foreign-schema-rejected",
+          observer_leaked(foreign_blocks) != []
+          and not (observer_frozen_ok(foreign_blocks)
+                   and not observer_leaked(foreign_blocks)))
+    # An unreviewed schema claiming an event- ID is never
+    # exempt: identity verifies against registered filenames,
+    # never the document's own $id.
+    spoofed = {"$id": "event-selfcheck.schema.json",
+               "properties": {"observer_context":
+                              copy.deepcopy(OBSERVER_FROZEN)}}
+    spoofed_blocks = schema_blocks(spoofed)
+    check("observer-spoofed-id-rejected",
+          observer_leaked(spoofed_blocks) != []
+          and not (observer_frozen_ok(spoofed_blocks)
+                   and not observer_leaked(spoofed_blocks)))
+    # A copied registered $id verifies nothing without the
+    # registered content: the claim must equal the file.
+    copied = {"$id": eid,
+              "properties": {"observer_context":
+                             copy.deepcopy(OBSERVER_FROZEN)}}
+    copied_blocks = schema_blocks(copied)
+    check("observer-copied-id-rejected",
+          observer_leaked(copied_blocks) != []
+          and not (observer_frozen_ok(copied_blocks)
+                   and not observer_leaked(copied_blocks)))
+    # The genuine registered content verifies unattested: the
+    # fallback admits the reviewed file itself.
+    genuine = json.load(open(os.path.join(REPO, "schemas", eid)))
+    genuine_blocks = schema_blocks(genuine)
+    check("observer-genuine-registered-accepted",
+          observer_frozen_ok(genuine_blocks)
+          and not observer_leaked(genuine_blocks))
+    # A key containing "/" cannot collide with the reviewed
+    # path: segment vectors compare, never joined strings, so
+    # the smuggled block's names leak even though the genuine
+    # block beside it stays frozen and exempt.
+    slashed = {"$id": eid,
+               "properties": {"observer_context":
+                              copy.deepcopy(OBSERVER_FROZEN)},
+               "properties/observer_context":
+                   copy.deepcopy(OBSERVER_FROZEN)}
+    slashed_blocks = schema_blocks(slashed, origin=eid)
+    check("observer-slashed-key-rejected",
+          observer_leaked(slashed_blocks) != []
+          and not (observer_frozen_ok(slashed_blocks)
+                   and not observer_leaked(slashed_blocks)))
+
+
 def strip_line_comments(text):
     return "\n".join(
         line for line in text.split("\n")
@@ -161,6 +419,7 @@ def strip_line_comments(text):
 def main():
     self_check_extractor()
     self_check_flag_audit()
+    self_check_observer_audit()
     schemas = sorted(glob.glob(os.path.join(REPO, "schemas", "*.json")))
     check("schemas-present", len(schemas) >= 5, "%d files" % len(schemas))
     for path in schemas:
@@ -168,6 +427,13 @@ def main():
         bad = sorted(props & FORBIDDEN_PROPS)
         check("schema-%s" % os.path.basename(path), not bad,
               "forbidden %s" % bad)
+        blocks = schema_blocks(json.load(open(path)),
+                              origin=os.path.basename(path))
+        check("schema-observer-frozen-%s" % os.path.basename(path),
+              observer_frozen_ok(blocks), "observer_context drifted")
+        leaked = observer_leaked(blocks)
+        check("schema-identity-contained-%s" % os.path.basename(path),
+              not leaked, "reviewed names outside observer_context: %s" % leaked)
 
     progs = sorted(glob.glob(os.path.join(
         RUST, "crates", "ebpf", "src", "*.rs")) + glob.glob(os.path.join(

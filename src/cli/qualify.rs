@@ -19,8 +19,8 @@ use crate::capture::run::{
 };
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, sanitize_diagnostic,
-    write_capture_location, write_stderr,
+    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, expand_flag_eq,
+    invalid_capability_message, sanitize_diagnostic, write_capture_location, write_stderr,
 };
 use crate::model::session::parse_session;
 use crate::platform::artifact_files::{
@@ -82,8 +82,25 @@ fn is_option(text: &str) -> bool {
     text.as_bytes().first() == Some(&0x2d)
 }
 
+/// Value-taking qualify flags: the `--flag=value` set.
+///
+/// Every option takes a value, so the set names all eight: both
+/// spellings share every error path including the capability list.
+const QUALIFY_VALUE_FLAGS: &[&str] = &[
+    "--output",
+    "--object",
+    "--bridge",
+    "--profile",
+    "--profiles-dir",
+    "--lc-object",
+    "--cp-object",
+    "--capability",
+];
+
 /// Parse qualify arguments without the leading verb.
 pub fn parse_qualify_args(args: &[String]) -> Result<QualifyOptions, CliError> {
+    let expanded = expand_flag_eq(args, QUALIFY_VALUE_FLAGS);
+    let args = &expanded;
     let mut opts = QualifyOptions::default();
     let mut i = 0;
     while i < args.len() {
@@ -170,6 +187,15 @@ pub fn parse_qualify_args(args: &[String]) -> Result<QualifyOptions, CliError> {
             message: "missing --output".to_string(),
         });
     }
+    // A malformed capability list is a usage error (exit 2),
+    // like record: admission refusals (exit 3) are reserved
+    // for wellformed lists the world cannot satisfy.
+    let ask = parse_requested_caps(&opts.capabilities);
+    if !ask.ok {
+        return Err(CliError {
+            message: invalid_capability_message(&ask.err),
+        });
+    }
     Ok(opts)
 }
 
@@ -181,8 +207,10 @@ pub fn qualify_usage() -> String {
         "       [--profiles-dir DIR] [--capability IDS]\n",
         "       [--lc-object PATH] [--cp-object PATH]\n",
         "\n",
-        "Run a short smoke capture into DIR and, when it\n",
-        "proves the requested channels, publish a\n",
+        "Prove this host can be measured (needs root): the common\n",
+        "case is sudo memveil qualify --output DIR --object PATH\n",
+        "--bridge PATH, which runs a short smoke capture into DIR\n",
+        "and, when it proves the requested channels, publishes a\n",
         "machine-local local-auto receipt under\n",
         "<profiles-dir>/receipts (/var/lib/memveil/receipts\n",
         "for an installed package). --object and --bridge are\n",
@@ -201,6 +229,10 @@ pub fn qualify_usage() -> String {
         "--lc-object and copy-actual needs --cp-object when\n",
         "those channels are wanted, else the run refuses\n",
         "before the smoke.\n",
+        "\n",
+        "Example:\n",
+        "  sudo memveil qualify --output /tmp/q1 --object attempt.bpf.o --bridge bin/memveil\n",
+        "  sudo memveil qualify --output /tmp/q1 --profile my-host.json --object attempt.bpf.o --bridge bin/memveil\n",
     )
     .to_string()
 }
@@ -1119,6 +1151,58 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn qualify_args_bad_capability_lists_ids() {
+        let err = parse_qualify_args(&args(&["--output", "out", "--capability", "bogus"]))
+            .expect_err("bad caps reject");
+        assert_eq!(
+            err.message,
+            "unknown capability: bogus; valid capabilities: attempt-trace, mapping-lifecycle, \
+             copy-actual, conversion-observe, conversion-journal, all"
+        );
+    }
+
+    #[test]
+    fn qualify_args_flag_eq_forms() {
+        // Every option takes a value, so every flag accepts the
+        // inline spelling with identical semantics.
+        let opts = parse_qualify_args(&args(&[
+            "--output=out",
+            "--object=obj.o",
+            "--bridge=br.so",
+            "--profile=p1",
+            "--profiles-dir=qd",
+            "--lc-object=lc.o",
+            "--cp-object=cp.o",
+            "--capability=attempt-trace,mapping-lifecycle",
+        ]))
+        .expect("eq forms parse");
+        assert_eq!(opts.output, "out");
+        assert_eq!(opts.object, "obj.o");
+        assert_eq!(opts.bridge, "br.so");
+        assert!(opts.has_bridge);
+        assert_eq!(opts.profile, "p1");
+        assert!(opts.has_profile);
+        assert_eq!(opts.profiles_dir, "qd");
+        assert!(opts.has_profiles_dir);
+        assert_eq!(opts.lc_object, "lc.o");
+        assert_eq!(opts.cp_object, "cp.o");
+        assert_eq!(opts.capabilities, "attempt-trace,mapping-lifecycle");
+        // Inline errors share the spaced paths, including the list.
+        let err = parse_qualify_args(&args(&["--output=out", "--capability=bogus"]))
+            .expect_err("inline bad caps reject");
+        assert!(err.message.contains("unknown capability: bogus"));
+        assert!(err.message.contains("valid capabilities: attempt-trace"));
+        // A word in value position never splits.
+        let err = parse_qualify_args(&args(&["--profiles-dir", "--capability=x"]))
+            .expect_err("value position consumes");
+        assert_eq!(err.message, "missing --output");
+        // Unknown flags echo the original token.
+        let err = parse_qualify_args(&args(&["--output=out", "--bogus=y"]))
+            .expect_err("unknown flag rejects");
+        assert_eq!(err.message, "unknown option: --bogus=y");
     }
 
     #[test]

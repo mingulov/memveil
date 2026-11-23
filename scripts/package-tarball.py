@@ -66,11 +66,12 @@ closure names anything outside the shipped lib/ set and the
 system allowlist, when a BPF inspection input differs
 from the binary's dumped embedded digest, carries another
 channel's marker, or stages bytes that differ from the
-dumped digest, and when the staged executable differs from
+dumped digest, when the staged executable differs from
 the validated --binary bytes or dumps a different embedded
-manifest than validated. Every
-cargo invocation strips RUSTUP_TOOLCHAIN so the repository pin
-wins.
+manifest than validated, and when the engine lacks the
+loadable x86-64-v3 ISA requirement the shipped link adds.
+Every cargo invocation strips RUSTUP_TOOLCHAIN so the
+repository pin wins.
 """
 
 import gzip
@@ -358,6 +359,45 @@ def embedded_manifest(binary):
              "release binary from this source before packaging"
              % (binary, proc.returncode, hint))
     return parse_embedded_manifest(proc.stdout, binary)
+
+
+def verify_isa_mark(path, role):
+    """Refuse an engine without the loadable v3 ISA requirement.
+
+    The shipped link marks the engine for x86-64-v3
+    (GNU_PROPERTY_X86_ISA_1_NEEDED) so the glibc loader
+    refuses older CPUs before any constructor runs; the
+    runtime_cpu verifier inspects the actual loadable
+    property and refuses an absent, weaker, or stronger
+    declaration. Runs on the normalized staged copy — the
+    exact bytes that would ship — so an unmarked binary
+    can never seal. It deliberately never re-reads the
+    mutable --binary path: the seal binds the pinned
+    validation digest plus the staged bytes, and extra
+    reads of the mutable path only widen the swap window.
+    The verifier is imported lazily: staging is the only
+    consumer, and a missing verifier must refuse, never
+    skip.
+    """
+    tools_dir = os.path.join(RUN_ROOT_DIR, "tools")
+    try:
+        sys.path.insert(0, tools_dir)
+        import runtime_cpu
+    except ImportError as exc:
+        fail("cannot load the CPU ISA verifier from %s: %s"
+             % (tools_dir, exc))
+    finally:
+        try:
+            sys.path.remove(tools_dir)
+        except ValueError:
+            pass
+    try:
+        runtime_cpu.verify_engine(path)
+    except ValueError as exc:
+        fail("engine %s (%s) lacks the loadable x86-64-v3 "
+             "ISA requirement: %s; rebuild with the shipped "
+             "link flags before packaging"
+             % (path, role, exc))
 
 
 def manifest_source(root, source):
@@ -2154,8 +2194,16 @@ def main(argv):
                      + relative)
             before = needed(path)
             if relative == "bin/memveil":
-                operations = [["patchelf", "--set-rpath",
-                               BIN_RUNPATH, relative]]
+                # --no-sort: patchelf's default header sort
+                # interleaves a NOTE program header after
+                # PT_GNU_PROPERTY, which the loadable ISA
+                # verifier forbids (the canonical property
+                # must be visited first, with no trailing
+                # note outside its checked extent). The
+                # link order already satisfies that; keep it.
+                operations = [["patchelf", "--no-sort",
+                               "--set-rpath", BIN_RUNPATH,
+                               relative]]
             else:
                 operations = [["strip", "--strip-unneeded", relative]]
                 lib_provider_sha[relative] = original
@@ -2207,6 +2255,11 @@ def main(argv):
         observed["THIRD-PARTY-NOTICES.md"] = sha256_file(
             os.path.join(staged, "THIRD-PARTY-NOTICES.md"))
 
+        # The normalized binary must still carry the mark:
+        # patchelf rewrites the executable, so re-verify the
+        # shipped bytes themselves before executing them below.
+        verify_isa_mark(binary, "staged copy")
+
         # The normalized binary must start with no loader help:
         # this rerun proves the RUNPATH resolves the staged lib.
         bare = dict(os.environ)
@@ -2249,12 +2302,14 @@ def main(argv):
             }
 
         # Known manifest gaps, intentionally unported (not
-        # oversights): no `canonical_runtime` entry — the Rust
-        # baseline (x86-64-v1) runs everywhere >= v1, so no
-        # CPU-floor gate is needed (recorded performance
-        # evidence decides if v3 codegen is warranted); and no
-        # `source_inventory` entry — the port-vs-retire record
-        # for sources lives in the parity notes instead.
+        # oversights): no `canonical_runtime` entry — the
+        # staging gate above already refuses any engine
+        # without the loadable x86-64-v3 requirement, so the
+        # floor needs no manifest duplicate (recorded
+        # performance evidence decides if v3 codegen is
+        # warranted); and no `source_inventory` entry — the
+        # port-vs-retire record for sources lives in the
+        # parity notes instead.
         manifest = {
             "bundle": tag,
             "qualification": "unqualified-local-build",

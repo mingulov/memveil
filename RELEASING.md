@@ -58,9 +58,9 @@ and never move a Q branch after dispatching on it.
   Claims pair with versions: `ordinary-preview` for `0.1.x`,
   `snp-journal` for `0.2.x`, `security-workflow` for
   `0.3.x`. The shipped template names the required gates,
-  `kernel-matrix/2` and `live-campaign/1`, with empty
-  `trusted_keys`; fill in the key digest from step 0
-  before fixing C.
+  `kernel-matrix/2` and `live-campaign/1`, with a qualifier
+  key digest already trusted in `trusted_keys`: decide reuse
+  vs replace (step 0 confirms which) before fixing C.
 - The qualifier Ed25519 key (step 0). The same key signs
   the artifact checksums, the gate receipts, and the
   remote-check receipts; its derived public bytes go in
@@ -68,6 +68,8 @@ and never move a Q branch after dispatching on it.
   `$HOME/.memveil-qualifier/`, outside the checkout, so
   key material never dirties the tree the seal gates on.
 - Toolchains: Rust 1.100.0 (`rust-toolchain.toml`),
+  gcc (the x86-64 link driver: only GNU ld merges the
+  `x86-64-v3` loader mark the bundle gate requires),
   nightly-2026-05-20 plus bpf-linker 0.10.4 for the eBPF
   child build (`build.rs`), packaging tools (`binutils`,
   `cpio`, `dpkg-dev`, `patchelf`, `rpm`), `ssh-keygen`,
@@ -75,7 +77,10 @@ and never move a Q branch after dispatching on it.
 - Keep every scratch path under the ignored `dist/` tree:
   the seal refuses a dirty source tree, and campaign
   receipts record the worktree state, so outputs anywhere
-  else would poison the evidence.
+  else would poison the evidence. Loose files at the
+  `dist/` root are scratch, never release inputs: publish
+  and upload only from a single `retained-<id>/` directory
+  (or a fresh artifacts dir produced in one seal run).
 
 ## 0. Key and policy, before C is fixed
 
@@ -97,10 +102,10 @@ sha256sum "$KEYDIR/qualifier-derived.pub"
 ```
 
 Keep `KEYDIR` exported for the steps below (like
-`CANDIDATE_SHA256` and `DEB`). Put that digest in
-`packaging/candidate-policy.json` at C (`trusted_keys`),
-with the claim, gates, and retention the release needs,
-then fix C with the policy committed.
+`CANDIDATE_SHA256` and `DEB`). Confirm that digest equals
+the `trusted_keys` entry at C (reuse), or replace the
+entry (replace), with the claim, gates, and retention the
+release needs, then fix C with the policy committed.
 
 ## Seal and sign locally
 
@@ -111,17 +116,20 @@ commit). Pin the sealed clock to C first:
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "$C")
 ```
 
-1. Build the sealable bundle, deb, and rpm from C:
+1. Build the sealable bundle, deb, and rpm from C. The
+bundle keeps its default tag, so the asset is the
+versioned `memveil-0.2.0.tar.gz` with top directory
+`memveil-0.2.0/`:
 
 ```sh
 python3 scripts/package-tarball.py --build --candidate \
-  --root . --out dist --tag bundle
-python3 scripts/package-deb.py --bundle dist/bundle \
+  --root . --out dist
+python3 scripts/package-deb.py --bundle dist/memveil-0.2.0 \
   --out dist/deb
 python3 scripts/package-rpm.py --work dist/work/rpm \
-  --out dist/rpm --bundle dist/bundle
+  --out dist/rpm --bundle dist/memveil-0.2.0
 mkdir -p dist/artifacts
-cp dist/bundle.tar.gz dist/artifacts/
+cp dist/memveil-0.2.0.tar.gz dist/artifacts/
 set -- dist/deb/*.deb; test $# -eq 1 && cp "$1" dist/artifacts/
 set -- dist/rpm/*.rpm; test $# -eq 1 && cp "$1" dist/artifacts/
 git archive --format=tar HEAD | gzip -n \
@@ -137,9 +145,9 @@ cargo build -p memveil-release-entry --locked --offline
 DEB=$(echo dist/artifacts/*.deb)
 RPM=$(echo dist/artifacts/*.rpm)
 target/debug/memveil-release-entry sbom-emit \
-  --manifest dist/bundle/MANIFEST.json \
+  --manifest dist/memveil-0.2.0/MANIFEST.json \
   --out dist/artifacts/memveil.spdx.json \
-  --bundle dist/artifacts/bundle.tar.gz \
+  --bundle dist/artifacts/memveil-0.2.0.tar.gz \
   --deb "$DEB" \
   --rpm "$RPM" \
   --lock Cargo.lock \
@@ -151,8 +159,8 @@ candidate ID; keep it in the environment from here on:
 
 ```sh
 ./tools/candidate provenance \
-  --bundle-dir dist/bundle \
-  --bundle dist/artifacts/bundle.tar.gz \
+  --bundle-dir dist/memveil-0.2.0 \
+  --bundle dist/artifacts/memveil-0.2.0.tar.gz \
   --deb "$DEB" \
   --rpm "$RPM" \
   --source dist/artifacts/memveil-source.tar.gz \
@@ -160,7 +168,7 @@ candidate ID; keep it in the environment from here on:
   --out dist/artifacts/memveil.provenance.json \
   --source-root .
 CANDIDATE_SHA256=$(./tools/candidate seal \
-  --bundle-dir dist/bundle \
+  --bundle-dir dist/memveil-0.2.0 \
   --artifacts-dir dist/artifacts \
   --policy packaging/candidate-policy.json \
   --out dist/candidate.json \
@@ -190,7 +198,7 @@ carry no `MV_DEB`/`MV_RPM`/`MEMVEIL_TEST_*` overrides
 
 ```sh
 cp dist/candidate.json dist/artifacts/candidate.json
-MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/memveil-0.2.0.tar.gz \
 MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
   ./tools/kernel-matrix --all --out dist/evidence/matrix \
     --deb "$PWD/$DEB"
@@ -209,10 +217,10 @@ and writes the verified totals into the receipt's
 `exit.json`:
 
 ```sh
-MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/memveil-0.2.0.tar.gz \
 MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
 MEMVEIL_VM_PERF=1 tools/test perf-overhead
-MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/memveil-0.2.0.tar.gz \
 MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
 MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak
 ```
@@ -464,7 +472,7 @@ TAG=candidate-$CANDIDATE_SHA256
 gh release create "$TAG" --draft -t "$TAG" --target "$C" \
   -n "Holding draft for $TAG."
 gh release upload "$TAG" \
-  dist/artifacts/bundle.tar.gz \
+  dist/artifacts/memveil-0.2.0.tar.gz \
   "$DEB" "$RPM" \
   dist/artifacts/memveil-source.tar.gz \
   dist/artifacts/memveil.spdx.json \
@@ -481,9 +489,9 @@ credentials, and the recorded ID is what CI consumes;
 no workflow lists releases. Never pass `--clobber`:
 re-uploads fail closed instead.
 
-12. Dispatch one hosted stage at a time with the ref at
-Q1. Qualify re-verifies independently; import stages
-the bytes:
+12. **Not yet exercised; required from 1.x.** Dispatch
+one hosted stage at a time with the ref at Q1. Qualify
+re-verifies independently; import stages the bytes:
 
 ```sh
 gh workflow run release.yml --ref release-q1 \
@@ -494,8 +502,9 @@ gh workflow run release.yml --ref release-q1 \
   -f source_commit="$C" -f draft_release_id="$DRAFT_RELEASE_ID"
 ```
 
-13. After a green import, record the remote receipt and
-commit Q2. Record four bindings now; do not record
+13. **Not yet exercised; required from 1.x.** After a
+green import, record the remote receipt and commit Q2.
+Record four bindings now; do not record
 `promotion-dry-run/1` here: its check-run is published by
 the dry-run dispatch in step 14 (a later
 remote-execution step), so dispatch dry-run before
@@ -560,8 +569,9 @@ git push origin HEAD:release-q2
 The diff must list exactly the four qualification
 paths (the Q1 three plus `remote.json`).
 
-14. Dispatch dry-run with the ref at Q2, passing the
-recorded import IDs:
+14. **Not yet exercised; required from 1.x.** Dispatch
+dry-run with the ref at Q2, passing the recorded import
+IDs:
 
 ```sh
 gh workflow run release.yml --ref release-q2 \
@@ -576,8 +586,9 @@ from Q2's `remote.json` (run, artifact, signer, custody)
 and ignores the check bindings; promote enforces the
 bindings, so four suffice here.
 
-15. After the dry-run dispatch is green, record the
-provisional dry-run receipt and carry it forward. The
+15. **Not yet exercised; required from 1.x.** After the
+dry-run dispatch is green, record the provisional
+dry-run receipt and carry it forward. The
 dry-run ran at Q2, so the check-run named exactly
 `promotion-dry-run/1` carries head SHA Q2. That
 check-run is published by the dry-run dispatch at
@@ -610,8 +621,9 @@ inputs, the inputs, the base64 signature
 `memveil-candidate`, as in step 6), and the public
 key.
 
-16. Assemble the final promotion evidence: the same
-import coordinates with all five check bindings (the
+16. **Not yet exercised; required from 1.x.** Assemble
+the final promotion evidence: the same import
+coordinates with all five check bindings (the
 four at Q1 plus `promotion-dry-run/1` at Q2 from the
 provisional receipt). Commit the finalized receipt as
 Q3 on a third frozen branch:
@@ -628,8 +640,9 @@ The diff must list exactly the same four
 qualification paths (`remote.json` amended, still
 evidence-only over C).
 
-17. After the dry-run dispatch is green and Q3 is
-frozen, tag `vX.Y.Z` on C (owner step, outside the
+17. **Not yet exercised; required from 1.x.** After the
+dry-run dispatch is green and Q3 is frozen, tag
+`vX.Y.Z` on C (owner step, outside the
 workflow; the version comes from `Cargo.toml` at C):
 
 ```sh
@@ -637,9 +650,10 @@ git tag "v<VERSION>" "$C"
 git push origin "v<VERSION>"
 ```
 
-18. Dispatch promote with the ref at Q3, the same
-recorded import IDs, and `promote_authorization`
-retyping the candidate digest:
+18. **Not yet exercised; required from 1.x.** Dispatch
+promote with the ref at Q3, the same recorded import
+IDs, and `promote_authorization` retyping the candidate
+digest:
 
 ```sh
 gh workflow run release.yml --ref release-q3 \

@@ -1,6 +1,9 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Kernel issues seen by memveil
 
+Kernel behaviour; memveil collection is not qualified on
+confidential guests, see [support](support.md).
+
 memveil records what the kernel's DMA layer actually does. A kernel or driver bug therefore shows up in the captures and reports. memveil reports it correctly, but a reader can mistake it for memveil losing events. This page lists the kernel issues found so far, how each one shows up in memveil output, and how to tell it apart from capture loss.
 
 ## NVMe SGL unmap leak (Linux 6.18 to 6.19-rc7, 6.18.y before 6.18.40)

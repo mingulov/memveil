@@ -6,8 +6,12 @@ No boot, no network, no privileged reads. Every case runs from
 controlled fixture bytes.
 """
 
+import ast
+import gzip
+import hashlib
 import json
 import os
+import subprocess
 import sys
 
 import pytest
@@ -15,6 +19,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import kernel_scenarios as ks
+import kernel_scenarios_guest as scguest
 
 
 def _doc(caps, mode="load-check", verdict="ready"):
@@ -597,3 +602,378 @@ def test_scenario_exit_mismatch_fails():
     rec = ks.evaluate_scenario("memcg", ev)
     assert not rec["ok"]
     assert not _check(rec, "doctor_passive_exit")["ok"]
+
+
+# Strict-leg binding: the guest runs record under
+# --strict on exactly the finalizing legs below, where
+# the session verdict is never complete so strict record
+# exits 4; the eight refusal legs exit 3 with no capture
+# and no flag. Harness 208ae75 never passes the flag, so
+# these tests fail there (proven in a base worktree) and
+# pass on the fixed harness. A live run binds its own
+# harness commit, candidate manifest, runtime versions,
+# and fresh run id through harness.json and the row
+# receipts at run time.
+STRICT_LEGS = ("base", "neg-layout", "neg-shift",
+               "neg-argcnt")
+
+_GUEST_MV = "/usr/bin/memveil"
+
+
+def test_record_strict_matches_finalize_table():
+    assert tuple(scguest.SCN_ORDER) == ks.SCENARIO_ORDER
+    strict = []
+    for name in ks.SCENARIO_ORDER:
+        spec = ks.SCENARIOS[name]
+        cp_object = None
+        if name.startswith("neg-"):
+            cp_object = "/tmp/neg-%s.bpf.o" % name
+        argv = scguest.record_argv(
+            _GUEST_MV, "cap", 10, cp_object,
+            strict=scguest.record_strict(name))
+        if "finalize" in spec["record"]:
+            strict.append(name)
+            assert "--strict" in argv, name
+            assert spec["exits"][2] == "4", name
+        else:
+            assert "--strict" not in argv, name
+            assert spec["exits"][2] == "3", name
+        assert ("--strict" in argv) == spec["workload"], \
+            name
+    assert tuple(strict) == STRICT_LEGS
+
+
+class _Completed:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout = stdout
+        self.stderr = ""
+        self.returncode = returncode
+
+
+def _fake_sh(argv, **kw):
+    if argv[1:2] == ["doctor"]:
+        return _Completed(json.dumps({"verdict": "ready"}))
+    return _Completed("")
+
+
+def _popen_factory(seen, returncode=4):
+    class FakePopen:
+        def __init__(self, argv, **kw):
+            seen.append(list(argv))
+            self.returncode = returncode
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    return FakePopen
+
+
+class _SubprocessStub:
+    TimeoutExpired = subprocess.TimeoutExpired
+
+    def __init__(self, popen):
+        self.Popen = popen
+        self.run = subprocess.run
+
+
+def _dispatch_record_argv(monkeypatch, tmp_path, name):
+    """Record argv from the real guest leg, stubbed spawn."""
+    seen = []
+    monkeypatch.setattr(scguest, "sh", _fake_sh)
+    monkeypatch.setattr(
+        scguest, "subprocess",
+        _SubprocessStub(_popen_factory(seen)))
+    sdir = tmp_path / ("scn-" + name)
+    sdir.mkdir()
+    ctx = {"mv": _GUEST_MV, "load": "load",
+           "dev": "/dev/x", "negs": {},
+           "plain": lambda argv: argv, "sdir": str(sdir)}
+    if name == "base":
+        scguest.scenario_base(ctx)
+    else:
+        neg = tmp_path / ("neg-" + name + ".bpf.o")
+        neg.write_bytes(b"negative-object")
+        ctx["negs"] = {scguest.NEG_FILES[name]: str(neg)}
+        scguest.scenario_negative(ctx, name)
+    assert len(seen) == 1, (name, seen)
+    return seen[0]
+
+
+def test_finalizing_dispatch_carries_strict(monkeypatch,
+                                            tmp_path):
+    argv = _dispatch_record_argv(monkeypatch, tmp_path,
+                                "base")
+    assert argv[:2] == [_GUEST_MV, "record"]
+    assert "--strict" in argv
+    assert argv[argv.index("--duration") + 1] == "10"
+    for name in ("neg-layout", "neg-shift", "neg-argcnt"):
+        argv = _dispatch_record_argv(monkeypatch, tmp_path,
+                                    name)
+        assert "--strict" in argv, name
+        assert "--cp-object" in argv, name
+        assert argv[argv.index("--duration") + 1] == "10", \
+            name
+    argv = _dispatch_record_argv(monkeypatch, tmp_path,
+                                "neg-renamed")
+    assert "--strict" not in argv
+    assert "--cp-object" in argv
+    assert argv[argv.index("--duration") + 1] == "5"
+
+
+def test_run_record_sites_route_through_record_strict():
+    path = os.path.join(os.path.dirname(scguest.__file__),
+                        "kernel_scenarios_guest.py")
+    with open(path) as handle:
+        tree = ast.parse(handle.read())
+    literals = []
+    shared = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "run_record":
+            continue
+        strict_kw = [kw for kw in node.keywords
+                     if kw.arg == "strict"]
+        assert len(strict_kw) == 1
+        value = strict_kw[0].value
+        assert isinstance(value, ast.Call)
+        assert isinstance(value.func, ast.Name)
+        assert value.func.id == "record_strict"
+        assert len(value.args) == 1
+        arg = value.args[0]
+        if isinstance(arg, ast.Constant):
+            literals.append(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id == "name":
+            # The shared negative dispatcher, executed
+            # for all four names by the dispatch test.
+            shared += 1
+        else:
+            raise AssertionError(ast.dump(value))
+    assert shared == 1
+    assert sorted(literals) == sorted(
+        ("base", "nonroot", "nocaps", "ftrace-off",
+         "tracefs-unmounted", "btf-empty", "btf-truncated",
+         "memcg", "memcg"))
+
+
+def test_record_argv_default_mode_control():
+    plain = scguest.record_argv(_GUEST_MV, "cap", 10)
+    assert plain == [_GUEST_MV, "record", "--output", "cap",
+                     "--duration", "10", "--capability",
+                     scguest.ALL_CAPS]
+    assert scguest.record_argv(
+        _GUEST_MV, "cap", 10,
+        strict=True) == plain + ["--strict"]
+    ok, _ = ks.check_record_finalized(
+        {"exit": "0", "exists": "yes"}, "0")
+    assert ok
+
+
+def test_scenario_hook_probes_match_matrix_guest():
+    import kernel_matrix_guest as mguest
+    assert scguest.WANT_FUNCS == mguest.WANT_FUNCS
+    assert scguest.HOOK_EVT == mguest.EVT
+    assert scguest.HOOK_FILTER_FUNCS == mguest.FILTER_FUNCS
+    assert scguest.BTF_PATH == "/sys/kernel/btf/vmlinux"
+
+
+def test_scenario_detect_hooks(monkeypatch, tmp_path):
+    hook = tmp_path / "swiotlb_bounced"
+    hook.mkdir()
+    funcs = tmp_path / "available_filter_functions"
+    funcs.write_text("swiotlb_bounce\nsome_other\n")
+    monkeypatch.setattr(scguest, "HOOK_EVT", str(hook))
+    monkeypatch.setattr(scguest, "HOOK_FILTER_FUNCS",
+                        str(funcs))
+    present, omitted = scguest.detect_hooks()
+    assert present == {"tp": True, "map": False,
+                       "unmap": False, "copy": True,
+                       "syncc": False, "syncd": False}
+    assert sorted(omitted) == ["map", "syncc", "syncd",
+                               "unmap"]
+    monkeypatch.setattr(scguest, "HOOK_EVT",
+                        str(tmp_path / "missing"))
+    monkeypatch.setattr(scguest, "HOOK_FILTER_FUNCS",
+                        str(tmp_path / "missing-funcs"))
+    present, omitted = scguest.detect_hooks()
+    assert set(present) == {"tp", "map", "unmap", "copy",
+                            "syncc", "syncd"}
+    assert not any(present.values())
+    assert sorted(omitted) == sorted(present)
+
+
+def test_scenario_write_btf_sha(tmp_path):
+    src = tmp_path / "vmlinux"
+    src.write_bytes(b"btf-bytes")
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.write_btf_sha(str(out), str(src))
+    assert (out / "btf-sha.txt").read_text() == \
+        hashlib.sha256(b"btf-bytes").hexdigest() + "\n"
+    scguest.write_btf_sha(str(out),
+                          str(tmp_path / "missing"))
+    assert (out / "btf-sha.txt").read_text() == "absent\n"
+
+
+class _StubUname:
+    release = "6.6.160-test"
+
+
+def _identity_tree(tmp_path):
+    sysfs = tmp_path / "sysfs"
+    hook = sysfs / "swiotlb_bounced"
+    hook.mkdir(parents=True)
+    (sysfs / "available_filter_functions").write_text(
+        "swiotlb_tbl_map_single\n"
+        "__swiotlb_tbl_unmap_single\n"
+        "swiotlb_bounce\n"
+        "__swiotlb_sync_single_for_cpu\n"
+        "__swiotlb_sync_single_for_device\n")
+    mods = tmp_path / "modules" / _StubUname.release
+    mods.mkdir(parents=True)
+    (tmp_path / "cmdline").write_text("virtme chance\n")
+    with gzip.open(tmp_path / "config.gz", "wb") as handle:
+        handle.write(b"CONFIG_TEST=y\n")
+    (tmp_path / "version").write_text("Linux version test\n")
+    (tmp_path / "lockdown").write_text("[none] test\n")
+    (tmp_path / "vmlinux").write_bytes(b"btf-bytes")
+    return sysfs
+
+
+def _patch_identity(monkeypatch, tmp_path):
+    sysfs = _identity_tree(tmp_path)
+    monkeypatch.setattr(os, "uname", lambda: _StubUname())
+    monkeypatch.setattr(scguest, "HOOK_EVT",
+                        str(sysfs / "swiotlb_bounced"))
+    monkeypatch.setattr(scguest, "HOOK_FILTER_FUNCS",
+                        str(sysfs / "available_filter_functions"))
+    monkeypatch.setattr(scguest, "CMDLINE_PATH",
+                        str(tmp_path / "cmdline"))
+    monkeypatch.setattr(scguest, "CONFIG_GZ_PATH",
+                        str(tmp_path / "config.gz"))
+    monkeypatch.setattr(scguest, "VERSION_PATH",
+                        str(tmp_path / "version"))
+    monkeypatch.setattr(scguest, "LOCKDOWN_PATH",
+                        str(tmp_path / "lockdown"))
+    monkeypatch.setattr(scguest, "MODULES_ROOT",
+                        str(tmp_path / "modules"))
+    monkeypatch.setattr(scguest, "BTF_PATH",
+                        str(tmp_path / "vmlinux"))
+
+
+def test_record_guest_identity_writes_matrix_set(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "uname.txt").read_text() == \
+        "6.6.160-test\nvirtme chance\n"
+    assert (out / "mods.txt").read_text() == \
+        "6.6.160-test\n%s\n" % (
+            tmp_path / "modules" / "6.6.160-test")
+    with gzip.open(tmp_path / "config.gz", "rb") as handle:
+        want_config = hashlib.sha256(handle.read()).hexdigest()
+    assert (out / "configid.txt").read_text() == \
+        want_config + "\n"
+    assert (out / "btf-sha.txt").read_text() == \
+        hashlib.sha256(b"btf-bytes").hexdigest() + "\n"
+    assert (out / "version.txt").read_text() == \
+        "Linux version test\n"
+    assert (out / "lockdown.txt").read_text() == "[none] test\n"
+    hooks = json.loads((out / "hooks.json").read_text())
+    assert set(hooks) == {"present", "omitted", "btf"}
+    assert hooks["present"] == {"tp": True, "map": True,
+                                "unmap": True, "copy": True,
+                                "syncc": True, "syncd": True}
+    assert hooks["omitted"] == []
+    assert hooks["btf"] is True
+
+
+def test_record_guest_identity_resolves_module_symlink(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    target = tmp_path / "real-mods"
+    target.mkdir()
+    link = tmp_path / "modules" / _StubUname.release
+    link.rmdir()
+    link.symlink_to(target)
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "mods.txt").read_text() == \
+        "6.6.160-test\n%s\n" % target
+    link.unlink()
+    link.symlink_to("../real-mods")
+    out2 = tmp_path / "out2"
+    out2.mkdir()
+    scguest.record_guest_identity(str(out2))
+    assert (out2 / "mods.txt").read_text() == \
+        "6.6.160-test\n%s\n" % (
+            tmp_path / "modules" / "6.6.160-test"
+            / "../real-mods")
+
+
+def test_record_guest_identity_absent_sentinels(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    monkeypatch.setattr(scguest, "CONFIG_GZ_PATH",
+                        str(tmp_path / "no-config"))
+    monkeypatch.setattr(scguest, "LOCKDOWN_PATH",
+                        str(tmp_path / "no-lockdown"))
+    monkeypatch.setattr(scguest, "BTF_PATH",
+                        str(tmp_path / "no-btf"))
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "configid.txt").read_text() == "absent\n"
+    assert (out / "lockdown.txt").read_text() == "absent\n"
+    assert (out / "btf-sha.txt").read_text() == "absent\n"
+    hooks = json.loads((out / "hooks.json").read_text())
+    assert hooks["btf"] is False
+
+
+def test_record_guest_identity_truncated_config_unreadable(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    (tmp_path / "config.gz").write_bytes(b"\x1f\x8b\x08\x00")
+    out = tmp_path / "out"
+    out.mkdir()
+    scguest.record_guest_identity(str(out))
+    assert (out / "configid.txt").read_text() == \
+        "unreadable\n"
+
+
+def _patch_fail_paths(monkeypatch, tmp_path, out):
+    monkeypatch.setattr(scguest, "_OUT", str(out))
+    monkeypatch.setattr(scguest, "_EXPORT",
+                        str(tmp_path / "no-export"))
+
+
+def test_record_guest_identity_missing_modules_fails(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    monkeypatch.setattr(scguest, "MODULES_ROOT",
+                        str(tmp_path / "no-modules"))
+    out = tmp_path / "out"
+    out.mkdir()
+    _patch_fail_paths(monkeypatch, tmp_path, out)
+    with pytest.raises(SystemExit):
+        scguest.record_guest_identity(str(out))
+
+
+def test_record_guest_identity_unreadable_version_fails(
+        monkeypatch, tmp_path):
+    _patch_identity(monkeypatch, tmp_path)
+    monkeypatch.setattr(scguest, "VERSION_PATH",
+                        str(tmp_path / "no-version"))
+    out = tmp_path / "out"
+    out.mkdir()
+    _patch_fail_paths(monkeypatch, tmp_path, out)
+    with pytest.raises(SystemExit):
+        scguest.record_guest_identity(str(out))

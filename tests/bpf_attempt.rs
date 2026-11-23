@@ -89,3 +89,53 @@ fn attempt_map_geometries_match_c() {
     assert_eq!(offsets.value_size(), 24, "mv_offsets value size");
     assert_eq!(offsets.max_entries(), 1, "mv_offsets entries");
 }
+
+/// Kernels before 6.7 reject `ctx + variable` when the offset
+/// register's 64-bit signed min is unbounded, even when 32-bit compares
+/// already bounded the value (6.0.19/6.6.160 refuse insn 219 with
+/// EINVAL). Every variable context offset therefore passes a 64-bit
+/// bound check (`bound_ctx_off` in `crates/ebpf-common`) before the ctx
+/// arithmetic. The checks are redundant by construction (the offsets
+/// table decoder and `mv_loc_ok` enforce the same caps on u32), so the
+/// optimizer is tempted to fold them away — pin their presence in the
+/// built object: one 64-bit `dst > imm` guard per site cap (size 120,
+/// loc 124, force 127, name offset 511).
+#[test]
+fn attempt_ctx_offsets_have_64bit_guards() {
+    let (_, object) = parse_object();
+    let program = object
+        .programs
+        .get("mv_swiotlb_attempt")
+        .expect("object must contain the mv_swiotlb_attempt program");
+    let function = object
+        .functions
+        .get(&program.function_key())
+        .expect("object must carry mv_swiotlb_attempt instructions");
+    // BPF_JMP | BPF_JGT | BPF_K: 64-bit `dst > imm` comparison. The
+    // 32-bit spelling (0x26) does not bound the 64-bit signed min on
+    // pre-6.7 verifiers, so only the 64-bit form counts here.
+    const JGT64_IMM: u8 = 0x25;
+    let mut guards = std::collections::BTreeSet::new();
+    let mut guard_insns = 0u32;
+    for insn in &function.instructions {
+        if insn.code == JGT64_IMM {
+            guards.insert(insn.imm);
+            guard_insns += 1;
+        }
+    }
+    for cap in [120, 124, 127, 511] {
+        assert!(
+            guards.contains(&cap),
+            "built attempt object must carry a 64-bit ctx-offset guard for cap {cap}, found {guards:?}"
+        );
+    }
+    // Four site guards plus the pre-existing force-value check (also a
+    // 64-bit `> 511`, on the shifted force byte): eliding any guard
+    // drops this count, so pin it. If an unrelated refactor changes the
+    // force check's shape, this fails loudly for human review rather
+    // than silently weakening this pin.
+    assert!(
+        guard_insns >= 5,
+        "built attempt object must carry all four 64-bit ctx-offset guards plus the force check, found {guard_insns} 64-bit guards: {guards:?}"
+    );
+}

@@ -9,9 +9,11 @@ names a verb from the usage line in main.rs and every flag
 beside it exists in that verb's built --help; no document
 carries placeholder markers; the support envelope and
 the agent instructions carry the identical ratified floor
-sentence; and every released version the policy names
-resolves to a git tag. The claim-vs-receipt audit stays
-in the preview-package lane; this lane does not duplicate it.
+sentence; every literal copy of the product version equals
+the root Cargo.toml version; and every released version
+the policy names resolves to a git tag. The claim-vs-receipt
+audit stays in the preview-package lane; this lane does
+not duplicate it.
 """
 
 import glob
@@ -19,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 
 ROOT = os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
@@ -125,10 +128,10 @@ def unsupported_section(text):
     return text[starts[0]:end]
 
 
-EXPECTED_TOP_ROW = ("  top       observe live or replay one capture with"
-                    " periodic summaries.")
-EXPECTED_RECORD_ROW = ("  record    capture bounce attempts and optional"
-                       " lifecycle/copy channels into a directory.")
+EXPECTED_TOP_ROW = ("  top           watch live, or replay a capture"
+                    " over time")
+EXPECTED_RECORD_ROW = ("  record        capture bounce attempts (+ optional"
+                       " lifecycle/copy) to a directory (root)")
 
 
 def verb_line(text, verb):
@@ -143,12 +146,198 @@ FLAG_RE = re.compile(r"--[a-z][a-z-]*")
 CODE_RE = re.compile(r"```.*?```|`[^`\n]+`", re.S)
 BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 
+# Literal copies of the product version: (relative path,
+# regex with exactly one version group). The root
+# Cargo.toml [package] version is the truth; every match
+# of every pattern must equal it, and every pattern must
+# match at least once, so a reworded copy fails loudly
+# instead of escaping the gate. Format versions
+# (session/event/report/profile/doctor/receipt), history
+# (CHANGELOG, older %changelog entries, recorded
+# captures), and the internal 0.0.0 crate versions are
+# separate namespaces and are not copies.
+VERSION_COPIES = (
+    ("README.md",
+     r"memveil_(\d+\.\d+\.\d+)-1_amd64\.deb"),
+    ("README.md",
+     r"memveil-(\d+\.\d+\.\d+)\.tar\.gz"),
+    ("README.md",
+     r"cd memveil-(\d+\.\d+\.\d+)"),
+    ("THIRD-PARTY-NOTICES.md",
+     r"# Third-party notices \(memveil (\d+\.\d+\.\d+)\)"),
+    ("docs/build.md",
+     r"dist/memveil-(\d+\.\d+\.\d+)"),
+    ("docs/install.md",
+     r"memveil_(\d+\.\d+\.\d+)-1_amd64\.deb"),
+    ("docs/install.md",
+     r"memveil-(\d+\.\d+\.\d+)-1\*\.x86_64\.rpm"),
+    ("docs/install.md",
+     r"# memveil-(\d+\.\d+\.\d+)-1"),
+    ("docs/lifecycle-hooks.md",
+     r"development bundle (\d+\.\d+\.\d+)\)"),
+    ("docs/profiles.md",
+     r"The (\d+\.\d+\.\d+) bundle ships"),
+    ("docs/quickstart.md",
+     r"development bundle (\d+\.\d+\.\d+)\)"),
+    ("docs/quickstart.md",
+     r"memveil-(\d+\.\d+\.\d+)\.tar\.gz"),
+    ("docs/quickstart.md",
+     r"cd memveil-(\d+\.\d+\.\d+)"),
+    ("docs/quickstart.md",
+     r"# memveil-(\d+\.\d+\.\d+), exit 0"),
+    ("docs/recipes/ordinary-linux.md",
+     r"which the (\d+\.\d+\.\d+)\s+bundle does not ship"),
+    ("docs/release-notes.md",
+     r"# MemVeil (\d+\.\d+\.\d+) release notes"),
+    ("docs/release-notes.md",
+     r"^(\d+\.\d+\.\d+) rebuilds the userspace in Rust"),
+    ("docs/release-notes.md",
+     r"The hardened (\d+\.\d+\.\d+) ordinary-Linux"),
+    ("docs/support.md",
+     r"development bundle (\d+\.\d+\.\d+)\)"),
+    ("docs/support.md",
+     r"`(\d+\.\d+\.\d+)`\s+is a development version"),
+    ("docs/support.md",
+     r"dist/memveil_(\d+\.\d+\.\d+)-1_amd64\.deb"),
+    ("docs/format-compatibility.md",
+     r"Product (\d+\.\d+\.\d+) is"),
+    ("examples/real-capture/README.md",
+     r"the (\d+\.\d+\.\d+) bundle ships reference"),
+    ("examples/lifecycle-copy/README.md",
+     r"the (\d+\.\d+\.\d+) bundle ships reference"),
+    ("packaging/rpm/memveil.spec",
+     r"dist/memveil-(\d+\.\d+\.\d+)"),
+    ("packaging/rpm/memveil.spec",
+     r"^Version:\s+(\d+\.\d+\.\d+)\s*$"),
+    # Test and assertion copies: the 0.2.0 bump left
+    # these stale while the gate stayed green, so they
+    # are pinned here like every other literal copy.
+    ("tests/scaffold.rs",
+     r"memveil-(\d+\.\d+\.\d+)\\n"),
+    ("tools/test",
+     r"memveil-(\d+\.\d+\.\d+)"),
+    ("src/analysis/attempts.rs",
+     r"ENGINE_VERSION, \"memveil-(\d+\.\d+\.\d+)\""),
+    ("tests/golden/report-attempts.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-conversion-uncertain.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-copy-before-failure.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-escape.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-gen-lineage.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-lifecycle-nested.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-pool-pressure.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-region-union.txt",
+     r"engine memveil-(\d+\.\d+\.\d+)\)"),
+    ("tests/golden/report-attempts.md",
+     r"- engine: memveil-(\d+\.\d+\.\d+)"),
+    ("tests/golden/report-escape.md",
+     r"- engine: memveil-(\d+\.\d+\.\d+)"),
+    # Dev-bundle version pins: the 0.2.0 bundle rename left
+    # these on 0.1.1, so they are pinned like the rest.
+    ("tests/vm/guest_lifecycle.py",
+     r"BUNDLE_VERSION = \"(\d+\.\d+\.\d+)\""),
+    ("tests/vm/guest_lifecycle.py",
+     r"dist/memveil-(\d+\.\d+\.\d+)\.tar\.gz"),
+    ("tests/vm/test_bundle.py",
+     r"BUNDLE_VERSION = \"(\d+\.\d+\.\d+)\""),
+    ("tests/vm/test_bundle.py",
+     r"memveil-(\d+\.\d+\.\d+)"),
+)
+
+# TOML copies of the product version: (relative path,
+# dotted key path into the parsed document).
+VERSION_TOML = (
+    ("crates/release-entry/Cargo.toml",
+     ("package", "version")),
+    ("crates/remap-flags/Cargo.toml",
+     ("package", "version")),
+    ("Cargo.toml",
+     ("dev-dependencies", "memveil-release-entry", "version")),
+    ("Cargo.toml",
+     ("dev-dependencies", "memveil-remap-flags", "version")),
+    ("Cargo.toml",
+     ("build-dependencies", "memveil-remap-flags", "version")),
+)
+
+# Cargo.lock [[package]] entries tracking the product
+# version (the 0.0.0 workspace members are not copies).
+VERSION_LOCK_CRATES = (
+    "memveil", "memveil-release-entry", "memveil-remap-flags",
+)
+
 
 def check(name, cond, detail=""):
     if not cond:
         print("FAIL %s %s" % (name, detail))
         sys.exit(1)
     print("ok %s" % name)
+
+
+def version_copies():
+    """Error strings for version copies != the Cargo truth.
+
+    Needs no built binary: pure file reads, so it runs
+    before the help-text checks below.
+    """
+    errors = []
+    with open(os.path.join(ROOT, "Cargo.toml"), "rb") as handle:
+        truth = tomllib.load(handle)["package"]["version"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", truth or ""):
+        return ["Cargo.toml [package] version %r is not X.Y.Z"
+                % (truth,)]
+    for rel, keys in VERSION_TOML:
+        with open(os.path.join(ROOT, rel), "rb") as handle:
+            found = tomllib.load(handle)
+        for key in keys:
+            found = found.get(key) \
+                if isinstance(found, dict) else None
+        if found != truth:
+            errors.append("%s %s is %r, want %s"
+                          % (rel, ".".join(keys), found, truth))
+    with open(os.path.join(ROOT, "Cargo.lock"), "rb") as handle:
+        lock = tomllib.load(handle)
+    locked = {}
+    for entry in lock.get("package", []):
+        if isinstance(entry, dict):
+            locked[entry.get("name")] = entry.get("version")
+    for name in VERSION_LOCK_CRATES:
+        if locked.get(name) != truth:
+            errors.append("Cargo.lock %s is %r, want %s"
+                          % (name, locked.get(name), truth))
+    for rel, pattern in VERSION_COPIES:
+        with open(os.path.join(ROOT, rel),
+                  encoding="utf-8") as handle:
+            found = re.findall(pattern, handle.read(),
+                               re.MULTILINE)
+        if not found:
+            errors.append("%s: no match for %r"
+                          % (rel, pattern))
+        for match in found:
+            if match != truth:
+                errors.append("%s: copy %r, want %s"
+                              % (rel, match, truth))
+    # The spec changelog is newest-first: only its head
+    # entry tracks the product version; older entries are
+    # history and stay frozen.
+    with open(os.path.join(ROOT, "packaging", "rpm",
+                           "memveil.spec"),
+              encoding="utf-8") as handle:
+        _head, _sep, tail = handle.read().partition(
+            "%changelog")
+    match = re.search(r"^\* .* - (\d+\.\d+\.\d+)-1\s*$",
+                      tail, re.MULTILINE)
+    if match is None:
+        errors.append("memveil.spec: no %changelog head entry")
+    elif match.group(1) != truth:
+        errors.append("memveil.spec %%changelog head is %s, "
+                      "want %s" % (match.group(1), truth))
+    return errors
 
 
 def doc_files():
@@ -222,6 +411,10 @@ def main():
         "record", "report", "top", "doctor", "qualify", "bind-profile",
         "help", "version"},
         " ".join(sorted(verbs)))
+
+    copy_errors = version_copies()
+    check("version-copies", not copy_errors,
+          "; ".join(copy_errors[:5]))
 
     if not os.path.isfile(BIN):
         print("FAIL docs: missing %s (run cargo build --release first)" % BIN)

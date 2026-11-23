@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# MemVeil quickstart (development bundle 0.1.1)
+# MemVeil quickstart (development bundle 0.2.0)
 
 MemVeil captures swiotlb bounce **attempts**, mapping **lifetimes**,
 and executed **copies** on x86-64 Linux and replays them offline as
@@ -8,7 +8,7 @@ from the copy channel. This bundle runs from any directory: no
 compiler, network, or source checkout needed. The
 [capability table](support.md#capabilities-by-mode) distinguishes the
 shipping collector, offline reducers and laboratory probes.
-Lifecycle/copy collection is qualified through the live
+Lifecycle/copy collection is admitted through the live
 interface checks on covered kernels (see the support
 envelope) or a machine-local receipt (advanced, step 6); a full
 confidential release is not yet qualified. The host supplies libc,
@@ -28,13 +28,16 @@ extra lifecycle/copy channels.
 
 ## 1. Extract and check the version
 
-    tar -xzf memveil-0.1.1.tar.gz
-    cd memveil-0.1.1
-    ./bin/memveil version        # memveil-0.1.1, exit 0
+    tar -xzf memveil-0.2.0.tar.gz
+    cd memveil-0.2.0
+    ./bin/memveil version        # memveil-0.2.0, exit 0
     ./bin/memveil help           # verb list, exit 0
 
-`MANIFEST.json` records the sha256 of every payload file plus the
-source revisions; re-hash any file to confirm it.
+This flow uses the tarball binary, which is byte-identical
+to the matrix-run `.deb` binary (one canonical binary; see
+release notes, Known issues). `MANIFEST.json` records the
+sha256 of every payload file plus the source revisions;
+re-hash any file to confirm it.
 
 ## 2. Inspect the host (unprivileged, passive)
 
@@ -64,6 +67,7 @@ and plain `sudo` works:
 
 Expected: `ready session=...`, then `end=duration
 outcome=finalized exit=0`.
+**Exit 0 does not mean complete measurement. Read the `verdict:` line, or pass `--strict` in scripts.**
 Normal exit 0 includes finalized output with partial terminal evidence,
 including zero-event and signal stops; inspect the recorded verdict. With
 `--strict`, partial evidence returns 4. Exit 3 names the refusal reason
@@ -77,7 +81,10 @@ run.
 Attempt-only recording needs no qualification: without a
 receipt it reports partial diagnostics instead of refusing.
 Anything but the exact bound kernel and objects refuses with
-exit 3 instead of recording an unverified channel. On a
+exit 3 instead of recording an unverified channel. Exception:
+an explicit `--profile` whose bindings note is unparseable
+proceeds as unbound partial instead of refusing (see
+[permissions](permissions.md)). On a
 qualified host the receipt admits the channel as `local-auto`
 (see step 6); a stale receipt loses that admission until
 qualification is re-run, with attempt-only recording falling
@@ -156,120 +163,15 @@ retains full provenance hashes. Missing or conflicting values remain explicit.
 
 This replays a finished capture in periodic prefixes; it does not follow a
 new workload live. Each summary shows its own measured prefix duration.
-`--compact` prints the short verdict-plus-headlines block per refresh
-instead of the full report; it cannot combine with `--device`.
+Refreshes print the short verdict-plus-headlines block; `--compact`
+is accepted for compatibility and combines with `--device`
+(headlines stay global, the final block honors the filter).
 
 ## 6. Advanced: qualify this machine (privileged)
 
-When `doctor` selects the reference profile with `unknown` or
-`unavailable` capabilities, or before using the extra
-lifecycle/copy channels, prove this host directly.
-Qualification needs a reference profile *bound* to this
-host: covering identity, an identity note whose
-config/BTF/format/image bindings match the live machine,
-and the recorded hook format text. Mint it from the bundle
-alone - no source checkout - with `bind-profile`:
-
-    sudo ./bin/memveil bind-profile --output profiles/my-host.json \
-        --object bpf/swiotlb_attempt.bpf.o
-
-Expected: `bind-profile: local-<release>
-caps=attempt-trace path=profiles/my-host.json`, exit 0.
-Each refusal names its exact cause with exit 3; exit 2 is
-a usage error. Minting takes explicit artifacts only:
-without `--object` the run refuses instead of guessing.
-For the extra channels, bind all three at
-once (extra channels bind together):
-
-    sudo ./bin/memveil bind-profile --output profiles/my-host.json \
-        --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --object bpf/swiotlb_attempt.bpf.o \
-        --lc-object bpf/swiotlb_lifecycle.bpf.o \
-        --cp-object bpf/swiotlb_copy.bpf.o
-
-See the [bound-reference recipe](profiles.md) for what the
-minted bytes mean and how to audit them by hand.
-
-Register the minted file first in the active profiles
-directory's `manifest.txt` (one file name per line, no
-blank lines or duplicates), including under a
-`--profiles-dir` override: only manifest-listed documents
-are visible to `doctor` and automatic `record`, so an
-unlisted document stays invisible, and the first covering
-document wins, so appends lose to the shipped reference.
-No environment setup is needed: the embedded objects and
-the linked loader run, so plain `sudo` works.
-Qualification mints explicit artifacts only, so name the
-bundle's inspection objects and bind the engine binary
-itself as the loader identity (the loader is statically
-linked; there is no separate bridge file):
-
-    { echo my-host.json; cat "$PWD/profiles/manifest.txt"; } > /tmp/manifest.new \
-        && mv /tmp/manifest.new "$PWD/profiles/manifest.txt"
-    sudo ./bin/memveil qualify --output /tmp/q1 \
-        --profile "$PWD/profiles/my-host.json" \
-        --object bpf/swiotlb_attempt.bpf.o \
-        --bridge bin/memveil
-
-Qualification runs a 3-second smoke capture (attach, poll,
-detach; no traffic required) and, when the channels prove
-out, publishes a machine-local `local-auto` receipt.
-Expected: `qualify: local-auto <profile> caps=attempt-trace
-receipt=...`, exit 0. The receipt lands under
-`profiles/receipts/` beside the binary, or under
-`--profiles-dir DIR/receipts/` when given; `record`,
-`doctor`, and live `top` must then use the same
-`--profiles-dir`. A
-receipt never claims `validated`: it binds one kernel,
-one profile document, and the exact artifacts and
-workload that produced it. Re-running `doctor` still
-reports the receipt as explicitly bridge-unchecked
-with exit 3: the passive path performs no bridge
-binding, so only `record` and live `top` - which verify
-bridge admission at every start - admit the receipt as
-`local-auto`. Exit 3 names the exact cause (planning
-or smoke refusal, or the unchecked receipt); exit 2
-is a usage error; exit 1 is an internal failure
-(unreadable objects, mint/publish failure).
-Without `--object` qualify refuses with exit 3
-`no object: pass --object PATH`; without `--bridge` the
-receipt cannot bind a loader identity and minting fails.
-There is no discovery: every artifact is explicit.
-
-Extra channels qualify the same way, naming their
-inspection objects explicitly (wanted channels without
-their object flags refuse before the smoke):
-
-    sudo ./bin/memveil qualify --output /tmp/q3 \
-        --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --profile "$PWD/profiles/my-host.json" \
-        --object bpf/swiotlb_attempt.bpf.o \
-        --lc-object bpf/swiotlb_lifecycle.bpf.o \
-        --cp-object bpf/swiotlb_copy.bpf.o \
-        --bridge bin/memveil
-
-Then record them per run:
-
-    sudo ./bin/memveil record --output /tmp/cap3 \
-        --capability attempt-trace,mapping-lifecycle,copy-actual \
-        --duration 10
-
-For the opt-in capture, replay `/tmp/cap3` in place with
-the step 4 commands, or hand off `~/cap3` the same way
-as step 3 and replay that.
-
-After any kernel, object, bridge, or profile change the receipt
-goes stale: re-mint the bound document with `bind-profile`
-first, then re-run `qualify`. `doctor` still
-names receipt mismatches its passive checks can see
-(another kernel, profile, note, or artifact binding);
-only when those preceding checks pass does the receipt
-stay bridge-unchecked (doctor performs no bridge
-binding, so it cannot confirm or deny bridge drift).
-`record` re-verifies the receipt - including bridge
-admission - at every start and names the drift there,
-with a stale receipt losing `local-auto` admission and
-attempt-only recording falling back to partial diagnostics.
+Qualification now lives in [the bundle-only qualify
+path](profiles.md#bundle-only-qualify-path-from-quickstart).
+The receipt does not hash the memveil executable; re-run `qualify` after any reinstall/upgrade.
 
 ## Limits in one paragraph
 

@@ -14,7 +14,7 @@
 
 use super::context::{measured_duration, recorded_value};
 use super::filter::resolve_device_filter;
-use super::text::{escape_text, integrity_line, verdict_line};
+use super::text::{attestation_text, escape_text, integrity_line, summary_lines, verdict_line};
 use crate::model::report::Report;
 use crate::model::session::Channel;
 use crate::model::validate::format_u64;
@@ -90,6 +90,11 @@ pub fn render_markdown(rep: &Report, device_filter: &str) -> String {
     let mut out = String::from("# Memveil report `");
     out.push_str(&escape_text(&rep.session_id));
     out.push_str("`\n\n");
+    for line in summary_lines(rep, escape_markdown, &filt) {
+        out.push_str("- ");
+        out.push_str(&line);
+        out.push('\n');
+    }
     if rep.synthetic {
         out.push_str("- synthetic: yes\n");
     } else {
@@ -112,7 +117,7 @@ pub fn render_markdown(rep: &Report, device_filter: &str) -> String {
     out.push_str(" detection=");
     out.push_str(&escape_text(&rep.env.detection));
     out.push_str(" attestation=");
-    out.push_str(&escape_text(&rep.env.attestation));
+    out.push_str(&attestation_text(&rep.env.attestation));
     if rep.env.has_asserted_mode {
         out.push_str(" asserted=");
         out.push_str(&escape_text(&rep.env.asserted_mode));
@@ -349,5 +354,35 @@ mod tests {
         let rep = analyze_fixture("tests/fixtures/attempts");
         let md = render_markdown(&rep, "");
         assert!(md.contains("| bounce\\_attempts | all | 3 |"));
+    }
+
+    #[test]
+    fn summary_bullets_open_the_prose_list() {
+        let rep = analyze_fixture("tests/fixtures/attempts");
+        let md = render_markdown(&rep, "");
+        assert!(md.starts_with("# Memveil report `attempts-3-session`\n\n"));
+        assert!(md.contains(
+            "- summary: attempts 3, requested bytes 9 KiB (9216 bytes) in 3.00 s\n- summary devices: dev-1 (testdev0): attempts 3, requested bytes 9 KiB (9216 bytes)\n"
+        ));
+    }
+
+    #[test]
+    fn attested_capture_marks_attestation_unverified_markdown() {
+        let rep = analyze_fixture("tests/fixtures/reader/attested-external");
+        let md = render_markdown(&rep, "");
+        assert!(md.contains("attestation=external_verified (recorded, not verified by memveil)"));
+    }
+
+    #[test]
+    fn summary_bullets_escape_markdown_cells() {
+        let mut rep = crate::model::report::Report::default();
+        rep.devices.push(DeviceEntry {
+            device_id: "d1".to_string(),
+            name: "a|b`c".to_string(),
+            ..DeviceEntry::default()
+        });
+        let md = render_markdown(&rep, "");
+        assert!(md.contains("- summary devices: d1 (a\\|b\\`c): attempts unavailable"));
+        assert!(!md.contains("a|b"));
     }
 }

@@ -10,7 +10,11 @@ import struct
 import subprocess
 import sys
 
-CONTRACT = {'code_generation': 'x86-64-v2', 'runtime_required': 'x86-64-v3',
+# code_generation names the verified compiler default for the
+# pinned toolchain (rustc 1.100.0 enables fxsr/sse/sse2 only:
+# x86-64 baseline). verify_engine checks the loader declaration
+# below, never the emitted instructions.
+CONTRACT = {'code_generation': 'x86-64-baseline', 'runtime_required': 'x86-64-v3',
             'enforcement': 'gnu-property-x86-isa-needed'}
 
 

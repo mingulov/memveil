@@ -165,6 +165,82 @@ def test_host_overhead_armed_via_perf_flag(sealed, monkeypatch, tmp_path):
     assert 'overhead' in calls[0][0][-1]
 
 
+@pytest.mark.parametrize('evil', ['x"y', 'o$(touch_x)', 'x;y',
+                                 'x y'])
+def test_host_rewritten_out_refused_before_boot(sealed, monkeypatch,
+                                                tmp_path, evil):
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    calls = []
+    def fake_guest(cmd, timeout):
+        calls.append((list(cmd), timeout))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        with pytest.raises(ValueError, match='launcher shell'):
+            m.host('overhead', opts={'out': str(tmp_path / evil)})
+    finally:
+        _restore_sealed(previous)
+    assert calls == []
+    assert not (tmp_path / evil).exists()
+
+
+def test_host_honest_out_reaches_boot(sealed, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    calls = []
+    def fake_guest(cmd, timeout):
+        calls.append((list(cmd), timeout))
+        return SimpleNamespace(returncode=1)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        with pytest.raises(ValueError, match='guest campaign failed'):
+            m.host('overhead', opts={'out': str(tmp_path / 'ev')})
+    finally:
+        _restore_sealed(previous)
+    assert len(calls) == 1
+
+
+def test_host_rewritten_tmpdir_refused_before_boot(sealed, monkeypatch,
+                                                   tmp_path):
+    import tempfile
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    calls = []
+    def fake_guest(cmd, timeout):
+        calls.append((list(cmd), timeout))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    hostile = tmp_path / 't"mp'
+    hostile.mkdir()
+    monkeypatch.setenv('TMPDIR', str(hostile))
+    monkeypatch.setattr(tempfile, 'tempdir', None)
+    try:
+        with pytest.raises(ValueError, match='launcher shell'):
+            m.host('overhead')
+    finally:
+        _restore_sealed(previous)
+    assert calls == []
+
+
 @pytest.mark.parametrize('returncode', [1, 2, 3, 4, -9])
 def test_attach_or_capture_refusal_is_failure(returncode):
     with pytest.raises(ValueError, match='exit'):

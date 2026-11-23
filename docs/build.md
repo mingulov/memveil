@@ -53,18 +53,44 @@ RUSTUP_TOOLCHAIN cargo ...`).
 Build, test, package, and document generation:
 
 ```sh
-cargo build --release --locked
-cargo test --workspace --locked
+export RUSTC="$(rustup which --toolchain 1.100.0 rustc)"  # one rustc for nested builds (see below)
+env -u RUSTUP_TOOLCHAIN cargo build --release --locked
+env -u RUSTUP_TOOLCHAIN cargo test --workspace --locked --no-fail-fast
 cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings
+./tools/test fast                # contributor gate: build + Rust tests + offline suites
 ./tools/test --help              # list harness suites
 ./tools/test reports             # one harness suite
 python3 scripts/package-tarball.py --out dist
 python3 scripts/gen-docs.py --out /tmp/docs --build
 ```
 
+The `RUSTC` pin matters on hosts with more than one Rust
+toolchain installed: some Rust tests spawn nested cargo
+builds, and nested cargo resolves `rustc` next to its own
+shim, which can mix compiler versions and fail the build
+with `E0514`. Pointing `RUSTC` at the pinned toolchain's
+`rustc` keeps every build on one compiler; the eBPF child
+build still selects its own pinned nightly.
+`./tools/test fast` sets this pin itself, builds in-tree
+(an exported `CARGO_TARGET_DIR` elsewhere breaks profile
+lookup beside the binary, so the lane ignores it), and
+runs the full workspace tests plus the offline suites
+(schemas, reports, privacy, reader-adversarial, docs) in
+one invocation. `./tools/test fast-full` adds the
+examples suite, whose fixed real-time replay costs about
+two minutes.
+
 Public build/test suites work from a standalone clone
 using only this repository. A skipped privileged test is
 reported as skipped, never as success evidence.
+
+The full `cargo test --workspace` suite needs a git
+checkout: the 92 `package_*` tests clone and stage
+through git, so they fail on a git-free source export
+while `cargo build --release --locked --offline` and
+every VM-free suite pass there. Run the full suite from
+a checkout; a source-tarball build plus the VM-free
+suites is the documented partial alternative.
 
 See [offline fixture generation](fixture-generation.md)
 for compiler-bound provisional fixtures and the complete
@@ -204,9 +230,9 @@ pass its directory to both package adapters:
 ```sh
 cargo build --release --locked
 python3 scripts/package-tarball.py --out dist
-python3 scripts/package-deb.py --bundle "$PWD/dist/memveil-0.1.1" --out dist
+python3 scripts/package-deb.py --bundle "$PWD/dist/memveil-0.2.0" --out dist
 python3 scripts/package-rpm.py --work build/rpm --out dist \
-    --bundle "$PWD/dist/memveil-0.1.1"
+    --bundle "$PWD/dist/memveil-0.2.0"
 ```
 
 These commands prepare local, unqualified artifacts and
@@ -224,12 +250,14 @@ path, type, size and SHA-256. Verification rejects
 missing, added, changed and escaping entries.
 
 The minimum runtime CPU eligibility is **x86-64-v3**.
-The engine keeps x86-64-v2 code generation; that does
-not lower the runtime requirement. Its single link adds
-the `GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration. The
-build and bundle verifier inspect the actual loadable
-property and refuse an absent, weaker or stronger
-declaration. A compatible glibc loader checks the
+Code generation stays at the compiler default, which is
+x86-64 baseline for the pinned toolchain (rustc 1.100.0
+enables fxsr/sse/sse2 only, per `--print cfg`); the v3
+eligibility is a loader declaration, separate from the
+emitted instruction set. Its single link adds the
+`GNU_PROPERTY_X86_ISA_1_NEEDED` v3 declaration. The build
+and bundle verifier inspect the actual loadable property
+and refuse an absent, weaker or stronger declaration. A compatible glibc loader checks the
 declaration before library constructors execute. An
 incompatible CPU produces `CPU ISA level is lower than
 required` and exits 127 on the verified loaders. This

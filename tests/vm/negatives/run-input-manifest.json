@@ -1,0 +1,55 @@
+{
+  "baseline": {
+    "copy_sha256": "daacd9950fec82d00c9dde5a33a7398d7e3c708d557455ab93b521aa0cf94227",
+    "copy_source_sha256": "6c7998afb28959dbfa6db59dabb049a96b7005bf91c24fb9057f70a765edcfdd"
+  },
+  "candidate": {
+    "manifest_sha256": "ac2503a3ef4269826ae3f9512ca2402d45e767be2601c2893e812ebb6df929a7",
+    "source_commit": "1af6cc9a912a38c8b2cb61da14749fbf1f628659"
+  },
+  "objects": {
+    "renamed_field": {
+      "file": "swiotlb_copy-renamed_field.bpf.o",
+      "loader_sha256": "ce33c0dfea4250c2b5b6e26fab2a2fb758df5ad7ea4b329e57f8cd912615e090",
+      "mutant_source_sha256": "ca3a4b23ce0ee571d3a4b1b92c91e92d2108ce146e404120939fb9222966c8b6",
+      "sha256": "bfa99cac14037a902b362698f11472765e6779d02ac27f5c01466a0c97c06088"
+    },
+    "widened_layout": {
+      "file": "swiotlb_copy-widened_layout.bpf.o",
+      "loader_sha256": "ab9c3fae77781dcf674f663211363078ffaf424e2cda6df687bc5f27b57ecfb4",
+      "mutant_source_sha256": "6f93745c8464a0db2906fb4b9ff8c28c528270bd3995bf36a7358dff38724a3d",
+      "sha256": "6dc35d9ef03773b32bb93611e618ac3ead58e65722b7c7d60f78b1e9b52c945f"
+    },
+    "wrong_argcnt": {
+      "file": "swiotlb_copy-wrong_argcnt.bpf.o",
+      "loader_sha256": "397cb7eecf4b15d5068bd25dd6d8859e7fd99e4abb43b92c5edd59ff8cdac4e7",
+      "mutant_source_sha256": "b555ef8618e86c07a094fd5b77856ebd0d398e7ceb8910f1c98dec5dfd455405",
+      "sha256": "5bf68a80fd5a74689b40686c5266a26ed4473c7e8382be0697299b1cda11d28e"
+    },
+    "wrong_shift": {
+      "file": "swiotlb_copy-wrong_shift.bpf.o",
+      "loader_sha256": "356a4a9750ad1a33b8284336843eabcd003c8ace7dd092299d61c65231a7bd66",
+      "mutant_source_sha256": "abe57929ca19665ed779febc896c98174fe054028cfd940bbd19a7c5ce8a564f",
+      "sha256": "277cac29d9701a820e43ed50a3a4b7dea9fbe6a9d783b477bb71990ca46acd01"
+    }
+  },
+  "pins": {
+    "aya_build": "0.2.0",
+    "aya_ebpf": "0.2.1",
+    "aya_obj_oracle": "0.3.0",
+    "bpf_linker": "0.10.4",
+    "nightly": "nightly-2026-05-20",
+    "recipe": {
+      "aya_readme": "c432a36e51b34afebd5d82436d1ab68734f173910657d71b73b53f75d80ba40e",
+      "ebpf_cargo_lock": "73ce54d9a6a19029d8d6e2dc5242ea53e8054285d205b32b066ef8bb432f5ea8",
+      "ebpf_toolchain": "657c8d393a73b47d61d0cde44129f255f73fdc5d72d115830d7ecd1ca0f51c63"
+    },
+    "rustc_commit": "e50aa6fba4e63ab34c72bf9acfd2c307c1155d1a"
+  },
+  "producer": {
+    "revision": "f201bd8a5df6b5b12c11ddc3a8bfd2bf248860f7",
+    "source_sha256": "204a68f9d24f99bf39f95b3d2ef722ff7a120dfe40a35af2c7638aaf56ba11e8",
+    "tree_clean": false
+  },
+  "schema": "memveil-negative-run-input/1"
+}

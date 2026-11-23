@@ -1,3 +1,4 @@
+> Legacy demo: recorded with memveil-0.1.0 (schema 0.1.1, integrity `legacy_unverified`). It demonstrates report rendering only and does not qualify current bytes; a fresh capture ships in a later release.
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # Worked example: real bounce-attempt capture
 
@@ -9,7 +10,7 @@ the persisted detail exactly (event count and byte totals), with
 zero recorded detail and aggregate loss. Terminal settlement stays partial;
 not-applicable channels do not claim a zero loss count. This is a historical
 capture and profile decision (the recorded decision names the narrow
-profile that kernel was captured under; the 0.1.1 bundle ships reference
+profile that kernel was captured under; the 0.2.0 bundle ships reference
 profiles only), not qualification of a rebuilt package or the
 current reader host.
 
