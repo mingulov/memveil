@@ -67,6 +67,18 @@ fn read_toolchain_channel(path: &Path) -> String {
 }
 
 fn main() {
+    // Runtime CPU floor: the shipped engine must carry a loadable
+    // x86-64-v3 requirement (GNU_PROPERTY_X86_ISA_1_NEEDED) so the
+    // glibc loader refuses older CPUs before any constructor runs.
+    // Code generation stays at the compiler default; only the link
+    // adds the declaration. The repository cargo config links this
+    // target with GNU ld (rust-lld ignores `-z x86-64-v*`), and the
+    // packager refuses any binary without the mark, so an unmarked
+    // build can never seal. Other targets keep their default link:
+    // the flag is x86-64-ELF-only.
+    if env::var("TARGET").as_deref() == Ok("x86_64-unknown-linux-gnu") {
+        println!("cargo::rustc-link-arg=-Wl,-z,x86-64-v3");
+    }
     // NOTE (candidate qualification): this child eBPF build runs in the
     // fixture-prep phase only (tests/support/journey_prep.py builds the
     // journey executables once and records them). Qualification itself

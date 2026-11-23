@@ -9,7 +9,7 @@
 //! packager-observed surface exists: `version` plus top and
 //! per-verb `--help`. Anything else exits 1.
 
-const VERSION: &str = "0.1.1";
+const VERSION: &str = "0.2.0";
 
 const VERBS: [&str; 6] = [
     "record",

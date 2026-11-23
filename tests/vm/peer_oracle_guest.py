@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Peer-leg guest flow: owned NIC, tracefs oracle, C9 capture, export.
+"""Peer-leg guest flow: owned NIC, tracefs oracle, sealed-candidate
+capture, export.
 
 Runs as root inside the virtme-ng guest (one boot for the
 peer case). Brings up the owned off-loopback pcnet NIC,
@@ -310,7 +311,7 @@ def sealed_record_binary():
         selected = load(required=True)
         binary = str(selected.path("bin/memveil"))
     except ValueError as exc:
-        fail("sealed C9 unusable in-guest: %s" % (exc,))
+        fail("the sealed candidate unusable in-guest: %s" % (exc,))
     if not os.access(binary, os.X_OK):
         fail("sealed record binary not executable")
     return binary
@@ -476,7 +477,7 @@ def parse_window(text, device, what):
 
 
 def run_traffic(args, nic, trace):
-    """Oracle window around peer traffic (C9 spans it)."""
+    """Oracle window around peer traffic (the sealed candidate spans it)."""
     iface = nic["iface"]
     drops_before = open_window(trace)
     mono_open = mono_ns()

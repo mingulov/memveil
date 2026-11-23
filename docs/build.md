@@ -222,9 +222,9 @@ pass its directory to both package adapters:
 ```sh
 cargo build --release --locked
 python3 scripts/package-tarball.py --out dist
-python3 scripts/package-deb.py --bundle "$PWD/dist/memveil-0.1.1" --out dist
+python3 scripts/package-deb.py --bundle "$PWD/dist/memveil-0.2.0" --out dist
 python3 scripts/package-rpm.py --work build/rpm --out dist \
-    --bundle "$PWD/dist/memveil-0.1.1"
+    --bundle "$PWD/dist/memveil-0.2.0"
 ```
 
 These commands prepare local, unqualified artifacts and

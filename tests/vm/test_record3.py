@@ -3,7 +3,7 @@
 """Shipped three-channel record against oracle scenario 1.
 
 SUPERSEDED by tests/vm/test_battery.py case `record3`
-(battery port: the sealed C9 record runs directly
+(battery port: the sealed-candidate record runs directly
 under the bound reference profile with no bridge); kept
 until the reviewed removal step.
 

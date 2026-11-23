@@ -68,6 +68,8 @@ and never move a Q branch after dispatching on it.
   `$HOME/.memveil-qualifier/`, outside the checkout, so
   key material never dirties the tree the seal gates on.
 - Toolchains: Rust 1.100.0 (`rust-toolchain.toml`),
+  gcc (the x86-64 link driver: only GNU ld merges the
+  `x86-64-v3` loader mark the bundle gate requires),
   nightly-2026-05-20 plus bpf-linker 0.10.4 for the eBPF
   child build (`build.rs`), packaging tools (`binutils`,
   `cpio`, `dpkg-dev`, `patchelf`, `rpm`), `ssh-keygen`,
@@ -111,17 +113,20 @@ commit). Pin the sealed clock to C first:
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "$C")
 ```
 
-1. Build the sealable bundle, deb, and rpm from C:
+1. Build the sealable bundle, deb, and rpm from C. The
+bundle keeps its default tag, so the asset is the
+versioned `memveil-0.2.0.tar.gz` with top directory
+`memveil-0.2.0/`:
 
 ```sh
 python3 scripts/package-tarball.py --build --candidate \
-  --root . --out dist --tag bundle
-python3 scripts/package-deb.py --bundle dist/bundle \
+  --root . --out dist
+python3 scripts/package-deb.py --bundle dist/memveil-0.2.0 \
   --out dist/deb
 python3 scripts/package-rpm.py --work dist/work/rpm \
-  --out dist/rpm --bundle dist/bundle
+  --out dist/rpm --bundle dist/memveil-0.2.0
 mkdir -p dist/artifacts
-cp dist/bundle.tar.gz dist/artifacts/
+cp dist/memveil-0.2.0.tar.gz dist/artifacts/
 set -- dist/deb/*.deb; test $# -eq 1 && cp "$1" dist/artifacts/
 set -- dist/rpm/*.rpm; test $# -eq 1 && cp "$1" dist/artifacts/
 git archive --format=tar HEAD | gzip -n \
@@ -137,9 +142,9 @@ cargo build -p memveil-release-entry --locked --offline
 DEB=$(echo dist/artifacts/*.deb)
 RPM=$(echo dist/artifacts/*.rpm)
 target/debug/memveil-release-entry sbom-emit \
-  --manifest dist/bundle/MANIFEST.json \
+  --manifest dist/memveil-0.2.0/MANIFEST.json \
   --out dist/artifacts/memveil.spdx.json \
-  --bundle dist/artifacts/bundle.tar.gz \
+  --bundle dist/artifacts/memveil-0.2.0.tar.gz \
   --deb "$DEB" \
   --rpm "$RPM" \
   --lock Cargo.lock \
@@ -151,8 +156,8 @@ candidate ID; keep it in the environment from here on:
 
 ```sh
 ./tools/candidate provenance \
-  --bundle-dir dist/bundle \
-  --bundle dist/artifacts/bundle.tar.gz \
+  --bundle-dir dist/memveil-0.2.0 \
+  --bundle dist/artifacts/memveil-0.2.0.tar.gz \
   --deb "$DEB" \
   --rpm "$RPM" \
   --source dist/artifacts/memveil-source.tar.gz \
@@ -160,7 +165,7 @@ candidate ID; keep it in the environment from here on:
   --out dist/artifacts/memveil.provenance.json \
   --source-root .
 CANDIDATE_SHA256=$(./tools/candidate seal \
-  --bundle-dir dist/bundle \
+  --bundle-dir dist/memveil-0.2.0 \
   --artifacts-dir dist/artifacts \
   --policy packaging/candidate-policy.json \
   --out dist/candidate.json \
@@ -190,7 +195,7 @@ carry no `MV_DEB`/`MV_RPM`/`MEMVEIL_TEST_*` overrides
 
 ```sh
 cp dist/candidate.json dist/artifacts/candidate.json
-MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/memveil-0.2.0.tar.gz \
 MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
   ./tools/kernel-matrix --all --out dist/evidence/matrix \
     --deb "$PWD/$DEB"
@@ -209,10 +214,10 @@ and writes the verified totals into the receipt's
 `exit.json`:
 
 ```sh
-MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/memveil-0.2.0.tar.gz \
 MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
 MEMVEIL_VM_PERF=1 tools/test perf-overhead
-MV_BUNDLE_TARBALL=$PWD/dist/artifacts/bundle.tar.gz \
+MV_BUNDLE_TARBALL=$PWD/dist/artifacts/memveil-0.2.0.tar.gz \
 MV_CANDIDATE_MANIFEST=$PWD/dist/artifacts/candidate.json \
 MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak
 ```
@@ -464,7 +469,7 @@ TAG=candidate-$CANDIDATE_SHA256
 gh release create "$TAG" --draft -t "$TAG" --target "$C" \
   -n "Holding draft for $TAG."
 gh release upload "$TAG" \
-  dist/artifacts/bundle.tar.gz \
+  dist/artifacts/memveil-0.2.0.tar.gz \
   "$DEB" "$RPM" \
   dist/artifacts/memveil-source.tar.gz \
   dist/artifacts/memveil.spdx.json \

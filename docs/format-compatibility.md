@@ -59,10 +59,11 @@ A missing final session can be recovered with `--allow-partial` from an owned, l
   request/result journal. It must retain integrity and recovery guarantees;
   successful API results cannot establish physical state or range lifetimes.
 - The reserved journal versions are not accepted or produced and have
-  no schema files yet. Old schema files remain immutable. Product 0.1.1 is
-  the planned hardened ordinary-Linux preview; product 0.2.0 is the planned
-  journal and real-SNP qualification target. Neither name is a qualification
-  receipt. The later 0.3.0 security milestone is separate from these formats.
+  no schema files yet. Old schema files remain immutable. Product 0.2.0 is
+  the hardened ordinary-Linux preview; the journal and real-SNP
+  qualification target stays a later, unnumbered release. Neither statement
+  is a qualification receipt. The later 0.3.0 security milestone is separate
+  from these formats.
 
 The [integrity and recovery contract](capture-integrity.md) specifies the
 required fields, literal-byte verification, quality demotion, durable

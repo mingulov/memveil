@@ -1,12 +1,12 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
-# MemVeil 0.1.1 release notes (development bundle)
+# MemVeil 0.2.0 release notes (development bundle)
 
 Status: **attempt/lifecycle/copy development preview**. The version names
 development bytes and schema compatibility, not a qualified full release.
 The [capability table](support.md#capabilities-by-mode) is the support
 contract for shipping collection, offline analysis, and laboratory work.
 
-0.1.1 rebuilds the userspace in Rust: collection, CLI, and reporting
+0.2.0 rebuilds the userspace in Rust: collection, CLI, and reporting
 come from the Cargo workspace, the BPF loader is statically linked,
 and the inspection objects are embedded in the binary. The 0.1.0
 bundle notes below stay as the history of that prerelease.
@@ -187,9 +187,10 @@ profiles accept `0.1.1`/`0.1.2`, and receipts remain `0.1.0`.
 Session/report `0.1.4` implement integrity with event `0.1.2`
 unchanged. Session/event/report `0.2.0` are reserved for a conversion
 request/result journal. Journal versions are planned,
-not implemented or admitted. The hardened 0.1.1 ordinary-Linux
-preview does not qualify confidential collection; 0.2.0 must earn real SNP
-I/O and owned conversion/reversion evidence for its exact packaged bytes.
+not implemented or admitted. The hardened 0.2.0 ordinary-Linux
+preview does not qualify confidential collection; a later release must
+earn real SNP I/O and owned conversion/reversion evidence for its exact
+packaged bytes.
 The broader 0.3.0 security milestone remains separate.
 
 Normal successful `record`, `report` and `top` output returns 0 even with
