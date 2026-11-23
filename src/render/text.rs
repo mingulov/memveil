@@ -231,26 +231,43 @@ fn fmt_bytes(v: Option<u64>) -> String {
     }
 }
 
-/// Total pool use and capacity across every pool row.
+/// Combined pool occupancy over pools with both gauges.
 ///
-/// Pool gauges carry per-pool dimensions only, so the headline
-/// sums each half over the measured rows; a half with no
-/// measured row stays unavailable. Saturating: hostile totals
-/// clamp instead of wrapping.
-fn pool_totals(rep: &Report) -> (Option<u64>, Option<u64>) {
-    let mut used: Option<u64> = None;
-    let mut cap: Option<u64> = None;
+/// A pool joins the sums only when it measured both halves;
+/// a half from a pool missing the other half never joins
+/// (unknown is not zero, and halves from different pools
+/// never combine). Returns the used and capacity sums over
+/// the fully gauged pools plus the fully gauged count and
+/// the pools seen. Saturating: hostile totals clamp instead
+/// of wrapping.
+fn pool_occupancy(rep: &Report) -> (Option<u64>, Option<u64>, usize, usize) {
+    use std::collections::BTreeMap;
+    let mut gauges: BTreeMap<&str, (Option<u64>, Option<u64>)> = BTreeMap::new();
     for m in &rep.metrics {
-        if !m.has_pool_id || !m.has_value {
+        if !m.has_pool_id {
+            continue;
+        }
+        let entry = gauges.entry(m.pool_id.as_str()).or_insert((None, None));
+        if !m.has_value {
             continue;
         }
         if m.name == "pool_used_bytes" {
-            used = Some(used.unwrap_or(0).saturating_add(m.value));
+            entry.0 = Some(entry.0.unwrap_or(0).saturating_add(m.value));
         } else if m.name == "pool_capacity_bytes" {
-            cap = Some(cap.unwrap_or(0).saturating_add(m.value));
+            entry.1 = Some(entry.1.unwrap_or(0).saturating_add(m.value));
         }
     }
-    (used, cap)
+    let mut used: Option<u64> = None;
+    let mut cap: Option<u64> = None;
+    let mut full = 0;
+    for (_, (u, c)) in &gauges {
+        if let (Some(u), Some(c)) = (u, c) {
+            full += 1;
+            used = Some(used.unwrap_or(0).saturating_add(*u));
+            cap = Some(cap.unwrap_or(0).saturating_add(*c));
+        }
+    }
+    (used, cap, full, gauges.len())
 }
 
 /// Plain 4-5 line summary answering bouncing, how much, which device.
@@ -309,12 +326,25 @@ pub fn summary_lines<E: Fn(&str) -> String>(rep: &Report, esc: E) -> Vec<String>
             fmt_bytes(to_original)
         ));
     }
-    let (used, cap) = pool_totals(rep);
-    lines.push(format!(
-        "summary pool: used {} of {} capacity",
-        fmt_bytes(used),
-        fmt_bytes(cap)
-    ));
+    let (used, cap, full, pools) = pool_occupancy(rep);
+    if full == pools {
+        // Covers no pools too: both halves unavailable.
+        lines.push(format!(
+            "summary pool: used {} of {} capacity",
+            fmt_bytes(used),
+            fmt_bytes(cap)
+        ));
+    } else if full == 0 {
+        lines.push(
+            "summary pool: occupancy unknown (no pool has both gauges)".to_string(),
+        );
+    } else {
+        lines.push(format!(
+            "summary pool: used {} of {} capacity (partial: {full} of {pools} pools fully gauged)",
+            fmt_bytes(used),
+            fmt_bytes(cap)
+        ));
+    }
     let scope = match (attempts_known, copies_known) {
         (true, false) => {
             "proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded"
@@ -848,6 +878,16 @@ mod tests {
         }
     }
 
+    fn pooled_gap(name: &str, pool_id: &str) -> Metric {
+        Metric {
+            name: name.to_string(),
+            has_value: false,
+            has_pool_id: true,
+            pool_id: pool_id.to_string(),
+            ..Metric::default()
+        }
+    }
+
     #[test]
     fn summary_copies_line_needs_a_measured_copy() {
         let rep = analyze_fixture("tests/fixtures/lifecycle/copy-before-failure");
@@ -886,13 +926,79 @@ mod tests {
         assert!(lines.contains(
             &"summary pool: used 150 bytes of 1.5 KiB (1500 bytes) capacity".to_string()
         ));
+        // A measured zero is a value, not an unknown: the pool
+        // counts as fully gauged.
+        let mut zero = Report::default();
+        zero.metrics
+            .push(pooled_metric("pool_used_bytes", 0, "pool-0"));
+        zero.metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
+        let lines = summary_lines(&zero, escape_text);
+        assert!(lines.contains(
+            &"summary pool: used 0 bytes of 1000 bytes capacity".to_string()
+        ));
+    }
+
+    #[test]
+    fn summary_pool_never_combines_across_pools() {
+        // Halves from different pools never meet: no pool has
+        // both gauges, so no combined occupancy prints.
+        let mut split = Report::default();
+        split
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
+        split
+            .metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-0"));
+        split
+            .metrics
+            .push(pooled_gap("pool_used_bytes", "pool-1"));
+        split
+            .metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-1"));
+        let lines = summary_lines(&split, escape_text);
+        assert!(lines.contains(
+            &"summary pool: occupancy unknown (no pool has both gauges)".to_string()
+        ));
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("summary pool: used "))
+        );
+        // One half alone is unknown too, never zero-filled.
         let mut half = Report::default();
         half.metrics
             .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
+        half.metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-0"));
         let lines = summary_lines(&half, escape_text);
-        assert!(
-            lines.contains(&"summary pool: used 100 bytes of unavailable capacity".to_string())
-        );
+        assert!(lines.contains(
+            &"summary pool: occupancy unknown (no pool has both gauges)".to_string()
+        ));
+    }
+
+    #[test]
+    fn summary_pool_partial_covers_only_full_pools() {
+        // The combination covers the fully gauged subset only,
+        // and says so with the pool count.
+        let mut mixed = Report::default();
+        mixed
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
+        mixed
+            .metrics
+            .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
+        mixed
+            .metrics
+            .push(pooled_metric("pool_used_bytes", 500, "pool-1"));
+        mixed
+            .metrics
+            .push(pooled_gap("pool_capacity_bytes", "pool-1"));
+        let lines = summary_lines(&mixed, escape_text);
+        assert!(lines.contains(
+            &"summary pool: used 900 bytes of 1000 bytes capacity (partial: 1 of 2 pools fully gauged)"
+                .to_string()
+        ));
     }
 
     #[test]
