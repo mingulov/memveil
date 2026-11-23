@@ -165,6 +165,33 @@ def test_host_overhead_armed_via_perf_flag(sealed, monkeypatch, tmp_path):
     assert 'overhead' in calls[0][0][-1]
 
 
+def test_host_boots_full_machine_for_pcnet(sealed, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    calls = []
+    def fake_guest(cmd, timeout):
+        calls.append((list(cmd), timeout))
+        return SimpleNamespace(returncode=1)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        with pytest.raises(ValueError, match='guest campaign failed'):
+            m.host('overhead')
+    finally:
+        _restore_sealed(previous)
+    assert len(calls) == 1
+    argv = calls[0][0]
+    assert '--disable-microvm' in argv
+    assert argv.index('--disable-microvm') < argv.index('--exec')
+    assert any(part.startswith('--qemu-opts=') and 'pcnet' in part
+               for part in argv)
+
+
 @pytest.mark.parametrize('evil', ['x"y', 'o$(touch_x)', 'x;y',
                                  'x y'])
 def test_host_rewritten_out_refused_before_boot(sealed, monkeypatch,
