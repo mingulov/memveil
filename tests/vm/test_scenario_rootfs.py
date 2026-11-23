@@ -46,13 +46,13 @@ kmt = _load_tool()
 
 # Documented 4-way equality bytes (deb, manifest, sealed fixture,
 # release set) for the sealed source.
-SEALED_COMMIT = "3a3d6cb8c8acc1295efdff6df44f2d89d327cc9c"
-SEALED_ATTEMPT = "8ee4903f6de717d013ae797e7963fefdb28549f4" \
-    "ee04e3c5d4544a8e9de61d6a"
-SEALED_LIFECYCLE = "ad69cf0587597a1a8c14048dbb5f1256a604bf20" \
-    "cc8d9f092d8c7b658c41f8e9"
-SEALED_COPY = "29959dcbf9cc4cb40b9813cddf686d4118b0528f" \
-    "29a8edec070504e1265350f8"
+SEALED_COMMIT = "bdf641c36addc345f3fb6d8bf925059c6f1fa714"
+SEALED_ATTEMPT = "81ebd35c1450e905de1eaf2d23ea2827328a221a" \
+    "a8eabf2b4ca4e2f4daa026b6"
+SEALED_LIFECYCLE = "0cd5a0c9b961605f0c47fbcf0a5377080e5ca3f6" \
+    "24d6c9860a57e816aff4527f"
+SEALED_COPY = "daacd9950fec82d00c9dde5a33a7398d7e3c708d" \
+    "557455ab93b521aa0cf94227"
 
 NEG_SHAS = {"renamed_field": "11" * 32,
             "widened_layout": "22" * 32,

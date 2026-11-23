@@ -786,11 +786,11 @@ MANIFEST_BPF_ENTRY = "bpf/swiotlb_%s.bpf.o"
 # worktree bytes before trusting them; dirt fails the pin
 # exactly as a missing object would.
 SEALED_SOURCE_COMMIT = \
-    "3a3d6cb8c8acc1295efdff6df44f2d89d327cc9c"
+    "bdf641c36addc345f3fb6d8bf925059c6f1fa714"
 SEALED_FIXTURE_BLOBS = {
-    "attempt": "bfbe26bbe4450145fed90c66f72ea2c4dba39b48",
-    "lifecycle": "280cce505ff18005793e3b04d897c29707249976",
-    "copy": "2899af58a7b7e91a4bce172b17ed2390ee0a79ea",
+    "attempt": "e8951a35178e9cb01d428455f81c16686c9328cf",
+    "lifecycle": "b52975b81c3368f0467cf7408509a0a9b9573fbe",
+    "copy": "1f4e851ee2d045b67133aad3ed4772666b418d84",
 }
 
 
