@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 // LD_PRELOAD shim: report a foreign owner so capture-open tests reach
 // the not-owned-by-reader refusals unprivileged.
 //
