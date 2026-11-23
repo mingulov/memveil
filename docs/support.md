@@ -21,7 +21,8 @@ has passed its gates.
 Rows without evidence remain unavailable with reasons. Allocation
 release reduces observed occupancy, not persistent sharing state;
 allocation byte-time is not a measured sharing lifetime. Absence of a
-pressure finding is not evidence of absent pressure.
+pressure finding is not evidence of absent pressure. Unmapping is not
+erasure or reprivatization.
 
 ## Confidence and device scope
 
@@ -209,6 +210,13 @@ required. Admission is by live interface checks (BTF
 signatures, tracepoint format, ftrace attachability),
 never by trusting the release string. One prebuilt probe
 set covers every row; no rebuild on the device.
+
+Attempt counts work without BTF: the 6.12.114-nobtf row
+below reports attempt EXACT with lifecycle/copy refused
+(`btf-absent-config`), while attempt bytes on BTF-less
+kernels stay unproven and unqualified. Lifecycle/copy
+require BTF (T5 row receipt
+`matrix-out/6.12.114-nobtf/receipt.json`).
 
 On 6.0 through 6.10 a default `record` is attempt-only
 (attempt-trace is the default capability and required for

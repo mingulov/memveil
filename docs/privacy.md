@@ -94,6 +94,10 @@ path is that report's operational purpose.)
   bytes and adds engine version plus computed counts only.
 - MemVeil makes no network connections and runs no daemon;
   copying a capture directory is the only export path.
+- Captures contain no secrets, but do contain a per-boot
+  identifier and kernel/hardware fingerprints; treat a
+  capture like a `dmesg` — fine to share deliberately,
+  not anonymous.
 
 ## Preview evidence
 

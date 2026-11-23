@@ -72,6 +72,8 @@ bundle notes below stay as the history of that prerelease.
 >   the signed `SHA256SUMS.txt`; build from source if you need a
 >   stronger chain — signed release custody returns at 1.x.
 
+**Exit 0 does not mean complete measurement. Read the `verdict:` line, or pass `--strict` in scripts.**
+
 Finalized session 0.1.4 captures now bind and verify literal event bytes,
 counts, kinds and contiguous sequences. Report 0.1.4 exposes verified
 bytes/events. Finalized corruption returns 2 with or without partial mode.

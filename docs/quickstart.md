@@ -8,7 +8,7 @@ from the copy channel. This bundle runs from any directory: no
 compiler, network, or source checkout needed. The
 [capability table](support.md#capabilities-by-mode) distinguishes the
 shipping collector, offline reducers and laboratory probes.
-Lifecycle/copy collection is qualified through the live
+Lifecycle/copy collection is admitted through the live
 interface checks on covered kernels (see the support
 envelope) or a machine-local receipt (advanced, step 6); a full
 confidential release is not yet qualified. The host supplies libc,
@@ -33,8 +33,11 @@ extra lifecycle/copy channels.
     ./bin/memveil version        # memveil-0.2.0, exit 0
     ./bin/memveil help           # verb list, exit 0
 
-`MANIFEST.json` records the sha256 of every payload file plus the
-source revisions; re-hash any file to confirm it.
+This flow uses the tarball binary, which is byte-identical
+to the matrix-run `.deb` binary (one canonical binary; see
+release notes, Known issues). `MANIFEST.json` records the
+sha256 of every payload file plus the source revisions;
+re-hash any file to confirm it.
 
 ## 2. Inspect the host (unprivileged, passive)
 
@@ -64,6 +67,7 @@ and plain `sudo` works:
 
 Expected: `ready session=...`, then `end=duration
 outcome=finalized exit=0`.
+**Exit 0 does not mean complete measurement. Read the `verdict:` line, or pass `--strict` in scripts.**
 Normal exit 0 includes finalized output with partial terminal evidence,
 including zero-event and signal stops; inspect the recorded verdict. With
 `--strict`, partial evidence returns 4. Exit 3 names the refusal reason
@@ -77,7 +81,10 @@ run.
 Attempt-only recording needs no qualification: without a
 receipt it reports partial diagnostics instead of refusing.
 Anything but the exact bound kernel and objects refuses with
-exit 3 instead of recording an unverified channel. On a
+exit 3 instead of recording an unverified channel. Exception:
+an explicit `--profile` whose bindings note is unparseable
+proceeds as unbound partial instead of refusing (see
+[permissions](permissions.md)). On a
 qualified host the receipt admits the channel as `local-auto`
 (see step 6); a stale receipt loses that admission until
 qualification is re-run, with attempt-only recording falling
@@ -271,6 +278,9 @@ binding, so it cannot confirm or deny bridge drift).
 admission - at every start and names the drift there,
 with a stale receipt losing `local-auto` admission and
 attempt-only recording falling back to partial diagnostics.
+
+The receipt does not hash the memveil executable; re-run
+`qualify` after any reinstall/upgrade.
 
 ## Limits in one paragraph
 

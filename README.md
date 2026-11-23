@@ -104,6 +104,8 @@ separately linked binaries that were not matrix-run (see
     sudo memveil record --output /tmp/cap1 --duration 10
     memveil report --format text /tmp/cap1   # unprivileged replay
 
+**Exit 0 does not mean complete measurement. Read the `verdict:` line, or pass `--strict` in scripts.**
+
 ## Use (from the tarball)
 
     tar -xzf memveil-0.2.0.tar.gz && cd memveil-0.2.0
