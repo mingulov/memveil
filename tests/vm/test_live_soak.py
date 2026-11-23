@@ -2040,6 +2040,30 @@ def test_guest_install_unwritable_forensics_is_loud(tmp_path, monkeypatch):
         m.install_guest_deb(_sealed_deb(tmp_path), str(blocker))
 
 
+def test_guest_install_failure_keeps_cause_when_forensics_unwritable(
+        tmp_path, monkeypatch):
+    import shlex
+    m = api()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    _stub_installer(bindir / 'dpkg',
+        'printf %s %s\nprintf %s %s >&2\nexit 1\n'
+        % (shlex.quote(INSTALL_REFUSAL_STDOUT), '',
+           shlex.quote(INSTALL_REFUSAL_STDERR), ''))
+    _shadow_path(monkeypatch, bindir)
+    blocker = tmp_path / 'blocker'
+    blocker.write_text('not a directory\n')
+    with pytest.raises(m.InstallFailure) as caught:
+        m.install_guest_deb(_sealed_deb(tmp_path), str(blocker))
+    message = str(caught.value)
+    assert 'libc6' in message
+    assert 'forensics unwritable' in message
+    assert message.index('libc6') < message.index('forensics unwritable')
+    assert 'dpkg exit 1' in message
+    assert caught.value.returncode == 1
+    assert b'leaving unconfigured' in caught.value.stderr
+
+
 def test_checked_keeps_label_only_contract(tmp_path):
     m = api()
     helper = _stub_installer(

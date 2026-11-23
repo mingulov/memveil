@@ -141,21 +141,27 @@ def install_guest_deb(deb, local_evidence, timeout=120):
     try:
         result = subprocess.run(argv, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        _write_install_log(local_evidence, argv, 'timeout',
-                           exc.stdout or b'', exc.stderr or b'')
+        message = ('guest package install timed out: dpkg -i %s: %s'
+                   % (deb, _install_tail(exc.stderr or b'')))
+        try:
+            _write_install_log(local_evidence, argv, 'timeout',
+                               exc.stdout or b'', exc.stderr or b'')
+        except ValueError as log_exc:
+            message += '; ' + str(log_exc)
         raise InstallFailure(
-            'guest package install timed out: dpkg -i %s: %s'
-            % (deb, _install_tail(exc.stderr or b'')),
-            returncode=None, stdout=exc.stdout or b'',
+            message, returncode=None, stdout=exc.stdout or b'',
             stderr=exc.stderr or b'',
             log=str(Path(local_evidence) / INSTALL_LOG_NAME))
     if result.returncode:
-        _write_install_log(local_evidence, argv, result.returncode,
-                           result.stdout, result.stderr)
+        message = ('guest package install failed: dpkg exit %d: %s'
+                   % (result.returncode, _install_tail(result.stderr)))
+        try:
+            _write_install_log(local_evidence, argv, result.returncode,
+                               result.stdout, result.stderr)
+        except ValueError as log_exc:
+            message += '; ' + str(log_exc)
         raise InstallFailure(
-            'guest package install failed: dpkg exit %d: %s'
-            % (result.returncode, _install_tail(result.stderr)),
-            returncode=result.returncode, stdout=result.stdout,
+            message, returncode=result.returncode, stdout=result.stdout,
             stderr=result.stderr,
             log=str(Path(local_evidence) / INSTALL_LOG_NAME))
     _write_install_log(local_evidence, argv, 0,
