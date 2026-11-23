@@ -47,9 +47,9 @@ use crate::cli::durations::parse_duration_ns;
 use crate::cli::record::parse_record_args;
 use crate::cli::report::{
     CliError, EXIT_ERROR, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, MAX_RENDERED_BYTES,
-    analysis_error_text, check_rendered_size, exit_for_report, parse_limit, parse_limit_bytes,
-    refusal_stderr_lines, sanitize_diagnostic, write_capture_location, write_stderr,
-    write_stderr_trusted,
+    analysis_error_text, check_rendered_size, exit_for_report, expand_flag_eq, expand_flag_eq_os,
+    parse_limit, parse_limit_bytes, refusal_stderr_lines, sanitize_diagnostic, write_capture_location,
+    write_stderr, write_stderr_trusted,
 };
 use crate::model::event::Event;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
@@ -282,6 +282,48 @@ fn is_live_flag(tok: &str) -> bool {
     )
 }
 
+/// Value-taking top flags: the `--flag=value` set.
+///
+/// Own options plus the live-flow flags forwarded to the
+/// record parser, so both spellings share every error path
+/// (including the capability ID list).
+const TOP_VALUE_FLAGS: &[&str] = &[
+    "--interval",
+    "--device",
+    "--long-lived-after",
+    "--max-line-bytes",
+    "--max-session-bytes",
+    "--max-events-bytes",
+    "--output",
+    "--object",
+    "--bridge",
+    "--profile",
+    "--profiles-dir",
+    "--capability",
+    "--lc-object",
+    "--cp-object",
+    "--duration",
+];
+
+/// Byte-wise [`TOP_VALUE_FLAGS`] for the raw parser.
+const TOP_VALUE_FLAGS_OS: &[&[u8]] = &[
+    b"--interval",
+    b"--device",
+    b"--long-lived-after",
+    b"--max-line-bytes",
+    b"--max-session-bytes",
+    b"--max-events-bytes",
+    b"--output",
+    b"--object",
+    b"--bridge",
+    b"--profile",
+    b"--profiles-dir",
+    b"--capability",
+    b"--lc-object",
+    b"--cp-object",
+    b"--duration",
+];
+
 fn parse_duration_opt(text: &str, what: &str) -> Result<u64, CliError> {
     match parse_duration_ns(text) {
         Ok(ns) => Ok(ns),
@@ -293,6 +335,8 @@ fn parse_duration_opt(text: &str, what: &str) -> Result<u64, CliError> {
 
 /// Parse top arguments without the leading verb.
 pub fn parse_top_args(args: &[String]) -> Result<TopOptions, CliError> {
+    let expanded = expand_flag_eq(args, TOP_VALUE_FLAGS);
+    let args = &expanded;
     let mut opts = TopOptions::default();
     let mut live_args: Vec<String> = Vec::new();
     let mut stashed_max_events = String::new();
@@ -481,6 +525,8 @@ fn is_live_flag_os(tok: &[u8]) -> bool {
 /// only a live run (which would collect through text words)
 /// returns [`TopOsArgs::Live`] instead of replaying.
 fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
+    let expanded = expand_flag_eq_os(args, TOP_VALUE_FLAGS_OS);
+    let args = &expanded;
     let mut opts = TopOptions::default();
     let mut dir_os = OsString::new();
     let mut device_os: Option<OsString> = None;
@@ -1659,6 +1705,24 @@ mod tests {
     }
 
     #[test]
+    fn top_flag_eq_forms() {
+        let opts = parse_top_args(&args(&["--interval=2s", "capdir"])).expect("eq parses");
+        assert_eq!(opts.interval_ns, 2_000_000_000);
+        assert_eq!(opts.dir, "capdir");
+        let opts = parse_top_args(&args(&["--device=d000001", "capdir"])).expect("eq parses");
+        assert!(opts.has_device);
+        assert_eq!(opts.device, "d000001");
+        let err = parse_top_args(&args(&["--interval=nope", "capdir"]))
+            .expect_err("bad eq interval rejects");
+        assert!(err.message.starts_with("--interval "), "{}", err.message);
+        // A value-position word never splits, even when it
+        // spells a known flag inline.
+        let err = parse_top_args(&args(&["--device", "--interval=2s"]))
+            .expect_err("flag-like device value rejects as dir");
+        assert_eq!(err.message, "missing capture directory");
+    }
+
+    #[test]
     fn top_arg_errors() {
         let err = parse_top_args(&[]).expect_err("empty rejects");
         assert_eq!(err.message, "missing capture directory");
@@ -1723,6 +1787,27 @@ mod tests {
         let opts = parse_top_args(&args(&["--output", "out", "--strict"])).expect("parses");
         assert!(opts.strict);
         assert!(opts.live.strict);
+    }
+
+    #[test]
+    fn top_live_flag_eq_forms() {
+        let opts =
+            parse_top_args(&args(&["--output=out"])).expect("eq output parses");
+        assert!(opts.has_output);
+        assert_eq!(opts.live.output, "out");
+        // A bad live capability lists the valid IDs in both
+        // spellings, through the shared record parser.
+        for words in [
+            vec!["--output", "out", "--capability", "bogus"],
+            vec!["--output=out", "--capability=bogus"],
+        ] {
+            let err = parse_top_args(&args(&words)).expect_err("bad caps reject");
+            assert_eq!(
+                err.message,
+                "unknown capability: bogus; valid capabilities: attempt-trace, \
+                 mapping-lifecycle, copy-actual, conversion-observe, conversion-journal, all"
+            );
+        }
     }
 
     #[test]
@@ -1809,6 +1894,7 @@ mod tests {
             ],
             vec!["--full", "--device", "d", "capdir"],
             vec!["--compact", "--device", "d", "capdir"],
+            vec!["--interval=2s", "--device=d", "capdir"],
         ] {
             let text: Vec<String> = words.iter().map(|w| w.to_string()).collect();
             let mut want = parse_top_args(&text).expect("str parses");

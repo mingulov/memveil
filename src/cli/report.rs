@@ -433,11 +433,26 @@ pub fn split_flag_eq_bytes(raw: &[u8]) -> Option<(&[u8], &[u8])> {
 /// inline value (which may itself contain `=`); every other word
 /// passes through untouched, so unknown-option errors keep echoing
 /// the original token and boolean flags never gain an inline form.
-/// Callers parse the expansion exactly like spaced words, so both
-/// spellings share every error path.
+/// A word in value position never splits: the parsers consume the
+/// word after a bare value flag unconditionally, so the expansion
+/// tracks the same consumption (a bare value flag arms the next
+/// word; an inline word never does). Callers parse the expansion
+/// exactly like spaced words, so both spellings share every error
+/// path.
 pub fn expand_flag_eq(args: &[String], value_flags: &[&str]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
+    let mut value_next = false;
     for arg in args {
+        if value_next {
+            out.push(arg.clone());
+            value_next = false;
+            continue;
+        }
+        if value_flags.contains(&arg.as_str()) {
+            out.push(arg.clone());
+            value_next = true;
+            continue;
+        }
         let mut split = false;
         if let Some((flag, value)) = split_flag_eq(arg)
             && value_flags.contains(&flag)
@@ -454,10 +469,24 @@ pub fn expand_flag_eq(args: &[String], value_flags: &[&str]) -> Vec<String> {
 }
 
 /// Byte-wise [`expand_flag_eq`] over raw argv words.
+///
+/// Value-position words pass through untouched, exactly like the
+/// text form: a bare value flag arms the next word.
 pub fn expand_flag_eq_os(args: &[OsString], value_flags: &[&[u8]]) -> Vec<OsString> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     let mut out = Vec::with_capacity(args.len());
+    let mut value_next = false;
     for arg in args {
+        if value_next {
+            out.push(arg.clone());
+            value_next = false;
+            continue;
+        }
+        if value_flags.contains(&arg.as_bytes()) {
+            out.push(arg.clone());
+            value_next = true;
+            continue;
+        }
         let mut split = false;
         if let Some((flag, value)) = split_flag_eq_bytes(arg.as_bytes())
             && value_flags.contains(&flag)
@@ -1099,6 +1128,29 @@ mod tests {
         // Unknown and boolean flags pass through untouched.
         let out = expand_flag_eq(&args(&["--bogus=x", "--strict=x"]), &["--format"]);
         assert_eq!(out, args(&["--bogus=x", "--strict=x"]));
+        // A word in value position never splits, even when it
+        // spells another known flag inline.
+        let out = expand_flag_eq(
+            &args(&["--profiles-dir", "--object=x"]),
+            &["--profiles-dir", "--object"],
+        );
+        assert_eq!(out, args(&["--profiles-dir", "--object=x"]));
+        // A consumed flag-word does not arm the next word: only
+        // genuine flag position does.
+        let out = expand_flag_eq(
+            &args(&["--profiles-dir", "--capability", "--object=x"]),
+            &["--profiles-dir", "--capability", "--object"],
+        );
+        assert_eq!(
+            out,
+            args(&["--profiles-dir", "--capability", "--object", "x"])
+        );
+        // An inline word never arms the next word either.
+        let out = expand_flag_eq(
+            &args(&["--format=json", "--object=x"]),
+            &["--format", "--object"],
+        );
+        assert_eq!(out, args(&["--format", "json", "--object", "x"]));
         // Byte-level expansion keeps raw value bytes.
         let raw = expand_flag_eq_os(
             &os(&[b"--format=json".as_slice(), b"d".as_slice()]),
@@ -1107,6 +1159,15 @@ mod tests {
         assert_eq!(
             raw,
             os(&[b"--format".as_slice(), b"json".as_slice(), b"d".as_slice()])
+        );
+        // The raw arm tracks value position the same way.
+        let raw = expand_flag_eq_os(
+            &os(&[b"--profiles-dir".as_slice(), b"--object=x".as_slice()]),
+            &[b"--profiles-dir".as_slice(), b"--object".as_slice()],
+        );
+        assert_eq!(
+            raw,
+            os(&[b"--profiles-dir".as_slice(), b"--object=x".as_slice()])
         );
     }
 

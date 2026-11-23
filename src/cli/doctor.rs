@@ -2296,6 +2296,18 @@ mod tests {
     }
 
     #[test]
+    fn exit_profiles_dir_flag_like_value() {
+        // A value-position word never splits, even when it
+        // spells another known flag inline: the whole word is
+        // the directory, so a manifest-less word is
+        // unavailable (3), not a usage error (2).
+        assert_eq!(
+            run_doctor(&args(&["--profiles-dir", "--object=r100-canary"])),
+            EXIT_UNAVAILABLE
+        );
+    }
+
+    #[test]
     fn exit_profiles_dir_valid_dir() {
         let code = run_doctor(&args(&["--profiles-dir", &fx("profiles-test")]));
         assert_ne!(code, 2);

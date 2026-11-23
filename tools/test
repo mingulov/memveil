@@ -2109,7 +2109,7 @@ suite_qualify() {
     # run refuses before the smoke on every host (no discovery).
     qexpect no-object 3 "no object: pass --object PATH" -- \
         --output "$TMP/q-noobj" --bridge "$TMP/nolib.so"
-    qexpect bad-capability 3 "bad capability list" -- \
+    qexpect bad-capability 2 "bad capability list; valid capabilities:" -- \
         --output "$TMP/q-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
@@ -2155,7 +2155,7 @@ suite_qualify() {
         --object "$ROOT/tests/fixtures/elf/ok.o"
     bexpect bind-bad-id 2 "bad --profile-id" -- \
         --output "$TMP/b-id.json" --profile-id 'has space'
-    bexpect bind-bad-capability 3 "bad capability list" -- \
+    bexpect bind-bad-capability 2 "bad capability list; valid capabilities:" -- \
         --output "$TMP/b-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
