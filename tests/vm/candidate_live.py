@@ -1159,7 +1159,12 @@ def host(mode, candidate=None, opts=None):
             '--token', token, '--export', '/tmp/export', '--digest', selected.digest,
             '--local-evidence', '/tmp/memveil-local-evidence',
             '--host-boot', Path('/proc/sys/kernel/random/boot_id').read_text().strip()])
-        args = ['--run', '-m', '6G', '--append', 'swiotlb=force memveil_candidate_guest=' + token,
+        # Microvm boots carry no pcnet NIC, so this network
+        # guest needs the full machine (same flag as the
+        # attempt lane's argv in test_attempt_capture and the
+        # network branch of vm_boot).
+        args = ['--run', '-m', '6G', '--disable-microvm',
+                '--append', 'swiotlb=force memveil_candidate_guest=' + token,
                 '--overlay-rwdir=/usr', '--overlay-rwdir=/etc', '--overlay-rwdir=/var',
                 '--rwdir=/tmp/export=' + str(export),
                 '--rwdir=/tmp/memveil-local-evidence=' + str(local_evidence), '--network', 'user',
