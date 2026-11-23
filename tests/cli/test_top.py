@@ -63,12 +63,15 @@ def main():
     check("unknown-flag", p.returncode == 2, "exit %d" % p.returncode)
     p = run(["top", "--long-lived-after", "0s", NESTED])
     check("zero-long-lived", p.returncode == 2, "exit %d" % p.returncode)
+    # --compact is a no-op alias now: it combines with --device,
+    # headlines stay global, the final block honors the filter.
     p = run(["top", "--compact", "--device", "dev-1", NESTED])
-    check("compact-device-refused", p.returncode == 2,
-          "exit %d" % p.returncode)
-    check("compact-device-message",
-          "--compact does not take --device" in p.stderr,
-          repr(p.stderr))
+    check("compact-device-accepted", p.returncode == 0,
+          "exit %d: %s" % (p.returncode, p.stderr))
+    check("compact-device-filter", "[device: dev-1]" in p.stdout)
+    p = run(["top", "--full", "--device", "dev-1", NESTED])
+    check("full-device-accepted", p.returncode == 0,
+          "exit %d: %s" % (p.returncode, p.stderr))
 
     p = run(["top", "--interval", "1s", NESTED])
     check("nested-exit", p.returncode == 0, "exit %d: %s"
@@ -79,13 +82,22 @@ def main():
     check("nested-final", "successful_allocations = 1" in blocks[-1])
     check("prefix-integrity-pending", "integrity: unverified replay prefix" in blocks[0])
     check("final-integrity-legacy", "integrity: legacy_unverified" in blocks[-1])
+    # Interim refreshes are headlines now; the full per-refresh
+    # rows moved behind --full.
+    check("nested-interim-compact", "attempts: " in blocks[0]
+          and "memveil report " not in blocks[0])
+    check("nested-interim-elapsed", "(+1.0s)" in blocks[0].split("\n")[0])
+    f = run(["top", "--full", "--interval", "1s", NESTED])
+    check("full-exit", f.returncode == 0, "exit %d" % f.returncode)
+    fblocks = [b for b in f.stdout.split("--- refresh ") if b.strip()]
+    check("full-blocks", len(fblocks) == 2, "%d blocks" % len(fblocks))
     # The 2.0s refresh must exclude the unmap at 2.3s: the mapping
     # is still open at the first boundary.
-    check("nested-interim-open", "open_mappings = 1" in blocks[0])
+    check("nested-interim-open", "open_mappings = 1" in fblocks[0])
     check("nested-interim-live",
-          "live_observed_allocation_bytes = 4096" in blocks[0])
+          "live_observed_allocation_bytes = 4096" in fblocks[0])
     check("nested-interim-no-close",
-          "completed_lifetime_count = 1" not in blocks[0])
+          "completed_lifetime_count = 1" not in fblocks[0])
 
     rep = run(["report", NESTED])
     check("report-exit", rep.returncode == 0)
@@ -100,12 +112,38 @@ def main():
     check("compact-blocks", len(cblocks) == 2,
           "%d blocks" % len(cblocks))
     check("compact-verdict", "verdict: " in cblocks[-1])
-    check("compact-headlines", "attempts: " in cblocks[-1]
-          and "detail: " in cblocks[-1]
-          and "terminal: " in cblocks[-1]
-          and "findings: " in cblocks[-1])
-    check("compact-short", "memveil report " not in p.stdout
-          and "metrics (" not in p.stdout)
+    check("compact-headlines", "attempts: " in cblocks[0]
+          and "detail: " in cblocks[0]
+          and "terminal: " in cblocks[0]
+          and "findings: " in cblocks[0])
+    check("compact-short", "memveil report " not in cblocks[0]
+          and "metrics (" not in cblocks[0])
+    check("compact-final-full", "memveil report " in cblocks[-1]
+          and "metrics (" in cblocks[-1])
+
+    # Compact-by-default oracle: the shipped ~20 s example stays
+    # small at 1 s refreshes (the old full default measured 1859
+    # lines here), refreshes are headlines, the final block is
+    # the full report. A sub-200 bound miscounts the full final
+    # (20 six-line refreshes plus the ~98-line final), so the
+    # pin is <300 with the 6x magnitude gap explicit.
+    REAL = os.path.join(REPO, "examples", "real-capture")
+    p = run(["top", "--interval", "1", REAL])
+    check("default-oracle-exit", p.returncode == 0,
+          "exit %d: %s" % (p.returncode, p.stderr))
+    total = len(p.stdout.split("\n")) - 1
+    check("default-oracle-small", total < 300, "%d lines" % total)
+    check("default-oracle-magnitude", total * 6 < 1859,
+          "%d lines" % total)
+    dblocks = [b for b in p.stdout.split("--- refresh ") if b.strip()]
+    check("default-oracle-final-full",
+          "memveil report " in dblocks[-1]
+          and "metrics (" in dblocks[-1])
+    check("default-oracle-refresh-compact",
+          all("memveil report " not in b and "attempts: " in b
+              for b in dblocks[:-1]),
+          "%d blocks" % len(dblocks))
+    check("default-oracle-elapsed", "(+1.0s)" in dblocks[0])
 
     p = run(["top", "--interval", "1s", "--device", "dev-1", NESTED])
     check("device-exit", p.returncode == 0)
@@ -171,10 +209,10 @@ def main():
     check("device-hostile-del",
           "\x7f" not in p.stdout and "\x7f" not in p.stderr)
     check("device-hostile-h1",
-          "--- refresh 1 @ 2000000000 ns --- [device: %s]" % esc
+          "--- refresh 1 @ 2000000000 ns (+1.0s) --- [device: %s]" % esc
           in p.stdout)
     check("device-hostile-h2",
-          "--- refresh 2 @ 2500000000 ns --- [device: %s]" % esc
+          "--- refresh 2 @ 2500000000 ns (+1.5s) --- [device: %s]" % esc
           in p.stdout)
 
     # Global findings survive a filter that matches nothing.

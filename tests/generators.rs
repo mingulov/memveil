@@ -73,6 +73,7 @@ const FROZEN_FLAGS: [(&str, &[&str]); 6] = [
             "--cp-object",
             "--device",
             "--duration",
+            "--full",
             "--help",
             "--interval",
             "--lc-object",
@@ -135,10 +136,11 @@ const FROZEN_FLAGS: [(&str, &[&str]); 6] = [
     ),
 ];
 const FROZEN_FORMAT_VALUES: [&str; 3] = ["text", "json", "markdown"];
-const FROZEN_NOVALUE_FLAGS: [&str; 7] = [
+const FROZEN_NOVALUE_FLAGS: [&str; 8] = [
     "--help",
     "--allow-partial",
     "--compact",
+    "--full",
     "--json",
     "--load-check",
     "--strict",

@@ -485,7 +485,7 @@ complete, and 4 for checkpoint recovery. Invalid input or
 usage exits 2; corrupt final captures are never recovered.
 "#;
     const TOP_VERB_HELP: &str = r#"usage: memveil top [--interval DURATION] [--device NAME]
-       [--strict] [--compact] [--long-lived-after DURATION]
+       [--strict] [--compact] [--full] [--long-lived-after DURATION]
        [--allow-partial] [--max-line-bytes N]
        [--max-session-bytes N] [--max-events-bytes N] DIR
    or: memveil top --output DIR [--object PATH]
@@ -494,10 +494,13 @@ usage exits 2; corrupt final captures are never recovered.
        [--profiles-dir DIR] [--capability IDS]
        [--lc-object PATH] [--cp-object PATH]
        [--interval DURATION] [--device NAME]
-       [--strict] [--compact] [--long-lived-after DURATION]
+       [--strict] [--compact] [--full] [--long-lived-after DURATION]
 
-Replay the capture in DIR, printing one text summary per
-interval of capture time plus a final full-window report.
+Replay the capture in DIR, printing one short headline
+block per interval of capture time plus a final
+full-window report. Each refresh prints the six-line
+verdict-plus-headlines block; only the final block
+prints the full report.
 With --output, observe the live system instead, retaining
 the capture in DIR while printing the same summaries.
 Live collection resolves absent --bridge, --object,
@@ -522,9 +525,12 @@ Diagnostics go to stderr.
   --strict          exit 4 unless the final verdict is
                     complete (live mode also runs the
                     collection strictly).
-  --compact         print the short verdict-plus-headlines
-                    block instead of the full report per
-                    refresh; cannot combine with --device.
+  --compact         accepted for compatibility; refreshes
+                    already print the short headlines block.
+                    Combines with --device: headlines stay
+                    global, the final block honors the filter.
+  --full            print the full report per refresh
+                    instead of the short headlines block.
 
 DURATION is a decimal count with optional unit s, m, or h
 (bare digits mean seconds); zero and overflow are refused.
@@ -766,11 +772,23 @@ fn top_replay_blocks_and_integrity() {
     assert!(blocks[1].contains("successful_allocations = 1"));
     assert!(blocks[0].contains("integrity: unverified replay prefix"));
     assert!(blocks[1].contains("integrity: legacy_unverified"));
+    // Interim refreshes are headlines; the full per-refresh rows
+    // moved behind --full.
+    assert!(blocks[0].contains("attempts: "));
+    assert!(!blocks[0].contains("memveil report "));
+    let full = run_top(&bin(), &["--full"], &dir);
+    assert_eq!(full.status.code(), Some(0));
+    let full_text = String::from_utf8_lossy(&full.stdout);
+    let full_blocks: Vec<&str> = full_text
+        .split("--- refresh ")
+        .filter(|b| !b.trim().is_empty())
+        .collect();
+    assert_eq!(full_blocks.len(), 2);
     // The 2.0s refresh excludes the unmap at 2.3s: the mapping is
     // still open at the first boundary.
-    assert!(blocks[0].contains("open_mappings = 1"));
-    assert!(blocks[0].contains("live_observed_allocation_bytes = 4096"));
-    assert!(!blocks[0].contains("completed_lifetime_count = 1"));
+    assert!(full_blocks[0].contains("open_mappings = 1"));
+    assert!(full_blocks[0].contains("live_observed_allocation_bytes = 4096"));
+    assert!(!full_blocks[0].contains("completed_lifetime_count = 1"));
 }
 
 #[test]
@@ -816,15 +834,17 @@ fn top_hostile_filter_stays_escaped() {
     assert!(!out.stderr.contains(&0x7f));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(&format!(
-        "--- refresh 1 @ 2000000000 ns --- [device: {esc}]"
+        "--- refresh 1 @ 2000000000 ns (+1.0s) --- [device: {esc}]"
     )));
     assert!(stdout.contains(&format!(
-        "--- refresh 2 @ 2500000000 ns --- [device: {esc}]"
+        "--- refresh 2 @ 2500000000 ns (+1.5s) --- [device: {esc}]"
     )));
 }
 
 #[test]
 fn top_compact_blocks() {
+    // --compact is the default now: headlines per refresh, the
+    // full report as the final block.
     let dir = lifecycle("lifecycle-nested");
     let out = run_top(&bin(), &["--compact"], &dir);
     assert_eq!(out.status.code(), Some(0));
@@ -834,13 +854,17 @@ fn top_compact_blocks() {
         .filter(|b| !b.trim().is_empty())
         .collect();
     assert_eq!(blocks.len(), 2);
-    assert!(blocks[1].contains("verdict: "));
-    assert!(blocks[1].contains("attempts: "));
-    assert!(blocks[1].contains("detail: "));
-    assert!(blocks[1].contains("terminal: "));
-    assert!(blocks[1].contains("findings: "));
-    assert!(!text.contains("memveil report "));
-    assert!(!text.contains("metrics ("));
+    assert!(blocks[0].contains("verdict: "));
+    assert!(blocks[0].contains("attempts: "));
+    assert!(blocks[0].contains("detail: "));
+    assert!(blocks[0].contains("terminal: "));
+    assert!(blocks[0].contains("findings: "));
+    assert!(!blocks[0].contains("memveil report "));
+    assert!(!blocks[0].contains("metrics ("));
+    assert!(blocks[1].contains("memveil report "));
+    assert!(blocks[1].contains("metrics ("));
+    let plain = run_top(&bin(), &[], &dir);
+    assert_eq!(plain.stdout, out.stdout);
 }
 
 #[test]

@@ -57,16 +57,19 @@ OBSERVER_FROZEN_PROPS = {"cpu", "pid", "tgid", "comm", "cgroup_id", "relation"}
 # channel; the invoking operator chooses which profile
 # set to trust, exactly like --profile/--object.
 # --compact: cli/top.rs parse_top_args selects presentation only.
+# --full: cli/top.rs parse_top_args selects full per-refresh
+# reports instead of headlines. Both add no collection,
+# environment or payload source.
 # --strict: parse_report_args/parse_top_args/parse_record_args select partial-evidence exit policy.
 # --profile-id: cli/bind.rs parse_bind_args names the profile being generated.
 # These existing selectors add no collection, environment or payload source.
 ALLOWED_FLAGS = {
     "--allow-partial", "--bridge", "--capability", "--cp-object",
-    "--device", "--duration", "--format", "--help", "--interval",
-    "--json", "--lc-object", "--load-check", "--long-lived-after",
-    "--max-events-bytes", "--max-line-bytes", "--max-session-bytes",
-    "--object", "--output", "--profile", "--profiles-dir",
-    "--compact", "--strict", "--profile-id",
+    "--device", "--duration", "--format", "--full", "--help",
+    "--interval", "--json", "--lc-object", "--load-check",
+    "--long-lived-after", "--max-events-bytes", "--max-line-bytes",
+    "--max-session-bytes", "--object", "--output", "--profile",
+    "--profiles-dir", "--compact", "--strict", "--profile-id",
 }
 
 # SUDO_UID/SUDO_GID reviewed 2026-10-11: read once by
