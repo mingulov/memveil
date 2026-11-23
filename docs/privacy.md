@@ -26,6 +26,18 @@ version (6.11 sets it for encrypted-memory guests, 7.3
 does not, while streaming DMA still bounces), so it is
 not a confidential-guest signal.
 
+## Reserved execution-context block
+
+Each event may carry an `observer_context` object (`cpu`,
+`pid`, `tgid`, `comm`, `cgroup_id`, always with
+`relation: execution_context_only`). The shipped collector
+never sets it, and no renderer emits it: it is a reserved,
+never-rendered block for other producers, re-persisted
+verbatim when a foreign capture carries it. Check a foreign
+capture for this block before sharing it: unlike the
+allowlisted fields above, its process names and ids identify
+activity on the recording machine.
+
 ## Persisted per capture
 
 - Session id, window bounds, end reason, finalized flag.

@@ -107,7 +107,7 @@ class ReportContext(unittest.TestCase):
 
     def test_top_duration_tracks_each_replay_prefix(self):
         cap = ROOT / "tests/fixtures/lifecycle/lifecycle-nested"
-        proc = subprocess.run([BIN, "top", "--interval", "1s", cap],
+        proc = subprocess.run([BIN, "top", "--full", "--interval", "1s", cap],
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         blocks = [b for b in proc.stdout.split("--- refresh ") if b.strip()]

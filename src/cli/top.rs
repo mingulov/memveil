@@ -2,10 +2,11 @@
 //! Top: periodic summaries over a capture directory or live.
 //!
 //! Top replays the capture's events through the shared composed analyzer
-//! and prints one text summary per refresh: at each interval boundary of
-//! capture time plus a final full-window report. The final block renders
-//! the same rows and findings as `report` with the same policy, so
-//! replay-prefix equivalence holds by construction.
+//! and prints one short headline block per refresh: at each interval
+//! boundary of capture time plus a final full-window report. The final
+//! block renders the same rows and findings as `report` with the same
+//! policy, so replay-prefix equivalence holds by construction; pass
+//! --full for the full report at every refresh instead of headlines.
 //!
 //! With --output, top observes the live system instead: the collector
 //! retains the capture while a tee writer folds the same bytes into the
@@ -37,7 +38,7 @@ use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
 use crate::capture::reader::{
     CaptureReader, DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES,
-    ReaderLimits, read_capture, read_capture_os,
+    ReaderLimits, read_capture, read_capture_os, read_remedy,
 };
 use crate::capture::run::{RecordOptions, repair_warning_for, run_collector_with};
 use crate::capture::tee::{LiveAnalyzer, RefreshSink, TeeWriter};
@@ -79,8 +80,11 @@ pub struct TopOptions {
     pub allow_partial: bool,
     /// Exit 4 unless the final verdict is complete.
     pub strict: bool,
-    /// Print the short verdict-plus-headlines block per refresh.
+    /// No-op alias kept one release: refreshes already print the
+    /// short verdict-plus-headlines block; see `full`.
     pub compact: bool,
+    /// Print the full report per refresh instead of the headlines.
+    pub full: bool,
     /// True when --long-lived-after was passed.
     pub has_long_lived_after: bool,
     /// Informational long-lived finding threshold in nanoseconds.
@@ -108,6 +112,7 @@ impl Default for TopOptions {
             allow_partial: false,
             strict: false,
             compact: false,
+            full: false,
             has_long_lived_after: false,
             long_lived_after_ns: 0,
             dir: String::new(),
@@ -124,7 +129,7 @@ impl Default for TopOptions {
 pub fn top_usage() -> String {
     concat!(
         "usage: memveil top [--interval DURATION] [--device NAME]\n",
-        "       [--strict] [--compact] [--long-lived-after DURATION]\n",
+        "       [--strict] [--compact] [--full] [--long-lived-after DURATION]\n",
         "       [--allow-partial] [--max-line-bytes N]\n",
         "       [--max-session-bytes N] [--max-events-bytes N] DIR\n",
         "   or: memveil top --output DIR [--object PATH]\n",
@@ -133,10 +138,13 @@ pub fn top_usage() -> String {
         "       [--profiles-dir DIR] [--capability IDS]\n",
         "       [--lc-object PATH] [--cp-object PATH]\n",
         "       [--interval DURATION] [--device NAME]\n",
-        "       [--strict] [--compact] [--long-lived-after DURATION]\n",
+        "       [--strict] [--compact] [--full] [--long-lived-after DURATION]\n",
         "\n",
-        "Replay the capture in DIR, printing one text summary per\n",
-        "interval of capture time plus a final full-window report.\n",
+        "Replay the capture in DIR, printing one short headline\n",
+        "block per interval of capture time plus a final\n",
+        "full-window report. Each refresh prints the six-line\n",
+        "verdict-plus-headlines block; only the final block\n",
+        "prints the full report.\n",
         "With --output, observe the live system instead, retaining\n",
         "the capture in DIR while printing the same summaries.\n",
         "Live collection resolves absent --bridge, --object,\n",
@@ -161,9 +169,12 @@ pub fn top_usage() -> String {
         "  --strict          exit 4 unless the final verdict is\n",
         "                    complete (live mode also runs the\n",
         "                    collection strictly).\n",
-        "  --compact         print the short verdict-plus-headlines\n",
-        "                    block instead of the full report per\n",
-        "                    refresh; cannot combine with --device.\n",
+        "  --compact         accepted for compatibility; refreshes\n",
+        "                    already print the short headlines block.\n",
+        "                    Combines with --device: headlines stay\n",
+        "                    global, the final block honors the filter.\n",
+        "  --full            print the full report per refresh\n",
+        "                    instead of the short headlines block.\n",
         "\n",
         "DURATION is a decimal count with optional unit s, m, or h\n",
         "(bare digits mean seconds); zero and overflow are refused.\n",
@@ -335,6 +346,9 @@ pub fn parse_top_args(args: &[String]) -> Result<TopOptions, CliError> {
         } else if tok == "--compact" {
             opts.compact = true;
             i += 1;
+        } else if tok == "--full" {
+            opts.full = true;
+            i += 1;
         } else if is_live_flag(tok) {
             if tok == "--output" {
                 opts.has_output = true;
@@ -368,11 +382,6 @@ pub fn parse_top_args(args: &[String]) -> Result<TopOptions, CliError> {
     if !opts.dir.is_empty() && opts.has_output {
         return Err(CliError {
             message: "cannot combine replay DIR with live --output".to_string(),
-        });
-    }
-    if opts.compact && opts.has_device {
-        return Err(CliError {
-            message: "--compact does not take --device".to_string(),
         });
     }
     if opts.dir.is_empty() && !opts.has_output {
@@ -550,6 +559,9 @@ fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
         } else if tok == b"--compact" {
             opts.compact = true;
             i += 1;
+        } else if tok == b"--full" {
+            opts.full = true;
+            i += 1;
         } else if is_live_flag_os(tok) {
             if tok == b"--output" {
                 opts.has_output = true;
@@ -595,11 +607,6 @@ fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
             message: "cannot combine replay DIR with live --output".to_string(),
         }));
     }
-    if opts.compact && opts.has_device {
-        return Err(TopOsFail::Message(CliError {
-            message: "--compact does not take --device".to_string(),
-        }));
-    }
     if dir_os.is_empty() && !opts.has_output {
         return Err(TopOsFail::Message(CliError {
             message: "missing capture directory".to_string(),
@@ -635,6 +642,29 @@ fn top_failed(prefix: &str, detail: &str) -> i64 {
     match write_stderr(&line) {
         Ok(()) => EXIT_INVALID,
         Err(_) => EXIT_INTERNAL,
+    }
+}
+
+/// Read failure with a remedy line when one applies.
+///
+/// Open failures with a fixed cause print cause plus fix; every
+/// other read failure keeps today's single scrubbed line.
+fn top_read_failed(detail: &str) -> i64 {
+    match read_remedy(detail) {
+        Some(fix) => {
+            // Fixed literals, no caller bytes: both lines keep
+            // their prose (including the expected-files slash).
+            let cause = format!("memveil top: cannot read capture: {detail}\n");
+            let remedy = format!("memveil top: fix: {fix}\n");
+            match write_stderr_trusted(&cause) {
+                Ok(()) => match write_stderr_trusted(&remedy) {
+                    Ok(()) => EXIT_INVALID,
+                    Err(_) => EXIT_INTERNAL,
+                },
+                Err(_) => EXIT_INTERNAL,
+            }
+        }
+        None => top_failed("memveil top: cannot read capture: ", detail),
     }
 }
 
@@ -761,14 +791,30 @@ impl FilterWatch {
     }
 }
 
+/// Capture-time elapsed label for a refresh header (`+1.0s`).
+///
+/// Seconds with one decimal of capture time past the window
+/// start; a horizon below the start clamps to zero.
+pub fn elapsed_label(horizon_ns: u64, start_ns: u64) -> String {
+    let elapsed = horizon_ns.saturating_sub(start_ns);
+    let secs = elapsed / 1_000_000_000;
+    let tenths = (elapsed % 1_000_000_000) / 100_000_000;
+    format!("+{}.{}s", format_u64(secs), tenths)
+}
+
 /// Print one refresh block.
 ///
 /// Every byte goes through the checked stdout writer: a short write
 /// or error reports on stderr and fails, so a blocked stdout fails
-/// the run instead of printing success. The header names the active
-/// device filter, if any.
-fn print_block(text: &str, seq: i64, horizon_ns: u64, filt: &str) -> Result<(), ()> {
-    let mut head = format!("--- refresh {seq} @ {} ns ---", format_u64(horizon_ns));
+/// the run instead of printing success. The header names the
+/// horizon, the capture-time elapsed past the window start, and
+/// the active device filter, if any.
+fn print_block(text: &str, seq: i64, horizon_ns: u64, start_ns: u64, filt: &str) -> Result<(), ()> {
+    let mut head = format!(
+        "--- refresh {seq} @ {} ns ({}) ---",
+        format_u64(horizon_ns),
+        elapsed_label(horizon_ns, start_ns)
+    );
     head += &filter_header_suffix(filt);
     head.push('\n');
     if write_stdout(&head).is_err() || write_stdout(text).is_err() {
@@ -790,8 +836,9 @@ fn diagnose_block(rep: &mut Report, has_long_lived_after: bool, long_lived_after
 
 /// Render one refresh body: compact headlines or full text.
 ///
-/// Compact headlines are global-only; the caller refuses --compact
-/// with --device, so filt is always empty here in compact mode.
+/// Compact headlines are global-only; a device filter still names
+/// itself in the header and warns once, and the final full block
+/// honors it.
 fn render_block(rep: &Report, compact: bool, filt: &str) -> Result<String, ()> {
     if compact {
         return Ok(render_compact(rep));
@@ -804,6 +851,7 @@ fn render_block(rep: &Report, compact: bool, filt: &str) -> Result<String, ()> {
 /// Shared by replay refreshes and the live sink: one policy for every
 /// printed block. Returns the exit code: 0 printed, 2 oversized.
 /// Render and stdout failures return Err.
+#[allow(clippy::too_many_arguments)]
 fn emit_report(
     rep: &mut Report,
     filt: &str,
@@ -811,6 +859,7 @@ fn emit_report(
     long_lived_after_ns: u64,
     seq: i64,
     horizon_ns: u64,
+    start_ns: u64,
     compact: bool,
 ) -> Result<i64, ()> {
     diagnose_block(rep, has_long_lived_after, long_lived_after_ns);
@@ -818,7 +867,7 @@ fn emit_report(
     if check_rendered_size(&text, MAX_RENDERED_BYTES).is_err() {
         return Ok(top_failed("memveil top: ", "report exceeds size limit"));
     }
-    print_block(&text, seq, horizon_ns, filt)?;
+    print_block(&text, seq, horizon_ns, start_ns, filt)?;
     Ok(0)
 }
 
@@ -833,6 +882,7 @@ fn snapshot_block<A: TopReducer>(
     horizon_ns: u64,
     seq: i64,
     watch: &mut FilterWatch,
+    start_ns: u64,
 ) -> i64 {
     let mut rep = match analyzer.snapshot(horizon_ns, false) {
         Ok(rep) => rep,
@@ -856,7 +906,8 @@ fn snapshot_block<A: TopReducer>(
         opts.long_lived_after_ns,
         seq,
         horizon_ns,
-        opts.compact,
+        start_ns,
+        !opts.full,
     ) {
         Ok(rc) => rc,
         Err(_) => EXIT_INTERNAL,
@@ -886,7 +937,7 @@ impl StdoutSink {
             watch: FilterWatch::new(opts),
             has_long_lived_after: opts.has_long_lived_after,
             long_lived_after_ns: opts.long_lived_after_ns,
-            compact: opts.compact,
+            compact: !opts.full,
             seq: 0,
         }
     }
@@ -901,6 +952,7 @@ impl RefreshSink for StdoutSink {
         if !line.is_empty() {
             let _ = write_stderr(&line);
         }
+        let start_ns = rep.window_start_ns;
         match emit_report(
             &mut rep,
             &self.watch.filt,
@@ -908,6 +960,7 @@ impl RefreshSink for StdoutSink {
             self.long_lived_after_ns,
             self.seq,
             horizon_ns,
+            start_ns,
             self.compact,
         ) {
             Ok(rc) => rc == 0,
@@ -1010,7 +1063,7 @@ fn finish_live(dir: &str, opts: &TopOptions, shown: usize, capture_exit: i64) ->
         },
     ) {
         Ok(reader) => reader,
-        Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+        Err(e) => return top_read_failed(&e.message),
     };
     let mut analyzer = Analyzer::new(reader.session.clone());
     let mut watch = FilterWatch::new(opts);
@@ -1121,7 +1174,7 @@ pub fn run_top(args: &[String]) -> i64 {
         },
     ) {
         Ok(reader) => reader,
-        Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+        Err(e) => return top_read_failed(&e.message),
     };
     run_replay(&mut reader, &opts, false)
 }
@@ -1205,7 +1258,7 @@ pub fn run_top_os(args: &[OsString]) -> i64 {
                 },
             ) {
                 Ok(reader) => reader,
-                Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+                Err(e) => return top_read_failed(&e.message),
             };
             let device_unrenderable = parsed
                 .device_os
@@ -1299,14 +1352,14 @@ fn drain<A: TopReducer>(
     loop {
         let more = match reader.has_more() {
             Ok(more) => more,
-            Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+            Err(e) => return top_read_failed(&e.message),
         };
         if !more {
             break;
         }
         let ev = match reader.next_event() {
             Ok(ev) => ev,
-            Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+            Err(e) => return top_read_failed(&e.message),
         };
         let ts = ev.ts_ns;
         // Every boundary the event crosses renders BEFORE the event is
@@ -1325,7 +1378,14 @@ fn drain<A: TopReducer>(
         while cursor.has_due(ts) && !stopped {
             let horizon = cursor.pop();
             seq += 1;
-            let rc = snapshot_block(analyzer, opts, horizon, seq, watch);
+            let rc = snapshot_block(
+                analyzer,
+                opts,
+                horizon,
+                seq,
+                watch,
+                reader.session.window_start_ns,
+            );
             if rc != 0 {
                 return rc;
             }
@@ -1378,7 +1438,9 @@ fn drain<A: TopReducer>(
         opts.has_long_lived_after,
         opts.long_lived_after_ns,
     );
-    let text = match render_block(&rep, opts.compact, &watch.filt) {
+    // The final block is always the full report, whatever the
+    // refreshes printed.
+    let text = match render_block(&rep, false, &watch.filt) {
         Ok(text) => text,
         Err(_) => {
             let _ = write_stderr("memveil top: internal error: cannot render report\n");
@@ -1388,7 +1450,15 @@ fn drain<A: TopReducer>(
     if check_rendered_size(&text, MAX_RENDERED_BYTES).is_err() {
         return top_failed("memveil top: ", "report exceeds size limit");
     }
-    if print_block(&text, seq, reader.session.window_end_ns, &watch.filt).is_err() {
+    if print_block(
+        &text,
+        seq,
+        reader.session.window_end_ns,
+        reader.session.window_start_ns,
+        &watch.filt,
+    )
+    .is_err()
+    {
         return EXIT_INTERNAL;
     }
     if reader.checkpoint_prefix {
@@ -1431,14 +1501,14 @@ fn finish_after_signal<A: TopReducer>(
     loop {
         let more = match reader.has_more() {
             Ok(more) => more,
-            Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+            Err(e) => return top_read_failed(&e.message),
         };
         if !more {
             break;
         }
         let ev = match reader.next_event() {
             Ok(ev) => ev,
-            Err(e) => return top_failed("memveil top: cannot read capture: ", &e.message),
+            Err(e) => return top_read_failed(&e.message),
         };
         if let Err(message) = analyzer.consume(&ev) {
             return top_failed("memveil top: cannot reduce capture: ", &message);
@@ -1476,14 +1546,24 @@ fn finish_after_signal<A: TopReducer>(
         opts.has_long_lived_after,
         opts.long_lived_after_ns,
     );
-    let text = match render_block(&rep, opts.compact, &watch.filt) {
+    // The final block is always the full report, whatever the
+    // refreshes printed.
+    let text = match render_block(&rep, false, &watch.filt) {
         Ok(text) => text,
         Err(_) => {
             let _ = write_stderr("memveil top: internal error: cannot render report\n");
             return EXIT_INTERNAL;
         }
     };
-    if print_block(&text, seq + 1, reader.session.window_end_ns, &watch.filt).is_err() {
+    if print_block(
+        &text,
+        seq + 1,
+        reader.session.window_end_ns,
+        reader.session.window_start_ns,
+        &watch.filt,
+    )
+    .is_err()
+    {
         if capture_exit >= 0 {
             let _ = write_capture_location(retained_path, "");
             return capture_exit;
@@ -1500,9 +1580,9 @@ fn finish_after_signal<A: TopReducer>(
 mod tests {
     use super::{
         BoundaryCursor, FilterWatch, StdoutSink, TopLiveAnalyzer, TopOptions, WaitSlices,
-        diagnose_block, drain, filter_header_suffix, finish_after_signal, finish_live,
-        live_template, parse_top_args, parse_top_args_os, run_top, snapshot_block, top_usage,
-        wait_interval,
+        diagnose_block, drain, elapsed_label, filter_header_suffix, finish_after_signal,
+        finish_live, live_template, parse_top_args, parse_top_args_os, run_top, snapshot_block,
+        top_usage, wait_interval,
     };
     use super::{EXIT_INTERNAL, TopOsArgs, TopOsFail};
     use crate::analysis::engine::Analyzer;
@@ -1538,6 +1618,7 @@ mod tests {
         assert!(!opts.allow_partial);
         assert!(!opts.strict);
         assert!(!opts.compact);
+        assert!(!opts.full);
         assert!(!opts.has_output);
         assert_eq!(opts.max_line_bytes, 65536);
         assert_eq!(opts.max_session_bytes, 16777216);
@@ -1601,10 +1682,17 @@ mod tests {
         let err = parse_top_args(&args(&["--output", "out", "--allow-partial"]))
             .expect_err("live partial rejects");
         assert_eq!(err.message, "--allow-partial requires replay DIR");
-        // --compact refuses --device.
-        let err = parse_top_args(&args(&["--compact", "--device", "d", "capdir"]))
-            .expect_err("compact plus device rejects");
-        assert_eq!(err.message, "--compact does not take --device");
+        // --compact is a no-op alias: refreshes are headlines
+        // either way, so --device combines freely.
+        let opts = parse_top_args(&args(&["--compact", "--device", "d", "capdir"]))
+            .expect("compact plus device parses");
+        assert!(opts.compact);
+        assert!(opts.has_device);
+        assert_eq!(opts.device, "d");
+        // --full restores the full report per refresh.
+        let opts = parse_top_args(&args(&["--full", "capdir"])).expect("full parses");
+        assert!(opts.full);
+        assert!(!opts.compact);
         // Live flags without --output refuse.
         let err = parse_top_args(&args(&["--profiles-dir", "/alt", "capdir"]))
             .expect_err("replay profiles-dir rejects");
@@ -1655,7 +1743,18 @@ mod tests {
         assert!(text.contains("embedded objects"));
         assert!(!text.contains("discover"));
         assert!(text.contains("[--profiles-dir DIR]"));
+        assert!(text.contains("[--full]"));
+        assert!(text.contains("six-line"));
         assert!(text.starts_with("usage: memveil top [--interval DURATION]"));
+    }
+
+    #[test]
+    fn elapsed_label_shapes() {
+        assert_eq!(elapsed_label(1_000_000_000, 0), "+1.0s");
+        assert_eq!(elapsed_label(2_500_000_000, 1_000_000_000), "+1.5s");
+        assert_eq!(elapsed_label(200, 100), "+0.0s");
+        assert_eq!(elapsed_label(100, 200), "+0.0s");
+        assert_eq!(elapsed_label(u64::MAX, 0), "+18446744073.7s");
     }
 
     fn os(words: &[&[u8]]) -> Vec<std::ffi::OsString> {
@@ -1694,6 +1793,8 @@ mod tests {
                 "256",
                 "capdir",
             ],
+            vec!["--full", "--device", "d", "capdir"],
+            vec!["--compact", "--device", "d", "capdir"],
         ] {
             let text: Vec<String> = words.iter().map(|w| w.to_string()).collect();
             let mut want = parse_top_args(&text).expect("str parses");
@@ -1715,7 +1816,6 @@ mod tests {
             vec!["--interval", "nope", "capdir"],
             vec!["--nope", "capdir"],
             vec!["a", "b"],
-            vec!["--compact", "--device", "d", "capdir"],
             vec!["--profiles-dir", "/alt", "capdir"],
             vec!["--max-events-bytes", "99999999999", "capdir"],
             vec!["--long-lived-after", "0s", "capdir"],
@@ -1762,12 +1862,15 @@ mod tests {
             }
             _ => panic!("raw device and dir must parse to replay"),
         }
-        // --compact still refuses a non-UTF-8 device at parse time.
+        // --compact no longer refuses a device: a non-UTF-8
+        // device parses and fails at the first block instead.
         match parse_top_args_os(&os(&[b"--compact", b"--device", b"\xff", b"cap"])) {
-            Err(TopOsFail::Message(e)) => {
-                assert_eq!(e.message, "--compact does not take --device");
+            Ok(TopOsArgs::Replay(got)) => {
+                assert!(got.opts.compact);
+                assert!(got.opts.has_device);
+                assert_eq!(got.device_os.as_ref().expect("raw device").to_str(), None);
             }
-            _ => panic!("compact plus raw device must reject"),
+            _ => panic!("compact plus raw device must parse to replay"),
         }
     }
 
@@ -1915,7 +2018,7 @@ mod tests {
         watch.mark_device_unrenderable();
         let mut stub = SnapshotStub;
         assert_eq!(
-            snapshot_block(&mut stub, &opts, 1, 1, &mut watch),
+            snapshot_block(&mut stub, &opts, 1, 1, &mut watch, 0),
             EXIT_INTERNAL
         );
         assert!(watch.device_unrenderable());
@@ -2071,7 +2174,11 @@ mod tests {
         oracle.integrity_context = "live stream".to_string();
         diagnose_block(&mut oracle, false, 0);
         let text = render(&oracle, "text", filt).expect("render");
-        let mut head = format!("--- refresh {seq} @ {} ns ---", format_u64(horizon));
+        let mut head = format!(
+            "--- refresh {seq} @ {} ns ({}) ---",
+            format_u64(horizon),
+            elapsed_label(horizon, oracle.window_start_ns)
+        );
         if !filt.is_empty() {
             head.push_str(&format!(" [device: {filt}]"));
         }
@@ -2138,7 +2245,10 @@ mod tests {
         if std::env::var("MEMVEIL_TOP_CHILD").is_ok() {
             let dir = child_scratch().expect("scratch env");
             let out = format!("{dir}/out.txt");
-            let opts = TopOptions::default();
+            let opts = TopOptions {
+                full: true,
+                ..TopOptions::default()
+            };
             let mut sink = StdoutSink::new(&opts);
             let rep = sink_report(200);
             let want = block_want(1, 200, "");
@@ -2161,6 +2271,7 @@ mod tests {
             let opts = TopOptions {
                 has_device: true,
                 device: "d1".to_string(),
+                full: true,
                 ..TopOptions::default()
             };
             let mut sink = StdoutSink::new(&opts);
@@ -2182,7 +2293,10 @@ mod tests {
         if std::env::var("MEMVEIL_TOP_CHILD").is_ok() {
             let dir = child_scratch().expect("scratch env");
             let out = format!("{dir}/out.txt");
-            let opts = TopOptions::default();
+            let opts = TopOptions {
+                full: true,
+                ..TopOptions::default()
+            };
             let mut sink = StdoutSink::new(&opts);
             let first = sink_report(100);
             let second = sink_report(200);
@@ -2197,6 +2311,36 @@ mod tests {
             return;
         }
         run_child("sink_seq_increments", &scratch);
+    }
+
+    #[test]
+    fn sink_emits_compact_by_default() {
+        // Default options print headlines, not the full report;
+        // --full restores the full block.
+        let scratch = TestDir::create("memveil-top-sink").expect("scratch");
+        if std::env::var("MEMVEIL_TOP_CHILD").is_ok() {
+            let dir = child_scratch().expect("scratch env");
+            let out = format!("{dir}/out.txt");
+            let opts = TopOptions::default();
+            let mut sink = StdoutSink::new(&opts);
+            assert!(sink.compact);
+            let saved = redirect_fd(1, &out);
+            let ok = sink.emit(sink_report(200), 200);
+            restore_fd(1, saved);
+            assert!(ok);
+            let text = read_scratch(&out);
+            assert!(text.contains("attempts: "));
+            assert!(!text.contains("memveil report "));
+            assert!(!text.contains("metrics ("));
+            let full_opts = TopOptions {
+                full: true,
+                ..TopOptions::default()
+            };
+            let full_sink = StdoutSink::new(&full_opts);
+            assert!(!full_sink.compact);
+            return;
+        }
+        run_child("sink_emits_compact_by_default", &scratch);
     }
 
     #[test]
@@ -2229,7 +2373,7 @@ mod tests {
             a.consume(&e1).expect("consume");
             let mut watch = FilterWatch::new(&opts);
             let saved2 = redirect_fd(1, &replay_out);
-            let rc = snapshot_block(&mut a, &opts, 200, 1, &mut watch);
+            let rc = snapshot_block(&mut a, &opts, 200, 1, &mut watch, 100);
             restore_fd(1, saved2);
             assert_eq!(rc, 0);
             let live_text = read_scratch(&live_out);
@@ -2265,7 +2409,7 @@ mod tests {
             "(live, engine ",
             "window: [100,200)",
             "duration: 0.000000100 s (100 ns)",
-            "environment: mode=unknown detection=unverified attestation=not_performed evidence=0",
+            "environment: mode=unknown detection=unverified attestation=not_performed (recorded, not verified by memveil) evidence=0",
             "recorded kernel.release: unavailable (no captured provenance)",
             "recorded profile.decision: unavailable (no captured provenance)",
             "recorded measurement_scope: unavailable (no captured provenance)",
@@ -2277,7 +2421,7 @@ mod tests {
             "- synthetic: no",
             "- window: [100,200)",
             "- duration: 0.000000100 s (100 ns)",
-            "- environment: mode=unknown detection=unverified attestation=not_performed evidence=0",
+            "- environment: mode=unknown detection=unverified attestation=not_performed (recorded, not verified by memveil) evidence=0",
             "- recorded kernel.release: unavailable (no captured provenance)",
             "- recorded profile.decision: unavailable (no captured provenance)",
             "- recorded measurement\\_scope: unavailable (no captured provenance)",
@@ -2637,7 +2781,7 @@ mod tests {
             assert!(ok);
             let text = read_scratch(&out);
             let head = text.split('\n').next().expect("header");
-            assert_eq!(head, "--- refresh 1 @ 200 ns --- [device: d1]");
+            assert_eq!(head, "--- refresh 1 @ 200 ns (+0.0s) --- [device: d1]");
             return;
         }
         run_child("sink_header_displays_filter", &scratch);
@@ -2667,7 +2811,10 @@ mod tests {
             let head = text.split('\n').next().expect("header");
             assert_eq!(
                 head,
-                format!("--- refresh 1 @ 200 ns --- [device: {}]", hostile_escaped())
+                format!(
+                    "--- refresh 1 @ 200 ns (+0.0s) --- [device: {}]",
+                    hostile_escaped()
+                )
             );
             assert!(!text.as_bytes().contains(&0x1b));
             assert!(!text.as_bytes().contains(&0x7f));
@@ -2707,12 +2854,12 @@ mod tests {
             let mut a = snapshot_analyzer();
             let mut watch = FilterWatch::new(&opts);
             let saved = redirect_fd(1, &out);
-            let rc = snapshot_block(&mut a, &opts, 200, 1, &mut watch);
+            let rc = snapshot_block(&mut a, &opts, 200, 1, &mut watch, 100);
             restore_fd(1, saved);
             assert_eq!(rc, 0);
             let text = read_scratch(&out);
             let head = text.split('\n').next().expect("header");
-            assert_eq!(head, "--- refresh 1 @ 200 ns --- [device: d1]");
+            assert_eq!(head, "--- refresh 1 @ 200 ns (+0.0s) --- [device: d1]");
             return;
         }
         run_child("replay_header_displays_filter", &scratch);
@@ -2728,21 +2875,22 @@ mod tests {
             let opts = TopOptions {
                 has_device: true,
                 device: "nope".to_string(),
+                full: true,
                 ..TopOptions::default()
             };
             let mut a = snapshot_analyzer();
             let mut watch = FilterWatch::new(&opts);
             let saved_out = redirect_fd(1, &out);
             let saved_err = redirect_fd(2, &err);
-            let r0 = snapshot_block(&mut a, &opts, 150, 1, &mut watch);
-            let r1 = snapshot_block(&mut a, &opts, 200, 2, &mut watch);
+            let r0 = snapshot_block(&mut a, &opts, 150, 1, &mut watch, 100);
+            let r1 = snapshot_block(&mut a, &opts, 200, 2, &mut watch, 100);
             restore_fd(1, saved_out);
             restore_fd(2, saved_err);
             assert_eq!(r0, 0);
             assert_eq!(r1, 0);
             let text = read_scratch(&out);
-            assert!(text.contains("--- refresh 1 @ 150 ns --- [device: nope]"));
-            assert!(text.contains("--- refresh 2 @ 200 ns --- [device: nope]"));
+            assert!(text.contains("--- refresh 1 @ 150 ns (+0.0s) --- [device: nope]"));
+            assert!(text.contains("--- refresh 2 @ 200 ns (+0.0s) --- [device: nope]"));
             assert!(!text.contains("{device="));
             assert!(text.contains("bounce_attempts = 2"));
             assert_eq!(
@@ -2764,13 +2912,14 @@ mod tests {
             let opts = TopOptions {
                 has_device: true,
                 device: "d1".to_string(),
+                full: true,
                 ..TopOptions::default()
             };
             let mut a = snapshot_analyzer();
             let mut watch = FilterWatch::new(&opts);
             let saved_out = redirect_fd(1, &out);
             let saved_err = redirect_fd(2, &err);
-            let rc = snapshot_block(&mut a, &opts, 200, 1, &mut watch);
+            let rc = snapshot_block(&mut a, &opts, 200, 1, &mut watch, 100);
             restore_fd(1, saved_out);
             restore_fd(2, saved_err);
             assert_eq!(rc, 0);
@@ -2791,6 +2940,7 @@ mod tests {
             let opts = TopOptions {
                 has_device: true,
                 device: "d2".to_string(),
+                full: true,
                 ..TopOptions::default()
             };
             let mut s = live_template();
@@ -2801,11 +2951,11 @@ mod tests {
             let mut watch = FilterWatch::new(&opts);
             let saved_out = redirect_fd(1, &out);
             let saved_err = redirect_fd(2, &err);
-            let r0 = snapshot_block(&mut a, &opts, 150, 1, &mut watch);
+            let r0 = snapshot_block(&mut a, &opts, 150, 1, &mut watch, 100);
             let mut e1 = sink_attempt("op2", 1, 200);
             e1.bounce.device_id = "d2".to_string();
             a.consume(&e1).expect("consume");
-            let r1 = snapshot_block(&mut a, &opts, 250, 2, &mut watch);
+            let r1 = snapshot_block(&mut a, &opts, 250, 2, &mut watch, 100);
             restore_fd(1, saved_out);
             restore_fd(2, saved_err);
             assert_eq!(r0, 0);
@@ -2834,6 +2984,7 @@ mod tests {
             let opts = TopOptions {
                 has_device: true,
                 device: "d2".to_string(),
+                full: true,
                 ..TopOptions::default()
             };
             let mut sink = StdoutSink::new(&opts);
@@ -2932,7 +3083,7 @@ mod tests {
             assert!(ok);
             let text = read_scratch(&out);
             let head = text.split('\n').next().expect("header");
-            assert_eq!(head, "--- refresh 1 @ 200 ns --- [device: d1]");
+            assert_eq!(head, "--- refresh 1 @ 200 ns (+0.0s) --- [device: d1]");
             assert!(text.contains("PROBE_FINDING"));
             return;
         }

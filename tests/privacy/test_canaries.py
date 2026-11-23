@@ -73,10 +73,13 @@ def main():
     check("md-star", "star\\*" in md)
     check("md-brack", "brack\\[et\\]" in md)
     check("md-amp", "amp&amp;lt;" in md)
-    # The name renders on one line: no raw pipe, no split row.
+    # The name renders on two lines (summary bullet plus
+    # devices table): no raw pipe, no split row anywhere.
     check("md-no-raw-pipe", "pipe|tick" not in md)
     hits = [ln for ln in md.split("\n") if "MV-CANARY-NAME" in ln]
-    check("md-one-line", len(hits) == 1, "%d lines" % len(hits))
+    check("md-name-lines", len(hits) == 2, "%d lines" % len(hits))
+    for ln in hits:
+        check("md-name-escaped", "pipe\\|tick" in ln, ln[:80])
 
     # JSON output parses and round-trips the escaped form.
     doc = json.loads(outputs["json"].decode("utf-8"))

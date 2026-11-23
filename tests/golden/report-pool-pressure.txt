@@ -1,9 +1,13 @@
+summary: attempts 1, requested bytes 512 bytes in 1.00 s
+summary devices: dev-1 (testdev0): attempts 1, requested bytes 512 bytes
+summary pool: used 900 bytes of 1000 bytes capacity
+summary scope: proves bounce attempts were counted; does not prove bytes were copied or DMA succeeded
 verdict: partial_unknown_loss (loss >=0.00%, 1 delivered)
 integrity: legacy_unverified (verified bytes=0, events=0); arithmetic is unverified; completeness withheld
 memveil report pool-pressure-session (synthetic, engine memveil-0.1.1)
 window: [1000000000,2000000000)
 duration: 1.000000000 s (1000000000 ns)
-environment: mode=unknown detection=unverified attestation=not_performed evidence=0
+environment: mode=unknown detection=unverified attestation=not_performed (recorded, not verified by memveil) evidence=0
 recorded kernel.release: unavailable (no captured provenance)
 recorded profile.decision: unavailable (no captured provenance)
 recorded measurement_scope: unavailable (no captured provenance)

@@ -15,7 +15,7 @@ use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
 use crate::capture::reader::{
     DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES, ReaderLimits,
-    read_capture, read_capture_os,
+    read_capture, read_capture_os, read_remedy,
 };
 use crate::cli::durations::parse_duration_ns;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
@@ -838,6 +838,29 @@ fn report_failed(prefix: &str, detail: &str) -> i64 {
     }
 }
 
+/// Read failure with a remedy line when one applies.
+///
+/// Open failures with a fixed cause print cause plus fix; every
+/// other read failure keeps today's single scrubbed line.
+fn report_read_failed(detail: &str) -> i64 {
+    match read_remedy(detail) {
+        Some(fix) => {
+            // Fixed literals, no caller bytes: both lines keep
+            // their prose (including the expected-files slash).
+            let cause = format!("memveil report: cannot read capture: {detail}\n");
+            let remedy = format!("memveil report: fix: {fix}\n");
+            match write_stderr_trusted(&cause) {
+                Ok(()) => match write_stderr_trusted(&remedy) {
+                    Ok(()) => EXIT_INVALID,
+                    Err(_) => EXIT_INTERNAL,
+                },
+                Err(_) => EXIT_INTERNAL,
+            }
+        }
+        None => report_failed("memveil report: cannot read capture: ", detail),
+    }
+}
+
 /// Run the report verb; return the process exit code.
 ///
 /// `args` excludes the program name and the report word. The rendered
@@ -876,14 +899,14 @@ fn run_report_parsed(opts: &ReportOptions, dir_os: Option<&OsStr>) -> i64 {
     };
     let mut reader = match opened {
         Ok(reader) => reader,
-        Err(e) => return report_failed("memveil report: cannot read capture: ", &e.message),
+        Err(e) => return report_read_failed(&e.message),
     };
     let mut analyzer = Analyzer::new(reader.session.clone());
     loop {
         let more = match reader.has_more() {
             Ok(more) => more,
             Err(e) => {
-                return report_failed("memveil report: cannot read capture: ", &e.message);
+                return report_read_failed(&e.message);
             }
         };
         if !more {
@@ -892,7 +915,7 @@ fn run_report_parsed(opts: &ReportOptions, dir_os: Option<&OsStr>) -> i64 {
         let ev = match reader.next_event() {
             Ok(ev) => ev,
             Err(e) => {
-                return report_failed("memveil report: cannot read capture: ", &e.message);
+                return report_read_failed(&e.message);
             }
         };
         if let Err(e) = analyzer.consume(&ev) {
