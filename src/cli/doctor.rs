@@ -1250,9 +1250,12 @@ fn translate_signal(code: &str) -> Option<String> {
 /// Recording is impossible when the kernel misses the floor, no
 /// profile covers the host, or a capability admission fails hard
 /// (tracefs, BTF, lockdown, memory); then the offline replay
-/// replaces the record command. A privilege-only failure keeps
-/// the record command: sudo overcomes it. Ready reports carry
-/// no next step.
+/// replaces the record command. An unknown row with
+/// root-collected evidence blocks the same way: elevation cannot
+/// reveal what root could not observe. A privilege-only failure
+/// or a genuinely-unknown row (unprivileged evidence that could
+/// not observe) keeps the record command: sudo overcomes it.
+/// Ready reports carry no next step.
 fn doctor_next_line(rep: &DoctorReport2) -> Option<&'static str> {
     if rep.verdict != "unavailable" {
         return None;
@@ -1261,12 +1264,15 @@ fn doctor_next_line(rep: &DoctorReport2) -> Option<&'static str> {
         return Some("next: memveil report examples/real-capture\n");
     }
     // Admission failures surface per capability with their own
-    // codes; only the privilege demotion is a failure the
-    // suggested sudo record can get past.
-    let blocked = rep
-        .caps
-        .iter()
-        .any(|cap| cap.status == "unavailable" && cap.reason_code != "no-bpf-privilege");
+    // codes; only the privilege demotion and the unprivileged
+    // unknown are failures the suggested sudo record can get
+    // past.
+    let blocked = rep.caps.iter().any(|cap| {
+        if cap.status == "unavailable" {
+            return cap.reason_code != "no-bpf-privilege";
+        }
+        cap.status == "unknown" && rep.euid == 0
+    });
     if blocked {
         return Some("next: memveil report examples/real-capture\n");
     }
@@ -2102,6 +2108,69 @@ mod tests {
         let text = render_doctor_text2(&rep);
         assert!(
             text.ends_with("next: sudo memveil record --output /tmp/cap1 --duration 10\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn doctor2_tracefs_hidden_next_is_replay() {
+        // End to end over the shipped fixture: the floor holds
+        // and a profile covers, but the attempt-trace row is
+        // unknown with root-collected evidence, so the next step
+        // is the offline replay, not sudo record: elevation
+        // cannot reveal what root could not observe.
+        let opts = doctor2_opts(
+            gate_fixture("tracefs-hidden"),
+            profiles_dir(),
+            "attempt-trace",
+            &elf("ok.o"),
+            &elf("lc-ok.o"),
+            &elf("cp-ok.o"),
+        );
+        let rep = assess_doctor(&opts);
+        assert_eq!(rep.verdict, "unavailable");
+        assert!(rep.kernel.eligible_floor);
+        assert!(rep.has_profile);
+        assert_eq!(rep.euid, 0);
+        assert_eq!(rep.caps.len(), 1);
+        assert_eq!(rep.caps[0].status, "unknown");
+        assert_eq!(rep.caps[0].reason_code, "tracefs-hidden");
+        let text = render_doctor_text2(&rep);
+        assert_eq!(text.matches("next: ").count(), 1, "{text}");
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
+            "{text}"
+        );
+        assert_eq!(run_doctor_opts(&opts), EXIT_UNAVAILABLE);
+    }
+
+    #[test]
+    fn doctor2_unprivileged_unknown_next_stays_record() {
+        // Genuinely-unknown rows (unprivileged evidence that could
+        // not observe) keep the record command: sudo may reveal
+        // them. Root-collected unknowns block instead.
+        let mut rep = DoctorReport2 {
+            verdict: "unavailable".to_string(),
+            ..Default::default()
+        };
+        rep.kernel.eligible_floor = true;
+        rep.has_profile = true;
+        rep.caps.push(DoctorCap {
+            id: "attempt-trace".to_string(),
+            status: "unknown".to_string(),
+            reason_code: "tracefs-hidden".to_string(),
+            ..DoctorCap::default()
+        });
+        rep.euid = 1000;
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: sudo memveil record --output /tmp/cap1 --duration 10\n"),
+            "{text}"
+        );
+        rep.euid = 0;
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
             "{text}"
         );
     }
