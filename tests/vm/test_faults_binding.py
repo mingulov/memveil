@@ -224,10 +224,15 @@ def test_shipped_binary_needs_no_bridge_lib(tmp_path):
     """
     root = tmp_path / "seal"
     with tarfile.open(DIST_BUNDLE, "r:gz") as archive:
-        for member in ("bundle/bin/memveil",
-                       "bundle/lib/memveil/libgcc_s.so.1"):
+        tops = {entry.name.split("/")[0]
+                for entry in archive.getmembers()
+                if "/" in entry.name}
+        assert len(tops) == 1, tops
+        top = next(iter(tops))
+        for member in (top + "/bin/memveil",
+                       top + "/lib/memveil/libgcc_s.so.1"):
             archive.extract(member, path=root)
-    binary = root / "bundle" / "bin" / "memveil"
+    binary = root / top / "bin" / "memveil"
     assert b"libbpf_mojo" not in binary.read_bytes()
     proc = subprocess.run(
         [str(binary), "record", "--help"],

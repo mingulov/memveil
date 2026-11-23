@@ -85,18 +85,18 @@ PINNED_INPUTS = {
 
 # Full sha256 of the committed baseline fixture
 # (`tests/vm/fixtures/aya/swiotlb_copy.bpf.o`): the fixture
-# tracks the sealed bytes (currently the 39f4a227 seal's
+# tracks the sealed bytes (currently the 08bdeaed seal's
 # copy object), and the reproduction control pins it to
 # this digest. A fresh base rebuild is compared against the
 # fixture's behavior bytes (see the test), not full bytes:
 # full bytes move with the checkout path (codegen metadata)
 # and with source lines (BTF line info), so byte-identity
 # only binds staged copies of one build. (The previous value
-# bound the superseded ac2503a3 seal's bytes; the candidate
+# bound the superseded 39f4a227 seal's bytes; the candidate
 # record below keeps that qualified history.)
 BASELINE_COPY_SHA256 = (
-    "29959dcbf9cc4cb40b9813cddf686d4118b0528f29a8edec0"
-    "70504e1265350f8"
+    "daacd9950fec82d00c9dde5a33a7398d7e3c708d557455ab"
+    "93b521aa0cf94227"
 )
 
 # Full candidate manifest digest (sha256 of the qualified

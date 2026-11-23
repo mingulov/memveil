@@ -24,17 +24,17 @@ and the attach grammar (heldopen_guest LC_SITES/CP_SITES,
 AST-equal to the battery's).
 """
 
-# Retained seal roots (dist/retained-39f4a227.../).
-CANDIDATE_SHA256 = "39f4a22721dba8a6dfab751add6067deb7874689" \
-    "87936485daa954ffe8eaf51d"
+# Retained seal roots (dist/retained-08bdeaed.../).
+CANDIDATE_SHA256 = "08bdeaed2e8646c28b1a6dda760ae9071f603816" \
+    "ab8e219600cb465749b890c9"
 CANDIDATE_SCHEMA = "memveil-candidate/2"
-SOURCE_COMMIT = "3a3d6cb8c8acc1295efdff6df44f2d89d327cc9c"
-SOURCE_TREE = "25d906845f211b8ceb9873a0cbf2949d4a566bb9"
-BUNDLE_MANIFEST_SHA256 = "d2f768990ac3d9150bcb660e38be4ac7a8e09134" \
-    "3fbcd6aafaf2874065ee653e"
-BUNDLE_SHA256 = "96f8dac7dcad44a4eb2f410f0cbbb69eb3204c17" \
-    "3c9496cb44e3f87b16a15cc5"
-BUNDLE_SIZE = 1803786
+SOURCE_COMMIT = "bdf641c36addc345f3fb6d8bf925059c6f1fa714"
+SOURCE_TREE = "cc4447b939ef5e6ef79637dd675a0a1476f224c0"
+BUNDLE_MANIFEST_SHA256 = "e81f9a5518fb56341ede0526c7bf604ab5214619" \
+    "f0bbd4e55271d6891a808870"
+BUNDLE_SHA256 = "1421538887f8fc7673b5edcb55c6633ff6febec6" \
+    "d21257a181fcab4cd20d863e"
+BUNDLE_SIZE = 1826844
 
 # Human label for receipts and probe output: the retained
 # seal's candidate ID, single-sourced with the manifest
@@ -45,12 +45,12 @@ SEAL_LABEL = CANDIDATE_SHA256
 # Sealed BPF members. Seal verification covers all three;
 # the leg loads the lifecycle/copy pair only (the attempt
 # object is seal-verified, never extracted).
-LC_SHA256 = "ad69cf0587597a1a8c14048dbb5f1256a604bf20" \
-    "cc8d9f092d8c7b658c41f8e9"
-CP_SHA256 = "29959dcbf9cc4cb40b9813cddf686d4118b0528f" \
-    "29a8edec070504e1265350f8"
-ATTEMPT_SHA256 = "8ee4903f6de717d013ae797e7963fefdb28549f4" \
-    "ee04e3c5d4544a8e9de61d6a"
+LC_SHA256 = "0cd5a0c9b961605f0c47fbcf0a5377080e5ca3f6" \
+    "24d6c9860a57e816aff4527f"
+CP_SHA256 = "daacd9950fec82d00c9dde5a33a7398d7e3c708d" \
+    "557455ab93b521aa0cf94227"
+ATTEMPT_SHA256 = "81ebd35c1450e905de1eaf2d23ea2827328a221a" \
+    "a8eabf2b4ca4e2f4daa026b6"
 
 # Seal bundle members the leg extracts. Their digests are
 # read from the verified seal (inner manifest), never
