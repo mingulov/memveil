@@ -160,6 +160,10 @@ The sealed artifacts, all from the one seal:
 These hashes are re-verified by the T5 campaign's
 pre-VM gates (6/6 match `candidate.json`) and the
 release lists them in `SHA256SUMS.txt`.
+The `tested-payload.sha256` and full `qualification.json`
+exports are not part of this prerelease: the export gate
+requires the full 20-row matrix, so the full export
+follows the T8 full-repeat campaign.
 Earlier development receipts and CI successes apply to their recorded
 revisions, binaries, BPF objects and environments. They are historical
 evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
@@ -290,3 +294,9 @@ with the partial flag. Full current and planned reader rules live in
 [integrity exit table](capture-integrity.md#reader-and-report-behavior).
 Captures replay offline without the recording host or native bridge. Current
 legacy data has no integrity verification; arithmetic is not authenticity.
+
+## Support
+
+RnD prerelease; supported until the next 0.x; report
+issues with your `memveil version` output plus the seal
+ID above.
