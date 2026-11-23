@@ -422,6 +422,8 @@ def test_failure_retains_capture(tmp_path, monkeypatch, failure):
     m = api()
     local, export = tmp_path / 'local', tmp_path / 'export'
     local.mkdir(); export.mkdir()
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
     error = m.ProductExit(3) if failure == 'product' else ValueError(failure + ' failed')
     def fail(binary, disk, mode, work, seconds, pool=False, observation=None, **kwargs):
         capture = work / 'capture'
@@ -433,8 +435,9 @@ def test_failure_retains_capture(tmp_path, monkeypatch, failure):
         raise error
     monkeypatch.setattr(m, 'leg', fail)
     with pytest.raises(type(error)) as caught:
-        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0)
+        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0, scratch=scratch)
     assert caught.value is error
+    assert (scratch / 'leg-0/capture/checkpoint.json').exists()
     assert (local / 'leg-0/capture/checkpoint.json').exists()
     assert (export / 'failed-0/capture/checkpoint.json').exists()
     receipt = json.loads((local / 'leg-0/observations.json').read_text())
@@ -447,6 +450,8 @@ def test_export_failure_keeps_original_product_exit_and_local_capture(tmp_path, 
     m = api()
     local, export = tmp_path / 'local', tmp_path / 'export'
     local.mkdir(); export.mkdir()
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
     def fail(binary, disk, mode, work, seconds, pool=False, observation=None, **kwargs):
         (work / 'capture').mkdir()
         (work / 'capture/checkpoint.json').write_text('{"synthetic":true}')
@@ -455,8 +460,9 @@ def test_export_failure_keeps_original_product_exit_and_local_capture(tmp_path, 
     monkeypatch.setattr(m, 'leg', fail)
     monkeypatch.setattr(m, 'retain_capture', lambda *a: (_ for _ in ()).throw(OSError('export failed')))
     with pytest.raises(m.ProductExit) as caught:
-        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0)
+        m.record_leg('/unused', '/unused', 'attempt-record-summary', 60, False, local, export, 0, scratch=scratch)
     assert caught.value.product_exit == 3
+    assert (scratch / 'leg-0/capture/checkpoint.json').exists()
     assert (local / 'leg-0/capture/checkpoint.json').exists()
     receipt = json.loads((local / 'leg-0/observations.json').read_text())
     assert receipt['product_exit'] == 3 and receipt['export_error']
@@ -492,6 +498,7 @@ def test_real_leg_applies_measured_top_cadence_guard(tmp_path, monkeypatch, refr
     class Process:
         pid = 123
         stdout = io.BytesIO()
+        stderr = io.BytesIO()
         returncode = None
         def poll(self): return self.returncode
         def send_signal(self, signal): self.returncode = 0
@@ -2154,3 +2161,359 @@ def test_host_guest_argv_install_inputs_unchanged(
     assert '--deb' in payload
     assert '--rpm' not in payload
     assert 'force-depends' not in payload
+
+
+# Overlay capture staging: the collector records to a
+# guest-local dir while the mount-backed dirs stay the
+# host-visible forensics mirror. The stubs below emulate
+# the product's capture-dir ownership guard (refuse with
+# exit 3 when --output sits under the refused mount) and
+# the record lifecycle (ready line, SIGTERM stop with
+# marker bytes).
+
+
+GUARD_REFUSAL_LINE = ('memveil record: output exists: '
+                      'output dir owned by another user')
+
+
+def _collector_output_probe():
+    return ('out=""; prev=""; for arg in "$@"; do '
+            'if [ "$prev" = "--output" ]; then out="$arg"; fi; '
+            'prev="$arg"; done; ')
+
+
+def _stub_guard_collector(path):
+    """Fake collector honouring a mount-shaped ownership guard.
+
+    Refuses with the product's exit code and diagnostic when
+    --output sits under $REFUSE_UNDER; otherwise readies,
+    logs its --output to $ARGV_LOG, and writes marker
+    bytes on SIGTERM. Needs no product, no mount, no boot.
+    """
+    body = (_collector_output_probe() +
+            'if [ -n "$REFUSE_UNDER" ]; then case "$out" in '
+            '"$REFUSE_UNDER"/*) echo "%s" >&2; exit 3;; esac; fi; '
+            'mkdir -p "$out"; '
+            'if [ -n "$ARGV_LOG" ]; then printf "%%s\\n" "$out" '
+            '>> "$ARGV_LOG"; fi; '
+            'echo "ready session=cap-fake-1"; '
+            'trap \'printf "{\\"marker\\":true}" '
+            '> "$out/checkpoint.json"; exit 0\' TERM; '
+            'while :; do sleep 1; done\n' % GUARD_REFUSAL_LINE)
+    return _stub_installer(path, body)
+
+
+def _stub_refusing_collector(path):
+    return _stub_installer(
+        path, 'echo "%s" >&2\nexit 3\n' % GUARD_REFUSAL_LINE)
+
+
+def _stub_partial_refusing_collector(path):
+    body = (_collector_output_probe() +
+            'mkdir -p "$out"; '
+            'printf "{\\"partial\\":true}" > "$out/checkpoint.json"; '
+            'echo "%s" >&2; exit 3\n' % GUARD_REFUSAL_LINE)
+    return _stub_installer(path, body)
+
+
+def _stub_flapping_collector(path):
+    body = (_collector_output_probe() +
+            'mkdir -p "$out"; '
+            'printf "{\\"partial\\":true}" > "$out/checkpoint.json"; '
+            'echo "ready session=cap-fake-2"; sleep 1; '
+            'echo "memveil record: backend lost mid-leg" >&2; '
+            'exit 3\n')
+    return _stub_installer(path, body)
+
+
+def _stub_flooding_collector(path):
+    body = ('i=0; while [ "$i" -lt 3000 ]; do '
+            'echo "diagnostic filler line $i padding padding" >&2; '
+            'i=$((i + 1)); done; '
+            'echo "%s" >&2; exit 3\n' % GUARD_REFUSAL_LINE)
+    return _stub_installer(path, body)
+
+
+def _overlay_leg_env(tmp_path, monkeypatch):
+    """Scratch/local/export dirs plus instant workload doubles."""
+    m = api()
+    local, export, scratch = (tmp_path / name for name in
+                              ('local', 'export', 'scratch'))
+    local.mkdir(); export.mkdir(); scratch.mkdir()
+    monkeypatch.setattr(m, 'inventory', lambda: {})
+    monkeypatch.setattr(m, 'settled', lambda before: {})
+    monkeypatch.setattr(m, 'workload',
+                        lambda *args, **kwargs: measured()['workload'])
+    monkeypatch.setattr(m, 'capture_facts', lambda *args: {'ok': True})
+    return m, local, export, scratch
+
+
+def test_record_leg_requires_overlay_scratch(tmp_path):
+    m = api()
+    local, export = tmp_path / 'local', tmp_path / 'export'
+    local.mkdir(); export.mkdir()
+    with pytest.raises(TypeError):
+        m.record_leg('/unused', '/unused', 'attempt-record-summary',
+                     60, False, local, export, 0)
+
+
+def test_guard_refusal_shape_is_reproducible_offline(
+        tmp_path, monkeypatch):
+    """Work staged under the refused mount refuses, exit 3."""
+    m = api()
+    monkeypatch.setattr(m, 'inventory', lambda: {})
+    monkeypatch.setattr(m, 'settled', lambda before: {})
+    work = tmp_path / 'rwdir-mount' / 'leg-0'
+    work.mkdir(parents=True)
+    binary = _stub_refusing_collector(tmp_path / 'memveil')
+    with pytest.raises(m.ProductExit) as caught:
+        m.leg(str(binary), '/unused', 'attempt-record-summary',
+              work, 60)
+    assert caught.value.product_exit == 3
+
+
+def test_overlay_leg_records_local_and_mirrors_forensics(
+        tmp_path, monkeypatch):
+    import json
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    monkeypatch.setenv('REFUSE_UNDER', str(local))
+    argv_log = tmp_path / 'argv.log'
+    monkeypatch.setenv('ARGV_LOG', str(argv_log))
+    binary = _stub_guard_collector(tmp_path / 'memveil')
+    state = m.record_leg(str(binary), '/unused',
+                         'attempt-record-summary', 60, False,
+                         local, export, 0, scratch=scratch)
+    assert state['status'] == 'PASS'
+    recorded = Path(argv_log.read_text().splitlines()[0])
+    assert scratch.resolve() in recorded.resolve().parents
+    assert local.resolve() not in recorded.resolve().parents
+    assert (export / 'completed-0/capture/checkpoint.json').exists()
+    mirror = local / 'leg-0'
+    assert (mirror / 'capture/checkpoint.json').exists()
+    receipt = json.loads((mirror / 'observations.json').read_text())
+    assert receipt['status'] == 'PASS'
+    assert 'export_error' not in receipt
+    assert 'local_receipt_error' not in receipt
+    assert not (scratch / 'leg-0').exists()
+
+
+def test_overlay_mirror_preserves_private_modes(tmp_path, monkeypatch):
+    import stat
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    monkeypatch.setenv('REFUSE_UNDER', str(local))
+    binary = _stub_guard_collector(tmp_path / 'memveil')
+    old = os.umask(0o027)
+    try:
+        state = m.record_leg(str(binary), '/unused',
+                             'attempt-record-summary', 60, False,
+                             local, export, 0, scratch=scratch)
+    finally:
+        os.umask(old)
+    assert state['status'] == 'PASS'
+    assert stat.S_IMODE((local / 'leg-0').stat().st_mode) == 0o700
+    assert stat.S_IMODE(
+        (local / 'leg-0/capture').stat().st_mode) == 0o700
+    for name in ('capture/checkpoint.json', 'observations.json'):
+        assert stat.S_IMODE(
+            (local / ('leg-0/' + name)).stat().st_mode) == 0o600
+    assert stat.S_IMODE((export / 'completed-0/capture'
+                         / 'checkpoint.json').stat().st_mode) == 0o600
+
+
+def test_passing_leg_observation_schema_is_frozen(
+        tmp_path, monkeypatch):
+    import json
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    monkeypatch.setenv('REFUSE_UNDER', str(local))
+    binary = _stub_guard_collector(tmp_path / 'memveil')
+    state = m.record_leg(str(binary), '/unused',
+                         'attempt-record-summary', 60, False,
+                         local, export, 0, scratch=scratch)
+    assert state['status'] == 'PASS'
+    exported = json.loads(
+        (export / 'completed-0/observations.json').read_text())
+    assert set(exported) == {'ordinal', 'mode', 'status',
+                             'bpf_before', 'bpf_after', 'product_exit',
+                             'cleanup_errors', 'warmup', 'workload',
+                             'capture', 'retained_capture',
+                             'retained_verification', 'output',
+                             'stop_signal_ns'}
+
+
+def test_successful_leg_keeps_no_collector_stderr(
+        tmp_path, monkeypatch):
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    monkeypatch.setenv('REFUSE_UNDER', str(local))
+    binary = _stub_guard_collector(tmp_path / 'memveil')
+    state = m.record_leg(str(binary), '/unused',
+                         'attempt-record-summary', 60, False,
+                         local, export, 0, scratch=scratch)
+    assert state['status'] == 'PASS'
+    assert 'collector_stderr_tail' not in state
+    assert not (local / 'leg-0/collector-stderr.log').exists()
+    assert (local / 'leg-0/observations.json').exists()
+
+
+def test_refusal_persists_stderr_and_partial_capture(
+        tmp_path, monkeypatch):
+    import json
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    binary = _stub_partial_refusing_collector(tmp_path / 'memveil')
+    with pytest.raises(m.ProductExit) as caught:
+        m.record_leg(str(binary), '/unused',
+                     'attempt-record-summary', 60, False,
+                     local, export, 0, scratch=scratch)
+    assert caught.value.product_exit == 3
+    assert 'owned by another user' in str(caught.value)
+    state = caught.value.observation
+    assert state['status'] == 'FAIL'
+    assert 'owned by another user' in state['collector_stderr_tail']
+    assert (scratch / 'leg-0/collector-stderr.log').exists()
+    log = (local / 'leg-0/collector-stderr.log').read_bytes()
+    assert b'owned by another user' in log
+    assert (local / 'leg-0/capture/checkpoint.json').exists()
+    assert (export / 'failed-0/capture/checkpoint.json').exists()
+    receipt = json.loads((local / 'leg-0/observations.json').read_text())
+    assert receipt['status'] == 'FAIL'
+    assert receipt['product_exit'] == 3
+    assert 'owned by another user' in receipt['collector_stderr_tail']
+
+
+def test_refusal_without_capture_dir_still_mirrors_receipts(
+        tmp_path, monkeypatch):
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    binary = _stub_refusing_collector(tmp_path / 'memveil')
+    with pytest.raises(m.ProductExit):
+        m.record_leg(str(binary), '/unused',
+                     'attempt-record-summary', 60, False,
+                     local, export, 0, scratch=scratch)
+    assert not (local / 'leg-0/capture').exists()
+    assert (local / 'leg-0/observations.json').exists()
+    assert (local / 'leg-0/collector-stderr.log').exists()
+    assert (export / 'failed-0/observations.json').exists()
+
+
+def test_mid_leg_exit_persists_stderr_and_partial_capture(
+        tmp_path, monkeypatch):
+    import time
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    binary = _stub_flapping_collector(tmp_path / 'memveil')
+
+    def short_workload(disk, seconds, proc=None, pool_case=False,
+                       oracle=None):
+        deadline = time.monotonic() + 30
+        while proc is not None and proc.poll() is None \
+                and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if proc is not None and proc.poll() is not None:
+            raise m.ProductExit(
+                proc.returncode, 'collector exited during workload: exit')
+        return measured()['workload']
+
+    monkeypatch.setattr(m, 'workload', short_workload)
+    with pytest.raises(m.ProductExit) as caught:
+        m.record_leg(str(binary), '/unused',
+                     'attempt-record-summary', 60, False,
+                     local, export, 0, scratch=scratch)
+    assert caught.value.product_exit == 3
+    assert 'backend lost mid-leg' in \
+        caught.value.observation['collector_stderr_tail']
+    assert (local / 'leg-0/collector-stderr.log').exists()
+    assert (local / 'leg-0/capture/checkpoint.json').exists()
+
+
+def test_collector_stderr_is_bounded_and_tailed(
+        tmp_path, monkeypatch):
+    m = api()
+    monkeypatch.setattr(m, 'inventory', lambda: {})
+    monkeypatch.setattr(m, 'settled', lambda before: {})
+    binary = _stub_flooding_collector(tmp_path / 'memveil')
+    work = tmp_path / 'work'
+    work.mkdir()
+    observation = {}
+    with pytest.raises(m.ProductExit):
+        m.leg(str(binary), '/unused', 'attempt-record-summary',
+              work, 60, observation=observation)
+    log = (work / 'collector-stderr.log').read_bytes()
+    assert len(log) <= m.COLLECTOR_STDERR_LIMIT + 8192
+    assert b'owned by another user' in log
+    tail = observation['collector_stderr_tail']
+    assert 'owned by another user' in tail
+    assert 'filler line 0' not in tail
+
+
+def test_blocked_forensics_mirror_degrades_to_warning(
+        tmp_path, monkeypatch, capsys):
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    monkeypatch.setenv('REFUSE_UNDER', str(local))
+    binary = _stub_guard_collector(tmp_path / 'memveil')
+    (local / 'leg-0').write_text('blocker file on the mirror path\n')
+    state = m.record_leg(str(binary), '/unused',
+                         'attempt-record-summary', 60, False,
+                         local, export, 0, scratch=scratch)
+    assert state['status'] == 'PASS'
+    assert 'export_error' not in state
+    assert 'local_receipt_error' not in state
+    assert (export / 'completed-0/capture/checkpoint.json').exists()
+    assert 'forensics' in capsys.readouterr().err
+    assert (scratch / 'leg-0').exists()
+
+
+def test_forensics_copy_failure_never_masks_primary(
+        tmp_path, monkeypatch, capsys):
+    m, local, export, scratch = _overlay_leg_env(tmp_path, monkeypatch)
+    binary = _stub_partial_refusing_collector(tmp_path / 'memveil')
+    (local / 'leg-0').write_text('blocker file on the mirror path\n')
+    with pytest.raises(m.ProductExit) as caught:
+        m.record_leg(str(binary), '/unused',
+                     'attempt-record-summary', 60, False,
+                     local, export, 0, scratch=scratch)
+    assert caught.value.product_exit == 3
+    assert 'owned by another user' in str(caught.value)
+    assert 'forensics' in capsys.readouterr().err
+
+
+def test_copy_leg_forensics_copies_what_exists(tmp_path):
+    m = api()
+    work = tmp_path / 'work'
+    (work / 'capture').mkdir(parents=True)
+    (work / 'capture/checkpoint.json').write_text('{"a":1}')
+    (work / 'capture/session.json').symlink_to(tmp_path / 'foreign')
+    (tmp_path / 'foreign').write_text('foreign')
+    (work / 'observations.json').write_text('{"status":"FAIL"}')
+    warnings = m.copy_leg_forensics(work, tmp_path / 'mirror')
+    assert any('session.json' in warning for warning in warnings)
+    assert (tmp_path / 'mirror/capture/checkpoint.json').exists()
+    assert (tmp_path / 'mirror/observations.json').exists()
+    assert not (tmp_path / 'mirror/capture/session.json').exists()
+    assert (tmp_path / 'foreign').read_text() == 'foreign'
+    assert (tmp_path / 'mirror/forensics-copy-warnings.log').exists()
+
+
+def test_copy_leg_forensics_tolerates_missing_work(tmp_path):
+    m = api()
+    warnings = m.copy_leg_forensics(tmp_path / 'absent',
+                                    tmp_path / 'mirror')
+    assert warnings
+
+
+def test_evidence_copy_enforces_modes_under_hostile_umask(tmp_path):
+    import stat
+    m = api()
+    work = tmp_path / 'work'
+    (work / 'capture').mkdir(parents=True)
+    (work / 'capture/checkpoint.json').write_text('{"a":1}')
+    (work / 'observations.json').write_text('{}')
+    old = os.umask(0o777)
+    try:
+        warnings = m.copy_leg_forensics(work, tmp_path / 'mirror')
+    finally:
+        os.umask(old)
+    assert warnings == []
+    assert stat.S_IMODE(
+        (tmp_path / 'mirror').stat().st_mode) == 0o700
+    assert stat.S_IMODE(
+        (tmp_path / 'mirror/capture').stat().st_mode) == 0o700
+    for name in ('capture/checkpoint.json', 'observations.json'):
+        assert stat.S_IMODE(
+            (tmp_path / ('mirror/' + name)).stat().st_mode) == 0o600
