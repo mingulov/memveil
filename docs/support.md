@@ -108,14 +108,16 @@ fallback are not provided.
 - `forced` mirrors the kernel's swiotlb force bit and is
   not a confidential-guest signal (see
   [privacy](privacy.md)).
-- The 7.0 scenario guest admits, and all 12 detection
-  scenarios pass: every negative refuses correctly,
-  `nocaps` drops every capability through `setpriv`
-  (CapEff 0 in the dropped child), and `memcg` refuses
-  `load-enomem` under its calibrated limit.
+- The 7.0 scenario guest admits, and the 12 detection
+  scenarios are 12/12 legs green on 2 sealed-bytes runs
+  (formal row receipt pending the scenario re-run):
+  every negative refuses correctly, `nocaps` drops
+  every capability through `setpriv` (CapEff 0 in the
+  dropped child), and `memcg` refuses `load-enomem`
+  under its calibrated limit.
 - This repository's booted matrix (below) qualifies
-  the 6.0 through 6.10 attempt rows below 7.0 for the
-  exact historical bytes named there.
+  the 6.0 and 6.6 attempt-only rows for the exact
+  sealed bytes named there.
 
 ## Configuration and artifact admission
 
@@ -168,7 +170,10 @@ fallback are not provided.
   `system_libraries` records that allowlist, a superset of
   the per-verb needs above. Compiler-free offline consumption
   has been tested
-  on Ubuntu 26.04.1 (glibc 2.43) for specific development artifacts.
+  on Ubuntu 26.04.1 (glibc 2.43) for specific development artifacts,
+  and re-proven on the sealed 0.2.0 bytes (compiler-free
+  `env -i` version/report exit 0 — T5 step-6 receipt
+  `step6-quickstart-logs/`).
   Observed linkage minima are glibc 2.35 (binary plus
   vendored libgcc, no ABI nodes). The Debian
   libgcc is pinned because the host
@@ -218,74 +223,60 @@ receipt, and never become support claims without exact-artifact booted
 evidence. The planned conversion journal starts at 6.11 with BTF required;
 it is not implemented or admitted by an ordinary-channel receipt.
 
-Booted 2026-10-24 with the CI-built 0.1.0 `.deb`
-(binary sha256 `ae2d3c13...`, full hash in the
-[release notes](release-notes.md)), all rows in one
-run with no re-boot. Every recorded row passed for those exact historical
-bytes; these rows
-do not qualify current development rebuilds. Refused capabilities stay
-measured observations recorded with their exact refusal codes.
-Evidence: `matrix/<lock id>` per row. `SHORT-COVERED`
-means memveil persisted fewer events than the oracle
-saw and declared the difference as loss (here always
-trampoline recursion misses); the row fails if the
-declared loss does not cover the gap.
+Booted 2026-11-23 with the sealed 0.2.0 build
+(seal `08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9`,
+source `bdf641c36addc345f3fb6d8bf925059c6f1fa714`,
+binary sha256
+`6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d`):
+one canonical binary; the matrix ran the `.deb` install
+of it. The tarball and `.rpm` binaries are byte-identical
+to the matrix binary, and the clean-VM journey ran the
+retained `.deb` install (T5 step-1 journey receipt
+`step1-scratch/export/` and step-6 package receipts
+`step6-quickstart-logs/`). Every recorded row passed for
+those exact bytes; rows not listed as PASS for this build
+were not run on this build. Refused capabilities stay
+measured observations recorded with their exact refusal
+codes. Evidence: T5 row receipt `receipt.json` per row
+dir (run `20261123T104854Z`) plus `summary.txt`.
+`SHORT-COVERED` means memveil persisted fewer events
+than the oracle saw and declared the difference as loss;
+the row fails if the declared loss does not cover the
+gap.
 
-| Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row |
-| --- | --- | --- | --- | --- | --- |
-| 5.15 | 5.15.223-0515223-generic | refused (`floor`) | refused (`floor`) | refused (`floor`) | PASS |
-| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) |
-| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) |
-| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; busy SHORT-COVERED) |
-| 6.11 | 6.11.11-061111-generic | available | available | available | PASS (busy stops at the 4,194,304-record cap) |
-| 6.12.0 | 6.12.0-061200-generic | available | available | available | PASS |
-| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS |
-| 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | available | PASS |
-| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (counts only; busy SHORT-COVERED) |
-| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | PASS (main SHORT-COVERED: 222 recursion misses) |
-| 6.12 | 6.12.114-0612114-generic | available | available | available | PASS |
-| 6.18.0 | 6.18.0-061800-generic | available | available | available | PASS (kernel leaves read maps unmapped, 384 this run; product reports them open with the kernel-left-open note; see [kernel issues](kernel-issues.md)) |
-| 6.18 | 6.18.58-061858-generic | available | available | available | PASS |
-| 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS |
-| 7.0 | 7.0.14-070014-generic | available | available | available | PASS (main SHORT-COVERED: 8 recursion misses) |
-| 7.1 | 7.1.13-070113-generic | available | available | available | PASS (main SHORT-COVERED: 6 recursion misses) |
-| 7.2 | 7.2.6-070206-generic | available | available | available | PASS |
-| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS (main SHORT-COVERED: 5 recursion misses) |
-| 7.3 | 7.3.0-mv-7.3 | available | available | available | PASS (main SHORT-COVERED: 21 recursion misses) |
-| debian13 | 6.12.107+deb13-amd64 | available | available | available | PASS |
+| Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row | Receipt |
+| --- | --- | --- | --- | --- | --- | --- |
+| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) | `matrix-out/6.0/receipt.json` |
+| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) | `matrix-out/6.6/receipt.json` |
+| 6.11 | 6.11.11-061111-generic | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.11/receipt.json` |
+| 7.0 | 7.0.14-070014-generic | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 73) | `matrix-out/7.0/receipt.json` |
+| debian13 | 6.12.107+deb13-amd64 | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/debian13/receipt.json` |
+| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.12.114-btf/receipt.json` |
+| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (attempt-only; counts only) | `matrix-out/6.12.114-nobtf/receipt.json` |
+| 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS (no admitted caps; all refusals exit 3) | `matrix-out/7.0.14-lockdown/receipt.json` |
 
 Notes:
 
-- The historical nobtf row is outside the current BTF-required support
-  envelope and cannot qualify a new BTF-less artifact. It asserts counts
-  only: attempt counts are
-  oracle-proven while bytes stay unproven (no hist
-  triggers in the built config). Its busy verdict is a
-  strict SHORT-COVERED bound with declared omits.
+- The nobtf row asserts counts only: attempt counts
+  are oracle-proven (attempt EXACT) while bytes stay
+  unproven. Lifecycle/copy refuse `btf-absent-config`
+  with exit 3.
+- The 7.0 row's map channel is SHORT-COVERED (92599
+  persisted of 92672 oracle events, 73 declared as
+  loss); a `--kernel 7.0` preflight row on the same
+  sealed bytes was all-EXACT with loss 0
+  (`matrix-preflight/`).
+- Rows not listed above were not run on this build and
+  are not claimed: 5.15, 6.10, 6.12, 6.12.0,
+  6.12.114-rt, 6.12.114-debug, 6.18, 6.18.0, 7.1, 7.2,
+  7.3-rc3, 7.3. They are follow-up campaign material;
+  the 0.1.0 rows for some of them sit in the
+  historical appendix below and do not qualify this
+  build.
 - A positive `stop.open_mappings` count means the
   kernel never released those mappings, not that the
   product lost their unmaps; see
   [kernel issues](kernel-issues.md).
-- 7.3 changes one detail: `swiotlb_tbl_map_single`
-  takes `attrs` as a pointer (present since rc1,
-  verified through rc3, the newest 7.3 in the lock).
-  The shipped probe never reads map-side `attrs`
-  (`fexit` map ignores it; `unmap` still passes it by
-  value), so the same object serves both shapes and the
-  signature check accepts either. If a future probe
-  reads map-side `attrs`, this row must be revisited.
-- Release candidates and mainline snapshots parse to
-  their triple (`7.3.0-rc2` is 7.3.0) and are admitted
-  by the same live checks. They are moving targets: a
-  newer rc that changes a shape is refused fail-closed
-  with the exact diff, never silently admitted.
-- Trying a 7.4 pre-alpha above the ceiling means
-  two checks: a source check (re-fetch
-  mainline `kernel/dma/swiotlb.c` and the trace
-  header, diff the five hooks plus the tracepoint
-  fields), then a boot check (run `doctor` and
-  `record` on the new kernel). Admission without
-  the boot check is not a support claim.
 - Admission is not qualification: booted matrix evidence
   stays on the tested kernel and artifact. Other
   builds additionally need a machine-local `local-auto`
@@ -341,7 +332,9 @@ scenarios that prove refusal codes and remedies
 (`MEMVEIL_VM_SCENARIOS` arms the `vm-scenarios` lane with
 `MV_DEB` pointing at the deb). Lockdown and BTF absence
 are covered by their matrix rows instead of scenarios.
-All twelve pass on the 7.0 guest with this bundle.
+Scenario contract: 12/12 legs green on 2 sealed-bytes
+runs; formal row receipt pending the R-2 re-run.
+<!-- T6 scenario-contract follow-up: replace the line above with the formal row receipt citation after the scenario re-run on this seal lands -->
 
 | Scenario | Record outcome | Remedy family |
 | --- | --- | --- |
@@ -357,6 +350,65 @@ All twelve pass on the 7.0 guest with this bundle.
 | btf-empty | `btf-truncated` (exit 3) | kernel BTF build |
 | btf-truncated | `btf-truncated` (exit 3) | kernel BTF build |
 | memcg | `load-enomem` (exit 3) | memcg headroom |
+
+## Historical appendix: 0.1.0 matrix (superseded)
+
+The table below ran the CI-built 0.1.0 `.deb` (binary
+sha256 `ae2d3c13ddad4c093317b90b0e2975cc388ff8566ae8bd4d0c13b7e9ecb2ae5e`)
+on 2026-10-24, all rows in one run with no re-boot. It is
+kept as history only: these rows do not qualify the
+sealed 0.2.0 build or any other bytes.
+
+| Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row |
+| --- | --- | --- | --- | --- | --- |
+| 5.15 | 5.15.223-0515223-generic | refused (`floor`) | refused (`floor`) | refused (`floor`) | PASS |
+| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) |
+| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) |
+| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; busy SHORT-COVERED) |
+| 6.11 | 6.11.11-061111-generic | available | available | available | PASS (busy stops at the 4,194,304-record cap) |
+| 6.12.0 | 6.12.0-061200-generic | available | available | available | PASS |
+| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS |
+| 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | available | PASS |
+| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (counts only; busy SHORT-COVERED) |
+| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | PASS (main SHORT-COVERED: 222 recursion misses) |
+| 6.12 | 6.12.114-0612114-generic | available | available | available | PASS |
+| 6.18.0 | 6.18.0-061800-generic | available | available | available | PASS (kernel leaves read maps unmapped, 384 this run; product reports them open with the kernel-left-open note; see [kernel issues](kernel-issues.md)) |
+| 6.18 | 6.18.58-061858-generic | available | available | available | PASS |
+| 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS |
+| 7.0 | 7.0.14-070014-generic | available | available | available | PASS (main SHORT-COVERED: 8 recursion misses) |
+| 7.1 | 7.1.13-070113-generic | available | available | available | PASS (main SHORT-COVERED: 6 recursion misses) |
+| 7.2 | 7.2.6-070206-generic | available | available | available | PASS |
+| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS (main SHORT-COVERED: 5 recursion misses) |
+| 7.3 | 7.3.0-mv-7.3 | available | available | available | PASS (main SHORT-COVERED: 21 recursion misses) |
+| debian13 | 6.12.107+deb13-amd64 | available | available | available | PASS |
+
+Historical notes (0.1.0 rows only):
+
+- The historical nobtf row asserted counts only:
+  attempt counts were oracle-proven while bytes stayed
+  unproven (no hist triggers in the built config). Its
+  busy verdict was a strict SHORT-COVERED bound with
+  declared omits.
+- 7.3 changes one detail: `swiotlb_tbl_map_single`
+  takes `attrs` as a pointer (present since rc1,
+  verified through rc3, the newest 7.3 in the lock).
+  The shipped probe never reads map-side `attrs`
+  (`fexit` map ignores it; `unmap` still passes it by
+  value), so the same object serves both shapes and the
+  signature check accepts either. If a future probe
+  reads map-side `attrs`, this row must be revisited.
+- Release candidates and mainline snapshots parse to
+  their triple (`7.3.0-rc2` is 7.3.0) and are admitted
+  by the same live checks. They are moving targets: a
+  newer rc that changes a shape is refused fail-closed
+  with the exact diff, never silently admitted.
+- Trying a 7.4 pre-alpha above the ceiling means
+  two checks: a source check (re-fetch
+  mainline `kernel/dma/swiotlb.c` and the trace
+  header, diff the five hooks plus the tracepoint
+  fields), then a boot check (run `doctor` and
+  `record` on the new kernel). Admission without
+  the boot check is not a support claim.
 
 ## Permissions
 
