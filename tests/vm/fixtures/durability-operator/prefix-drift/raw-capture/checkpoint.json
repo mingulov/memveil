@@ -1,0 +1,1 @@
+{"session_id": "b01dface-0000-4000-8000-000000000001", "capture": {"finalized": false, "end_reason": "checkpoint", "checkpoint_generation": "2", "integrity": {"events_bytes": "258", "events_sha256": "d835cb961d7f886272e34bf75444a1a3652ce43e73b6c16b079931bacd9fb177", "line_count": "3", "kinds": {"attempt": "3"}}}}

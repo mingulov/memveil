@@ -1,0 +1,13 @@
+{
+  "nonce": "0123456789abcdef0123",
+  "scenario": "checkpoint",
+  "schema": "memveil-durability-operator/1",
+  "workload": {
+    "block_bytes": 65536,
+    "block_count": 64,
+    "id": "owned-io-sweep/1",
+    "seed": "9f2c4a7e0b1d8e3f6a5c7d9e0b1d4a6c",
+    "target": "operator-io",
+    "total_bytes": 4194304
+  }
+}

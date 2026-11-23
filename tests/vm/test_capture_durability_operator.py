@@ -361,5 +361,66 @@ class GuestHookTests(unittest.TestCase):
             self.assertEqual(failed['status'], 'FAIL')
 
 
+class DryRunTests(unittest.TestCase):
+    FIXTURES = VM / 'fixtures' / 'durability-operator'
+
+    def dry_run(self, name, tmp):
+        out = Path(tmp) / ('out-' + name)
+        proc = subprocess.run(
+            [sys.executable, str(VM / 'capture_durability_operator.py'),
+             '--fixture', str(self.FIXTURES / name), '--out', str(out)],
+            capture_output=True)
+        return proc, out
+
+    def test_good_fixture_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, out = self.dry_run('good', tmp)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn(b'operator-dry-run: PASS', proc.stdout)
+            verdict = json.loads((out / 'verdict.json').read_text())
+            self.assertEqual(verdict['status'], 'PASS')
+            window = json.loads((out / 'window.json').read_text())
+            self.assertLess(window['start_ns'], window['end_ns'])
+
+    def test_uuid_drift_fixture_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, out = self.dry_run('uuid-drift', tmp)
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertIn(b'operator-dry-run: FAIL', proc.stdout)
+            self.assertIn(b'same_uuid_recovery', proc.stdout)
+            verdict = json.loads((out / 'verdict.json').read_text())
+            self.assertEqual(verdict['predicates']['same_uuid_recovery']['status'], 'FAIL')
+
+    def test_prefix_drift_fixture_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, out = self.dry_run('prefix-drift', tmp)
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertIn(b'prefix_reverified_from_raw_bytes', proc.stdout)
+            verdict = json.loads((out / 'verdict.json').read_text())
+            self.assertEqual(verdict['predicates']['prefix_reverified_from_raw_bytes']['status'], 'FAIL')
+
+    def test_pool_only_fixture_is_not_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, out = self.dry_run('pool-only', tmp)
+            self.assertEqual(proc.returncode, 3, proc.stdout)
+            self.assertIn(b'operator-dry-run: NOT RUN', proc.stdout)
+            self.assertFalse(out.exists())
+
+    def test_corrupt_fixture_fails_without_traceback(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp) / 'broken'
+            shutil.copytree(self.FIXTURES / 'good', broken)
+            (broken / 'oracle.log').write_text('not json\n')
+            out = Path(tmp) / 'out-broken'
+            proc = subprocess.run(
+                [sys.executable, str(VM / 'capture_durability_operator.py'),
+                 '--fixture', str(broken), '--out', str(out)],
+                capture_output=True)
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertIn(b'operator-dry-run: FAIL', proc.stdout)
+            self.assertNotIn(b'Traceback', proc.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

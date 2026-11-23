@@ -1,0 +1,15 @@
+{
+  "fs_uuid": "uuid-kept",
+  "integrity": {
+    "events_bytes": "172",
+    "events_sha256": "ef763521d74892749186190e873ee8619be59a6fd0ed391ed8141be73ef00a80",
+    "kinds": {
+      "attempt": "2"
+    },
+    "line_count": "2"
+  },
+  "marker": "checkpoint-2",
+  "nonce": "0123456789abcdef0123",
+  "scenario": "checkpoint",
+  "stopped": true
+}

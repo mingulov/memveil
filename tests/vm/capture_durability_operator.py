@@ -274,7 +274,11 @@ def main(argv=None):
     parser.add_argument('--fixture', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args(argv)
-    status, detail = dry_run(args.fixture, args.out)
+    try:
+        status, detail = dry_run(args.fixture, args.out)
+    except (OSError, ValueError) as exc:
+        print('operator-dry-run: FAIL: ' + str(exc))
+        return 1
     print('operator-dry-run: ' + status + ': ' + detail)
     return {'PASS': 0, 'FAIL': 1, 'NOT RUN': 3}[status]
 

@@ -73,3 +73,38 @@ boot a guest or establish physical filesystem durability. A runner that has
 only passed those controls is ready for live execution, not qualified.
 The nonempty checkpoint case also needs a reproducible owned I/O workload
 arranged and recorded by the operator; an idle guest does not establish it.
+
+## Operator phase (checkpoint leg)
+
+Before the checkpoint capture boot, the runner retains an operator plan
+(`operator-plan.json`) naming the one arranged sweep: 64 deterministic
+64 KiB blocks streamed to a file on the owned disk and read back. While
+the collector records, the guest runs that sweep and appends window
+markers to the oracle log (`oracle.log`): one `window-start` and one
+`window-end` carrying the workload id, the run nonce, monotonic
+timestamps, byte counts, and the sweep content hash. The host judges
+the window before the power cut: markers present and ordered, plan
+binding exact, byte counts equal to the arranged totals (an idle
+zero-byte window fails), and the content hash equal to the
+deterministically re-derived sweep hash.
+
+After remount, the guest judges the operator verdict
+(`operator-verdict.json`) with two predicates: same-UUID recovery
+(promised vs remounted filesystem UUID) and the durable prefix
+independently re-verified from raw capture bytes against the promised
+integrity. The host re-judges the retained verdict before the leg can
+pass. Sampling evidence alone, without operator records, leaves the
+leg NOT RUN -- never PASS.
+
+The verdict logic runs offline against recorded fixtures without
+guests, armed variables, or privileges:
+
+```sh
+python3 tests/vm/capture_durability_operator.py \
+  --fixture tests/vm/fixtures/durability-operator/good \
+  --out /tmp/operator-dry-run
+```
+
+Exit 0 on PASS, 1 on FAIL, 3 when operator evidence is absent
+(NOT RUN). Fixture cases live under
+`tests/vm/fixtures/durability-operator/` (see its README).
