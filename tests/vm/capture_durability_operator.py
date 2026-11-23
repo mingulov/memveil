@@ -129,6 +129,10 @@ def validate_window(plan, text):
     start, end = starts[0], ends[0]
     if rows.index(start) > rows.index(end):
         raise ValueError('operator window markers out of order')
+    if any(key not in start for key in ('workload', 'nonce', 'mono_ns', 'seq')) or \
+            any(key not in end for key in ('workload', 'nonce', 'mono_ns', 'seq',
+                                           'bytes_written', 'bytes_read', 'workload_sha256')):
+        raise ValueError('operator window breaks the arranged plan')
     spec = plan['workload']
     for row in (start, end):
         if row.get('workload') != spec['id'] or row.get('nonce') != plan['nonce']:

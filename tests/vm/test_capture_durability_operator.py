@@ -189,6 +189,15 @@ class WindowMarkerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '^operator window breaks the arranged plan$'):
             operator.validate_window(other, self.log(plan))
 
+    def test_truncated_marker_fails(self):
+        import capture_durability_operator as operator
+        plan = self.plan()
+        rows = [json.loads(line) for line in self.log(plan).splitlines()]
+        del rows[1]['workload_sha256']
+        bad = ''.join(json.dumps(row) + '\n' for row in rows)
+        with self.assertRaisesRegex(ValueError, '^operator window breaks the arranged plan$'):
+            operator.validate_window(plan, bad)
+
     def test_sha_mismatch_fails(self):
         import capture_durability_operator as operator
         plan = self.plan()
