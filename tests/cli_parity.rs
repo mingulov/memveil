@@ -1251,7 +1251,13 @@ fn bind_refusals() {
     // refuses admission.
     let bad = run(
         &bin(),
-        &["bind-profile", "--output", path, "--capability", "bogus-cap"],
+        &[
+            "bind-profile",
+            "--output",
+            path,
+            "--capability",
+            "bogus-cap",
+        ],
     );
     assert_eq!(bad.status.code(), Some(2));
     assert_eq!(
