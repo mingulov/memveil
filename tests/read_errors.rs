@@ -162,11 +162,8 @@ fn stage_unreadable(dir: &Path, member: &str, recovery: bool) {
         std::fs::copy(attempts.join("events.ndjson"), dir.join("events.ndjson"))
             .expect("copy events");
     }
-    std::fs::set_permissions(
-        dir.join(member),
-        std::fs::Permissions::from_mode(0o000),
-    )
-    .expect("chmod member");
+    std::fs::set_permissions(dir.join(member), std::fs::Permissions::from_mode(0o000))
+        .expect("chmod member");
 }
 
 #[test]

@@ -350,9 +350,7 @@ pub fn summary_lines<E: Fn(&str) -> String>(
                 fmt_bytes(cap)
             ));
         } else if full == 0 {
-            lines.push(
-                "summary pool: occupancy unknown (no pool has both gauges)".to_string(),
-            );
+            lines.push("summary pool: occupancy unknown (no pool has both gauges)".to_string());
         } else {
             lines.push(format!(
                 "summary pool: used {} of {} capacity (partial: {full} of {pools} pools fully gauged)",
@@ -1041,10 +1039,9 @@ mod tests {
         // branch names the covered count against the true
         // total; gauge claims stay scoped to the covered set.
         let mut covered = Report::default();
-        covered.metrics.push(valued_metric(
-            "pools_withheld_from_detail",
-            1,
-        ));
+        covered
+            .metrics
+            .push(valued_metric("pools_withheld_from_detail", 1));
         covered
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1052,15 +1049,16 @@ mod tests {
             .metrics
             .push(pooled_metric("pool_capacity_bytes", 1000, "pool-0"));
         let lines = summary_lines(&covered, escape_text, "");
-        assert!(lines.contains(
-            &"summary pool: used 900 bytes of 1000 bytes capacity (covers 1 of 2 pools)"
-                .to_string()
-        ));
+        assert!(
+            lines.contains(
+                &"summary pool: used 900 bytes of 1000 bytes capacity (covers 1 of 2 pools)"
+                    .to_string()
+            )
+        );
         let mut partial = Report::default();
-        partial.metrics.push(valued_metric(
-            "pools_withheld_from_detail",
-            2,
-        ));
+        partial
+            .metrics
+            .push(valued_metric("pools_withheld_from_detail", 2));
         partial
             .metrics
             .push(pooled_metric("pool_used_bytes", 900, "pool-0"));
@@ -1079,10 +1077,9 @@ mod tests {
                 .to_string()
         ));
         let mut unknown = Report::default();
-        unknown.metrics.push(valued_metric(
-            "pools_withheld_from_detail",
-            1,
-        ));
+        unknown
+            .metrics
+            .push(valued_metric("pools_withheld_from_detail", 1));
         unknown
             .metrics
             .push(pooled_metric("pool_used_bytes", 100, "pool-0"));
@@ -1101,8 +1098,8 @@ mod tests {
         // The 257-pool shape: 257 sampled pools emit 256
         // per-pool rows plus the withheld count, and the
         // headline qualifies its total.
-        let tmp = crate::platform::test_support::TestDir::create("memveil-257pools")
-            .expect("mkdtemp");
+        let tmp =
+            crate::platform::test_support::TestDir::create("memveil-257pools").expect("mkdtemp");
         let dir = tmp.path();
         let root = crate::platform::test_support::repo_root();
         std::fs::copy(
@@ -1110,17 +1107,19 @@ mod tests {
             dir.join("session.json"),
         )
         .expect("copy session");
-        let raw = std::fs::read_to_string(
-            root.join("tests/fixtures/pools/pressure/events.ndjson"),
-        )
-        .expect("read events");
+        let raw = std::fs::read_to_string(root.join("tests/fixtures/pools/pressure/events.ndjson"))
+            .expect("read events");
         let sample = raw.lines().nth(1).expect("sample line").to_string();
         assert!(sample.contains("\"pool_id\": \"pool-0\""));
         let mut events = String::new();
         for i in 0..257 {
             let line = sample
                 .replacen("\"seq\": \"2\"", &format!("\"seq\": \"{}\"", i + 1), 1)
-                .replacen("\"pool_id\": \"pool-0\"", &format!("\"pool_id\": \"pool-{i:03}\""), 1);
+                .replacen(
+                    "\"pool_id\": \"pool-0\"",
+                    &format!("\"pool_id\": \"pool-{i:03}\""),
+                    1,
+                );
             assert_ne!(line, sample);
             events.push_str(&line);
             events.push('\n');
@@ -1132,9 +1131,8 @@ mod tests {
             use crate::analysis::diagnostics::diagnose_report;
             use crate::analysis::engine::Analyzer;
             use crate::capture::reader::{default_limits, read_capture};
-            let mut reader =
-                read_capture(dir.to_str().expect("utf-8"), false, default_limits())
-                    .expect("read capture");
+            let mut reader = read_capture(dir.to_str().expect("utf-8"), false, default_limits())
+                .expect("read capture");
             let mut analyzer = Analyzer::new(reader.session.clone());
             while reader.has_more().expect("has_more") {
                 let event = reader.next_event().expect("next event");

@@ -706,9 +706,16 @@ mod tests {
         assert!(withheld.has_value);
         assert_eq!(withheld.value, 1);
         assert_eq!(withheld.unit, "count");
-        assert_eq!(rows.iter().position(|m| m.name == "pools_withheld_from_detail"), Some(0));
+        assert_eq!(
+            rows.iter()
+                .position(|m| m.name == "pools_withheld_from_detail"),
+            Some(0)
+        );
         assert!(find(&rows, "pool_used_bytes", "pool-000").has_value);
-        assert!(rows.iter().all(|m| !m.has_pool_id || m.pool_id != "pool-256"));
+        assert!(
+            rows.iter()
+                .all(|m| !m.has_pool_id || m.pool_id != "pool-256")
+        );
         assert!(
             t.limitations()
                 .iter()
@@ -721,9 +728,6 @@ mod tests {
             full.consume(&sample(&id, true, 900, true, 1000, "bytes", i as u64 + 1));
         }
         let rows = full.metrics("window [0,2000)", false);
-        assert!(
-            rows.iter()
-                .all(|m| m.name != "pools_withheld_from_detail")
-        );
+        assert!(rows.iter().all(|m| m.name != "pools_withheld_from_detail"));
     }
 }

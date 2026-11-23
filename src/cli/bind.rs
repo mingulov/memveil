@@ -895,26 +895,17 @@ mod tests {
         assert_eq!(opts.profile_id, "pid");
         assert!(opts.has_profile_id);
         // Inline errors share the spaced paths, including the list.
-        let err = parse_bind_args(&[
-            "--output=x".to_string(),
-            "--capability=bogus".to_string(),
-        ])
-        .expect_err("inline bad caps reject");
+        let err = parse_bind_args(&["--output=x".to_string(), "--capability=bogus".to_string()])
+            .expect_err("inline bad caps reject");
         assert!(err.message.contains("unknown capability: bogus"));
         assert!(err.message.contains("valid capabilities: attempt-trace"));
         // A word in value position never splits.
-        let err = parse_bind_args(&[
-            "--profiles-dir".to_string(),
-            "--capability=x".to_string(),
-        ])
-        .expect_err("value position consumes");
+        let err = parse_bind_args(&["--profiles-dir".to_string(), "--capability=x".to_string()])
+            .expect_err("value position consumes");
         assert_eq!(err.message, "missing --output");
         // Unknown flags echo the original token.
-        let err = parse_bind_args(&[
-            "--output=x".to_string(),
-            "--bogus=y".to_string(),
-        ])
-        .expect_err("unknown flag rejects");
+        let err = parse_bind_args(&["--output=x".to_string(), "--bogus=y".to_string()])
+            .expect_err("unknown flag rejects");
         assert_eq!(err.message, "unknown option: --bogus=y");
     }
 

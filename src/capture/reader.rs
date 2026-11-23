@@ -3982,10 +3982,16 @@ mod tests {
         // Finalized twin: denied events beside a valid session.
         let fin = tmp.path().join("finalized");
         std::fs::create_dir(&fin).expect("mkdir fin");
-        std::fs::write(fin.join("session.json"), fixture_bytes("attempts/session.json"))
-            .expect("write session");
-        std::fs::write(fin.join("events.ndjson"), fixture_bytes("attempts/events.ndjson"))
-            .expect("write events");
+        std::fs::write(
+            fin.join("session.json"),
+            fixture_bytes("attempts/session.json"),
+        )
+        .expect("write session");
+        std::fs::write(
+            fin.join("events.ndjson"),
+            fixture_bytes("attempts/events.ndjson"),
+        )
+        .expect("write events");
         std::fs::set_permissions(fin.join("events.ndjson"), denied.clone()).expect("chmod events");
         let err = read_capture(fin.to_str().unwrap(), false, default_limits()).unwrap_err();
         assert_eq!(err.code, READ_IO);
@@ -4018,7 +4024,10 @@ mod tests {
         std::fs::set_permissions(rec.join("checkpoint.json"), denied).expect("chmod checkpoint");
         let err = read_capture(rec.to_str().unwrap(), false, default_limits()).unwrap_err();
         assert_eq!(err.code, READ_IO);
-        assert_eq!(err.message, "checkpoint.json: unreadable (permission denied)");
+        assert_eq!(
+            err.message,
+            "checkpoint.json: unreadable (permission denied)"
+        );
         assert!(read_remedy(&err.message).is_some());
     }
 }
