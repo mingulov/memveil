@@ -5,7 +5,7 @@
 Offline: the characterisation tests prove the oracle
 reader, pairing, and judge against recorded tracefs oracle
 bytes plus synthetic edge traces. The live leg runs only
-when explicitly armed (``MEMVEIL_VM_PEER=1`` with sealed C9
+when explicitly armed (``MEMVEIL_VM_PEER=1`` with sealed-candidate
 inputs); anything else skips fast without booting. An
 armed leg with missing pieces fails instead of skipping.
 
@@ -1005,7 +1005,7 @@ def test_wiring_chain_blocks_only_on_provenance(tmp_path):
     verdict, findings, agreement = peer_oracle.judge_peer_leg(
         doc, fold, summary, declared)
     assert verdict is False
-    assert findings == ["C9 capture is not live"]
+    assert findings == ["the sealed candidate capture is not live"]
     assert agreement["gap"] == 0
     assert agreement["attempt_events"] == 1
 
@@ -1036,7 +1036,7 @@ def test_judge_failure_classes():
         ({"workload": {"nic_rx_after": 2}}, {}, {},
          "NIC corroboration"),
         ({"c9": {"mono_open_ns": 1}}, {}, {},
-         "escapes C9 window"),
+         "escapes the sealed candidate window"),
         ({"traffic": {"pairs": 0}}, {}, {},
          "traffic pairs"),
     ]
@@ -1054,18 +1054,18 @@ def test_judge_failure_classes():
         assert verdict is False
         assert any(needle in finding for finding in findings), \
             (needle, findings)
-    # C9-side failure classes.
+    # Failure classes on the sealed-candidate side.
     doc = peer_doc(traffic_fixture_doc(), bracket_fixture_doc())
     summary = live_summary()
     summary["synthetic"] = True
     _, findings, _ = peer_oracle.judge_peer_leg(
         doc, base_fold, summary, zero_loss())
-    assert findings == ["C9 capture is not live"]
+    assert findings == ["the sealed candidate capture is not live"]
     summary = live_summary()
     summary["finalized"] = False
     _, findings, _ = peer_oracle.judge_peer_leg(
         doc, base_fold, summary, zero_loss())
-    assert findings == ["C9 capture not finalized"]
+    assert findings == ["the sealed candidate capture not finalized"]
     summary = live_summary()
     summary["end_reason"] = "signal"
     _, findings, _ = peer_oracle.judge_peer_leg(
@@ -1273,8 +1273,8 @@ def test_attempts_excluded_from_bounced_subset():
                 "buckets": dict(zero_loss()["buckets"])}
     bad, report = peer_oracle.agree_oracle_c9(
         proven, attempt_only, declared)
-    assert bad == ["no exercised bounce coverage in C9 "
-                   "copies"]
+    assert bad == ["no exercised bounce coverage in the sealed "
+                   "candidate copies"]
     assert report["gap"] == 2
 
 
@@ -1408,7 +1408,7 @@ def guest_hidden(path):
 
 
 def resolve_sealed_c9():
-    """Sealed C9 binary, seal digests, and guest env triple.
+    """Sealed-candidate binary, seal digests, and guest env triple.
 
     Fails closed without qualification inputs, and when the
     tarball or manifest lives under a guest-namespaced
@@ -1421,7 +1421,7 @@ def resolve_sealed_c9():
     try:
         selected = load(required=True)
     except ValueError as exc:
-        pytest.fail("peer leg needs sealed C9 inputs: %s"
+        pytest.fail("peer leg needs sealed-candidate inputs: %s"
                     % (exc,))
     manifest = str(selected.manifest_path)
     bundle = str(selected.bundle)
@@ -1573,7 +1573,7 @@ def test_peer_leg():
     Boots the pinned guest with the owned pcnet NIC on the
     lease peer path (no host bridge changes), runs the
     tracefs oracle around peer traffic plus the down/up
-    bracket under a sealed C9 capture, and judges the full
+    bracket under a sealed-candidate capture, and judges the full
     leg. Executor duties (lease idle check, warm vng cache
     with no downloads) follow the standard live procedure.
     """
