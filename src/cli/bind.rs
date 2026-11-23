@@ -6,8 +6,8 @@ use crate::capture::run::{MAX_PROFILE_DOC_BYTES, parse_requested_caps, resolve_o
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::qualify::publish_receipt;
 use crate::cli::report::{
-    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, invalid_capability_message,
-    sanitize_diagnostic, write_stderr,
+    CliError, EXIT_INTERNAL, EXIT_INVALID, EXIT_OK, EXIT_REFUSAL, expand_flag_eq,
+    invalid_capability_message, sanitize_diagnostic, write_stderr,
 };
 use crate::platform::artifact_files::join_root;
 use crate::platform::evidence::{KernelInfo, detect_environment, parse_kernel_triple};
@@ -68,8 +68,25 @@ fn is_option(text: &str) -> bool {
     text.as_bytes().first() == Some(&0x2d)
 }
 
+/// Value-taking bind-profile flags: the `--flag=value` set.
+///
+/// Every option takes a value, so the set names all eight: both
+/// spellings share every error path including the capability list.
+const BIND_VALUE_FLAGS: &[&str] = &[
+    "--output",
+    "--object",
+    "--profile",
+    "--profiles-dir",
+    "--lc-object",
+    "--cp-object",
+    "--capability",
+    "--profile-id",
+];
+
 /// Parse bind-profile arguments without the leading verb.
 pub fn parse_bind_args(args: &[String]) -> Result<BindOptions, CliError> {
+    let expanded = expand_flag_eq(args, BIND_VALUE_FLAGS);
+    let args = &expanded;
     let mut opts = BindOptions::default();
     let mut i = 0;
     while i < args.len() {
@@ -849,6 +866,47 @@ mod tests {
             "unknown capability: bogus; valid capabilities: attempt-trace, mapping-lifecycle, \
              copy-actual, conversion-observe, conversion-journal, all"
         );
+    }
+
+    #[test]
+    fn bind_args_flag_eq_forms() {
+        // Every option takes a value, so every flag accepts the
+        // inline spelling with identical semantics.
+        let opts = parse_bind_args(&[
+            "--output=/tmp/x.json".to_string(),
+            "--profile=my-host".to_string(),
+            "--profiles-dir=pd".to_string(),
+            "--object=o".to_string(),
+            "--lc-object=l".to_string(),
+            "--cp-object=c".to_string(),
+            "--capability=attempt-trace".to_string(),
+            "--profile-id=pid".to_string(),
+        ])
+        .expect("eq forms parse");
+        assert_eq!(opts.output, "/tmp/x.json");
+        assert_eq!(opts.profile, "my-host");
+        assert!(opts.has_profile);
+        assert_eq!(opts.profiles_dir, "pd");
+        assert!(opts.has_profiles_dir);
+        assert_eq!(opts.object, "o");
+        assert_eq!(opts.lc_object, "l");
+        assert_eq!(opts.cp_object, "c");
+        assert_eq!(opts.capabilities, "attempt-trace");
+        assert_eq!(opts.profile_id, "pid");
+        assert!(opts.has_profile_id);
+        // Inline errors share the spaced paths, including the list.
+        let err = parse_bind_args(&["--output=x".to_string(), "--capability=bogus".to_string()])
+            .expect_err("inline bad caps reject");
+        assert!(err.message.contains("unknown capability: bogus"));
+        assert!(err.message.contains("valid capabilities: attempt-trace"));
+        // A word in value position never splits.
+        let err = parse_bind_args(&["--profiles-dir".to_string(), "--capability=x".to_string()])
+            .expect_err("value position consumes");
+        assert_eq!(err.message, "missing --output");
+        // Unknown flags echo the original token.
+        let err = parse_bind_args(&["--output=x".to_string(), "--bogus=y".to_string()])
+            .expect_err("unknown flag rejects");
+        assert_eq!(err.message, "unknown option: --bogus=y");
     }
 
     #[test]

@@ -1264,6 +1264,14 @@ fn bind_refusals() {
         bad.stderr,
         b"memveil bind-profile: unknown capability: bogus-cap; valid capabilities: attempt-trace, mapping-lifecycle, copy-actual, conversion-observe, conversion-journal, all\n"
     );
+    // The inline spelling shares the spaced error path.
+    let output_eq = format!("--output={path}");
+    let inline = run(
+        &bin(),
+        &["bind-profile", &output_eq, "--capability=bogus-cap"],
+    );
+    assert_eq!(inline.status.code(), Some(2));
+    assert_eq!(inline.stderr, bad.stderr);
     let bad = run(
         &bin(),
         &[

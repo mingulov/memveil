@@ -2,10 +2,12 @@
 //! Capture-open failures print cause plus remedy and exit 2.
 //!
 //! Table over verbs and bad inputs: a missing path, a regular
-//! file, an empty directory, and a foreign-owned directory (via
-//! an LD_PRELOAD owner shim, unprivileged) each refuse with a
-//! cause line naming the problem and a fix line naming the
-//! remedy. Failures without a remedy keep today's single line.
+//! file, an empty directory, a foreign-owned directory (via
+//! an LD_PRELOAD owner shim, unprivileged), and staged captures
+//! with an unreadable member (session, events, checkpoint)
+//! each refuse with a cause line naming the problem and a fix
+//! line naming the remedy. Failures without a remedy keep
+//! today's single line.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +62,10 @@ struct Case {
     file: bool,
     /// Run under the foreign-owner shim.
     foreign_owner: bool,
+    /// Stage a capture and chmod this member 000 (None: no staging).
+    unreadable_member: Option<&'static str>,
+    /// Stage a recovery layout (checkpoint plus events, no session).
+    recovery: bool,
     /// Expected cause text after the prefix.
     cause: &'static str,
     /// Expected remedy text after the fix prefix.
@@ -73,6 +79,8 @@ fn cases() -> Vec<Case> {
             missing: true,
             file: false,
             foreign_owner: false,
+            unreadable_member: None,
+            recovery: false,
             cause: "capture directory does not exist",
             fix: "check the path spelling and retry with an existing capture directory",
         },
@@ -81,6 +89,8 @@ fn cases() -> Vec<Case> {
             missing: false,
             file: true,
             foreign_owner: false,
+            unreadable_member: None,
+            recovery: false,
             cause: "capture path is not a directory",
             fix: "pass a capture directory (a directory holding session.json and events.ndjson)",
         },
@@ -89,6 +99,8 @@ fn cases() -> Vec<Case> {
             missing: false,
             file: false,
             foreign_owner: false,
+            unreadable_member: None,
+            recovery: false,
             cause: "not a memveil capture: expected session.json/events.ndjson",
             fix: "pass a capture directory (session.json and events.ndjson)",
         },
@@ -97,16 +109,76 @@ fn cases() -> Vec<Case> {
             missing: false,
             file: false,
             foreign_owner: true,
+            unreadable_member: None,
+            recovery: false,
             cause: "capture directory not owned by reader",
             fix: "take ownership as the reading user (for example: sudo chown -R $(id -u):$(id -g) DIR)",
         },
+        Case {
+            name: "unreadable-events",
+            missing: false,
+            file: false,
+            foreign_owner: false,
+            unreadable_member: Some("events.ndjson"),
+            recovery: false,
+            cause: "events.ndjson: unreadable (permission denied)",
+            fix: "check read access to the capture member and retry",
+        },
+        Case {
+            name: "unreadable-session",
+            missing: false,
+            file: false,
+            foreign_owner: false,
+            unreadable_member: Some("session.json"),
+            recovery: false,
+            cause: "session.json: unreadable (permission denied)",
+            fix: "check read access to the capture member and retry",
+        },
+        Case {
+            name: "unreadable-checkpoint",
+            missing: false,
+            file: false,
+            foreign_owner: false,
+            unreadable_member: Some("checkpoint.json"),
+            recovery: true,
+            cause: "checkpoint.json: unreadable (permission denied)",
+            fix: "check read access to the capture member and retry",
+        },
     ]
+}
+
+/// Stage a capture with one member chmodded 000: a denied
+/// member exists, so the open names the denial, never the
+/// missing-capture cause.
+fn stage_unreadable(dir: &Path, member: &str, recovery: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    if recovery {
+        std::fs::write(dir.join("checkpoint.json"), b"{}").expect("write checkpoint");
+        std::fs::write(dir.join("events.ndjson"), b"").expect("write events");
+    } else {
+        let attempts = repo_root().join("tests/fixtures/attempts");
+        std::fs::copy(attempts.join("session.json"), dir.join("session.json"))
+            .expect("copy session");
+        std::fs::copy(attempts.join("events.ndjson"), dir.join("events.ndjson"))
+            .expect("copy events");
+    }
+    std::fs::set_permissions(dir.join(member), std::fs::Permissions::from_mode(0o000))
+        .expect("chmod member");
 }
 
 #[test]
 fn open_failures_print_cause_and_fix() {
     for verb in ["report", "top"] {
         for case in cases() {
+            if case.unreadable_member.is_some() {
+                // Root reads through file modes, so the denial
+                // cases only run unprivileged.
+                // SAFETY: pure id query.
+                if unsafe { libc::geteuid() } == 0 {
+                    eprintln!("SKIP {} {verb}: requires non-root", case.name);
+                    continue;
+                }
+            }
             let dir = scratch(case.name);
             let target = if case.missing {
                 dir.join("no-such-capture-xyz")
@@ -117,6 +189,9 @@ fn open_failures_print_cause_and_fix() {
                 std::fs::write(&file, b"not a capture\n").expect("write file");
                 file.to_string_lossy().into_owned()
             } else {
+                if let Some(member) = case.unreadable_member {
+                    stage_unreadable(&dir, member, case.recovery);
+                }
                 dir.to_string_lossy().into_owned()
             };
             let mut cmd = Command::new(bin());

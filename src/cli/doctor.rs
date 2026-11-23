@@ -1250,9 +1250,12 @@ fn translate_signal(code: &str) -> Option<String> {
 /// Recording is impossible when the kernel misses the floor, no
 /// profile covers the host, or a capability admission fails hard
 /// (tracefs, BTF, lockdown, memory); then the offline replay
-/// replaces the record command. A privilege-only failure keeps
-/// the record command: sudo overcomes it. Ready reports carry
-/// no next step.
+/// replaces the record command. An unknown row with
+/// root-collected evidence blocks the same way: elevation cannot
+/// reveal what root could not observe. A privilege-only failure
+/// or a genuinely-unknown row (unprivileged evidence that could
+/// not observe) keeps the record command: sudo overcomes it.
+/// Ready reports carry no next step.
 fn doctor_next_line(rep: &DoctorReport2) -> Option<&'static str> {
     if rep.verdict != "unavailable" {
         return None;
@@ -1261,12 +1264,15 @@ fn doctor_next_line(rep: &DoctorReport2) -> Option<&'static str> {
         return Some("next: memveil report examples/real-capture\n");
     }
     // Admission failures surface per capability with their own
-    // codes; only the privilege demotion is a failure the
-    // suggested sudo record can get past.
-    let blocked = rep
-        .caps
-        .iter()
-        .any(|cap| cap.status == "unavailable" && cap.reason_code != "no-bpf-privilege");
+    // codes; only the privilege demotion and the unprivileged
+    // unknown are failures the suggested sudo record can get
+    // past.
+    let blocked = rep.caps.iter().any(|cap| {
+        if cap.status == "unavailable" {
+            return cap.reason_code != "no-bpf-privilege";
+        }
+        cap.status == "unknown" && rep.euid == 0
+    });
     if blocked {
         return Some("next: memveil report examples/real-capture\n");
     }
@@ -1424,15 +1430,21 @@ pub fn run_doctor_with(root: &str, profiles_dir: &str, as_json: bool) -> i64 {
 
 /// Run the admission-judging doctor flow; return exit code.
 ///
-/// Bad roots or capability lists fail with exit 2; a load check
-/// against a fixture root is rejected the same way. A missing
-/// profiles tree (no manifest at the searched path) reports the
-/// lone-install shape with exit 3, matching record; a present but
-/// malformed tree keeps the loader diagnostic with exit 2.
-/// Otherwise the report goes to stdout with exit 0 when the
-/// requested set is ready and 3 when it is unavailable. Passive
-/// runs never touch the bridge.
+/// Argv validates before the world is probed: a malformed
+/// capability list fails with exit 2 even when the evidence root
+/// or the profiles tree is also bad, exactly like the text entry.
+/// A load check against a fixture root and a bad root fail with
+/// exit 2 next. A missing profiles tree (no manifest at the
+/// searched path) reports the lone-install shape with exit 3,
+/// matching record; a present but malformed tree keeps the
+/// loader diagnostic with exit 2. Otherwise the report goes to
+/// stdout with exit 0 when the requested set is ready and 3 when
+/// it is unavailable. Passive runs never touch the bridge.
 pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
+    let ask = parse_requested_caps(&opts.capabilities);
+    if !ask.ok {
+        return doctor_failed(&invalid_capability_message(&ask.err));
+    }
     if opts.load_check && !opts.root.is_empty() {
         return doctor_failed("--load-check needs the live host");
     }
@@ -1444,10 +1456,6 @@ pub fn run_doctor_opts(opts: &DoctorOptions) -> i64 {
             return doctor_unavailable_profiles(&opts.profiles_dir);
         }
         return doctor_failed(&format!("cannot load profiles: {e}"));
-    }
-    let ask = parse_requested_caps(&opts.capabilities);
-    if !ask.ok {
-        return doctor_failed(&invalid_capability_message(&ask.err));
     }
     let drep = assess_doctor(opts);
     let ready = drep.verdict == "ready" || drep.verdict == "ready-load-unchecked";
@@ -2100,6 +2108,69 @@ mod tests {
         let text = render_doctor_text2(&rep);
         assert!(
             text.ends_with("next: sudo memveil record --output /tmp/cap1 --duration 10\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn doctor2_tracefs_hidden_next_is_replay() {
+        // End to end over the shipped fixture: the floor holds
+        // and a profile covers, but the attempt-trace row is
+        // unknown with root-collected evidence, so the next step
+        // is the offline replay, not sudo record: elevation
+        // cannot reveal what root could not observe.
+        let opts = doctor2_opts(
+            gate_fixture("tracefs-hidden"),
+            profiles_dir(),
+            "attempt-trace",
+            &elf("ok.o"),
+            &elf("lc-ok.o"),
+            &elf("cp-ok.o"),
+        );
+        let rep = assess_doctor(&opts);
+        assert_eq!(rep.verdict, "unavailable");
+        assert!(rep.kernel.eligible_floor);
+        assert!(rep.has_profile);
+        assert_eq!(rep.euid, 0);
+        assert_eq!(rep.caps.len(), 1);
+        assert_eq!(rep.caps[0].status, "unknown");
+        assert_eq!(rep.caps[0].reason_code, "tracefs-hidden");
+        let text = render_doctor_text2(&rep);
+        assert_eq!(text.matches("next: ").count(), 1, "{text}");
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
+            "{text}"
+        );
+        assert_eq!(run_doctor_opts(&opts), EXIT_UNAVAILABLE);
+    }
+
+    #[test]
+    fn doctor2_unprivileged_unknown_next_stays_record() {
+        // Genuinely-unknown rows (unprivileged evidence that could
+        // not observe) keep the record command: sudo may reveal
+        // them. Root-collected unknowns block instead.
+        let mut rep = DoctorReport2 {
+            verdict: "unavailable".to_string(),
+            ..Default::default()
+        };
+        rep.kernel.eligible_floor = true;
+        rep.has_profile = true;
+        rep.caps.push(DoctorCap {
+            id: "attempt-trace".to_string(),
+            status: "unknown".to_string(),
+            reason_code: "tracefs-hidden".to_string(),
+            ..DoctorCap::default()
+        });
+        rep.euid = 1000;
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: sudo memveil record --output /tmp/cap1 --duration 10\n"),
+            "{text}"
+        );
+        rep.euid = 0;
+        let text = render_doctor_text2(&rep);
+        assert!(
+            text.ends_with("next: memveil report examples/real-capture\n"),
             "{text}"
         );
     }
@@ -3187,6 +3258,34 @@ mod tests {
         let code = run_doctor(&args(&[
             "--profiles-dir=no-such-profiles",
             "--capability=bogus",
+        ]));
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn doctor_opts_capability_first() {
+        // The library entry validates argv before the world too: a
+        // bad list wins over a missing profiles tree and a bad
+        // root (exit 2, never the exit-3 manifest shape).
+        let bad = doctor2_opts(
+            "no-such-root".to_string(),
+            "no-such-profiles".to_string(),
+            "bogus",
+            &elf("ok.o"),
+            &elf("lc-ok.o"),
+            &elf("cp-ok.o"),
+        );
+        assert_eq!(run_doctor_opts(&bad), 2);
+    }
+
+    #[test]
+    fn doctor_os_bad_list_wins_over_missing_profiles() {
+        // The raw entry routes a non-UTF-8 list to the
+        // empty-segment refusal, which precedes the profiles gate.
+        let code = super::run_doctor_os(&os(&[
+            b"--profiles-dir".as_slice(),
+            b"r100-no-such-profiles".as_slice(),
+            b"--capability=\xff".as_slice(),
         ]));
         assert_eq!(code, 2);
     }

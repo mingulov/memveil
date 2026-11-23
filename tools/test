@@ -1979,12 +1979,12 @@ suite_record() {
     fi
     rexpect no-args 2 "missing --output" "" --
     rexpect unknown-flag 2 "unknown option" "" -- --bogus
-    rexpect bad-duration 2 "bad decimal" "" -- \
+    rexpect bad-duration 2 "bad duration: 0" "" -- \
         --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --duration 0
-    rexpect duration-suffix 2 "bad decimal" "" -- \
+    rexpect duration-invalid 2 "bad duration: bogus" "" -- \
         --output "$TMP/r" --object "$ROOT/tests/fixtures/elf/ok.o" \
-        --duration 60s
+        --duration bogus
     rexpect device-empty 2 "--device needs a value" "" -- \
         --output "$TMP/r-deve" --object "$ROOT/tests/fixtures/elf/ok.o" \
         --device ""
@@ -2025,7 +2025,7 @@ suite_record() {
             --output "$TMP/r-miss" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
             --bridge "$TMP/nolib.so" --profile definitely-not-a-profile
-        rexpect bad-capability 3 "unknown capability: nope" \
+        rexpect bad-capability 2 "unknown capability: nope" \
             "$TMP/r-badcap" -- \
             --output "$TMP/r-badcap" \
             --object "$ROOT/tests/fixtures/elf/ok.o" \
@@ -2113,6 +2113,10 @@ suite_qualify() {
         --output "$TMP/q-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
+    qexpect bad-capability-inline 2 "unknown capability: bogus; valid capabilities:" -- \
+        --output="$TMP/q-badcap-inline" \
+        --object="$ROOT/tests/fixtures/elf/ok.o" \
+        --capability=bogus
     qexpect convert-channel 3 "conversion-observe has no record channel" -- \
         --output "$TMP/q-conv" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
@@ -2159,6 +2163,10 @@ suite_qualify() {
         --output "$TMP/b-badcap" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \
         --capability 'attempt-trace,'
+    bexpect bind-bad-capability-inline 2 "unknown capability: bogus; valid capabilities:" -- \
+        --output="$TMP/b-badcap-inline" \
+        --object="$ROOT/tests/fixtures/elf/ok.o" \
+        --capability=bogus
     bexpect bind-convert 3 "conversion-observe has no record channel" -- \
         --output "$TMP/b-conv" \
         --object "$ROOT/tests/fixtures/elf/ok.o" \

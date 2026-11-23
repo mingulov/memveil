@@ -228,9 +228,28 @@ impl<const POOL_N: usize> PoolTracker<POOL_N> {
     /// dropped tail) without latching tracker state: gauge
     /// coverage degrades and the proved streak reads zero in
     /// this view only, so a partial snapshot cannot alter
-    /// later facts.
+    /// later facts. When the detail budget withholds pools, a
+    /// leading global row carries the withheld count, so the
+    /// prose headline can qualify its total; full-coverage
+    /// reports carry no such row and render byte-identically.
     pub fn metrics(&self, window: &str, overlay_detail_loss: bool) -> Vec<Metric> {
         let mut out = Vec::new();
+        if self.pools.len() > MAX_POOL_DETAIL {
+            out.push(Metric {
+                name: "pools_withheld_from_detail".to_string(),
+                has_value: true,
+                value: (self.pools.len() - MAX_POOL_DETAIL) as u64,
+                unit: "count".to_string(),
+                confidence: "high".to_string(),
+                measurement: "observed".to_string(),
+                coverage: self.coverage(overlay_detail_loss),
+                has_aggregation: true,
+                aggregation: "gauge".to_string(),
+                scope: window.to_string(),
+                notes: "Pools beyond the 256-pool detail budget: their gauges never entered per-pool rows.".to_string(),
+                ..Default::default()
+            });
+        }
         let kept = self.pools.len().min(MAX_POOL_DETAIL);
         for (pool, st) in self.pools.iter().take(kept) {
             let scope = format!("{window}; pool {pool}");
@@ -667,5 +686,48 @@ mod tests {
         assert_eq!(t.streak_of("p1").unwrap(), 2);
         t.consume(&sample("p1", true, 900, true, 1000, "bytes", 4));
         assert_eq!(t.pressured_pools().len(), 1);
+    }
+
+    #[test]
+    fn detail_budget_withholds_and_counts() {
+        // Past 256 pools the per-pool rows stop but a leading
+        // global row carries the withheld count, so the prose
+        // headline can qualify its total.
+        let mut t: PoolTracker = PoolTracker::new();
+        for i in 0..257 {
+            let id = format!("pool-{i:03}");
+            t.consume(&sample(&id, true, 900, true, 1000, "bytes", i as u64 + 1));
+        }
+        let rows = t.metrics("window [0,2000)", false);
+        let withheld = rows
+            .iter()
+            .find(|m| m.name == "pools_withheld_from_detail" && !m.has_pool_id)
+            .expect("withheld row");
+        assert!(withheld.has_value);
+        assert_eq!(withheld.value, 1);
+        assert_eq!(withheld.unit, "count");
+        assert_eq!(
+            rows.iter()
+                .position(|m| m.name == "pools_withheld_from_detail"),
+            Some(0)
+        );
+        assert!(find(&rows, "pool_used_bytes", "pool-000").has_value);
+        assert!(
+            rows.iter()
+                .all(|m| !m.has_pool_id || m.pool_id != "pool-256")
+        );
+        assert!(
+            t.limitations()
+                .iter()
+                .any(|n| n.contains("1 pools withheld from per-pool rows"))
+        );
+        // Full coverage carries no budget row.
+        let mut full: PoolTracker = PoolTracker::new();
+        for i in 0..256 {
+            let id = format!("pool-{i:03}");
+            full.consume(&sample(&id, true, 900, true, 1000, "bytes", i as u64 + 1));
+        }
+        let rows = full.metrics("window [0,2000)", false);
+        assert!(rows.iter().all(|m| m.name != "pools_withheld_from_detail"));
     }
 }

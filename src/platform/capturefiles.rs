@@ -219,10 +219,18 @@ impl RecoveryFiles {
         if fd < 0 {
             // Read errno before anything can clobber it: with
             // O_NOFOLLOW on a directory fd plus a bare name, ELOOP
-            // names exactly a symlinked member, not a missing one.
+            // names exactly a symlinked member, not a missing one,
+            // and EACCES names a denied member, which exists but
+            // refuses reads and must never collapse into the
+            // missing-member cause downstream.
             let no = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if no == libc::ELOOP {
                 return Err(CaptureError::new(format!("{name}: member is a symlink")));
+            }
+            if no == libc::EACCES {
+                return Err(CaptureError::new(format!(
+                    "{name}: unreadable (permission denied)"
+                )));
             }
             return Err(CaptureError::new(format!(
                 "{name}: cannot open regular capture file"
