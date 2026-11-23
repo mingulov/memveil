@@ -150,7 +150,8 @@ def test_host_overhead_armed_via_perf_flag(sealed, monkeypatch, tmp_path):
     calls = []
     def fake_guest(cmd, timeout):
         calls.append((list(cmd), timeout))
-        return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=1, stdout='stub stdout\n',
+                                 stderr='stub stderr\n')
     monkeypatch.setitem(sys.modules, 'test_attempt_capture',
                         SimpleNamespace(gate_prefix=lambda: (['true'], None)))
     monkeypatch.setitem(sys.modules, 'vm_process',
@@ -174,7 +175,8 @@ def test_host_boots_full_machine_for_pcnet(sealed, monkeypatch, tmp_path):
     calls = []
     def fake_guest(cmd, timeout):
         calls.append((list(cmd), timeout))
-        return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=1, stdout='stub stdout\n',
+                                 stderr='stub stderr\n')
     monkeypatch.setitem(sys.modules, 'test_attempt_capture',
                         SimpleNamespace(gate_prefix=lambda: (['true'], None)))
     monkeypatch.setitem(sys.modules, 'vm_process',
@@ -227,7 +229,8 @@ def test_host_honest_out_reaches_boot(sealed, monkeypatch, tmp_path):
     calls = []
     def fake_guest(cmd, timeout):
         calls.append((list(cmd), timeout))
-        return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=1, stdout='stub stdout\n',
+                                 stderr='stub stderr\n')
     monkeypatch.setitem(sys.modules, 'test_attempt_capture',
                         SimpleNamespace(gate_prefix=lambda: (['true'], None)))
     monkeypatch.setitem(sys.modules, 'vm_process',
@@ -1447,3 +1450,288 @@ def test_host_acceptance_refuses_tampered_export(sealed, monkeypatch, tmp_path):
             m.host('pool', opts={'out': str(tmp_path)})
     finally:
         _restore_sealed(previous)
+
+
+def _flap_read_text(monkeypatch, m, name, faults):
+    """Fail the next reads of leaf `name` with `faults`, then read through."""
+    real_read_text = Path.read_text
+    state = {'raised': []}
+    def flapping(self, *args, **kwargs):
+        if self.name == name and faults:
+            error = faults.pop(0)
+            state['raised'].append(error.errno)
+            raise error
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(m.Path, 'read_text', flapping)
+    return state
+
+
+def _recorded_sleeps(monkeypatch, m):
+    sleeps = []
+    monkeypatch.setattr(m.time, 'sleep', sleeps.append)
+    return sleeps
+
+
+def _fake_nic_tree(tmp_path, addresses):
+    net = tmp_path / 'net'
+    for iface, address in addresses.items():
+        node = net / iface
+        node.mkdir(parents=True)
+        (node / 'address').write_text(address + '\n')
+    return net
+
+
+def test_identity_scan_rides_through_nic_rename_flap(tmp_path, monkeypatch):
+    import errno
+    m = api()
+    token = '0123456789abcdef'
+    net = _fake_nic_tree(tmp_path, {'eth0': m.guest_mac(token),
+                                    'lo': '00:00:00:00:00:00'})
+    flap = OSError(errno.ENXIO, 'No such device or address')
+    raised = _flap_read_text(monkeypatch, m, 'address', [flap, flap])
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(net, 'address', m.guest_mac(token),
+                                   'NIC identity scan')
+    assert [p.name for p in matches] == ['eth0']
+    assert raised['raised'] == [errno.ENXIO, errno.ENXIO]
+    assert sleeps == [m.IDENTITY_SCAN_INTERVAL] * 2
+
+
+def test_identity_scan_stable_pass_never_sleeps(tmp_path, monkeypatch):
+    m = api()
+    token = '0123456789abcdef'
+    net = _fake_nic_tree(tmp_path, {'eth0': m.guest_mac(token)})
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    assert [p.name for p in m.scan_sysfs_matches(
+        net, 'address', m.guest_mac(token), 'NIC identity scan')] == ['eth0']
+    assert sleeps == []
+
+
+@pytest.mark.parametrize('addresses,flaps', [
+    ({'eth0': '52:54:00:00:00:01'}, []),
+    ({'eth0': '52:54:00:00:00:01'}, ['flap']),
+    ({'eth0': '52:54:00:ab:cd:ef', 'eth1': '52:54:00:ab:cd:ef'}, []),
+    ({'eth0': '52:54:00:ab:cd:ef', 'eth1': '52:54:00:ab:cd:ef'}, ['flap']),
+])
+def test_identity_scan_absence_and_ambiguity_still_fail(
+        tmp_path, monkeypatch, addresses, flaps):
+    import errno
+    m = api()
+    token = '0123456789abcdef'
+    net = _fake_nic_tree(tmp_path, addresses)
+    faults = [OSError(errno.ENXIO, 'No such device or address')
+              for _ in flaps]
+    _flap_read_text(monkeypatch, m, 'address', faults)
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(net, 'address', m.guest_mac(token),
+                                   'NIC identity scan')
+    # Retries converge to the same strict exactly-one check:
+    # absence (0) and ambiguity (2) both fail it, with or
+    # without a transient flap on the way.
+    assert len(sleeps) == len(flaps)
+    assert len(matches) != 1
+    with pytest.raises(ValueError, match='missing or ambiguous'):
+        if len(matches) != 1:
+            raise ValueError(
+                'owned guest network identity missing or ambiguous')
+
+
+def test_identity_scan_exhaustion_names_the_access(tmp_path, monkeypatch):
+    import errno
+    m = api()
+    token = '0123456789abcdef'
+    net = _fake_nic_tree(tmp_path, {'eth0': m.guest_mac(token)})
+    real_read_text = Path.read_text
+    def always_flapping(self, *args, **kwargs):
+        if self.name == 'address':
+            raise OSError(errno.ENXIO, 'No such device or address', str(self))
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(m.Path, 'read_text', always_flapping)
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    with pytest.raises(OSError) as caught:
+        m.scan_sysfs_matches(net, 'address', m.guest_mac(token),
+                             'NIC identity scan')
+    assert 'NIC identity scan' in str(caught.value)
+    assert str(net / 'eth0/address') in str(caught.value)
+    assert isinstance(caught.value.__cause__, OSError)
+    assert caught.value.__cause__.errno == errno.ENXIO
+    assert sleeps == [m.IDENTITY_SCAN_INTERVAL] * \
+        (m.IDENTITY_SCAN_ATTEMPTS - 1)
+
+
+def test_identity_scan_nvme_skips_serial_less_disks(tmp_path, monkeypatch):
+    m = api()
+    token = '0123456789abcdef'
+    block = tmp_path / 'block'
+    owned = block / 'nvme0n1/device'
+    owned.mkdir(parents=True)
+    (owned / 'serial').write_text('mv-' + token + '\n')
+    (block / 'sda').mkdir()
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                                   'scratch disk identity scan',
+                                   missing_ok=True)
+    assert [p.name for p in matches] == ['nvme0n1']
+    assert sleeps == []
+
+
+def test_identity_scan_nvme_rides_through_serial_flap(tmp_path, monkeypatch):
+    import errno
+    m = api()
+    token = '0123456789abcdef'
+    block = tmp_path / 'block'
+    owned = block / 'nvme0n1/device'
+    owned.mkdir(parents=True)
+    (owned / 'serial').write_text('mv-' + token + '\n')
+    _flap_read_text(monkeypatch, m, 'serial',
+                    [OSError(errno.ENXIO, 'No such device or address')])
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    matches = m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                                   'scratch disk identity scan',
+                                   missing_ok=True)
+    assert [p.name for p in matches] == ['nvme0n1']
+    assert sleeps == [m.IDENTITY_SCAN_INTERVAL]
+
+
+def test_identity_scan_nvme_exhaustion_names_the_access(tmp_path, monkeypatch):
+    import errno
+    m = api()
+    token = '0123456789abcdef'
+    block = tmp_path / 'block'
+    owned = block / 'nvme0n1/device'
+    owned.mkdir(parents=True)
+    (owned / 'serial').write_text('mv-' + token + '\n')
+    real_read_text = Path.read_text
+    def always_flapping(self, *args, **kwargs):
+        if self.name == 'serial':
+            raise OSError(errno.ENXIO, 'No such device or address', str(self))
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(m.Path, 'read_text', always_flapping)
+    _recorded_sleeps(monkeypatch, m)
+    with pytest.raises(OSError) as caught:
+        m.scan_sysfs_matches(block, 'device/serial', 'mv-' + token,
+                             'scratch disk identity scan', missing_ok=True)
+    assert 'scratch disk identity scan' in str(caught.value)
+    assert str(block / 'nvme0n1/device/serial') in str(caught.value)
+    assert isinstance(caught.value.__cause__, OSError)
+
+
+def test_identity_reread_rides_through_flap_then_names_access(
+        tmp_path, monkeypatch):
+    import errno
+    m = api()
+    node = tmp_path / 'nvme0n1/device'
+    node.mkdir(parents=True)
+    (node / 'serial').write_text('mv-0123456789abcdef\n')
+    _flap_read_text(monkeypatch, m, 'serial',
+                    [OSError(errno.ENXIO, 'No such device or address'),
+                     FileNotFoundError(errno.ENOENT, 'No such file')])
+    sleeps = _recorded_sleeps(monkeypatch, m)
+    assert m.read_sysfs_text(node / 'serial', 'identity re-read') == \
+        'mv-0123456789abcdef\n'
+    assert sleeps == [m.IDENTITY_SCAN_INTERVAL] * 2
+    real_read_text = Path.read_text
+    def always_flapping(self, *args, **kwargs):
+        if self.name == 'serial':
+            raise OSError(errno.ENXIO, 'No such device or address')
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(m.Path, 'read_text', always_flapping)
+    with pytest.raises(OSError) as caught:
+        m.read_sysfs_text(node / 'serial', 'identity re-read')
+    assert 'identity re-read' in str(caught.value)
+    assert str(node / 'serial') in str(caught.value)
+
+
+def _failed_host_out(sealed, monkeypatch, tmp_path, fake_guest, raised):
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_PERF', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    parent = tmp_path / 'ev'
+    try:
+        with pytest.raises(raised[0], match=raised[1]):
+            m.host('overhead', opts={'out': str(parent)})
+    finally:
+        _restore_sealed(previous)
+    runs = [p for p in parent.iterdir() if p.is_dir()]
+    assert len(runs) == 1
+    return runs[0]
+
+
+def test_host_preserves_guest_console_on_failure(
+        sealed, monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    stdout = 'guest booted\nFAIL candidate live campaign: [Errno 6] stuck\n'
+    stderr = 'traceback line one\ntraceback line two\n'
+    def fake_guest(cmd, timeout):
+        return SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
+    out = _failed_host_out(sealed, monkeypatch, tmp_path, fake_guest,
+                           (ValueError, 'guest campaign failed'))
+    assert (out / 'guest-stdout.log').read_text() == stdout
+    assert (out / 'guest-stderr.log').read_text() == stderr
+    exit_doc = json.loads((out / 'exit.json').read_text())
+    assert exit_doc['guest_exit'] == 1
+    assert (out / 'export').is_dir()
+
+
+def test_host_failure_console_tolerates_bare_runner_shape(
+        sealed, monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    def fake_guest(cmd, timeout):
+        return SimpleNamespace(returncode=1)
+    out = _failed_host_out(sealed, monkeypatch, tmp_path, fake_guest,
+                           (ValueError, 'guest campaign failed'))
+    assert (out / 'guest-stdout.log').read_text() == ''
+    assert (out / 'guest-stderr.log').read_text() == ''
+    assert json.loads((out / 'exit.json').read_text())['guest_exit'] == 1
+
+
+def test_host_preserves_partial_console_on_timeout(
+        sealed, monkeypatch, tmp_path):
+    import subprocess
+    def fake_guest(cmd, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout, output='partial-out',
+                                        stderr='partial-err')
+    out = _failed_host_out(sealed, monkeypatch, tmp_path, fake_guest,
+                           (subprocess.TimeoutExpired, 'timed out'))
+    assert (out / 'guest-stdout.log').read_text() == 'partial-out'
+    assert (out / 'guest-stderr.log').read_text() == 'partial-err'
+
+
+def test_host_success_writes_no_console_files(sealed, monkeypatch, tmp_path):
+    import shutil
+    from types import SimpleNamespace
+    m = api()
+    previous = _sealed_arming_env(monkeypatch, sealed)
+    monkeypatch.setenv('MEMVEIL_VM_LIVE_SOAK', '1')
+    monkeypatch.setattr(m, 'ROOT', tmp_path)
+    from support.candidate_input import load
+    probe = load(env=dict(sealed))
+    manifest, digest = probe.manifest, probe.digest
+    probe.close()
+    honest = tmp_path / 'honest'
+    honest.mkdir()
+    _pool_export(honest, manifest)
+    def fake_guest(cmd, timeout):
+        export = _export_argv_export(cmd)
+        shutil.copytree(honest, export, dirs_exist_ok=True)
+        return SimpleNamespace(returncode=0, stdout='ok\n', stderr='')
+    monkeypatch.setitem(sys.modules, 'test_attempt_capture',
+                        SimpleNamespace(gate_prefix=lambda: (['true'], None)))
+    monkeypatch.setitem(sys.modules, 'vm_process',
+                        SimpleNamespace(run_owned_guest=fake_guest))
+    try:
+        receipt = m.host('pool', opts={'out': str(tmp_path)})
+    finally:
+        _restore_sealed(previous)
+    assert receipt['candidate'] == digest
+    evidence = Path(receipt['evidence'])
+    assert not (evidence / 'guest-stdout.log').exists()
+    assert not (evidence / 'guest-stderr.log').exists()

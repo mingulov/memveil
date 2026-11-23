@@ -3,6 +3,7 @@
 """Installed candidate campaigns in an owned, ephemeral ordinary Linux guest."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import fcntl
 import hashlib
 import json
@@ -432,6 +433,86 @@ def validate_guest_identity(token, cmdline, guest_boot, host_boot, serial, secto
             not guest_boot or not host_boot or guest_boot == host_boot or serial != 'mv-' + token or
             sectors != 131072 or mac.lower() != guest_mac(token) or mounted):
         raise ValueError('owned isolated guest scratch/network identity unproved')
+
+
+IDENTITY_SCAN_ATTEMPTS = 11
+IDENTITY_SCAN_INTERVAL = 0.5
+
+
+def _transient_sysfs(error):
+    """Whether a sysfs read error is a rename flap worth one more scan.
+
+    Only ENXIO (a stale dentry read mid-rename) and ENOENT
+    (an entry vanished mid-scan) retry; anything else
+    (permissions, I/O errors) raises immediately, as before.
+    """
+    if not isinstance(error, OSError):
+        return False
+    return error.errno in (errno.ENXIO, errno.ENOENT)
+
+
+def scan_sysfs_matches(root, attribute, value, label, missing_ok=False):
+    """Entries under root whose attribute file reads value.
+
+    One clean pass returns the exact match list; a pass
+    interrupted by a concurrent rename (coldplug brings an
+    interface up or renames it while the scan reads) sleeps
+    and rescans from scratch, bounded by
+    IDENTITY_SCAN_ATTEMPTS passes IDENTITY_SCAN_INTERVAL
+    apart (udev settle is seconds-scale while the campaign
+    timeout is hours, so a few seconds here cost nothing,
+    and a stable tree never sleeps). Predicate mismatches
+    never retry: absence and ambiguity return 0/2 matches
+    for the caller's unchanged exactly-one check.
+    missing_ok skips entries whose attribute is legitimately
+    absent (serial-less disks) instead of treating ENOENT as
+    a flap. Exhaustion raises the last flap chained under
+    the scan label, so the next abort names which access
+    raised.
+    """
+    last = None
+    for attempt in range(IDENTITY_SCAN_ATTEMPTS):
+        try:
+            matches = []
+            for entry in root.iterdir():
+                try:
+                    text = (entry / attribute).read_text()
+                except OSError as error:
+                    if missing_ok and isinstance(error, FileNotFoundError):
+                        continue
+                    raise
+                if text.strip() == value:
+                    matches.append(entry)
+            return matches
+        except OSError as error:
+            if not _transient_sysfs(error):
+                raise
+            last = error
+            if attempt + 1 < IDENTITY_SCAN_ATTEMPTS:
+                time.sleep(IDENTITY_SCAN_INTERVAL)
+    raise OSError('guest %s: sysfs still renaming after %d scans: %s: %s'
+                  % (label, IDENTITY_SCAN_ATTEMPTS, root, last)) from last
+
+
+def read_sysfs_text(path, label):
+    """One sysfs attribute read, tolerant of concurrent renames.
+
+    Same transient set and bound as scan_sysfs_matches,
+    for re-reads of an already-selected node; exhaustion
+    names the path and the label instead of aborting raw.
+    """
+    last = None
+    for attempt in range(IDENTITY_SCAN_ATTEMPTS):
+        try:
+            return path.read_text()
+        except OSError as error:
+            if not _transient_sysfs(error):
+                raise
+            last = error
+            if attempt + 1 < IDENTITY_SCAN_ATTEMPTS:
+                time.sleep(IDENTITY_SCAN_INTERVAL)
+    raise OSError('guest %s: sysfs read still failing after %d tries: %s: %s'
+                  % (label, IDENTITY_SCAN_ATTEMPTS, path, last)) from last
 
 
 def verify_installed(manifest, root=Path('/')):
@@ -1036,23 +1117,30 @@ def guest(kind, manifest, bundle, deb, token, export, host_boot, digest, local_e
     except StopIteration: raise ValueError('candidate has no deb artifact')
     candidate.verify_file(deb, entry)
     from guest_lifecycle import configure_net
-    interfaces = [p for p in Path('/sys/class/net').iterdir() if (p / 'address').read_text().strip() == guest_mac(token)]
+    interfaces = scan_sysfs_matches(
+        Path('/sys/class/net'), 'address', guest_mac(token),
+        'NIC identity scan')
     if len(interfaces) != 1: raise ValueError('owned guest network identity missing or ambiguous')
     iface = interfaces[0]
     if not str((iface / 'device/driver').resolve()).endswith('/pcnet32'):
         raise ValueError('owned guest NIC driver differs')
-    disks = [p for p in Path('/sys/block').iterdir() if (p / 'device/serial').exists()
-             and (p / 'device/serial').read_text().strip() == 'mv-' + token]
+    disks = scan_sysfs_matches(
+        Path('/sys/block'), 'device/serial', 'mv-' + token,
+        'scratch disk identity scan', missing_ok=True)
     if len(disks) != 1: raise ValueError('owned scratch disk identity missing or ambiguous')
     node = disks[0]
     disk = Path('/dev') / node.name
     if not stat.S_ISBLK(disk.stat().st_mode): raise ValueError('scratch is not a block device')
-    devices = {(node / 'dev').read_text().strip()}
-    devices.update(p.read_text().strip() for p in node.glob('*/dev'))
+    devices = {read_sysfs_text(node / 'dev', 'identity re-read').strip()}
+    devices.update(read_sysfs_text(p, 'identity re-read').strip()
+                   for p in node.glob('*/dev'))
     mounted = any(line.split()[2] in devices for line in Path('/proc/self/mountinfo').read_text().splitlines())
+    serial = read_sysfs_text(
+        node / 'device/serial', 'identity re-read').strip()
+    sectors = int(read_sysfs_text(node / 'size', 'identity re-read'))
+    mac = read_sysfs_text(iface / 'address', 'identity re-read').strip()
     validate_guest_identity(token, cmdline, Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-        host_boot, (node / 'device/serial').read_text().strip(), int((node / 'size').read_text()),
-        (iface / 'address').read_text().strip(), mounted)
+        host_boot, serial, sectors, mac, mounted)
     checked(['dpkg', '-i', deb], 120)
     verify_installed(selected.manifest)
     binary = Path('/usr/bin/memveil')
@@ -1096,6 +1184,20 @@ def guest(kind, manifest, bundle, deb, token, export, host_boot, digest, local_e
     selected.close()
 
 
+def _write_guest_console(out, stdout, stderr):
+    """Persist a failed guest's console capture beside the receipt.
+
+    The owned runner already holds both streams in memory,
+    so the full text is cheap; a runner shape carrying none
+    leaves empty files instead of failing the failure path.
+    Fixed shell-inert names, siblings of export/, so the
+    export inventory gate never sees them.
+    """
+    streams = (('guest-stdout.log', stdout), ('guest-stderr.log', stderr))
+    for name, stream in streams:
+        (out / name).write_text(stream if isinstance(stream, str) else '')
+
+
 def host(mode, candidate=None, opts=None):
     """Run one installed-candidate campaign; return its receipt.
 
@@ -1106,7 +1208,8 @@ def host(mode, candidate=None, opts=None):
     for its mode (overhead needs MEMVEIL_VM_PERF=1, soak and
     pool need MEMVEIL_VM_LIVE_SOAK=1); unarmed exits 77.
     Acceptance re-verifies the export from retained bytes
-    and records the verified totals in exit.json.
+    and records the verified totals in exit.json. A failed
+    guest run keeps its console capture beside exit.json.
     Recognized options: out, the evidence parent (a fresh
     temporary directory by default).
     """
@@ -1174,7 +1277,14 @@ def host(mode, candidate=None, opts=None):
                 '--exec', guest_command]
         try:
             print('candidate campaign evidence: ' + str(out), flush=True)
-            proc = run_owned_guest(prefix + args, timeout=TIMEOUTS[mode])
+            try:
+                proc = run_owned_guest(prefix + args, timeout=TIMEOUTS[mode])
+            except subprocess.TimeoutExpired as exc:
+                _write_guest_console(out, exc.output, exc.stderr)
+                raise
+            if proc.returncode:
+                _write_guest_console(out, getattr(proc, 'stdout', ''),
+                                     getattr(proc, 'stderr', ''))
             (out / 'exit.json').write_text(json.dumps({'guest_exit': proc.returncode, 'candidate': selected.digest}) + '\n')
             if proc.returncode: raise ValueError('guest campaign failed; receipt at ' + str(out))
             result = json.loads((export / 'campaign.json').read_bytes())
