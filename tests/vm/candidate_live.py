@@ -92,6 +92,98 @@ def checked(command, timeout=60):
     return result.stdout
 
 
+class InstallFailure(ValueError):
+    def __init__(self, message, returncode=None, stdout=b'',
+                 stderr=b'', log=None):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.log = log
+
+
+INSTALL_LOG_NAME = 'install-dpkg.log'
+INSTALL_LOG_LIMIT = 65536
+INSTALL_TAIL_LINES = 20
+
+
+def install_guest_deb(deb, local_evidence, timeout=120):
+    """Install the sealed .deb in the campaign guest; return dpkg stdout.
+
+    The guest shares the host rootfs by design, so its dpkg
+    database tracks almost nothing: unpack succeeds but
+    configure refuses on Depends entries (libc6) that exist
+    in userspace yet are unknown to dpkg. --force-depends
+    converts exactly that refusal into a warning while the
+    real dependency stays satisfied by the shared rootfs;
+    where dpkg already knows the libraries (a Debian
+    rootfs) the flag is a no-op, so no guest-distro probe
+    is needed. dpkg-state consequences stay inside the
+    ephemeral overlay: the package lands installed with an
+    unmet-Depends note, nothing in-guest consults dpkg
+    status afterwards (every verifier below hashes files),
+    and no apt/dpkg follow-up ever runs before teardown.
+    A guest without dpkg refuses with the missing tool
+    named instead of guessing another installer.
+
+    Forensics: the full dpkg transcript (bounded) lands in
+    local_evidence/INSTALL_LOG_NAME on success and failure
+    alike - that mount is host-visible yet outside the
+    export/ inventory gate - and the failure message
+    carries the stderr tail, so the cause survives in the
+    console capture even if the log write itself fails.
+    """
+    dpkg = shutil.which('dpkg')
+    if dpkg is None:
+        raise ValueError('guest package installer missing: dpkg not found '
+                         'in guest PATH; cannot install the sealed .deb')
+    argv = [dpkg, '--force-depends', '-i', str(deb)]
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _write_install_log(local_evidence, argv, 'timeout',
+                           exc.stdout or b'', exc.stderr or b'')
+        raise InstallFailure(
+            'guest package install timed out: dpkg -i %s: %s'
+            % (deb, _install_tail(exc.stderr or b'')),
+            returncode=None, stdout=exc.stdout or b'',
+            stderr=exc.stderr or b'',
+            log=str(Path(local_evidence) / INSTALL_LOG_NAME))
+    if result.returncode:
+        _write_install_log(local_evidence, argv, result.returncode,
+                           result.stdout, result.stderr)
+        raise InstallFailure(
+            'guest package install failed: dpkg exit %d: %s'
+            % (result.returncode, _install_tail(result.stderr)),
+            returncode=result.returncode, stdout=result.stdout,
+            stderr=result.stderr,
+            log=str(Path(local_evidence) / INSTALL_LOG_NAME))
+    _write_install_log(local_evidence, argv, 0,
+                       result.stdout, result.stderr)
+    return result.stdout
+
+
+def _install_tail(stream):
+    lines = (stream or b'').decode('utf-8', 'replace').splitlines()
+    tail = lines[-INSTALL_TAIL_LINES:]
+    text = '\n'.join(line for line in tail if line.strip())
+    return text or '(no installer output)'
+
+
+def _write_install_log(local_evidence, argv, status, stdout, stderr):
+    header = ('argv: %s\nstatus: %s\n--- stdout ---\n'
+              % (argv, status)).encode()
+    body = header + (stdout or b'') + b'\n--- stderr ---\n' + (stderr or b'')
+    if len(body) > INSTALL_LOG_LIMIT:
+        body = body[:INSTALL_LOG_LIMIT] + b'\n[truncated]\n'
+    try:
+        (Path(local_evidence) / INSTALL_LOG_NAME).write_bytes(body)
+    except OSError as exc:
+        log = str(Path(local_evidence) / INSTALL_LOG_NAME)
+        raise ValueError(
+            'guest install forensics unwritable: ' + log) from exc
+
+
 def inventory():
     from journal_spike import resources
     return {kind: sorted(values) for kind, values in resources().items()}
@@ -563,6 +655,40 @@ def verify_installed(manifest, root=Path('/')):
             if source.relative_to(root).as_posix() not in expected \
                     and source.relative_to(root).as_posix() not in generated:
                 raise ValueError('extra installed candidate runtime file')
+
+
+INSTALLED_BINARY = Path('/usr/bin/memveil')
+
+
+def verify_installed_binary(manifest, binary=INSTALLED_BINARY):
+    """Refuse unless the installed binary is the sealed bytes that run.
+
+    Hash first: sha256(installed binary) must equal the
+    manifest bin/memveil pin, no exceptions, reached without
+    aliases. Then execute `binary --version`: exit 0 with
+    version output proves the measured bytes run as the
+    engine, never mere existence. This is the post-install
+    identity gate whatever installer placed the bytes; the
+    per-leg verify_installed re-hashes the same binary
+    between legs, so executability need only be proved at
+    the campaign boundaries.
+    """
+    from support.candidate_input import candidate
+    pinned = manifest['files'].get('bin/memveil')
+    if pinned is None:
+        raise ValueError('installed binary has no pinned digest')
+    target = Path(binary)
+    if target.is_symlink():
+        raise ValueError('installed binary is an alias')
+    if not target.is_file():
+        raise ValueError('installed binary absent')
+    if candidate.digest(target) != pinned:
+        raise ValueError('installed binary differs from the sealed candidate')
+    proc = subprocess.run([str(target), '--version'],
+                          capture_output=True, timeout=60)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise ValueError(
+            'installed binary identity unproved: --version refused')
 
 
 def journal_admission(binary, capability=JOURNAL_CAPABILITY):
@@ -1159,9 +1285,10 @@ def guest(kind, manifest, bundle, deb, token, export, host_boot, digest, local_e
     mac = read_sysfs_text(iface / 'address', 'identity re-read').strip()
     validate_guest_identity(token, cmdline, Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
         host_boot, serial, sectors, mac, mounted)
-    checked(['dpkg', '-i', deb], 120)
+    install_guest_deb(deb, local_evidence)
     verify_installed(selected.manifest)
-    binary = Path('/usr/bin/memveil')
+    verify_installed_binary(selected.manifest)
+    binary = INSTALLED_BINARY
     configure_net(iface.name)
     before = inventory()
     config = Path('/proc/config.gz')
@@ -1197,6 +1324,7 @@ def guest(kind, manifest, bundle, deb, token, export, host_boot, digest, local_e
     result['cleanup'] = {'before': before, 'after': settled(before)}
     result['totals'] = campaign_totals(result)
     verify_installed(selected.manifest)
+    verify_installed_binary(selected.manifest)
     with (Path(export) / 'campaign.json').open('x') as stream: json.dump(result, stream, sort_keys=True)
     require_campaign_targets(result['comparisons'])
     selected.close()
