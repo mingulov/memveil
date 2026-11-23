@@ -227,6 +227,36 @@ def qmp_disk(socket_path, disk):
             raise ValueError('owned image absent from running QEMU')
 
 
+def operator_checkpoint_capture(case, export, nonce):
+    """Judge the operator I/O window recorded during the capture boot."""
+    from capture_durability_operator import OPERATOR_WINDOW_NAME, validate_window
+    plan = json.loads((Path(case) / 'operator-plan.json').read_text())
+    if plan.get('nonce') != nonce:
+        raise ValueError('operator plan ownership drift')
+    log_path = Path(export) / 'oracle.log'
+    if not log_path.is_file():
+        raise ValueError('operator oracle log absent')
+    window = validate_window(plan, log_path.read_text())
+    (Path(case) / OPERATOR_WINDOW_NAME).write_text(
+        json.dumps(window, indent=2, sort_keys=True) + '\n')
+    return window
+
+
+def operator_checkpoint_recover(case, export, promised):
+    """Re-judge the retained operator verdict after the recovery boot."""
+    from capture_durability_operator import OPERATOR_VERDICT_NAME, validate_verdict
+    verdict_path = Path(export) / OPERATOR_VERDICT_NAME
+    if not verdict_path.is_file():
+        raise ValueError('operator verdict absent')
+    verdict = json.loads(verdict_path.read_text())
+    status = validate_verdict(verdict, promised)
+    (Path(case) / OPERATOR_VERDICT_NAME).write_text(
+        json.dumps(verdict, indent=2, sort_keys=True) + '\n')
+    if status != 'PASS':
+        raise ValueError('operator verdict is not PASS')
+    return verdict
+
+
 def stop_owned(child):
     try:
         os.killpg(child.pid, signal.SIGKILL)
@@ -312,6 +342,9 @@ def execute(args):
             with disk.open('xb') as image:
                 image.truncate(128 * 1048576)
             nonce = uuid.uuid4().hex[:OWNERSHIP_NONCE_LENGTH]
+            if scenario == 'checkpoint':
+                from capture_durability_operator import write_plan
+                write_plan(case, nonce)
             with tempfile.TemporaryDirectory(prefix='mvfs-qmp-') as sockets:
                 qmp = Path(sockets) / 'monitor'
                 check_shell_inert_path(qmp, 'QMP socket path')
@@ -342,6 +375,8 @@ def execute(args):
                             raise ValueError('guest live BTF differs from pinned BTF')
                         if promised['identity'].get('modules_manifest_sha256') != args.expected_modules_sha256:
                             raise ValueError('guest modules manifest differs from bound modules')
+                        if scenario == 'checkpoint':
+                            operator_checkpoint_capture(case, export, nonce)
                         qmp_disk(qmp, disk)
                         stop_owned(child)
                         (case / 'power-cut.json').write_text(json.dumps(dict(
@@ -373,6 +408,9 @@ def execute(args):
                         raise ValueError('result modules identity drift')
                     if result['identity']['inputs'] != inputs:
                         raise ValueError('result candidate identity drift')
+                    if scenario == 'checkpoint':
+                        promised = json.loads((export / 'barrier.json').read_text())
+                        operator_checkpoint_recover(case, export, promised)
                     verified_config[scenario] = result['identity']['config_status']
                     (case / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
                 finally:
