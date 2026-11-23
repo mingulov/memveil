@@ -165,6 +165,7 @@ class VerdictTests(unittest.TestCase):
 
     def raw_capture(self, root, events=2):
         root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
         lines = [json.dumps({'session_id': self.SESSION, 'seq': str(seq),
                              'kind': 'attempt'}) + '\n'
                  for seq in range(events)]
