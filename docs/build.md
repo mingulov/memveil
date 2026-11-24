@@ -77,8 +77,8 @@ lookup beside the binary, so the lane ignores it), and
 runs the full workspace tests plus the offline suites
 (schemas, reports, privacy, reader-adversarial, docs) in
 one invocation. `./tools/test fast-full` adds the
-examples suite, whose fixed real-time replay costs about
-two minutes.
+examples suite, whose single real-time replay refresh
+costs about ten seconds.
 
 Public build/test suites work from a standalone clone
 using only this repository. A skipped privileged test is

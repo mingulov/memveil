@@ -40,8 +40,8 @@
 # runs cargo test --workspace --locked --no-fail-fast, then
 # the offline suites schemas, reports, privacy,
 # reader-adversarial, and docs. fast-full adds the examples
-# suite, whose fixed real-time replay costs about two
-# minutes. An exported CARGO_TARGET_DIR or MEMVEIL_BIN is
+# suite, whose single real-time replay refresh costs about
+# ten seconds. An exported CARGO_TARGET_DIR or MEMVEIL_BIN is
 # ignored with a note so the lane always tests this tree's
 # bytes with working profile lookup.
 # MEMVEIL_BIN overrides the binary under test: an absolute
