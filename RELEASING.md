@@ -569,9 +569,9 @@ git push origin HEAD:release-q2
 The diff must list exactly the four qualification
 paths (the Q1 three plus `remote.json`).
 
-14. **Not yet exercised; required from 1.x.** Dispatch
-dry-run with the ref at Q2, passing the recorded import
-IDs:
+14. **Not yet exercised; required from 1.x.**
+Dispatch dry-run with the ref at Q2, passing the recorded
+import IDs:
 
 ```sh
 gh workflow run release.yml --ref release-q2 \
@@ -587,8 +587,8 @@ and ignores the check bindings; promote enforces the
 bindings, so four suffice here.
 
 15. **Not yet exercised; required from 1.x.** After the
-dry-run dispatch is green, record the provisional
-dry-run receipt and carry it forward. The
+dry-run dispatch is green, record the
+provisional dry-run receipt and carry it forward. The
 dry-run ran at Q2, so the check-run named exactly
 `promotion-dry-run/1` carries head SHA Q2. That
 check-run is published by the dry-run dispatch at
@@ -650,9 +650,9 @@ git tag "v<VERSION>" "$C"
 git push origin "v<VERSION>"
 ```
 
-18. **Not yet exercised; required from 1.x.** Dispatch
-promote with the ref at Q3, the same recorded import
-IDs, and `promote_authorization` retyping the candidate
+18. **Not yet exercised; required from 1.x.**
+Dispatch promote with the ref at Q3, the same recorded
+import IDs, and `promote_authorization` retyping the candidate
 digest:
 
 ```sh
