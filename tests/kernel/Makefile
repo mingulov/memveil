@@ -5,6 +5,7 @@
 
 obj-m += memveil_dma_oracle.o
 obj-m += memveil_region_oracle.o
+obj-m += memveil_exposure_oracle.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
