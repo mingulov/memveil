@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "policy-v0.1.0.schema.json",
+  "title": "MemVeil authored sharing policy",
+  "description": "Local authored policy file, immutable for a run. Selectors constrain finite enumerated fields and exact labels; there are no arbitrary expressions and no unrestricted patterns. All applicable rules intersect; an exception names one rule and one constraint and cannot bypass others.",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "policy_id",
+    "subject_scope",
+    "applies_to",
+    "required_sources",
+    "clock",
+    "role_bindings",
+    "rules",
+    "exceptions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "policy"
+    },
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+    },
+    "subject_scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+    },
+    "applies_to": {
+      "type": "object",
+      "required": [
+        "platform",
+        "profile"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "platform": {
+          "enum": [
+            "ordinary-linux",
+            "sev-snp",
+            "tdx-standalone",
+            "hyper-v"
+          ]
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "required_sources": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z0-9][a-z0-9-]{0,127}$"
+      },
+      "description": "An empty required scope can never produce a vacuous pass."
+    },
+    "clock": {
+      "enum": [
+        "guest_monotonic_active",
+        "guest_boottime_elapsed",
+        "external_trusted_interval"
+      ]
+    },
+    "role_bindings": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+      },
+      "description": "Logical-role bindings; cross-capture selectors use these, never equal opaque ids."
+    },
+    "rules": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "required": [
+          "rule_id",
+          "selector",
+          "permitted",
+          "limit"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          },
+          "selector": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": {
+              "capability": {
+                "enum": [
+                  "census",
+                  "object-lifetimes",
+                  "dma-paths",
+                  "shared-buffers",
+                  "host-interfaces",
+                  "mapping-inventory",
+                  "exposure-context"
+                ]
+              },
+              "source_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[a-z0-9][a-z0-9-]{0,127}$"
+              },
+              "semantics": {
+                "enum": [
+                  "request",
+                  "result",
+                  "inventory",
+                  "lifecycle",
+                  "state",
+                  "native_rejection"
+                ]
+              }
+            }
+          },
+          "permitted": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "Permitted operation and direction grant; the grant vocabulary freezes with adapter admission."
+          },
+          "limit": {
+            "type": "object",
+            "required": [
+              "window",
+              "max"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "window": {
+                "enum": [
+                  "operation",
+                  "capture"
+                ]
+              },
+              "max": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$"
+              }
+            }
+          },
+          "obligation": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "boundary_type",
+                  "reference"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "boundary_type": {
+                    "enum": [
+                      "revert_boundary",
+                      "declared_duration"
+                    ]
+                  },
+                  "reference": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "exceptions": {
+      "type": "array",
+      "maxItems": 65536,
+      "items": {
+        "type": "object",
+        "required": [
+          "rule_id",
+          "constraint",
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+          },
+          "constraint": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "description": "Bounded exceptions, each naming one rule and one constraint. Initial cap: 1,024 rules times 64."
+    }
+  }
+}
