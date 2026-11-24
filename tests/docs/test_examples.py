@@ -5,7 +5,9 @@
 Runs the built binary over examples/real-capture in all three
 formats and asserts the numbers the example README promises
 (exit 0, 30 bounce attempts, zero detail loss, lifecycle/copy/
-conversion/region rows unavailable). Fails when the example or
+conversion/region rows unavailable), plus a top replay over
+each example: one mid-stream refresh on real-capture, the
+final report on lifecycle-copy. Fails when the example or
 its documentation drifts from the product.
 """
 
@@ -99,12 +101,19 @@ def check_three_channel():
     check("3ch-markdown-copy", "copy\\_original\\_to\\_bounce\\_bytes"
           in proc.stdout and "| 35002 |" in proc.stdout)
 
+    # 300s clears the 150.2s capture window, so replay crosses
+    # no horizon and waits nothing; the final full-window
+    # report still proves top reproduces the README numbers
+    # end to end. The mid-stream refresh oracle lives on
+    # real-capture in main below.
     proc = subprocess.run(
-        [BIN, "top", "--interval", "60s", EXAMPLE3],
+        [BIN, "top", "--interval", "300s", EXAMPLE3],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     check("3ch-top-exit", proc.returncode == 0,
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     check("3ch-top-count", "bounce_attempts = 208" in proc.stdout)
+    check("3ch-top-final", "--- refresh 1 @" in proc.stdout)
+    check("3ch-top-no-wait", "--- refresh 2 @" not in proc.stdout)
 
 
 def main():
@@ -157,6 +166,20 @@ def main():
           "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
     check("markdown-count", "bounce\\_attempts" in proc.stdout
           and "| 30 |" in proc.stdout)
+
+    # The 20.1s capture window holds exactly one 11s horizon,
+    # so replay prints one mid-stream refresh, waits once, and
+    # prints the final report. A smaller interval would cross
+    # more horizons and wait longer, not shorter.
+    proc = subprocess.run(
+        [BIN, "top", "--interval", "11s", EXAMPLE],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check("top-exit", proc.returncode == 0,
+          "exit %d: %s" % (proc.returncode, proc.stderr.strip()))
+    check("top-count", "bounce_attempts = 30" in proc.stdout)
+    check("top-refresh", "--- refresh 1 @" in proc.stdout)
+    check("top-final", "--- refresh 2 @" in proc.stdout)
+    check("top-one-wait", "--- refresh 3 @" not in proc.stdout)
 
     check_three_channel()
 
