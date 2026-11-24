@@ -25,10 +25,15 @@ in-tree, runs the full Rust workspace tests,
 then the offline suites (schemas, reports,
 privacy, reader-adversarial, docs).
 Measured wall time on an 8-core Linux host:
-about 7 min cold (fresh target directory), about
-5 min warm. The `fast-full` variant adds about
-2 min for the examples replay. Shared-host load
-moves these by a minute or two either way.
+about 17 min cold (fresh target directory), about
+6 min warm. The `fast-full` variant adds about
+12 s for the examples replay. Heavy shared-host
+load swings the cold figure widely (17-29 min
+observed across runs on a heavily shared host;
+warm holds near 6 min). Cold means a
+fresh target directory with only the shared
+cargo registry warm; warm reuses the build
+cache.
 Run the suites that cover a change; run the
 full gate before declaring green. Do not
 invent test commands: `cargo test` plus
