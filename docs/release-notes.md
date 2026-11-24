@@ -49,8 +49,9 @@ bundle notes below stay as the history of that prerelease.
 >   matrix ran bundle mode of the canonical binary, byte-identical
 >   to the `.deb` install (all three package binaries share one
 >   sha256). Rows not listed as PASS carry no verdict;
->   the T8 campaign measured all 20 matrix kernels on
->   this build (see `evidence/matrix/` in the evidence
+>   the T5 and T8 campaigns measured all 20 matrix
+>   kernels on this build — 8 T5-admitted rows plus 12
+>   T8 rows (see `evidence/matrix/` in the evidence
 >   archive).
 >   A machine-local `qualify` receipt records that a smoke
 >   capture worked on one host; it is not release qualification
@@ -164,9 +165,13 @@ The sealed artifacts, all from the one seal:
 
 These six hashes are re-verified by the T5 campaign's
 pre-VM gates (6/6 match `candidate.json`) and the
-release lists them in `SHA256SUMS.txt`. The three export
-rows are bound by `qualification.json` (gates plus evidence
-archive record) instead; verify them against the release
+release lists them in `SHA256SUMS.txt`, which covers only
+those six. The three export rows verify differently:
+`tested-payload.sha256` regenerates byte-for-byte from the
+sealed candidate (`tools/kernel-matrix --export-tested`),
+and `qualification.json` binds the two signed gate receipts
+(signatures check against `signer.pub`) plus the evidence
+archive hash and size; compare all three against the release
 assets on download.
 The T8 full-repeat campaign completed the full 20-row matrix,
 so this prerelease carries the full export (table above):
