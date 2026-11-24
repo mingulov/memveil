@@ -1,0 +1,21 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "mapping-dax-inventory",
+  "family": "mapping inventory",
+  "namespace": "guest_physical",
+  "notes": "Presence, absence and unsupported-class fixtures: the present mapping is conserved, absence is confirmed without a claim, and the unsupported probe stays explicit.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-mdx-present-1", "object": "obj-mdx-present-1", "pages": "2", "native_result": 0, "action": "inventory-present-mapping"},
+    {"ordinal": "2", "operation": "op-mdx-absent-2", "object": "none", "pages": "1", "native_result": 0, "action": "confirm-absence-without-claim"},
+    {"ordinal": "3", "operation": "op-mdx-unsupported-3", "object": "obj-mdx-unsupported-1", "pages": "1", "native_result": -22, "action": "probe-unsupported-class"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-mdx-present-1", "generation": "1", "pages": "2", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-mdx-present-1", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-mdx-unsupported-1", "generation": "1", "pages": "1", "status": "unknown"}
+  ],
+  "expectation": {"conserved": ["obj-mdx-present-1"], "transitioned": [], "added": ["obj-mdx-unsupported-1"], "removed": []}
+}

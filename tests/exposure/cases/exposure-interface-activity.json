@@ -1,0 +1,20 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "interface-activity",
+  "family": "host interfaces",
+  "namespace": "interface_register",
+  "notes": "Normal covered interface use continues around one authored native rejection; the rejection is recorded as a fact, never as an attack label.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-ifc-use-1", "object": "obj-ifc-port-1", "pages": "1", "native_result": 0, "action": "observe-normal-interface-use"},
+    {"ordinal": "2", "operation": "op-ifc-reject-2", "object": "obj-ifc-port-1", "pages": "1", "native_result": -22, "action": "record-authored-native-rejection"},
+    {"ordinal": "3", "operation": "op-ifc-use-3", "object": "obj-ifc-port-1", "pages": "1", "native_result": 0, "action": "observe-normal-interface-use"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-ifc-port-1", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-ifc-port-1", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "expectation": {"conserved": ["obj-ifc-port-1"], "transitioned": [], "added": [], "removed": []}
+}

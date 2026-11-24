@@ -1,0 +1,20 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "shared-heap-retention",
+  "family": "shared buffers",
+  "namespace": "session_token",
+  "notes": "A shared-origin allocation is retained across two references and then released; attach, use and destruction stay distinct.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-shr-attach-1", "object": "obj-shr-heap-1", "pages": "3", "native_result": 0, "action": "attach-first-reference"},
+    {"ordinal": "2", "operation": "op-shr-use-2", "object": "obj-shr-heap-1", "pages": "3", "native_result": 0, "action": "retain-second-reference"},
+    {"ordinal": "3", "operation": "op-shr-release-3", "object": "obj-shr-heap-1", "pages": "3", "native_result": 0, "action": "release-all-references"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-shr-heap-1", "generation": "1", "pages": "3", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-shr-heap-1", "generation": "1", "pages": "3", "status": "released"}
+  ],
+  "expectation": {"conserved": [], "transitioned": ["obj-shr-heap-1"], "added": [], "removed": []}
+}

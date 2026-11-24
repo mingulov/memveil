@@ -1,0 +1,24 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "egress-control-facts",
+  "family": "exposure context",
+  "namespace": "not_applicable",
+  "notes": "Swap backing, dump and driver facts are read from an independently configured guest. Identical traces with and without a modeled host read produce identical facts, so no output may claim to distinguish them.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-ecf-swap-1", "object": "obj-ecf-swap-1", "pages": "1", "native_result": 0, "action": "read-swap-backing-fact"},
+    {"ordinal": "2", "operation": "op-ecf-dump-2", "object": "obj-ecf-dump-1", "pages": "1", "native_result": 0, "action": "read-dump-fact"},
+    {"ordinal": "3", "operation": "op-ecf-driver-3", "object": "obj-ecf-driver-1", "pages": "1", "native_result": 0, "action": "read-driver-fact"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-ecf-swap-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-ecf-dump-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-ecf-driver-1", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-ecf-swap-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-ecf-dump-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-ecf-driver-1", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "expectation": {"conserved": ["obj-ecf-swap-1", "obj-ecf-dump-1", "obj-ecf-driver-1"], "transitioned": [], "added": [], "removed": []}
+}

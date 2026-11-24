@@ -1,0 +1,20 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "channel-lifetimes",
+  "family": "host interfaces",
+  "namespace": "channel_relid",
+  "notes": "Channel offer, memory descriptor and flags agree across the channel lifetime; host-facing and paravisor peers stay distinct by token.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-chl-offer-1", "object": "obj-chl-chan-1", "pages": "1", "native_result": 0, "action": "record-channel-offer"},
+    {"ordinal": "2", "operation": "op-chl-bind-2", "object": "obj-chl-chan-1", "pages": "1", "native_result": 0, "action": "bind-memory-descriptor"},
+    {"ordinal": "3", "operation": "op-chl-confirm-3", "object": "obj-chl-chan-1", "pages": "1", "native_result": 0, "action": "confirm-flags-agree"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-chl-chan-1", "generation": "1", "pages": "1", "status": "created"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-chl-chan-1", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "expectation": {"conserved": [], "transitioned": ["obj-chl-chan-1"], "added": [], "removed": []}
+}
