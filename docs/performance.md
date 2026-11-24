@@ -17,6 +17,27 @@ counts. Earlier documentation reported 5.5 seconds and 123.5 MiB on a
 16-core x86-64 runner with 59 GiB RAM; those are historical development
 observations, not current-artifact results or a live-path overhead limit.
 
+Sealed-candidate evidence, measured 2026-11-24 (candidate
+`08bdeaed`, source `bdf641c`, measured `bin/memveil`
+`6fa00bfb`; host Linux 7.2.13 x86-64, Intel i7-8565U 8-way,
+30 GiB RAM, Python 3.14.8; `tools/test perf-replay` under
+`MV_BUNDLE_TARBALL`/`MV_CANDIDATE_MANIFEST` qualification,
+exit 0, exact counts on every leg):
+
+| Leg | Records | Wall | RSS | Rate |
+|---|---|---|---|---|
+| full replay | 600,000 | 3.8 s | 72.7 MiB | 159,822/s |
+| prefix | 100,000 | 0.7 s | — | — |
+| prefix | 300,000 | 1.9 s | — | — |
+| paced | 600,000 | 60.0 s | 92.8 MiB | 10,000/s paced |
+| sealed replay | 600,000 | 5.4 s | 92.8 MiB upper bound | — |
+
+The paced leg issued 3,269 product reads of at most 64 KiB,
+reached EOF, and held the full 60-second duration. A same-day
+repeat run confirmed (full 4.6 s at 129,501 records/s with
+72.3 MiB RSS; paced 92.7 MiB; exit 0). Both runs clear the
+envelope above.
+
 The default paced leg still reads all 600,000 records over 60 seconds. A test-only
 `fread` adapter calls the real reader, counts bytes/newlines in the returned
 buffer, and delays return to cumulative monotonic deadlines. It never generates
@@ -68,6 +89,30 @@ Arbitrary insertion order can still require a linear tail move; the fixed
 scale rows and independent interval/lifetime oracles remain the acceptance
 checks. The historical 95.1-second largest-row miss remains a failed
 measurement; a new implementation needs fresh exact-artifact evidence.
+
+That fresh evidence, measured 2026-11-24 (candidate
+`08bdeaed`, source `bdf641c`, same host and qualification
+inputs as the replay table above; `tools/test perf-region`,
+exit 0, 234 checks green with exact oracle equality on
+every row):
+
+| Row | Events | Wall | RSS | Rate |
+|---|---|---|---|---|
+| holes-1024 | 17,411 | 0.1 s | 30.0 MiB | 119,172/s |
+| holes-2048 | 18,435 | 0.2 s | 33.2 MiB | 111,137/s |
+| holes-4096 | 20,483 | 0.2 s | 35.0 MiB | 120,357/s |
+| holes-8192 | 24,579 | 0.2 s | 37.9 MiB | 135,079/s |
+| holes-16384 | 32,771 | 0.2 s | 44.1 MiB | 144,626/s |
+| holes-32766 | 49,153 | 0.4 s | 56.2 MiB | 124,250/s |
+| active-ceiling | 202,163 | 1.5 s | 140.6 MiB | 134,128/s |
+
+Peak RSS 140.6 MiB. Every row in this run clears the per-scale
+≤60 s / ≤256 MiB envelope at ≥111,000 records/s against the
+10,000 target. A same-day repeat run confirmed (active-ceiling
+2.0 s, 140.3 MiB, 98,994 records/s; exit 0, 234 checks green).
+The historical miss
+stays recorded as a pre-rewrite failure; it no longer
+describes the sealed candidate.
 
 ## Live workload protocol
 
