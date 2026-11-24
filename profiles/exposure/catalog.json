@@ -106,9 +106,9 @@
   ],
   "capability_composition": {
     "default_unchanged": true,
-    "pure_journal_or_exposure": "A list containing only exposure capabilities and/or conversion-journal does not implicitly require the attempt hook.",
+    "pure_journal_or_exposure": "A list containing only exposure capabilities and/or conversion-journal and/or conversion-observe does not implicitly require the attempt hook.",
     "mixed_with_ordinary": "Any selection containing a legacy ordinary capability keeps the existing attempt dependency.",
-    "duplicates": "Duplicate capability names are usage errors.",
+    "duplicates": "Duplicates are ignored; the first occurrence wins.",
     "device_filter": "Device filtering cannot hide global conversion or policy evidence; invalid combinations refuse with reason."
   },
   "platforms": [
@@ -244,7 +244,7 @@
     }
   ],
   "source_reasons": [
-    {"code": "adapter-unimplemented", "meaning": "No adapter exists yet; the capability is planned and refuses when requested."},
+    {"code": "adapter-unimplemented", "meaning": "No adapter exists yet; the capability is planned or reserved and refuses when requested."},
     {"code": "no-safe-source", "meaning": "Reviewed kernel sources expose no safe observation point for this entry."},
     {"code": "lease-pending", "meaning": "Proof needs a real-cell lease that is not assigned; planning grants no lease."},
     {"code": "access-denied", "meaning": "Attachment or readout was refused by the platform (lockdown, permissions, hardening)."},
@@ -362,7 +362,7 @@
   "exit_table": [
     {"condition": "Invalid capture, invalid policy/schema, unsafe output or comparison inputs", "exit": 2, "result": "No repaired or guessed result."},
     {"condition": "Explicit required collection unavailable", "exit": 3, "result": "Explain the missing capability."},
-    {"condition": "Recovered unfinalized capture", "exit": 4, "result": "Findings may be shown but recovery stays partial."},
+    {"condition": "Recovered unfinalized capture", "exit": 4, "result": "Findings may be shown but recovery stays partial regardless of policy flags."},
     {"condition": "Valid finalized ordinary report, including with policy and no strict flag", "exit": 0, "result": "Show independent quality and policy fields."},
     {"condition": "Valid finalized strict policy result, a proved policy violation", "exit": 5, "result": "Retain gaps and known findings."},
     {"condition": "Valid finalized strict result without violation but required evidence incomplete", "exit": 4, "result": "Never conforms."},
