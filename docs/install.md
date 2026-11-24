@@ -93,11 +93,11 @@ directory stays behind with your receipts.
 
 Verified on candidate `08bdeaed` (source `bdf641c`) in an
 ephemeral Debian 13 guest: `dpkg -r` exits 0 with the
-package fully de-registered, every installed memveil path
-is gone (157/157, zero strays) except the non-empty
-receipts directory, user captures and a published receipt
-verify byte-identical after removal, and reinstalling the
-same file works.
+package fully de-registered, 157 of 159 inventoried paths
+gone with zero unexpected survivors (only `/var/lib/memveil`
+and the non-empty receipts directory survive, as expected),
+user captures and a receipt file verify byte-identical after
+removal, and reinstalling the same file works.
 
 ## .rpm: build, install, use, uninstall
 
