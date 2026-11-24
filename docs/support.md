@@ -111,7 +111,7 @@ fallback are not provided.
   [privacy](privacy.md)).
 - The 7.0 scenario guest admits, and the 12 detection
   scenarios are 12/12 legs green on 3 sealed-bytes runs
-  (formal row receipt `scenarios-out/7.0/receipt.json`,
+  (formal row receipt privately retained,
   run `20261123T121047Z`):
   every negative refuses correctly, `nocaps` drops
   every capability through `setpriv` (CapEff 0 in the
@@ -175,7 +175,7 @@ fallback are not provided.
   on Ubuntu 26.04.1 (glibc 2.43) for specific development artifacts,
   and re-proven on the sealed 0.2.0 bytes (compiler-free
   `env -i` version/report exit 0 — T5 step-6 receipt
-  `step6-quickstart-logs/`).
+  privately retained).
   Observed linkage minima are glibc 2.35 (binary plus
   vendored libgcc, no ABI nodes). The Debian
   libgcc is pinned because the host
@@ -217,7 +217,7 @@ below reports attempt EXACT with lifecycle/copy refused
 (`btf-absent-config`), while attempt bytes on BTF-less
 kernels stay unproven and unqualified. Lifecycle/copy
 require BTF (T5 row receipt
-`matrix-out/6.12.114-nobtf/receipt.json`).
+`evidence/matrix/6.12.114-nobtf/receipt.json`).
 
 On 6.0 through 6.10 a default `record` is attempt-only
 (attempt-trace is the default capability and required for
@@ -241,14 +241,17 @@ one canonical binary; matrix ran bundle mode
 of it, byte-identical to the `.deb` install. The tarball
 and `.rpm` binaries are byte-identical
 to the matrix binary, and the clean-VM journey ran the
-retained `.deb` install (T5 step-1 journey receipt
-`step1-scratch/export/` and step-6 package receipts
-`step6-quickstart-logs/`). Every recorded row passed for
+retained `.deb` install (T5 step-1 journey and step-6
+package receipts privately retained). Every recorded row
+passed for
 those exact bytes; rows not listed as PASS for this build
 were not run on this build. Refused capabilities stay
 measured observations recorded with their exact refusal
-codes. Evidence: T5 row receipt `receipt.json` per row
-dir (run `20261123T104854Z`) plus `summary.txt`.
+codes. Evidence: row receipt `receipt.json` per
+`evidence/matrix/<row>/` dir in
+`qualification-evidence.tar.gz` (run `20261123T104854Z`
+receipts, byte-identical in the T8 export) plus
+`summary.txt`.
 `SHORT-COVERED` means memveil persisted fewer events
 than the oracle saw and declared the difference as loss;
 the row fails if the declared loss does not cover the
@@ -256,14 +259,14 @@ gap.
 
 | Lock id | Booted release | attempt-trace | mapping-lifecycle | copy-actual | Row | Receipt |
 | --- | --- | --- | --- | --- | --- | --- |
-| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) | `matrix-out/6.0/receipt.json` |
-| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) | `matrix-out/6.6/receipt.json` |
-| 6.11 | 6.11.11-061111-generic | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.11/receipt.json` |
-| 7.0 | 7.0.14-070014-generic | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 73) | `matrix-out/7.0/receipt.json` |
-| debian13 | 6.12.107+deb13-amd64 | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/debian13/receipt.json` |
-| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.12.114-btf/receipt.json` |
-| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (attempt-only; counts only) | `matrix-out/6.12.114-nobtf/receipt.json` |
-| 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS (no admitted caps; all refusals exit 3) | `matrix-out/7.0.14-lockdown/receipt.json` |
+| 6.0 | 6.0.19-060019-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) | `evidence/matrix/6.0/receipt.json` |
+| 6.6 | 6.6.160-0606160-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; aggregate partial lower bound) | `evidence/matrix/6.6/receipt.json` |
+| 6.11 | 6.11.11-061111-generic | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `evidence/matrix/6.11/receipt.json` |
+| 7.0 | 7.0.14-070014-generic | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 73) | `evidence/matrix/7.0/receipt.json` |
+| debian13 | 6.12.107+deb13-amd64 | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `evidence/matrix/debian13/receipt.json` |
+| 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `evidence/matrix/6.12.114-btf/receipt.json` |
+| 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (attempt-only; counts only) | `evidence/matrix/6.12.114-nobtf/receipt.json` |
+| 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS (no admitted caps; all refusals exit 3) | `evidence/matrix/7.0.14-lockdown/receipt.json` |
 
 Notes:
 
@@ -275,7 +278,7 @@ Notes:
   persisted of 92672 oracle events, 73 declared as
   loss); a `--kernel 7.0` preflight row on the same
   sealed bytes was all-EXACT with loss 0
-  (`matrix-preflight/`).
+  (preflight receipt privately retained).
 - Rows not listed above were not run on this build and
   are not claimed: 5.15, 6.10, 6.12, 6.12.0,
   6.12.114-rt, 6.12.114-debug, 6.18, 6.18.0, 7.1, 7.2,
@@ -343,9 +346,8 @@ scenarios that prove refusal codes and remedies
 `MV_DEB` pointing at the deb). Lockdown and BTF absence
 are covered by their matrix rows instead of scenarios.
 Scenario contract: 12/12 legs green on 3 sealed-bytes
-runs, with formal row receipt
-`scenarios-out/7.0/receipt.json` (run `20261123T121047Z`,
-receipt
+runs, with formal row receipt privately retained
+(run `20261123T121047Z`, receipt
 `f4d4a677c98da9cfc8351f0af41e7d9b5af54299f04a612ac247635e11dba611`;
 judge 12/12, validate/rederive/`--verify-out` PASS).
 
