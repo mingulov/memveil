@@ -29,14 +29,17 @@ exit 0, exact counts on every leg):
 | full replay | 600,000 | 3.8 s | 72.7 MiB | 159,822/s |
 | prefix | 100,000 | 0.7 s | — | — |
 | prefix | 300,000 | 1.9 s | — | — |
-| paced | 600,000 | 60.0 s | 92.8 MiB | 10,000/s paced |
+| paced | 600,000 | ≥60.0 s floor | 92.8 MiB upper bound | 10,000/s paced |
 | sealed replay | 600,000 | 5.4 s | 92.8 MiB upper bound | — |
 
 The paced leg issued 3,269 product reads of at most 64 KiB,
-reached EOF, and held the full 60-second duration. A same-day
-repeat run confirmed (full 4.6 s at 129,501 records/s with
-72.3 MiB RSS; paced 92.7 MiB; exit 0). Both runs clear the
-envelope above.
+reached EOF, and held the full 60-second duration (the suite
+enforces a 60 s minimum; measured 60.0008 s here, 60.0016 s on
+the repeat). RSS readings are cumulative reaped-child
+high-water marks, so every RSS cell is an upper bound, not a
+per-leg peak. A same-day repeat run confirmed (full 4.6 s at
+129,501 records/s with 72.3 MiB RSS; paced 92.7 MiB; exit 0).
+Both runs clear the envelope above.
 
 The default paced leg still reads all 600,000 records over 60 seconds. A test-only
 `fread` adapter calls the real reader, counts bytes/newlines in the returned
@@ -106,10 +109,12 @@ every row):
 | holes-32766 | 49,153 | 0.4 s | 56.2 MiB | 124,250/s |
 | active-ceiling | 202,163 | 1.5 s | 140.6 MiB | 134,128/s |
 
-Peak RSS 140.6 MiB. Every row in this run clears the per-scale
-≤60 s / ≤256 MiB envelope at ≥111,000 records/s against the
-10,000 target. A same-day repeat run confirmed (active-ceiling
-2.0 s, 140.3 MiB, 98,994 records/s; exit 0, 234 checks green).
+Peak RSS 140.6 MiB (same cumulative high-water-mark caveat as
+the replay table: every RSS cell is an upper bound). Every row
+in this run clears the per-scale ≤60 s / ≤256 MiB envelope at
+≥111,000 records/s against the 10,000 target. A same-day repeat
+run confirmed (active-ceiling 2.0 s, 140.3 MiB, 98,994
+records/s; exit 0, 234 checks green).
 The historical miss
 stays recorded as a pre-rewrite failure; it no longer
 describes the sealed candidate.
