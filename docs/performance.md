@@ -217,6 +217,50 @@ ceiling (the verdict reason embeds the value), so the amendment
 takes effect on re-run campaigns only, never by re-grading old
 bytes.
 
+A second sealed-candidate overhead campaign under the amended
+ceiling (20 legs, every leg PASS, journal rows SKIP as
+unadmitted) measured block-p99 medians of 0.9717
+(`attempt-record-summary`) and 1.0742 (`live-top-1s`): PASS
+under 1.25 with 0/5 record pairs and 2/5 top pairs over it.
+Per-pair block-p99 ratios as measured (observer leg p99 over
+off leg p99, seconds; ratios to 4dp, medians exact):
+
+| Mode | Off | Obs | Off p99 | Obs p99 | Ratio |
+|---|---|---|---|---|---|
+| record | 0 | 1 | 0.038557 | 0.017427 | 0.4520 |
+| record | 5 | 4 | 0.049101 | 0.052822 | 1.0758 |
+| record | 8 | 9 | 0.088228 | 0.016014 | 0.1815 |
+| record | 13 | 12 | 0.042233 | 0.041733 | 0.9882 |
+| record | 16 | 17 | 0.043030 | 0.041811 | 0.9717 |
+| top | 2 | 3 | 0.054242 | 0.090716 | 1.6724 |
+| top | 7 | 6 | 0.041604 | 0.095483 | 2.2950 |
+| top | 10 | 11 | 0.040968 | 0.044008 | 1.0742 |
+| top | 15 | 14 | 0.041559 | 0.043531 | 1.0475 |
+| top | 18 | 19 | 0.042597 | 0.043217 | 1.0146 |
+
+Exact medians: record 0.9716605930673425, top 1.074214572050967.
+The network control on the same legs sits at ~1.00 (p99 medians
+0.9892 record / 1.0370 top) and throughput at ~1.00/~0.99
+(medians 1.0005 / 0.9873). Reference envelope: the same
+ephemeral-guest envelope as the first campaign (6 GiB RAM,
+host-CPU-count vCPUs, read-only root, capture staged to
+tmpfs-backed guest `/tmp`, `swiotlb=force`, owned NVMe scratch
+device, 10 s warmup plus a 60 s measured window inside the
+collector window, interleaved `(off,mode)`/`(mode,off)` pair
+order). The observed environment nevertheless differed:
+absolute block-p99 levels ran ~3x higher (off-leg median
+0.0424 here vs 0.0148 there), legs 0-9 ran noisy in both arms
+at once while legs 10-19 sat flat at 0.041-0.044 across all
+ten legs with every late pair near 1.0. The cause of the shift
+and of the early-leg noise is unidentified; the numbers publish
+as measured, without attribution.
+
+The two campaigns are two honest measurements in different
+environments: neither supersedes the other, and publishing both
+tables is what keeps the record free of cherry-picking in
+either direction. The 1.25 ceiling holds on all four medians
+seen live (1.1764/1.1606 then, 0.9717/1.0742 now).
+
 `MEMVEIL_VM_LIVE_SOAK=1 tools/test vm-live-soak` requires the same candidate
 inputs. It runs repeated one-minute captures with concurrent scratch block
 and peer-network traffic for at least thirty measured active minutes, then
