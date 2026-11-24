@@ -1,0 +1,10 @@
+{
+  "scope_id": "virtio-queue-lifetimes",
+  "capture_id": "cap-1",
+  "finalized": true,
+  "available_sources": ["egress-controls"],
+  "facts": [
+    {"evidence_id": "ev-cfg-1", "capture_id": "cap-1", "source_id": "egress-controls", "capability": "exposure-context", "semantics": "state", "peer_class": "none-observed", "clock_domain": "guest_monotonic_active"}
+  ],
+  "objects": []
+}

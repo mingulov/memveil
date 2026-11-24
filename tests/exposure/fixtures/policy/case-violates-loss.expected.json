@@ -1,0 +1,17 @@
+{
+  "policy": "ok-closed-loss.policy.json",
+  "input": "input-violates-loss.input.json",
+  "results": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "violates",
+      "evidence_ids": ["ev-9"],
+      "missing_sources": ["sharing-census"],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'no-unexpected-queue': 1 unexpected operations exceed max 0 (evidence [ev-9]); next: compare the listed evidence against the authored allowlist; required sources absent: [sharing-census]"
+    }
+  ],
+  "strict_exit": 5
+}

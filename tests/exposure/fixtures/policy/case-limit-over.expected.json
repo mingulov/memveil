@@ -1,0 +1,17 @@
+{
+  "policy": "ok-limits.policy.json",
+  "input": "input-limit-over.input.json",
+  "results": [
+    {
+      "rule_id": "at-most-two-queues",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "violates",
+      "evidence_ids": ["ev-1", "ev-2", "ev-3"],
+      "missing_sources": [],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'at-most-two-queues': 3 unexpected operations exceed max 2 (evidence [ev-1, ev-2, ev-3]); next: compare the listed evidence against the authored allowlist"
+    }
+  ],
+  "strict_exit": 5
+}
