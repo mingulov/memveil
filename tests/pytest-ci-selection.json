@@ -68,6 +68,7 @@
     "tests/vm/test_battery.py",
     "tests/vm/test_bpf_race_pins.py",
     "tests/vm/test_bundle.py",
+    "tests/vm/test_capture_durability_operator.py",
     "tests/vm/test_capture_durability_oracle.py",
     "tests/vm/test_collector_sigkill.py",
     "tests/vm/test_core_layouts.py",
