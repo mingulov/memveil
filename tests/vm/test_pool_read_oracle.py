@@ -170,6 +170,7 @@ def test_trace_bounds_stay_fatal_with_class(monkeypatch):
     record = sole_error(drive_reader([good_line(), good_line()]))
     assert (record['class'], record['shape']) == ('trace_bytes_bound', 'over_bound')
     assert record['seq'] == '1'
+    monkeypatch.setattr(m, 'MAX_TRACE_BYTES', 8 * 1024**2)
     monkeypatch.setattr(m, 'MAX_RECORDS', 2)
     record = sole_error(drive_reader([good_line(), good_line(), good_line()]))
     assert (record['class'], record['shape']) == ('trace_records_bound', 'over_bound')
