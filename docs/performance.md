@@ -34,8 +34,8 @@ exit 0, exact counts on every leg):
 
 The paced leg issued 3,269 product reads of at most 64 KiB,
 reached EOF, and held the full 60-second duration. A same-day
-repeat run matched (full 4.2 s at 143,354 records/s with
-72.9 MiB RSS; paced 92.7 MiB; exit 0). Both runs clear the
+repeat run confirmed (full 4.6 s at 129,501 records/s with
+72.3 MiB RSS; paced 92.7 MiB; exit 0). Both runs clear the
 envelope above.
 
 The default paced leg still reads all 600,000 records over 60 seconds. A test-only
@@ -106,10 +106,11 @@ every row):
 | holes-32766 | 49,153 | 0.4 s | 56.2 MiB | 124,250/s |
 | active-ceiling | 202,163 | 1.5 s | 140.6 MiB | 134,128/s |
 
-Peak RSS 140.6 MiB. Every row clears the per-scale ≤60 s /
-≤256 MiB envelope at ≥111,000 records/s against the 10,000
-target. A same-day repeat run matched (active-ceiling 1.8 s,
-140.4 MiB, 109,503 records/s; exit 0). The historical miss
+Peak RSS 140.6 MiB. Every row in this run clears the per-scale
+≤60 s / ≤256 MiB envelope at ≥111,000 records/s against the
+10,000 target. A same-day repeat run confirmed (active-ceiling
+2.0 s, 140.3 MiB, 98,994 records/s; exit 0, 234 checks green).
+The historical miss
 stays recorded as a pre-rewrite failure; it no longer
 describes the sealed candidate.
 
