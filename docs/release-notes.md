@@ -48,8 +48,11 @@ bundle notes below stay as the history of that prerelease.
 >   results name one binary by hash (see release notes); the
 >   matrix ran bundle mode of the canonical binary, byte-identical
 >   to the `.deb` install (all three package binaries share one
->   sha256). Rows
->   not listed as PASS for this build were not run on this build.
+>   sha256). Rows not listed as PASS carry no verdict;
+>   the T5 and T8 campaigns measured all 20 matrix
+>   kernels on this build — 8 T5-admitted rows plus 12
+>   T8 rows (see `evidence/matrix/` in the evidence
+>   archive).
 >   A machine-local `qualify` receipt records that a smoke
 >   capture worked on one host; it is not release qualification
 >   and does not hash the memveil executable — re-run `qualify`
@@ -97,8 +100,8 @@ binaries are byte-identical (sha256
 `6fa00bfba2bbff4aecd5b8185a6d736b7170f12fbe26754fd51b97750395275d`);
 matrix ran bundle mode of it, byte-identical to the
 `.deb` install (matrix mode + binary hash per row in
-`matrix-out/*/artifacts.json`; retained-`.deb` install
-journey `step1-scratch/export/`).
+`evidence/matrix/*/artifacts.json` in the evidence archive;
+retained-`.deb` install journey receipt privately retained).
 
 ## What this bundle contains
 
@@ -156,14 +159,25 @@ The sealed artifacts, all from the one seal:
 | `memveil-source.tar.gz` | `b8226ace8d843d3cc06c2a94a0f243f889f762b9d564d90ed8cfa3cfcdd52280` | 3375252 |
 | `memveil.spdx.json` | `3e253dd3b88ac9a41c9c6e1f1c0b74e0b611ce94492ec5ff348aa3a1f0ccee86` | 213354 |
 | `memveil.provenance.json` | `62139c3687c0ab3de4714577d025209822b69e37e2ad7007856c9af6df4e6c6e` | 1638 |
+| `qualification.json` | `44df17ac0897b102f96265b1bce9faf840868dad75a34851e699c682ed4ea058` | 758 |
+| `qualification-evidence.tar.gz` | `16d320ff6ad15d20fd9c1fc3b9f6dc9f2c21000109c218310f4de7b8036cc7fe` | 303131684 |
+| `tested-payload.sha256` | `5dff6a1737eca7fa7e80b2a0260e48657fc9340271f60e021d422014159de99a` | 37696 |
 
-These hashes are re-verified by the T5 campaign's
+These six hashes are re-verified by the T5 campaign's
 pre-VM gates (6/6 match `candidate.json`) and the
-release lists them in `SHA256SUMS.txt`.
-The `tested-payload.sha256` and full `qualification.json`
-exports are not part of this prerelease: the export gate
-requires the full 20-row matrix, so the full export
-follows the T8 full-repeat campaign.
+release lists them in `SHA256SUMS.txt`, which covers only
+those six. The three export rows verify differently:
+`tested-payload.sha256` regenerates byte-for-byte from the
+sealed candidate (`tools/kernel-matrix --export-tested`),
+and `qualification.json` binds the two signed gate receipts
+(signatures check against `signer.pub`) plus the evidence
+archive hash and size; compare all three against the release
+assets on download.
+The T8 full-repeat campaign completed the full 20-row matrix,
+so this prerelease carries the full export (table above):
+`tested-payload.sha256` (312 entries over bundle, `.deb` and
+`.rpm`), `qualification.json` binding both gate receipts, and
+`qualification-evidence.tar.gz` with the 20 row receipts.
 Earlier development receipts and CI successes apply to their recorded
 revisions, binaries, BPF objects and environments. They are historical
 evidence, not a final re-gate of every later candidate. Laboratory lifecycle,
@@ -225,10 +239,10 @@ Do not silently rewrite a profile hash to make them admitted.
   lifecycle and copy (need 6.11); BTF-less kernels
   refuse lifecycle and copy (`btf-absent-config`);
   confidentiality lockdown refuses everything (T5 row
-  receipts `matrix-out/6.0/receipt.json`,
-  `matrix-out/6.6/receipt.json`,
-  `matrix-out/6.12.114-nobtf/receipt.json`,
-  `matrix-out/7.0.14-lockdown/receipt.json`).
+  receipts `evidence/matrix/6.0/receipt.json`,
+  `evidence/matrix/6.6/receipt.json`,
+  `evidence/matrix/6.12.114-nobtf/receipt.json`,
+  `evidence/matrix/7.0.14-lockdown/receipt.json`).
 - Saturated busy runs can stop at the 4,194,304-record
   cap with bytes below the 4 GiB cap, which the gate
   accepts as a filled budget (no T5 row stopped at the
@@ -237,7 +251,7 @@ Do not silently rewrite a profile hash to make them admitted.
   to BPF trampoline recursion; memveil counts them as
   `recursion_missed` and reports detail partial (T5 7.0
   row: map SHORT-COVERED, 73 events declared as loss —
-  `matrix-out/7.0/receipt.json`). Attempt loss before 6.7 is a lower bound:
+  `evidence/matrix/7.0/receipt.json`). Attempt loss before 6.7 is a lower bound:
   the 6.0 and 6.6 rows report partial with the
   lower-bound label in detail and aggregate.
 - The 6.18.0 kernel leaves read maps unmapped (640,
@@ -255,13 +269,13 @@ Do not silently rewrite a profile hash to make them admitted.
   not a confidential-guest signal; see
   [privacy](privacy.md).
 - The BTF-less row proves attempt counts only; bytes
-  stay unproven (`matrix-out/6.12.114-nobtf/receipt.json`).
+  stay unproven (`evidence/matrix/6.12.114-nobtf/receipt.json`).
 - Passive doctor can read `ready (load not checked)`
   while the memcg precheck reports `memcg-headroom`
   unknown; only `doctor --load-check` or a record proves
   the load fits. Detection-scenario contract: 12/12 legs
   green on 3 sealed-bytes runs, with formal row receipt
-  `scenarios-out/7.0/receipt.json` (run `20261123T121047Z`,
+  privately retained (run `20261123T121047Z`,
   receipt
   `f4d4a677c98da9cfc8351f0af41e7d9b5af54299f04a612ac247635e11dba611`;
   judge 12/12, validate/rederive/`--verify-out` PASS).
