@@ -324,10 +324,11 @@ def _honest_live_capture(tmp_path, events=3, session=None, verdict=None,
     The session carries the honest live shape the product proves for
     every finalized live leg: zero-loss detail/aggregate channels, a
     terminal channel partial for quiescence unproven, the matching
-    stop evidence, and a zero-loss partial verdict. Callers override
-    session/verdict/integrity fields to build dishonest shapes; the
-    strict stdout always renders the (possibly dishonest) verdict the
-    way the product does on exit 4.
+    stop evidence, a signal end reason (every campaign collector
+    stops on a signal), and a zero-loss partial verdict. Callers
+    override session/verdict/integrity fields to build dishonest
+    shapes; the strict stdout always renders the (possibly
+    dishonest) verdict the way the product does on exit 4.
     """
     import json
     quality = {key: {'status': 'complete_for_scope', 'loss_count': '0'}
@@ -348,7 +349,8 @@ def _honest_live_capture(tmp_path, events=3, session=None, verdict=None,
     shape = {'quality': quality, 'stop': stop,
              'verdict': {'name': 'partial_known_loss',
                          'loss_ratio_bps': '0',
-                         'delivered': str(events)}}
+                         'delivered': str(events)},
+             'capture': {'end_reason': 'signal'}}
     for key, override in (session or {}).items():
         if isinstance(override, dict):
             shape[key].update(override)
@@ -465,6 +467,222 @@ def test_live_capture_rejects_dishonest_stop(tmp_path, monkeypatch,
     stdout = _honest_live_capture(tmp_path, session=session)
     _strict_run(monkeypatch, m, stdout)
     with pytest.raises(ValueError, match=match):
+        m.capture_facts('/unused', tmp_path)
+
+
+# Honest signal-stop omission: one post-cut record crossed the stop
+# latch, so the product counts signal_omitted=1 with every other
+# detail bucket at 0. Pinned byte for byte: the builder below must
+# reproduce this literal exactly, and the live-bytes probe checks
+# the literal against sealed renderer output out of band, so the
+# suite itself stays offline and self-contained.
+HONEST_OMISSION_REASON = (
+    'detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) '
+    'recursion_missed=(0) size_omitted=(0) duration_omitted=(0) '
+    'signal_omitted=(1) rejected=(0) write_failed=(0))')
+
+
+def _omission_reason(total=None, **buckets):
+    """Render one known-grammar detail reason from raw bucket counts."""
+    order = ('submit_fail', 'malformed', 'dropped', 'recursion_missed',
+             'size_omitted', 'duration_omitted', 'signal_omitted',
+             'rejected', 'write_failed')
+    counts = dict.fromkeys(order, 0)
+    counts.update(buckets)
+    if total is None:
+        total = sum(counts.values())
+    pairs = ' '.join('%s=(%s)' % (name, counts[name]) for name in order)
+    return 'detail loss %s (%s)' % (total, pairs)
+
+
+def _omitted_detail(reason=HONEST_OMISSION_REASON, loss_count='1',
+                    status='partial'):
+    detail = {'status': status, 'loss_count': loss_count,
+              'scope': '3 bounce_attempt events', 'reason': reason}
+    if reason is None:
+        del detail['reason']
+    return detail
+
+
+def test_omission_builder_matches_pinned_rendering():
+    assert _omission_reason(signal_omitted=1) == HONEST_OMISSION_REASON
+
+
+def test_live_capture_accepts_signal_stop_omission(tmp_path, monkeypatch):
+    m = api()
+    stdout = _honest_live_capture(
+        tmp_path, session={'quality': {'detail': _omitted_detail()}})
+    calls = _strict_run(monkeypatch, m, stdout)
+    facts = m.capture_facts('/unused', tmp_path)
+    assert calls == [['/unused', 'report', '--strict', '--format', 'json',
+                      str(tmp_path)]]
+    assert facts['kinds'] == {'bounce_attempt': '3'}
+    assert facts['quality']['detail']['loss_count'] == '1'
+
+
+def test_live_capture_zero_omission_needs_no_carveout(tmp_path, monkeypatch):
+    """The zero-loss signal-stopped leg still passes on the old pin."""
+    m = api()
+    stdout = _honest_live_capture(tmp_path)
+    _strict_run(monkeypatch, m, stdout)
+    facts = m.capture_facts('/unused', tmp_path)
+    assert facts['quality']['detail']['loss_count'] == '0'
+
+
+@pytest.mark.parametrize('detail,end_reason,session_verdict,match', [
+    ({}, '', None, 'capture channel loss: detail'),
+    ({}, 'duration', None, 'capture channel loss: detail'),
+    ({}, 'error', None, 'capture channel loss: detail'),
+    ({}, None, {'name': 'partial_unknown_loss'},
+     'not the honest partial'),
+    ({}, None, {'name': 'partial_known_loss', 'loss_ratio_bps': '5'},
+     'known loss'),
+])
+def test_live_capture_rejects_omission_shape_violations(
+        tmp_path, monkeypatch, detail, end_reason, session_verdict,
+        match):
+    m = api()
+    session = {'quality': {'detail': _omitted_detail(**detail)}}
+    if end_reason is not None:
+        session['capture'] = {'end_reason': end_reason}
+    if session_verdict is not None:
+        session['verdict'] = session_verdict
+    stdout = _honest_live_capture(tmp_path, session=session)
+    _strict_run(monkeypatch, m, stdout)
+    with pytest.raises(ValueError, match=match):
+        m.capture_facts('/unused', tmp_path)
+
+
+@pytest.mark.parametrize('reason,loss_count,status', [
+    (_omission_reason(signal_omitted=2), '2', 'partial'),
+    (_omission_reason(signal_omitted=1, dropped=1), '2', 'partial'),
+    (_omission_reason(signal_omitted=1, rejected=1), '2', 'partial'),
+    (_omission_reason(total=2, signal_omitted=1), '1', 'partial'),
+    ('detail loss unknown (drain budget exhausted; known: '
+     'submit_fail=(unavailable) malformed=(0) dropped=(0) '
+     'recursion_missed=(unavailable) size_omitted=(0) '
+     'duration_omitted=(0) signal_omitted=(1) rejected=(0) '
+     'write_failed=(0))', '1', 'partial'),
+    ('one record omitted', '1', 'partial'),
+    (HONEST_OMISSION_REASON, '1', 'complete_for_scope'),
+    (HONEST_OMISSION_REASON, '2', 'partial'),
+    (None, '1', 'partial'),
+])
+def test_live_capture_rejects_omission_reason_violations(
+        tmp_path, monkeypatch, reason, loss_count, status):
+    m = api()
+    stdout = _honest_live_capture(
+        tmp_path, session={'quality': {
+            'detail': _omitted_detail(reason=reason, loss_count=loss_count,
+                                    status=status)}})
+    _strict_run(monkeypatch, m, stdout)
+    with pytest.raises(ValueError, match='capture channel loss: detail'):
+        m.capture_facts('/unused', tmp_path)
+
+
+@pytest.mark.parametrize('detail,verdict,end_reason,want', [
+    (_omitted_detail(), {'name': 'partial_known_loss',
+                         'loss_ratio_bps': '0'}, 'signal', True),
+    (_omitted_detail(), {'name': 'partial_known_loss',
+                         'loss_ratio_bps': '0'}, 'duration', False),
+    (_omitted_detail(), {'name': 'partial_known_loss',
+                         'loss_ratio_bps': '0'}, 'error', False),
+    (_omitted_detail(), {'name': 'partial_known_loss',
+                         'loss_ratio_bps': '0'}, None, False),
+    (_omitted_detail(status='complete_for_scope'),
+     {'name': 'partial_known_loss', 'loss_ratio_bps': '0'}, 'signal',
+     False),
+    (_omitted_detail(loss_count='0'),
+     {'name': 'partial_known_loss', 'loss_ratio_bps': '0'}, 'signal',
+     False),
+    (_omitted_detail(loss_count='2'),
+     {'name': 'partial_known_loss', 'loss_ratio_bps': '0'}, 'signal',
+     False),
+    (_omitted_detail(), {'name': 'complete', 'loss_ratio_bps': '0'},
+     'signal', False),
+    (_omitted_detail(), {'name': 'partial_unknown_loss',
+                         'loss_ratio_bps': '0'}, 'signal', False),
+    (_omitted_detail(), {'name': 'partial_known_loss',
+                         'loss_ratio_bps': '1'}, 'signal', False),
+    (_omitted_detail(), {'name': 'partial_known_loss',
+                         'loss_ratio_bps': 'many'}, 'signal', False),
+    (_omitted_detail(), {'name': 'partial_known_loss'}, 'signal', False),
+    (None, {'name': 'partial_known_loss', 'loss_ratio_bps': '0'},
+     'signal', False),
+    (_omitted_detail(), None, 'signal', False),
+    (_omitted_detail(reason=_omission_reason(signal_omitted=2)),
+     {'name': 'partial_known_loss', 'loss_ratio_bps': '0'}, 'signal',
+     False),
+    (_omitted_detail(reason=_omission_reason(signal_omitted=1,
+                                             malformed=1)),
+     {'name': 'partial_known_loss', 'loss_ratio_bps': '0'}, 'signal',
+     False),
+    (_omitted_detail(reason=None),
+     {'name': 'partial_known_loss', 'loss_ratio_bps': '0'}, 'signal',
+     False),
+    (_omitted_detail(reason=7),
+     {'name': 'partial_known_loss', 'loss_ratio_bps': '0'}, 'signal',
+     False),
+])
+def test_signal_stop_omission_carveout_matrix(detail, verdict, end_reason,
+                                             want):
+    assert api()._signal_stop_omission_carveout(
+        detail, verdict, end_reason) is want
+
+
+@pytest.mark.parametrize('reason,want', [
+    (HONEST_OMISSION_REASON,
+     {'submit_fail': 0, 'malformed': 0, 'dropped': 0,
+      'recursion_missed': 0, 'size_omitted': 0, 'duration_omitted': 0,
+      'signal_omitted': 1, 'rejected': 0, 'write_failed': 0}),
+    (_omission_reason(), {'submit_fail': 0, 'malformed': 0, 'dropped': 0,
+                          'recursion_missed': 0, 'size_omitted': 0,
+                          'duration_omitted': 0, 'signal_omitted': 0,
+                          'rejected': 0, 'write_failed': 0}),
+    (_omission_reason(total=2, signal_omitted=1), None),
+    ('detail loss 1 (signal_omitted=(1) submit_fail=(0) malformed=(0) '
+     'dropped=(0) recursion_missed=(0) size_omitted=(0) '
+     'duration_omitted=(0) rejected=(0) write_failed=(0))', None),
+    ('detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) '
+     'recursion_missed=(0) size_omitted=(0) duration_omitted=(0) '
+     'signal_omitted=(01) rejected=(0) write_failed=(0))', None),
+    ('detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) '
+     'recursion_missed=(0) size_omitted=(0) duration_omitted=(0) '
+     'signal_omitted=(1) rejected=(0))', None),
+    ('detail loss unknown (drain budget exhausted; known: '
+     'submit_fail=(unavailable) malformed=(0) dropped=(0) '
+     'recursion_missed=(unavailable) size_omitted=(0) '
+     'duration_omitted=(0) signal_omitted=(1) rejected=(0) '
+     'write_failed=(0))', None),
+    ('Detail loss 1 (submit_fail=(0) malformed=(0) dropped=(0) '
+     'recursion_missed=(0) size_omitted=(0) duration_omitted=(0) '
+     'signal_omitted=(1) rejected=(0) write_failed=(0))', None),
+    (HONEST_OMISSION_REASON + '; channels attempt:(submit_fail=0 '
+     'malformed=0 dropped=0)', None),
+    ('one record omitted', None),
+    ('', None),
+    (None, None),
+    (7, None),
+])
+def test_detail_loss_bucket_parser_matrix(reason, want):
+    assert api()._parse_detail_loss_buckets(reason) == want
+
+
+def test_live_capture_tolerates_misshapen_capture_block(tmp_path,
+                                                           monkeypatch):
+    import json
+    m = api()
+    stdout = _honest_live_capture(tmp_path)
+    _strict_run(monkeypatch, m, stdout)
+    path = tmp_path / 'session.json'
+    session = json.loads(path.read_text())
+    session['capture'] = 'oops'
+    path.write_text(json.dumps(session))
+    facts = m.capture_facts('/unused', tmp_path)
+    assert facts['quality']['detail']['loss_count'] == '0'
+    session['quality']['detail'] = _omitted_detail()
+    path.write_text(json.dumps(session))
+    with pytest.raises(ValueError, match='capture channel loss: detail'):
         m.capture_facts('/unused', tmp_path)
 
 
@@ -1313,6 +1531,79 @@ def test_verify_live_campaign_refuses_dishonest_terminal(tmp_path, terminal):
         else:
             path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
     with pytest.raises(ValueError, match='honest terminal'):
+        _verify(m, export, manifest, 'pool')
+
+
+def _rebind_pool_session(export, session):
+    """Rewrite the pool leg session and rebind every digest to it."""
+    import hashlib
+    import json
+    fresh = json.dumps(session, sort_keys=True).encode()
+    (export / 'completed-0/capture/session.json').write_bytes(fresh)
+    digest = hashlib.sha256(fresh).hexdigest()
+    for path, nested in ((export / 'campaign.json', True),
+                         (export / 'completed-0/observations.json', False)):
+        doc = json.loads(path.read_bytes())
+        leg = doc['legs'][0] if nested else doc
+        leg['capture']['quality'] = session['quality']
+        leg['capture']['session_sha256'] = digest
+        leg['retained_capture']['session.json']['sha256'] = digest
+        leg['retained_capture']['session.json']['bytes'] = str(len(fresh))
+        if nested:
+            if isinstance(doc.get('pool'), dict) \
+                    and 'observation' in doc['pool']:
+                doc['pool']['observation'] = leg
+            path.write_bytes(json.dumps(doc, sort_keys=True).encode())
+        else:
+            path.write_bytes((json.dumps(doc, sort_keys=True) + '\n').encode())
+
+
+def _omitted_pool_session(export):
+    """Pool leg session carrying the honest signal-stop omission."""
+    import json
+    session = json.loads(
+        (export / 'completed-0/capture/session.json').read_bytes())
+    session['quality']['detail'] = _omitted_detail()
+    session['verdict'] = {'name': 'partial_known_loss',
+                          'loss_ratio_bps': '0', 'delivered': '522673'}
+    session['capture'] = {'end_reason': 'signal'}
+    return session
+
+
+def test_verify_live_campaign_accepts_signal_stop_omission(tmp_path):
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    _rebind_pool_session(export, _omitted_pool_session(export))
+    assert _verify(m, export, manifest, 'pool') == {
+        'legs': '1', 'failed_legs': '0', 'target_failures': '0',
+        'cleanup_mismatches': '0'}
+
+
+@pytest.mark.parametrize('mutate', [
+    lambda session: session['quality']['detail'].update(
+        reason=_omission_reason(signal_omitted=2), loss_count='2'),
+    lambda session: session['quality']['detail'].update(
+        reason=_omission_reason(signal_omitted=1, dropped=1),
+        loss_count='2'),
+    lambda session: session['verdict'].update(
+        name='partial_unknown_loss'),
+    lambda session: session['capture'].update(end_reason='duration'),
+    lambda session: session.pop('verdict'),
+    lambda session: session.pop('capture'),
+])
+def test_verify_live_campaign_refuses_omission_violations(tmp_path, mutate):
+    m = api()
+    manifest = _live_manifest()
+    export = tmp_path / 'export'
+    export.mkdir()
+    _pool_export(export, manifest)
+    session = _omitted_pool_session(export)
+    mutate(session)
+    _rebind_pool_session(export, session)
+    with pytest.raises(ValueError, match='loss'):
         _verify(m, export, manifest, 'pool')
 
 
