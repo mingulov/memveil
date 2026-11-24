@@ -1,0 +1,1 @@
+{"candidate_sha256":"08bdeaed2e8646c28b1a6dda760ae9071f603816ab8e219600cb465749b890c9","gate":"kernel-matrix/2","inputs":"matrix-inputs.json","inputs_sha256":"8a0ceb91d0e5ad9734379272c3f63aee6d94fc2cdcd63139ff5fd6ecce0cbdfa","schema":"memveil-gate-receipt/1","source_commit":"bdf641c36addc345f3fb6d8bf925059c6f1fa714"}
