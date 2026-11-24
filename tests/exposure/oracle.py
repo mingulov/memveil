@@ -263,8 +263,9 @@ def verify_case(case):
     """Run the positive self-check for one validated case.
 
     Confirms the control flow derives the authored event count, every
-    control object is accounted for in the ledgers, and every page
-    count stays exact and small. Returns a summary dict.
+    control object is accounted for in the ledgers with matching exact
+    page counts, and every page count stays small. Returns a summary
+    dict.
     """
     what = f"case {case.get('scenario')}"
     events = derive_events(case)
@@ -272,10 +273,21 @@ def verify_case(case):
         raise FixtureError(f"{what}: control flow derives no events")
     ledger_tokens = {entry["object_token"] for entry in case["before_ledger"]}
     ledger_tokens.update(entry["object_token"] for entry in case["after_ledger"])
+    ledger_pages = {}
+    for entry in case["before_ledger"] + case["after_ledger"]:
+        token = entry["object_token"]
+        if token in ledger_pages and ledger_pages[token] != entry["pages"]:
+            raise FixtureError(f"{what}: token {token!r} changes page count between ledgers")
+        ledger_pages[token] = entry["pages"]
     for event in events:
-        if event["object_token"] != "none" and event["object_token"] not in ledger_tokens:
+        if event["object_token"] == "none":
+            continue
+        if event["object_token"] not in ledger_tokens:
             raise FixtureError(f"{what}: event object {event['object_token']!r} "
                                "is in no ledger")
+        if event["pages"] != ledger_pages[event["object_token"]]:
+            raise FixtureError(f"{what}: event {event['ordinal']} page count differs "
+                               f"from the ledger for {event['object_token']!r}")
     small = SMALL_FIXTURE_PAGES
     for entry in case["before_ledger"] + case["after_ledger"]:
         if int(entry["pages"]) > small:
