@@ -1,0 +1,514 @@
+{
+  "exposure_catalog_version": "0.1.0",
+  "status": "frozen-planning",
+  "frozen_against": {
+    "product": "0.2.0",
+    "session_output": "0.1.4",
+    "event_output": "0.1.2",
+    "report_output": "0.1.4",
+    "note": "Planning freeze only. No runtime reader consumes this catalog yet; every planned or reserved entry refuses honestly until its capability ships with test evidence."
+  },
+  "capabilities": [
+    {
+      "id": "attempt-trace",
+      "kind": "ordinary",
+      "status": "implemented",
+      "requires_attempt_hook": true,
+      "since": "0.1.0",
+      "description": "SWIOTLB bounce-attempt observation; the default channel and always required when selected."
+    },
+    {
+      "id": "mapping-lifecycle",
+      "kind": "ordinary",
+      "status": "implemented",
+      "requires_attempt_hook": true,
+      "since": "0.1.0",
+      "description": "Internal bounce-allocation results and release boundaries."
+    },
+    {
+      "id": "copy-actual",
+      "kind": "ordinary",
+      "status": "implemented",
+      "requires_attempt_hook": true,
+      "since": "0.1.0",
+      "description": "Observed actual CPU bounce copies."
+    },
+    {
+      "id": "conversion-observe",
+      "kind": "journal",
+      "status": "reserved",
+      "requires_attempt_hook": false,
+      "description": "Reserved conversion-observation channel name; refuses until the journal ships."
+    },
+    {
+      "id": "conversion-journal",
+      "kind": "journal",
+      "status": "reserved",
+      "requires_attempt_hook": false,
+      "description": "Opt-in conversion request/result journal. Parses but refuses: no record channel exists yet, and no 0.2.0 schema files ship."
+    },
+    {
+      "id": "census",
+      "kind": "exposure",
+      "status": "planned",
+      "requires_attempt_hook": false,
+      "planned": "0.3.0",
+      "description": "Existing-sharing census with an honest late-attach baseline; never hardware truth."
+    },
+    {
+      "id": "object-lifetimes",
+      "kind": "exposure",
+      "status": "planned",
+      "requires_attempt_hook": false,
+      "planned": "0.3.0",
+      "description": "Qualified region/object identity, lifetime and expected cleanup obligations."
+    },
+    {
+      "id": "dma-paths",
+      "kind": "exposure",
+      "status": "planned",
+      "requires_attempt_hook": false,
+      "planned": "0.3.0",
+      "description": "Persistent coherent DMA and virtio queue coverage plus operation-specific path evidence."
+    },
+    {
+      "id": "shared-buffers",
+      "kind": "exposure",
+      "status": "planned",
+      "requires_attempt_hook": false,
+      "planned": "0.3.0",
+      "description": "Explicit shared heaps and DMA-BUF retention with admitted shared origin."
+    },
+    {
+      "id": "host-interfaces",
+      "kind": "exposure",
+      "status": "planned",
+      "requires_attempt_hook": false,
+      "planned": "0.3.0",
+      "description": "Guest/host interface metadata: GHCB and exception interfaces, TDX conversions, VMBus channels."
+    },
+    {
+      "id": "mapping-inventory",
+      "kind": "exposure",
+      "status": "planned",
+      "requires_attempt_hook": false,
+      "planned": "0.3.0",
+      "description": "MMIO, device and DAX mapping inventory."
+    },
+    {
+      "id": "exposure-context",
+      "kind": "exposure",
+      "status": "planned",
+      "requires_attempt_hook": false,
+      "planned": "0.3.0",
+      "description": "Relevant egress, control and configuration facts and changes."
+    }
+  ],
+  "capability_composition": {
+    "default_unchanged": true,
+    "pure_journal_or_exposure": "A list containing only exposure capabilities and/or conversion-journal does not implicitly require the attempt hook.",
+    "mixed_with_ordinary": "Any selection containing a legacy ordinary capability keeps the existing attempt dependency.",
+    "duplicates": "Duplicate capability names are usage errors.",
+    "device_filter": "Device filtering cannot hide global conversion or policy evidence; invalid combinations refuse with reason."
+  },
+  "platforms": [
+    {
+      "cell": "ordinary-linux",
+      "class": "ordinary",
+      "status": "available",
+      "for_capabilities": ["attempt-trace", "mapping-lifecycle", "copy-actual"],
+      "note": "Hardened ordinary preview only; ordinary evidence never qualifies confidential-guest claims."
+    },
+    {
+      "cell": "sev-snp",
+      "class": "confidential",
+      "status": "required-unproven",
+      "for_capabilities": ["conversion-journal", "census", "object-lifetimes", "dma-paths", "shared-buffers", "host-interfaces", "mapping-inventory", "exposure-context"],
+      "note": "No admitted cell selected; needs exact image/config/BTF identity plus safe-attachment proof before any live claim."
+    },
+    {
+      "cell": "tdx-standalone",
+      "class": "confidential",
+      "status": "required-unproven",
+      "for_capabilities": ["conversion-journal", "census", "object-lifetimes", "dma-paths", "shared-buffers", "host-interfaces", "mapping-inventory", "exposure-context"],
+      "note": "Distinct TDX semantics; one SNP run cannot qualify TDX. No admitted cell selected."
+    },
+    {
+      "cell": "hyper-v",
+      "class": "confidential",
+      "status": "required-unproven",
+      "for_capabilities": ["conversion-journal", "census", "object-lifetimes", "dma-paths", "shared-buffers", "host-interfaces", "mapping-inventory", "exposure-context"],
+      "note": "Includes the relevant paravisor topology; host-facing and paravisor peers stay distinct. No admitted cell selected."
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "conversion-requests",
+      "capability": "conversion-journal",
+      "subject_class": "guest-kernel-memory-management",
+      "peer_class": "none-observed",
+      "address_namespace": "guest-virtual",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "sharing-census",
+      "capability": "census",
+      "subject_class": "guest-direct-map",
+      "peer_class": "none-observed",
+      "address_namespace": "guest-physical",
+      "phase": "pre_attach",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "object-lineage",
+      "capability": "object-lifetimes",
+      "subject_class": "guest-kernel-allocator",
+      "peer_class": "none-observed",
+      "address_namespace": "session-token",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "dma-virtio-paths",
+      "capability": "dma-paths",
+      "subject_class": "guest-driver-virtio",
+      "peer_class": "host-device",
+      "address_namespace": "guest-physical",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "heap-dmabuf-objects",
+      "capability": "shared-buffers",
+      "subject_class": "guest-kernel-allocator",
+      "peer_class": "device-or-subsystem",
+      "address_namespace": "session-token",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "ghcb-exceptions",
+      "capability": "host-interfaces",
+      "subject_class": "guest-kernel-cc-platform",
+      "peer_class": "host-hypervisor",
+      "address_namespace": "interface-register",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "tdx-conversions",
+      "capability": "host-interfaces",
+      "subject_class": "guest-kernel-cc-platform",
+      "peer_class": "host-tdx-module",
+      "address_namespace": "guest-physical",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "vmbus-channels",
+      "capability": "host-interfaces",
+      "subject_class": "guest-kernel-vmbus",
+      "peer_class": "host-or-paravisor",
+      "address_namespace": "channel-relid",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "mapping-inventory-scan",
+      "capability": "mapping-inventory",
+      "subject_class": "guest-kernel-memory-management",
+      "peer_class": "device",
+      "address_namespace": "guest-physical",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "egress-controls",
+      "capability": "exposure-context",
+      "subject_class": "guest-configuration",
+      "peer_class": "none-observed",
+      "address_namespace": "not-applicable",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    }
+  ],
+  "source_reasons": [
+    {"code": "adapter-unimplemented", "meaning": "No adapter exists yet; the capability is planned and refuses when requested."},
+    {"code": "no-safe-source", "meaning": "Reviewed kernel sources expose no safe observation point for this entry."},
+    {"code": "lease-pending", "meaning": "Proof needs a real-cell lease that is not assigned; planning grants no lease."},
+    {"code": "access-denied", "meaning": "Attachment or readout was refused by the platform (lockdown, permissions, hardening)."},
+    {"code": "hook-absent", "meaning": "The expected hook or tracepoint does not exist on this kernel."},
+    {"code": "cell-unselected", "meaning": "No exact platform cell is admitted for this entry yet."},
+    {"code": "quarantined", "meaning": "Evidence exists but is held out of findings pending safety review."},
+    {"code": "not-applicable-platform", "meaning": "A catalog reason explains why this platform cannot produce the entry; absence of events alone never qualifies."}
+  ],
+  "field_conventions": {
+    "u64": "Canonical decimal strings, no signs, leading zeros, fractions or scientific notation; range checked to 18446744073709551615.",
+    "nullable": "Null only with a typed reason; unknown is never zero or an empty string.",
+    "labels": "Enumerated kinds and reason codes only; adapters cannot append arbitrary kernel labels."
+  },
+  "records": {
+    "CoverageSource": {
+      "fields": [
+        {"name": "source_id", "optional": false, "type": "label", "notes": "Catalog source entry this record describes."},
+        {"name": "capability", "optional": false, "type": "label", "notes": "Owning capability id."},
+        {"name": "profile_id", "optional": false, "type": "string", "notes": "Semantic profile that admitted the source."},
+        {"name": "subject_id", "optional": false, "type": "label", "notes": "Observed subject class."},
+        {"name": "platform_cell", "optional": false, "type": "label", "notes": "Exact admitted cell; never a bare release string."},
+        {"name": "address_namespace", "optional": false, "type": "label", "notes": "Namespace of every address-like field from this source."},
+        {"name": "phase", "optional": false, "type": "enum", "notes": "One of boot, pre_attach, observed."},
+        {"name": "status", "optional": false, "type": "enum", "notes": "One of available, partial, unavailable, not_applicable, disabled."},
+        {"name": "reason", "optional": false, "type": "label", "notes": "Source-reason code; required even when available."},
+        {"name": "window", "optional": false, "type": "object", "notes": "Observed interval this status covers."},
+        {"name": "quality", "optional": false, "type": "object", "notes": "Independent detail, aggregate, identity, baseline and terminal quality."}
+      ]
+    },
+    "ExposureFact": {
+      "fields": [
+        {"name": "evidence_id", "optional": false, "type": "string", "notes": "Session-unique evidence handle."},
+        {"name": "source_id", "optional": false, "type": "label", "notes": "Catalog source entry."},
+        {"name": "epoch", "optional": false, "type": "u64", "notes": "Measurement epoch; resets break comparability."},
+        {"name": "operation_id", "optional": false, "type": "string", "notes": "Operation handle; exists before any object token."},
+        {"name": "parent_operation_id", "optional": true, "type": "string", "notes": "Present only for nested operations."},
+        {"name": "kind", "optional": false, "type": "label", "notes": "Finite catalog kind; unknown kinds refuse."},
+        {"name": "direction", "optional": false, "type": "label", "notes": "Request direction; CPU-copy direction stays separate."},
+        {"name": "object_token", "optional": true, "type": "string", "notes": "Session-local token; never a physical address."},
+        {"name": "generation", "optional": false, "type": "u64", "notes": "Token generation; reuse starts a new lineage."},
+        {"name": "offset", "optional": false, "type": "u64", "notes": "Byte offset in the source namespace."},
+        {"name": "length_bytes", "optional": false, "type": "u64", "notes": "Requested length; effective length stays separate."},
+        {"name": "native_result", "optional": false, "type": "s64-or-null", "notes": "Observed native status; null with reason when unobservable."},
+        {"name": "caller_class", "optional": false, "type": "label", "notes": "Sanitized caller class, never a raw address."},
+        {"name": "peer_class", "optional": false, "type": "label", "notes": "Peer class (host, paravisor, device) or none-observed."},
+        {"name": "clock_domain", "optional": false, "type": "label", "notes": "Guest-monotonic-active, guest-boottime-elapsed or external-trusted-interval."},
+        {"name": "observed_interval", "optional": false, "type": "object", "notes": "Start/end in the stated clock domain with uncertainty."},
+        {"name": "semantics", "optional": false, "type": "enum", "notes": "One of request, result, inventory, lifecycle, state, native_rejection; absent capability never promotes a record to a stronger class."},
+        {"name": "quality", "optional": false, "type": "object", "notes": "Per-record quality; loss stays visible."}
+      ]
+    },
+    "ExposureObject": {
+      "fields": [
+        {"name": "object_token", "optional": false, "type": "string", "notes": "Session-local token; never a physical address."},
+        {"name": "generation", "optional": false, "type": "u64", "notes": "Lineage generation; intervals split and merge only within one lineage."},
+        {"name": "object_class", "optional": false, "type": "label", "notes": "Catalog object class (queue, buffer, channel, mapping, heap-object)."},
+        {"name": "namespace", "optional": false, "type": "label", "notes": "Address namespace of the token."},
+        {"name": "origin_source", "optional": false, "type": "label", "notes": "Catalog source that first observed the object."},
+        {"name": "lifecycle_status", "optional": false, "type": "label", "notes": "Created, live, released, quarantined or unknown."},
+        {"name": "state", "optional": false, "type": "label", "notes": "Last resolved state with evidence; unresolved stays explicit."},
+        {"name": "state_evidence", "optional": false, "type": "array", "notes": "Evidence ids supporting the state claim."},
+        {"name": "expected_boundary", "optional": true, "type": "object", "notes": "Admitted revert boundary or declared duration, when an obligation applies."},
+        {"name": "uncertainty", "optional": false, "type": "object", "notes": "Explicit gaps: alias, reuse, loss, missed events."}
+      ]
+    },
+    "BaselineSample": {
+      "fields": [
+        {"name": "sample_id", "optional": false, "type": "string", "notes": "Session-unique sample handle."},
+        {"name": "source_id", "optional": false, "type": "label", "notes": "Catalog source entry."},
+        {"name": "start_time", "optional": false, "type": "u64", "notes": "Sample start in the stated clock domain."},
+        {"name": "end_time", "optional": false, "type": "u64", "notes": "Sample end; samples are interval-valued, never atomic graphs by totals alone."},
+        {"name": "scope", "optional": false, "type": "label", "notes": "Scanned scope (pool, map region, device class)."},
+        {"name": "counts", "optional": false, "type": "object", "notes": "Observed counts keyed by catalog counter name."},
+        {"name": "units", "optional": false, "type": "label", "notes": "Count units; unknown units disable ratio rules."},
+        {"name": "visited", "optional": false, "type": "u64", "notes": "Entries visited by the scan."},
+        {"name": "returned", "optional": false, "type": "u64", "notes": "Records returned; bounded separately from visited."},
+        {"name": "bounded", "optional": false, "type": "boolean", "notes": "True when the scan hit a bound and the result is explicitly partial."},
+        {"name": "atomicity", "optional": false, "type": "label", "notes": "Atomic, interval or unknown; unproved atomicity stays interval."},
+        {"name": "quality", "optional": false, "type": "object", "notes": "Per-sample quality."}
+      ]
+    },
+    "PolicyResult": {
+      "fields": [
+        {"name": "rule_id", "optional": false, "type": "string", "notes": "Stable authored rule id."},
+        {"name": "scope_id", "optional": false, "type": "string", "notes": "Scope the rule was evaluated against."},
+        {"name": "result", "optional": false, "type": "enum", "notes": "One of conforms, deviates_known, violates, inconclusive, unavailable."},
+        {"name": "evidence_ids", "optional": false, "type": "array", "notes": "Evidence supporting this result."},
+        {"name": "missing_sources", "optional": false, "type": "array", "notes": "Required sources absent from the capture."},
+        {"name": "exceptions_applied", "optional": false, "type": "array", "notes": "Bounded exceptions that applied, each naming its rule."},
+        {"name": "clock_domain", "optional": false, "type": "label", "notes": "Clock domain of the temporal evaluation."},
+        {"name": "reason", "optional": false, "type": "string", "notes": "Human-readable rule/outcome explanation with a next investigation."}
+      ]
+    },
+    "ComparisonResult": {
+      "fields": [
+        {"name": "metric_id", "optional": false, "type": "string", "notes": "Compared metric."},
+        {"name": "compatibility", "optional": false, "type": "enum", "notes": "One of compatible, incompatible, unavailable."},
+        {"name": "reason", "optional": false, "type": "string", "notes": "Per-metric compatibility reason; no numeric delta for incompatible metrics."},
+        {"name": "left_evidence", "optional": false, "type": "string", "notes": "Left-capture evidence handle."},
+        {"name": "right_evidence", "optional": false, "type": "string", "notes": "Right-capture evidence handle."},
+        {"name": "delta", "optional": true, "type": "s64", "notes": "Exact delta; present only for compatible metrics."},
+        {"name": "unit", "optional": false, "type": "label", "notes": "Delta unit."},
+        {"name": "scope", "optional": false, "type": "label", "notes": "Comparison scope that was compatibility-checked."},
+        {"name": "quality", "optional": false, "type": "object", "notes": "Per-comparison quality."}
+      ]
+    }
+  },
+  "quality_dimensions": ["detail", "aggregate", "identity", "baseline", "terminal"],
+  "schema_reservations": [
+    {"family": "session", "version": "0.3.0", "carries": "exposure records", "schema_file": false, "accepted": false, "produced": false},
+    {"family": "event", "version": "0.3.0", "carries": "exposure records", "schema_file": false, "accepted": false, "produced": false},
+    {"family": "report", "version": "0.3.0", "carries": "exposure records", "schema_file": false, "accepted": false, "produced": false},
+    {"family": "policy", "version": "0.1.0", "carries": "authored policy files (standalone)", "schema_file": false, "accepted": false, "produced": false}
+  ],
+  "exit_table": [
+    {"condition": "Invalid capture, invalid policy/schema, unsafe output or comparison inputs", "exit": 2, "result": "No repaired or guessed result."},
+    {"condition": "Explicit required collection unavailable", "exit": 3, "result": "Explain the missing capability."},
+    {"condition": "Recovered unfinalized capture", "exit": 4, "result": "Findings may be shown but recovery stays partial."},
+    {"condition": "Valid finalized ordinary report, including with policy and no strict flag", "exit": 0, "result": "Show independent quality and policy fields."},
+    {"condition": "Valid finalized strict policy result, a proved policy violation", "exit": 5, "result": "Retain gaps and known findings."},
+    {"condition": "Valid finalized strict result without violation but required evidence incomplete", "exit": 4, "result": "Never conforms."},
+    {"condition": "Valid finalized strict result, required scope complete and no violation", "exit": 0, "result": "Conforms or explicitly permitted deviates_known."},
+    {"condition": "Comparison with incompatible requested metrics", "exit": 4, "result": "Per-metric reasons; no numeric delta for those metrics."}
+  ],
+  "scenarios": [
+    {
+      "id": "conversion-request-result",
+      "family": "conversion journal",
+      "positive_setup": "Covered conversion requests complete on an admitted confidential cell with caller context recorded.",
+      "oracle": "Independent owned-operation ledger plus native result agreement; wrapper success alone never establishes state.",
+      "subject": "guest-kernel-memory-management",
+      "peer": "none-observed",
+      "namespace": "guest-virtual",
+      "source_assumptions": "Admitted journal channel, exact cell identity, safe attachment proof."
+    },
+    {
+      "id": "existing-sharing-baseline",
+      "family": "census",
+      "positive_setup": "Boot and pre-attach sharing is inventoried with exact owned increase/decrease deltas.",
+      "oracle": "Owned direct-map fixture with exact counts; interval, alias and race bounds checked.",
+      "subject": "guest-direct-map",
+      "peer": "none-observed",
+      "namespace": "guest-physical",
+      "source_assumptions": "Bounded scan completes inside one second on the admitted reference cell."
+    },
+    {
+      "id": "shared-to-private-lifecycle",
+      "family": "object lifetimes",
+      "positive_setup": "An owned buffer moves shared-to-private across an admitted lifecycle boundary.",
+      "oracle": "Independent identity, generation and lifecycle ledger; failure, alias, reuse and loss never invent state.",
+      "subject": "guest-kernel-allocator",
+      "peer": "none-observed",
+      "namespace": "session-token",
+      "source_assumptions": "Source-admitted resolver with declared address space and generation model."
+    },
+    {
+      "id": "persistent-queue-traffic",
+      "family": "persistent DMA",
+      "positive_setup": "A real persistent queue or control buffer carries steady traffic with no new conversions.",
+      "oracle": "Independent create, use and teardown ledger; coherent memory is not synonymous with host-shared.",
+      "subject": "guest-driver-virtio",
+      "peer": "host-device",
+      "namespace": "guest-physical",
+      "source_assumptions": "Queue identity survives the capture window; steady traffic is independently driven."
+    },
+    {
+      "id": "shared-heap-retention",
+      "family": "shared buffers",
+      "positive_setup": "A shared-origin allocation is retained across multiple references and then released.",
+      "oracle": "Owned allocation ledger with attach, map, use and destruction kept distinct.",
+      "subject": "guest-kernel-allocator",
+      "peer": "device-or-subsystem",
+      "namespace": "session-token",
+      "source_assumptions": "Shared origin is admitted; generic buffer objects never imply confidential sharing."
+    },
+    {
+      "id": "interface-activity",
+      "family": "host interfaces",
+      "positive_setup": "Covered guest/host interface activity is observed on the matching cell.",
+      "oracle": "Coverage and rejection-source catalog; supported native errors are facts and rate changes never prove an attack.",
+      "subject": "guest-kernel-cc-platform",
+      "peer": "host-hypervisor",
+      "namespace": "interface-register",
+      "source_assumptions": "Interface source admitted for the exact platform; unavailable subchannels labeled separately."
+    },
+    {
+      "id": "channel-lifetimes",
+      "family": "host interfaces",
+      "positive_setup": "Channel offer, memory descriptor and flags agree across the channel lifetime.",
+      "oracle": "Host-facing versus confidential-paravisor negative controls; no inference into paravisor internal memory.",
+      "subject": "guest-kernel-vmbus",
+      "peer": "host-or-paravisor",
+      "namespace": "channel-relid",
+      "source_assumptions": "Peer topology is known; channel lifetime events are complete or explicitly gapped."
+    },
+    {
+      "id": "mapping-dax-inventory",
+      "family": "mapping inventory",
+      "positive_setup": "A supported mapping class is observed on a real cell with presence, absence and unsupported fixtures.",
+      "oracle": "Independent mapping fixtures; inventory only, never a claim to trace every access.",
+      "subject": "guest-kernel-memory-management",
+      "peer": "device",
+      "namespace": "guest-physical",
+      "source_assumptions": "Mapping class supported by the selected stack; disallowed uses stay unsupported."
+    },
+    {
+      "id": "egress-control-facts",
+      "family": "exposure context",
+      "positive_setup": "Swap backing, dump, driver and configuration facts are read from an independently configured guest.",
+      "oracle": "Configuration fixtures set independently of the collector; no payload and no exfiltration verdict.",
+      "subject": "guest-configuration",
+      "peer": "none-observed",
+      "namespace": "not-applicable",
+      "source_assumptions": "Configuration sources are allowlisted; facts are point-in-time unless a change source exists."
+    },
+    {
+      "id": "bounced-and-direct-paths",
+      "family": "operation DMA paths",
+      "positive_setup": "Bounced and admitted non-bounced shared-path cases complete with outer completion agreement.",
+      "oracle": "Segment-level agreement ledger; missing bounce events never imply direct private DMA.",
+      "subject": "guest-driver-dma",
+      "peer": "host-device",
+      "namespace": "guest-physical",
+      "source_assumptions": "Path admission per operation; outer completion observed independently."
+    },
+    {
+      "id": "authored-policy-finding",
+      "family": "policy",
+      "positive_setup": "An unexpected covered operation trips an authored rule; a proved lifecycle violation and an inconclusive-on-unknown case are also shown.",
+      "oracle": "Golden policy files with expected findings; unknown required evidence prevents conformity.",
+      "subject": "capture-evidence",
+      "peer": "none-observed",
+      "namespace": "not-applicable",
+      "source_assumptions": "Policy file immutable for the run; all applicable rules intersect."
+    },
+    {
+      "id": "before-after-delta",
+      "family": "comparison",
+      "positive_setup": "Two compatible captures produce per-metric deltas; an incompatible pair refuses per metric.",
+      "oracle": "Identity, profile, workload, window and unit compatibility checks; smaller totals never imply improved confidentiality.",
+      "subject": "capture-evidence",
+      "peer": "none-observed",
+      "namespace": "not-applicable",
+      "source_assumptions": "Both captures carry the facts the requested metrics need."
+    },
+    {
+      "id": "loss-and-bounds",
+      "family": "quality",
+      "positive_setup": "Loss, censored stop, denied access, absent sources and exhausted bounds each yield a scoped partial result.",
+      "oracle": "Injected-loss fixtures with exact expected gaps; no silent fallback and no loss converted to zero.",
+      "subject": "capture-evidence",
+      "peer": "none-observed",
+      "namespace": "not-applicable",
+      "source_assumptions": "Every bounded operation carries a deadline; exhaustion is explicit."
+    },
+    {
+      "id": "operator-walkthrough",
+      "family": "usefulness",
+      "positive_setup": "Healthy, seeded-unexpected, boot and pre-attach, incomplete, and metadata-indistinguishable cases each render with a next action.",
+      "oracle": "Held-out healthy workloads with zero false violations; seeded findings explainable end to end.",
+      "subject": "capture-evidence",
+      "peer": "none-observed",
+      "namespace": "not-applicable",
+      "source_assumptions": "Examples ship with accurate provenance; provisional data is labeled as such."
+    }
+  ]
+}

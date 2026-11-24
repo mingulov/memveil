@@ -64,6 +64,12 @@ A missing final session can be recovered with `--allow-partial` from an owned, l
   qualification target stays a later, unnumbered release. Neither statement
   is a qualification receipt. The later 0.3.0 security milestone is separate
   from these formats.
+- Session, event and report 0.3.0 are reserved for the exposure records in
+  [exposure coverage](exposure-coverage.md); standalone policy 0.1.0 is
+  reserved for the authored policy files in
+  [exposure policy](exposure-policy.md). The reserved exposure versions are
+  not accepted or produced and have no schema files yet. No schema number
+  may be reused.
 
 The [integrity and recovery contract](capture-integrity.md) specifies the
 required fields, literal-byte verification, quality demotion, durable

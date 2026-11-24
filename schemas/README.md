@@ -5,26 +5,30 @@ These are self-contained JSON Schema Draft 2020-12 **producer contracts**;
 validation never fetches references from the network. The product implements
 only the exact reader versions listed in [format compatibility](../docs/format-compatibility.md).
 Schema availability alone does not imply a shipping event source or a runtime
-reader. Families version independently of the product, native bridge ABI and
-BPF wire version.
+reader. Families version independently of the product and BPF wire version.
 
 | Family | Current output | Retained contracts | Reserved, not implemented |
 | --- | --- | --- | --- |
-| Session | 0.1.3 | 0.1.1, 0.1.2 (both accepted inputs) | 0.1.4 integrity; 0.2.0 journal |
-| Event | 0.1.2 | 0.1.1 (accepted input) | 0.2.0 journal |
-| Report | 0.1.3 | 0.1.0, 0.1.1, 0.1.2 (output reference only) | 0.1.4 integrity; 0.2.0 journal |
+| Session | 0.1.4 | 0.1.1, 0.1.2, 0.1.3 (accepted inputs) | 0.2.0 journal; 0.3.0 exposure |
+| Event | 0.1.2 | 0.1.1 (accepted input) | 0.2.0 journal; 0.3.0 exposure |
+| Report | 0.1.4 | 0.1.0, 0.1.1, 0.1.2, 0.1.3 (output reference only) | 0.2.0 journal; 0.3.0 exposure |
 | Profile | 0.1.2 | 0.1.1 (accepted input) | None |
 | Doctor | 0.1.1 | 0.1.0 (retained schema; no report-input reader) | None |
 | Receipt | 0.1.0 | None | None |
+| Policy | None (planned standalone file) | None | 0.1.0 exposure |
 
 Never reuse a frozen schema number or modify old schemas to carry new fields.
-The reserved versions have no schema files yet and current readers refuse
-them. Integrity keeps event 0.1.2 unchanged. Session/report 0.1.4 add the
+Session/report 0.1.4 are the current integrity outputs, adding the
 committed-byte integrity record, verification result and checkpoint contract
-in [capture integrity](../docs/capture-integrity.md). The journal's
-session/event/report 0.2.0 contract is reserved separately; it must preserve
-integrity and distinguish request/results from region state. Later 0.3.0
-security capabilities do not change these reservations.
+in [capture integrity](../docs/capture-integrity.md); integrity keeps event
+0.1.2 unchanged. The journal's session/event/report 0.2.0 contract is
+reserved separately; it must preserve integrity and distinguish
+request/results from region state. Session/event/report 0.3.0 are reserved
+for the exposure records in
+[exposure coverage](../docs/exposure-coverage.md), and standalone policy
+0.1.0 for the authored policy files in
+[exposure policy](../docs/exposure-policy.md). The reserved versions have no
+schema files yet and current readers refuse them.
 
 Events 0.1.2 adds true-only copy `pool_private` and
 `offset_past_allocation` markers. Session 0.1.2 adds optional correlation
