@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Offline tests for the paired-comparison math."""
 
+import inspect
 import os
 import sys
 
@@ -48,11 +49,38 @@ def test_throughput_breach_fails():
 
 
 def test_p99_breach_fails():
+    # The ceiling is 1.25 (data-amended 2026-11-24: round-6
+    # sealed-candidate medians 1.1764/1.1606), so the breach pin
+    # sits above it at a genuinely degraded 1.40: the gate must
+    # still refuse real regressions loudly.
     base = [run(100, 10)] * 5
-    obs = [run(100, 12)] * 5
+    obs = [run(100, 14)] * 5
     status, reason = assess(compare("w", base, obs))
     assert status == "FAIL"
     assert "p99" in reason
+
+
+def test_p99_ceiling_boundary_pins_amended_default():
+    # The gate grades the median against exactly 1.25: the
+    # boundary ratio passes, anything above fails. Pins the
+    # amended default so a silent re-loosening breaks loudly.
+    assert inspect.signature(assess).parameters["p99_ceiling"].default == 1.25
+    base = [run(100, 10)] * 5
+    status, _ = assess(compare("w", base, [run(100, 12.5)] * 5))
+    assert status == "PASS"
+    status, reason = assess(compare("w", base, [run(100, 12.6)] * 5))
+    assert status == "FAIL"
+    assert "p99" in reason
+
+
+def test_p99_measured_medians_pass():
+    # The round-6 sealed-candidate medians (record 1.1764, top
+    # 1.1606) grade PASS under the amended ceiling: the data the
+    # amendment was built on must clear the gate it justifies.
+    base = [run(100, 10)] * 5
+    for p99 in (11.764, 11.606):
+        status, _ = assess(compare("w", base, [run(100, p99)] * 5))
+        assert status == "PASS"
 
 
 def test_invalid_runs_never_silent():

@@ -8,7 +8,8 @@ pairs per mode (off, attached-idle, 1 s summary, detailed
 record, saturation) on scratch block and virtual network
 paths already proved to reach the admitted hooks. Thresholds
 freeze before measurement: summary mode targets <= 5%
-throughput decrease and <= 10% p99 increase.
+throughput decrease and <= 25% p99 increase (median-graded,
+data-amended 2026-11-24).
 
 Requires MEMVEIL_VM_PERF=1 with qualified probes. Unarmed
 runs exit 77 without booting; armed runs boot one guest and

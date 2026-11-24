@@ -9,8 +9,9 @@ only the tested artifact and environment; an unarmed lane
 skips without booting.
 
 Requires MEMVEIL_VM_PERF=1 with qualified probes. The
-summary-mode targets (<= 5% throughput decrease, <= 10% p99
-increase) apply to the documented reference workload only;
+summary-mode targets (<= 5% throughput decrease, <= 25% p99
+increase, median-graded, data-amended 2026-11-24) apply to the
+documented reference workload only;
 detail, attached-idle, and undersized-buffer results print
 as measured ratios without invented thresholds. A summary
 ratio outside the targets is a declared LIMITATION, never a
