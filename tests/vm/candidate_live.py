@@ -373,6 +373,98 @@ def _require_honest_stop(stop):
                          'undrained')
 
 
+# Known detail-loss reason grammar: the product renders known detail loss
+# as `detail loss <total> (<nine buckets>)` with these buckets in this
+# order (detail_reason_known in the collector source). The carve-out
+# below pins the raw bucket counts from that rendering, never the
+# floored loss ratio.
+_DETAIL_LOSS_BUCKETS = ('submit_fail', 'malformed', 'dropped',
+                        'recursion_missed', 'size_omitted',
+                        'duration_omitted', 'signal_omitted', 'rejected',
+                        'write_failed')
+_DETAIL_LOSS_HEAD = re.compile(
+    r'^detail loss (\d+) \('
+    + r' '.join(r'%s=\((\d+)\)' % name for name in _DETAIL_LOSS_BUCKETS)
+    + r'\)$')
+
+
+def _parse_detail_loss_buckets(reason):
+    """Parse a known detail-loss reason into {bucket: raw count}.
+
+    Returns None unless the reason is exactly the product's known
+    grammar: the `detail loss <total>` head, all nine buckets in
+    order with canonical decimal counts, nothing else, and the
+    declared total equal to the bucket sum. Unknown-grammar reasons
+    (`detail loss unknown ...`), channel suffixes, non-canonical
+    counts, and any other drift all return None so the caller
+    refuses closed instead of guessing.
+    """
+    if not isinstance(reason, str):
+        return None
+    match = _DETAIL_LOSS_HEAD.match(reason)
+    if match is None:
+        return None
+    try:
+        total = int(match.group(1))
+        buckets = {}
+        for index, name in enumerate(_DETAIL_LOSS_BUCKETS):
+            text = match.group(index + 2)
+            count = int(text)
+            if text != str(count):
+                return None
+            buckets[name] = count
+    except ValueError:
+        return None
+    if total != sum(buckets.values()):
+        return None
+    return buckets
+
+
+def _signal_stop_omission_carveout(detail, verdict, end_reason):
+    """Whether one signal-omitted record excuses this detail loss.
+
+    On a signal stop, exactly one post-cut record can cross the stop
+    latch after the collector closes admission: the stop path counts
+    it into the signal_omitted bucket (the latch arm for the signal
+    stop reason) instead of persisting it. The exclusion is correct
+    sealed behavior -- the record falls outside the capture window,
+    so including it would corrupt window semantics -- and the count
+    is correct sealed behavior too -- silently dropping the record
+    would be loss fraud, so the product reports detail loss 1 while
+    the verdict stays known-loss at 0 bps (1/N floors to zero). The
+    capture is valid; only this gate's older detail-loss==0 pin
+    refuses it.
+
+    The carve-out accepts exactly that shape and nothing wider: the
+    RAW signal_omitted count is 1 (pinned from the reason buckets,
+    never from the floored 0-bps ratio), every other detail bucket
+    is 0, the detail channel is partial with loss 1, the verdict is
+    still the known-loss verdict at 0 bps, and the capture stopped
+    on a signal. A count of 2+, any other nonzero bucket, any other
+    verdict or ratio, a non-signal stop carrying an omission count,
+    or any reason grammar drift all return False, and the caller
+    then refuses through its original pin exactly as before.
+    """
+    if end_reason != 'signal':
+        return False
+    if not isinstance(detail, dict) or not isinstance(verdict, dict):
+        return False
+    if detail.get('status') != 'partial' or detail.get('loss_count') != '1':
+        return False
+    if verdict.get('name') != 'partial_known_loss':
+        return False
+    try:
+        if int(verdict.get('loss_ratio_bps')) != 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    buckets = _parse_detail_loss_buckets(detail.get('reason'))
+    if buckets is None:
+        return False
+    return all((count == 1) if name == 'signal_omitted' else (count == 0)
+               for name, count in buckets.items())
+
+
 def capture_facts(binary, capture, pool=False, oracle=None, window=None, stop_ns=None):
     from support.candidate_input import candidate
     session = candidate.read_json(capture / 'session.json')
@@ -414,8 +506,18 @@ def capture_facts(binary, capture, pool=False, oracle=None, window=None, stop_ns
     if _verdict_count(session_verdict.get('loss_ratio_bps'), 'session loss_ratio_bps') != 0:
         raise ValueError('live session carries known loss')
     quality = session['quality']
+    capture_block = session.get('capture')
+    if isinstance(capture_block, dict):
+        end_reason = capture_block.get('end_reason')
+    else:
+        end_reason = None
     for channel in ('detail', 'aggregate', 'correlation', 'baseline'):
         value = quality[channel]
+        # One honestly counted post-cut record on a signal stop is not
+        # degradation; anything else lossy still refuses below.
+        if channel == 'detail' and _signal_stop_omission_carveout(
+                value, session.get('verdict'), end_reason):
+            continue
         if value.get('loss_count') not in ('0', None): raise ValueError('capture channel loss: ' + channel)
         if value.get('status') not in ('complete_for_scope', 'not_applicable', 'unavailable'):
             raise ValueError('capture channel incomplete: ' + channel)
@@ -1333,8 +1435,18 @@ def _verify_leg_content(ordinal, leg, files):
             or session.get('stop') != capture.get('stop'):
         raise ValueError('campaign leg capture differs from retained session: '
                          + str(ordinal))
+    capture_block = session.get('capture')
+    if isinstance(capture_block, dict):
+        end_reason = capture_block.get('end_reason')
+    else:
+        end_reason = None
     for channel in ('detail', 'aggregate', 'correlation', 'baseline'):
         value = capture['quality'][channel]
+        # Same honest-omission carve-out as the leg gate, replayed from
+        # the digest-bound retained session; anything else lossy refuses.
+        if channel == 'detail' and _signal_stop_omission_carveout(
+                value, session.get('verdict'), end_reason):
+            continue
         if value.get('loss_count') not in ('0', None):
             raise ValueError('campaign leg channel loss: ' + channel)
         if value.get('status') not in ('complete_for_scope', 'not_applicable',
