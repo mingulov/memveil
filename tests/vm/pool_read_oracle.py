@@ -15,23 +15,70 @@ GAP_NS = 3 * 10**9
 DELIVERY_NS = 250000000
 MAX_RECORDS = 20000
 MAX_TRACE_BYTES = 8 * 1024**2
+MAX_DETACH_CONTROL_SKIPS = 4
+MAX_CONTROL_PER_THREAD = 2
+
+
+class PoolReadError(ValueError):
+    """A classified pool-trace projection failure; shapes only, never bytes."""
+    def __init__(self, check, shape, message, extra=None):
+        super().__init__(message)
+        self.check = check
+        self.shape = shape
+        self.extra = extra if extra is not None else {}
+
+
+def _match_control(line):
+    """Match strace detach-edge control output for read; None when absent.
+
+    Returns (kind, pid, path) with kind 'unfinished' or 'resumed', pid an
+    int or None, path the raw field bytes or None (a resumed line repeats
+    no path). Matching is transient; callers store shapes, never the line.
+    """
+    unfinished = (rb'(?:(?:\[pid\s+(\d+)\]|(\d+))\s+)?(\d+)\.(\d{6,9})\s+'
+                  rb'read\(\d+<([^>]+)>, .* <unfinished \.\.\.>\s*\n?')
+    match = re.fullmatch(unfinished, line)
+    if match is not None:
+        pid = int(match[1] or match[2]) if match[1] or match[2] else None
+        return ('unfinished', pid, match[5])
+    resumed = (rb'(?:(?:\[pid\s+(\d+)\]|(\d+))\s+)?(\d+)\.(\d{6,9})\s+'
+               rb'<\.\.\. read resumed>\s*.*?\)\s+=\s+(\?|-?\d+).*\n?')
+    match = re.fullmatch(resumed, line)
+    if match is None: return None
+    pid = int(match[1] or match[2]) if match[1] or match[2] else None
+    return ('resumed', pid, None)
 
 
 def project_read(line, received_ns, wall_ns, owned_thread, default_tid=None):
-    if len(line) > 65536: raise ValueError('pool trace line exceeds bound')
+    if len(line) > 65536:
+        raise PoolReadError('line_too_long', 'exceeds_65536', 'pool trace line exceeds bound')
     pattern = (rb'(?:(?:\[pid\s+(\d+)\]|(\d+))\s+)?(\d+)\.(\d{6,9})\s+'
                rb'read\(\d+<([^>]+)>, .*\)\s+=\s+(\d+)\s*\n?')
     match = re.fullmatch(pattern, line)
-    if match is None: raise ValueError('unrecognized or failed pool read')
+    if match is None:
+        control = _match_control(line)
+        shape = 'control_' + control[0] if control is not None else 'unrecognized'
+        raise PoolReadError('grammar', shape, 'unrecognized or failed pool read')
     pid = int(match[1] or match[2]) if match[1] or match[2] else default_tid
-    if pid is None or not owned_thread(pid): raise ValueError('pool read target is not an owned thread')
+    if pid is None or not owned_thread(pid):
+        raise PoolReadError('ownership', 'unowned_or_exited_tid', 'pool read target is not an owned thread')
     source_ns = int(match[3]) * 10**9 + int(match[4].ljust(9, b'0'))
-    if not -1000000 <= wall_ns - source_ns <= DELIVERY_NS:
-        raise ValueError('pool trace delivery is late or clock mapping is unstable')
-    path = match[5].decode('ascii')
-    if path not in PATHS: raise ValueError('pool read path is not allowlisted')
+    skew_ns = wall_ns - source_ns
+    if not -1000000 <= skew_ns <= DELIVERY_NS:
+        shape = 'late' if skew_ns > DELIVERY_NS else 'future'
+        raise PoolReadError('delivery', shape, 'pool trace delivery is late or clock mapping is unstable',
+                            {'skew_ns': str(skew_ns)})
+    try:
+        path = match[5].decode('ascii')
+    except UnicodeError:
+        raise PoolReadError('decode', 'non_ascii_path', 'pool read path is not ascii')
+    if path not in PATHS:
+        raise PoolReadError('path', 'foreign_path', 'pool read path is not allowlisted',
+                            {'path_len': str(len(path))})
     count = int(match[6])
-    if count > 65: raise ValueError('pool read exceeds source counter bound')
+    if count > 65:
+        raise PoolReadError('count_bound', 'over_65', 'pool read exceeds source counter bound',
+                            {'count': str(count)})
     if count == 0: return None
     return {'field': PATHS[path], 'returned_bytes': str(count), 'received_ns': str(received_ns)}
 
@@ -98,7 +145,8 @@ class PoolReadOracle:
         self.observation = {'kind': 'intrusive-read-cadence-only', 'pid': str(product.pid),
             'start_ticks': self.identity[0], 'nonce': nonce, 'executable_sha256': digest(binary),
             'tracer_sha256': digest(tracer), 'parser_sha256': digest(__file__),
-            'records': [], 'errors': [], 'cleanup': 'pending',
+            'records': [], 'errors': [], 'skipped_detach_control': [], 'cleanup': 'pending',
+            'detach': 'pending',
             'delivery_bound_ns': str(DELIVERY_NS), 'cadence_gap_bound_ns': str(GAP_NS)}
         self.stopping = False
         args = [tracer, '-f', '-qq', '-ttt', '-yy', '-s', '0', '-e', 'trace=read', '-e', 'signal=none']
@@ -115,20 +163,94 @@ class PoolReadOracle:
         except OSError:
             return False
 
+    def _failure_record(self, check, shape, line_len, received_ns, wall_ns, extra=None):
+        """Build a byte-free failure record: check, shape, sequence, timing.
+
+        Takes only lengths, clocks, and counts — never the line — so trace
+        bytes cannot flow into the record by construction; extras are
+        restricted to the same shapes, counts, and offsets at each raise.
+        """
+        count = len(self.observation['records'])
+        last = self.observation['records'][-1]['received_ns'] if count else None
+        row = {'class': check, 'shape': shape, 'seq': str(count),
+               'last_good_seq': str(count - 1) if count else 'none',
+               'last_good_received_ns': last if last is not None else 'none',
+               'failed_received_ns': str(received_ns), 'failed_wall_ns': str(wall_ns),
+               'gap_ns': str(received_ns - int(last)) if last is not None else 'none',
+               'line_len': str(line_len), 'stopping': 'true' if self.stopping else 'false'}
+        if extra: row.update(extra)
+        return row
+
+    def _skip_detach_control(self, control, line_len, received_ns, wall_ns, per_thread):
+        """Skip one detach-edge control line while stopping; else raise classified.
+
+        Skipping is observation-conservative: it can only remove records,
+        never add them, so the cadence gates in validate_pool only get
+        stricter. Each skipped line still proves exact detach grammar, an
+        owned thread, and an allowlisted path where the line carries one;
+        one thread has exactly one in-flight syscall, so more than a pair
+        per thread — or more than a bounded few overall — is not a detach
+        edge and fails loud.
+        """
+        kind, pid, path = control
+        tid = pid if pid is not None else self.product.pid
+        if not self._owned_thread(tid):
+            raise PoolReadError('ownership', 'control_' + kind + '_unowned',
+                                'pool detach control target is not an owned thread')
+        if path is not None:
+            try: decoded = path.decode('ascii')
+            except UnicodeError:
+                raise PoolReadError('decode', 'non_ascii_path', 'pool detach control path is not ascii')
+            if decoded not in PATHS:
+                raise PoolReadError('path', 'control_' + kind + '_foreign_path',
+                                    'pool detach control path is not allowlisted',
+                                    {'path_len': str(len(decoded))})
+        if per_thread.get(tid, 0) >= MAX_CONTROL_PER_THREAD:
+            raise PoolReadError('detach_control_bound', 'per_thread_pair',
+                                'pool detach control exceeds one in-flight read per thread')
+        if len(self.observation['skipped_detach_control']) >= MAX_DETACH_CONTROL_SKIPS:
+            raise PoolReadError('detach_control_bound', 'over_total',
+                                'pool detach control exceeds the detach-edge bound',
+                                {'bound_skips': str(MAX_DETACH_CONTROL_SKIPS)})
+        per_thread[tid] = per_thread.get(tid, 0) + 1
+        self.observation['skipped_detach_control'].append(self._failure_record(
+            'detach_control', kind, line_len, received_ns, wall_ns))
+
     def _read(self):
         total = 0
+        per_thread = {}
         try:
             while True:
                 line = self.tracer.stderr.readline(65537)
                 if not line: break
+                received_ns = time.monotonic_ns()
+                wall_ns = time.time_ns()
                 total += len(line)
-                if total > MAX_TRACE_BYTES: raise ValueError('trace_bytes_bound')
-                row = project_read(line, time.monotonic_ns(), time.time_ns(), self._owned_thread, self.product.pid)
-                if row is not None:
-                    if len(self.observation['records']) >= MAX_RECORDS: raise ValueError('trace_records_bound')
-                    self.observation['records'].append(row)
-        except (ValueError, OSError, UnicodeError):
-            self.observation['errors'].append('invalid_or_delayed_read_observation')
+                try:
+                    if total > MAX_TRACE_BYTES:
+                        raise PoolReadError('trace_bytes_bound', 'over_bound', 'trace_bytes_bound',
+                                            {'bound_bytes': str(MAX_TRACE_BYTES), 'total_bytes': str(total)})
+                    control = _match_control(line)
+                    if control is not None and self.stopping:
+                        self._skip_detach_control(control, len(line), received_ns, wall_ns, per_thread)
+                        continue
+                    row = project_read(line, received_ns, wall_ns, self._owned_thread, self.product.pid)
+                    if row is not None:
+                        if len(self.observation['records']) >= MAX_RECORDS:
+                            raise PoolReadError('trace_records_bound', 'over_bound', 'trace_records_bound',
+                                                {'bound_records': str(MAX_RECORDS)})
+                        self.observation['records'].append(row)
+                except PoolReadError as exc:
+                    self.observation['errors'].append(self._failure_record(
+                        exc.check, exc.shape, len(line), received_ns, wall_ns, exc.extra))
+                    return
+        except OSError as exc:
+            self.observation['errors'].append(self._failure_record(
+                'read_os_error', 'readline_failed', 0, time.monotonic_ns(), time.time_ns(),
+                {'errno': str(exc.errno or 0)}))
+        except ValueError as exc:
+            self.observation['errors'].append(self._failure_record(
+                'unexpected_value', type(exc).__name__, 0, time.monotonic_ns(), time.time_ns()))
 
     def check(self):
         if self.observation['errors'] or self.tracer.poll() is not None:
@@ -142,8 +264,14 @@ class PoolReadOracle:
         try:
             if self.tracer.poll() is None:
                 self.tracer.terminate()
-                try: self.tracer.wait(timeout=10)
-                except subprocess.TimeoutExpired: self.tracer.kill(); self.tracer.wait(timeout=10)
+                try:
+                    self.tracer.wait(timeout=10)
+                    self.observation['detach'] = 'graceful'
+                except subprocess.TimeoutExpired:
+                    self.tracer.kill(); self.tracer.wait(timeout=10)
+                    self.observation['detach'] = 'sigkill_after_timeout'
+            else:
+                self.observation['detach'] = 'tracer_already_exited'
             self.reader.join(timeout=5)
             if self.reader.is_alive(): raise ValueError('pool oracle reader did not stop')
             self.tracer.stderr.close()
