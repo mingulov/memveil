@@ -1,0 +1,45 @@
+{
+  "quality": {
+    "terminal": {
+      "status": "partial",
+      "loss_count": null
+    },
+    "baseline": {
+      "status": "complete_for_scope",
+      "loss_count": "0"
+    },
+    "identity": {
+      "status": "complete_for_scope",
+      "loss_count": "0"
+    },
+    "aggregate": {
+      "status": "complete_for_scope",
+      "loss_count": "0"
+    },
+    "detail": {
+      "status": "complete_for_scope",
+      "loss_count": "0"
+    }
+  },
+  "semantics": "inventory",
+  "observed_interval": {
+    "uncertainty": "50",
+    "end": "1000000100",
+    "start": "1000000000"
+  },
+  "clock_domain": "guest_monotonic_active",
+  "peer_class": "none-observed",
+  "caller_class": "allocator",
+  "native_result": 0,
+  "length_bytes": "4096",
+  "offset": "0",
+  "generation": "1",
+  "object_token_reason": "withheld",
+  "object_token": null,
+  "direction": "egress",
+  "kind": "census-entry",
+  "operation_id": "op-9",
+  "epoch": "7",
+  "source_id": "sharing-census",
+  "evidence_id": "ev-9"
+}

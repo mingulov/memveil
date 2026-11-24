@@ -1,0 +1,172 @@
+{
+  "cases": [
+    {
+      "name": "settled",
+      "statuses": [
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope"
+      ],
+      "losses": [
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+      ],
+      "expected_usable": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "name": "only-detail-unavailable",
+      "statuses": [
+        "unavailable",
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope"
+      ],
+      "losses": [
+        null,
+        "0",
+        "0",
+        "0",
+        "0"
+      ],
+      "expected_usable": [
+        false,
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "name": "only-aggregate-unavailable",
+      "statuses": [
+        "complete_for_scope",
+        "unavailable",
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope"
+      ],
+      "losses": [
+        "0",
+        null,
+        "0",
+        "0",
+        "0"
+      ],
+      "expected_usable": [
+        true,
+        false,
+        true,
+        true,
+        true
+      ]
+    },
+    {
+      "name": "only-identity-unavailable",
+      "statuses": [
+        "complete_for_scope",
+        "complete_for_scope",
+        "unavailable",
+        "complete_for_scope",
+        "complete_for_scope"
+      ],
+      "losses": [
+        "0",
+        "0",
+        null,
+        "0",
+        "0"
+      ],
+      "expected_usable": [
+        true,
+        true,
+        false,
+        true,
+        true
+      ]
+    },
+    {
+      "name": "only-baseline-unavailable",
+      "statuses": [
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope",
+        "unavailable",
+        "complete_for_scope"
+      ],
+      "losses": [
+        "0",
+        "0",
+        "0",
+        null,
+        "0"
+      ],
+      "expected_usable": [
+        true,
+        true,
+        true,
+        false,
+        true
+      ]
+    },
+    {
+      "name": "only-terminal-unavailable",
+      "statuses": [
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope",
+        "complete_for_scope",
+        "unavailable"
+      ],
+      "losses": [
+        "0",
+        "0",
+        "0",
+        "0",
+        null
+      ],
+      "expected_usable": [
+        true,
+        true,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "name": "measured-zero-kept",
+      "statuses": [
+        "complete_for_scope",
+        "complete_for_scope",
+        "partial",
+        "complete_for_scope",
+        "complete_for_scope"
+      ],
+      "losses": [
+        "0",
+        "0",
+        "4",
+        "0",
+        "0"
+      ],
+      "expected_usable": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
+    }
+  ]
+}
