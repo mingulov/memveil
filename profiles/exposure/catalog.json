@@ -278,7 +278,7 @@
       "atomicity": ["atomic", "interval", "unknown"],
       "clock_domains": ["guest_monotonic_active", "guest_boottime_elapsed", "external_trusted_interval"],
       "address_namespaces": ["guest_virtual", "guest_physical", "session_token", "interface_register", "channel_relid", "not_applicable"],
-      "object_classes": ["queue", "buffer", "channel", "mapping", "heap-object"],
+      "object_classes": ["queue", "buffer", "channel", "mapping", "heap_object"],
       "lifecycle_statuses": ["created", "live", "released", "quarantined", "unknown"],
       "subject_classes": ["guest-kernel-memory-management", "guest-direct-map", "guest-kernel-allocator", "guest-driver-virtio", "guest-driver-dma", "guest-kernel-cc-platform", "guest-kernel-vmbus", "guest-configuration", "capture-evidence"],
       "peer_classes": ["none-observed", "host-device", "device-or-subsystem", "device", "host-hypervisor", "host-tdx-module", "host-or-paravisor"],
@@ -286,6 +286,9 @@
     },
     "deferred": {
       "kinds": {"rule": "Freezes from admitted sources during adapter implementation; unknown kinds refuse. Never invented by adapters."},
+      "object_states": {"rule": "Freezes from admitted sources during adapter implementation; the identity producer owns the values."},
+      "scopes": {"rule": "Freezes from admitted sources during adapter implementation; scan and comparison scopes stay distinct."},
+      "null_reasons": {"rule": "Freezes with the 0.3.0 schemas; reason codes are closed enums."},
       "directions": {"rule": "Freezes from admitted sources during adapter implementation; CPU-copy direction stays a separate dimension."},
       "caller_classes": {"rule": "Freezes from admitted sources during adapter implementation; sanitized classes only, never raw addresses."},
       "counters": {"rule": "Freezes from admitted sources during adapter implementation; each counter names its scope and epoch."}
@@ -345,7 +348,7 @@
         {"name": "namespace", "optional": false, "nullable": false, "type": "label", "notes": "Address namespace of the token."},
         {"name": "origin_source", "optional": false, "nullable": false, "type": "label", "notes": "Catalog source that first observed the object."},
         {"name": "lifecycle_status", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies frozen lifecycle statuses."},
-        {"name": "state", "optional": false, "nullable": false, "type": "label", "notes": "Last resolved state with evidence; unresolved stays explicit."},
+        {"name": "state", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies deferred object states; unresolved stays explicit with evidence."},
         {"name": "state_evidence", "optional": false, "nullable": false, "type": "array", "notes": "Evidence ids supporting the state claim."},
         {"name": "expected_boundary", "optional": true, "nullable": false, "type": "object", "notes": "Admitted revert boundary or declared duration. Absent when no obligation applies; never null."},
         {"name": "uncertainty", "optional": false, "nullable": false, "type": "object", "notes": "Explicit gaps: alias, reuse, loss, missed events."}
@@ -357,7 +360,7 @@
         {"name": "source_id", "optional": false, "nullable": false, "type": "label", "notes": "Catalog source entry."},
         {"name": "start_time", "optional": false, "nullable": false, "type": "u64", "notes": "Sample start in the stated clock domain."},
         {"name": "end_time", "optional": false, "nullable": false, "type": "u64", "notes": "Sample end; samples are interval-valued, never atomic graphs by totals alone."},
-        {"name": "scope", "optional": false, "nullable": false, "type": "label", "notes": "Scanned scope (pool, map region, device class)."},
+        {"name": "scope", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies deferred scopes; names the scanned scope."},
         {"name": "counts", "optional": false, "nullable": false, "type": "object", "notes": "Observed counts keyed by vocabularies deferred counter name."},
         {"name": "units", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies frozen units; unknown units disable ratio rules."},
         {"name": "visited", "optional": false, "nullable": false, "type": "u64", "notes": "Entries visited by the scan."},
@@ -388,7 +391,7 @@
         {"name": "right_evidence", "optional": false, "nullable": false, "type": "string", "notes": "Right-capture evidence handle."},
         {"name": "delta", "optional": true, "nullable": true, "type": "s64", "notes": "Absent for incompatible metrics; null with reason when compatible but uncomputable."},
         {"name": "unit", "optional": false, "nullable": false, "type": "label", "notes": "Delta unit."},
-        {"name": "scope", "optional": false, "nullable": false, "type": "label", "notes": "Comparison scope that was compatibility-checked."},
+        {"name": "scope", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies deferred scopes; compatibility-checked before use."},
         {"name": "quality", "optional": false, "nullable": false, "type": "object", "notes": "Per-comparison quality."}
       ]
     }
