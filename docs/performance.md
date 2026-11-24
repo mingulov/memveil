@@ -11,9 +11,11 @@ See the [support table](support.md#capabilities-by-mode) for the shipping modes.
 `./tools/test perf-replay` generates a fixed 600,000-record synthetic
 capture (214,148,895 bytes, under the default 1 GiB input cap) with
 independently known totals. It measures the built `report` verb and verifies
-prefix scaling and paced regular-file reads. Targets are at most 60 seconds,
-at most 256 MiB userspace RSS and at least 10,000 records/second, with exact
-counts. Earlier documentation reported 5.5 seconds and 123.5 MiB on a
+prefix scaling and paced regular-file reads. Targets are at most 60 seconds
+for full and sealed replay, at most 256 MiB userspace RSS and at least
+10,000 records/second, with exact counts; the paced leg instead enforces
+a 60-second minimum duration. Earlier documentation reported 5.5 seconds
+and 123.5 MiB on a
 16-core x86-64 runner with 59 GiB RAM; those are historical development
 observations, not current-artifact results or a live-path overhead limit.
 
@@ -39,7 +41,8 @@ the repeat). RSS readings are cumulative reaped-child
 high-water marks, so every RSS cell is an upper bound, not a
 per-leg peak. A same-day repeat run confirmed (full 4.6 s at
 129,501 records/s with 72.3 MiB RSS; paced 92.7 MiB; exit 0).
-Both runs clear the envelope above.
+Both runs clear every applicable target above (ceilings on full and
+sealed replay, floor on the paced leg).
 
 The default paced leg still reads all 600,000 records over 60 seconds. A test-only
 `fread` adapter calls the real reader, counts bytes/newlines in the returned
