@@ -111,6 +111,11 @@
     "duplicates": "Duplicates are ignored; the first occurrence wins.",
     "device_filter": "Device filtering cannot hide global conversion or policy evidence; invalid combinations refuse with reason."
   },
+  "request_refusals": {
+    "conversion-journal": {"exit": 3, "reason": "Parses; refuses as having no record channel."},
+    "conversion-observe": {"exit": 3, "reason": "Parses; refuses as having no record channel."},
+    "planned-exposure": {"exit": 2, "reason": "Rejected as unknown capability until the adapter ships.", "applies_to": ["census", "object-lifetimes", "dma-paths", "shared-buffers", "host-interfaces", "mapping-inventory", "exposure-context"]}
+  },
   "platforms": [
     {
       "cell": "ordinary-linux",
@@ -147,7 +152,7 @@
       "capability": "conversion-journal",
       "subject_class": "guest-kernel-memory-management",
       "peer_class": "none-observed",
-      "address_namespace": "guest-virtual",
+      "address_namespace": "guest_virtual",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -157,7 +162,7 @@
       "capability": "census",
       "subject_class": "guest-direct-map",
       "peer_class": "none-observed",
-      "address_namespace": "guest-physical",
+      "address_namespace": "guest_physical",
       "phase": "pre_attach",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -167,7 +172,7 @@
       "capability": "object-lifetimes",
       "subject_class": "guest-kernel-allocator",
       "peer_class": "none-observed",
-      "address_namespace": "session-token",
+      "address_namespace": "session_token",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -177,7 +182,7 @@
       "capability": "dma-paths",
       "subject_class": "guest-driver-virtio",
       "peer_class": "host-device",
-      "address_namespace": "guest-physical",
+      "address_namespace": "guest_physical",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -187,7 +192,7 @@
       "capability": "shared-buffers",
       "subject_class": "guest-kernel-allocator",
       "peer_class": "device-or-subsystem",
-      "address_namespace": "session-token",
+      "address_namespace": "session_token",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -197,7 +202,7 @@
       "capability": "host-interfaces",
       "subject_class": "guest-kernel-cc-platform",
       "peer_class": "host-hypervisor",
-      "address_namespace": "interface-register",
+      "address_namespace": "interface_register",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -207,7 +212,17 @@
       "capability": "host-interfaces",
       "subject_class": "guest-kernel-cc-platform",
       "peer_class": "host-tdx-module",
-      "address_namespace": "guest-physical",
+      "address_namespace": "guest_physical",
+      "phase": "observed",
+      "status": "unavailable",
+      "reason": "adapter-unimplemented"
+    },
+    {
+      "source_id": "tdx-ve-metadata",
+      "capability": "host-interfaces",
+      "subject_class": "guest-kernel-cc-platform",
+      "peer_class": "host-tdx-module",
+      "address_namespace": "interface_register",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -217,7 +232,7 @@
       "capability": "host-interfaces",
       "subject_class": "guest-kernel-vmbus",
       "peer_class": "host-or-paravisor",
-      "address_namespace": "channel-relid",
+      "address_namespace": "channel_relid",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -227,7 +242,7 @@
       "capability": "mapping-inventory",
       "subject_class": "guest-kernel-memory-management",
       "peer_class": "device",
-      "address_namespace": "guest-physical",
+      "address_namespace": "guest_physical",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -237,7 +252,7 @@
       "capability": "exposure-context",
       "subject_class": "guest-configuration",
       "peer_class": "none-observed",
-      "address_namespace": "not-applicable",
+      "address_namespace": "not_applicable",
       "phase": "observed",
       "status": "unavailable",
       "reason": "adapter-unimplemented"
@@ -253,102 +268,128 @@
     {"code": "quarantined", "meaning": "Evidence exists but is held out of findings pending safety review."},
     {"code": "not-applicable-platform", "meaning": "A catalog reason explains why this platform cannot produce the entry; absence of events alone never qualifies."}
   ],
+  "vocabularies": {
+    "frozen": {
+      "semantics": ["request", "result", "inventory", "lifecycle", "state", "native_rejection"],
+      "phase": ["boot", "pre_attach", "observed"],
+      "source_status": ["available", "partial", "unavailable", "not_applicable", "disabled"],
+      "policy_result": ["conforms", "deviates_known", "violates", "inconclusive", "unavailable"],
+      "compatibility": ["compatible", "incompatible", "unavailable"],
+      "atomicity": ["atomic", "interval", "unknown"],
+      "clock_domains": ["guest_monotonic_active", "guest_boottime_elapsed", "external_trusted_interval"],
+      "address_namespaces": ["guest_virtual", "guest_physical", "session_token", "interface_register", "channel_relid", "not_applicable"],
+      "object_classes": ["queue", "buffer", "channel", "mapping", "heap-object"],
+      "lifecycle_statuses": ["created", "live", "released", "quarantined", "unknown"],
+      "subject_classes": ["guest-kernel-memory-management", "guest-direct-map", "guest-kernel-allocator", "guest-driver-virtio", "guest-driver-dma", "guest-kernel-cc-platform", "guest-kernel-vmbus", "guest-configuration", "capture-evidence"],
+      "peer_classes": ["none-observed", "host-device", "device-or-subsystem", "device", "host-hypervisor", "host-tdx-module", "host-or-paravisor"],
+      "units": ["bytes", "unknown"]
+    },
+    "deferred": {
+      "kinds": {"rule": "Freezes from admitted sources during adapter implementation; unknown kinds refuse. Never invented by adapters."},
+      "directions": {"rule": "Freezes from admitted sources during adapter implementation; CPU-copy direction stays a separate dimension."},
+      "caller_classes": {"rule": "Freezes from admitted sources during adapter implementation; sanitized classes only, never raw addresses."},
+      "counters": {"rule": "Freezes from admitted sources during adapter implementation; each counter names its scope and epoch."}
+    },
+    "revision_rule": "Frozen lists change only by catalog revision with a version bump; adapters select from frozen lists or wait for the deferred freeze."
+  },
   "field_conventions": {
     "u64": "Canonical decimal strings, no signs, leading zeros, fractions or scientific notation; range checked to 18446744073709551615.",
-    "nullable": "Null only with a typed reason; unknown is never zero or an empty string.",
-    "labels": "Enumerated kinds and reason codes only; adapters cannot append arbitrary kernel labels."
+    "s64": "JSON integers. Signed native results are outside the u64 decimal-string class.",
+    "optional": "A field marked optional may have its key absent. Absent and null are different: absent means not applicable to this record.",
+    "null_with_reason": "A field marked nullable may be null only with a sibling {name}_reason string carrying a typed reason code (vocabulary freezes with the 0.3.0 schemas). Unknown is never zero or an empty string.",
+    "labels": "Closed enum values use underscores; identifier slugs (capabilities, sources, reasons, scenarios, subject and peer classes) use hyphens. Adapters cannot append arbitrary kernel labels."
   },
   "records": {
     "CoverageSource": {
       "fields": [
-        {"name": "source_id", "optional": false, "type": "label", "notes": "Catalog source entry this record describes."},
-        {"name": "capability", "optional": false, "type": "label", "notes": "Owning capability id."},
-        {"name": "profile_id", "optional": false, "type": "string", "notes": "Semantic profile that admitted the source."},
-        {"name": "subject_id", "optional": false, "type": "label", "notes": "Observed subject class."},
-        {"name": "platform_cell", "optional": false, "type": "label", "notes": "Exact admitted cell; never a bare release string."},
-        {"name": "address_namespace", "optional": false, "type": "label", "notes": "Namespace of every address-like field from this source."},
-        {"name": "phase", "optional": false, "type": "enum", "notes": "One of boot, pre_attach, observed."},
-        {"name": "status", "optional": false, "type": "enum", "notes": "One of available, partial, unavailable, not_applicable, disabled."},
-        {"name": "reason", "optional": false, "type": "label", "notes": "Source-reason code; required even when available."},
-        {"name": "window", "optional": false, "type": "object", "notes": "Observed interval this status covers."},
-        {"name": "quality", "optional": false, "type": "object", "notes": "Independent detail, aggregate, identity, baseline and terminal quality."}
+        {"name": "source_id", "optional": false, "nullable": false, "type": "label", "notes": "Catalog source entry this record describes."},
+        {"name": "capability", "optional": false, "nullable": false, "type": "label", "notes": "Owning capability id."},
+        {"name": "profile_id", "optional": false, "nullable": false, "type": "string", "notes": "Semantic profile that admitted the source."},
+        {"name": "subject_id", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies frozen subject classes."},
+        {"name": "platform_cell", "optional": false, "nullable": false, "type": "label", "notes": "Exact admitted cell; never a bare release string."},
+        {"name": "address_namespace", "optional": false, "nullable": false, "type": "label", "notes": "Namespace of every address-like field from this source."},
+        {"name": "phase", "optional": false, "nullable": false, "type": "enum", "notes": "One of boot, pre_attach, observed."},
+        {"name": "status", "optional": false, "nullable": false, "type": "enum", "notes": "One of available, partial, unavailable, not_applicable, disabled."},
+        {"name": "reason", "optional": false, "nullable": false, "type": "label", "notes": "Source-reason code; required even when available."},
+        {"name": "window", "optional": false, "nullable": false, "type": "object", "notes": "Observed interval this status covers."},
+        {"name": "quality", "optional": false, "nullable": false, "type": "object", "notes": "Independent detail, aggregate, identity, baseline and terminal quality."}
       ]
     },
     "ExposureFact": {
       "fields": [
-        {"name": "evidence_id", "optional": false, "type": "string", "notes": "Session-unique evidence handle."},
-        {"name": "source_id", "optional": false, "type": "label", "notes": "Catalog source entry."},
-        {"name": "epoch", "optional": false, "type": "u64", "notes": "Measurement epoch; resets break comparability."},
-        {"name": "operation_id", "optional": false, "type": "string", "notes": "Operation handle; exists before any object token."},
-        {"name": "parent_operation_id", "optional": true, "type": "string", "notes": "Present only for nested operations."},
-        {"name": "kind", "optional": false, "type": "label", "notes": "Finite catalog kind; unknown kinds refuse."},
-        {"name": "direction", "optional": false, "type": "label", "notes": "Request direction; CPU-copy direction stays separate."},
-        {"name": "object_token", "optional": true, "type": "string", "notes": "Session-local token; never a physical address."},
-        {"name": "generation", "optional": false, "type": "u64", "notes": "Token generation; reuse starts a new lineage."},
-        {"name": "offset", "optional": false, "type": "u64", "notes": "Byte offset in the source namespace."},
-        {"name": "length_bytes", "optional": false, "type": "u64", "notes": "Requested length; effective length stays separate."},
-        {"name": "native_result", "optional": false, "type": "s64-or-null", "notes": "Observed native status; null with reason when unobservable."},
-        {"name": "caller_class", "optional": false, "type": "label", "notes": "Sanitized caller class, never a raw address."},
-        {"name": "peer_class", "optional": false, "type": "label", "notes": "Peer class (host, paravisor, device) or none-observed."},
-        {"name": "clock_domain", "optional": false, "type": "label", "notes": "Guest-monotonic-active, guest-boottime-elapsed or external-trusted-interval."},
-        {"name": "observed_interval", "optional": false, "type": "object", "notes": "Start/end in the stated clock domain with uncertainty."},
-        {"name": "semantics", "optional": false, "type": "enum", "notes": "One of request, result, inventory, lifecycle, state, native_rejection; absent capability never promotes a record to a stronger class."},
-        {"name": "quality", "optional": false, "type": "object", "notes": "Per-record quality; loss stays visible."}
+        {"name": "evidence_id", "optional": false, "nullable": false, "type": "string", "notes": "Session-unique evidence handle."},
+        {"name": "source_id", "optional": false, "nullable": false, "type": "label", "notes": "Catalog source entry."},
+        {"name": "epoch", "optional": false, "nullable": false, "type": "u64", "notes": "Measurement epoch; resets break comparability."},
+        {"name": "operation_id", "optional": false, "nullable": false, "type": "string", "notes": "Operation handle; exists before any object token."},
+        {"name": "parent_operation_id", "optional": true, "nullable": true, "type": "string", "notes": "Absent for top-level operations; null with reason when the parent is unknown."},
+        {"name": "kind", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies deferred kinds; unknown kinds refuse."},
+        {"name": "direction", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies deferred directions; CPU-copy direction stays separate."},
+        {"name": "object_token", "optional": true, "nullable": true, "type": "string", "notes": "Absent when no object is involved; null with reason when the token is unknown. Never a physical address."},
+        {"name": "generation", "optional": false, "nullable": false, "type": "u64", "notes": "Token generation; reuse starts a new lineage."},
+        {"name": "offset", "optional": false, "nullable": false, "type": "u64", "notes": "Byte offset in the source namespace."},
+        {"name": "length_bytes", "optional": false, "nullable": false, "type": "u64", "notes": "Requested length; effective length stays separate."},
+        {"name": "native_result", "optional": false, "nullable": true, "type": "s64", "notes": "Always present; null with reason when unobservable."},
+        {"name": "caller_class", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies deferred caller classes; never a raw address."},
+        {"name": "peer_class", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies frozen peer classes."},
+        {"name": "clock_domain", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies clock_domains; no clock silently replaces another."},
+        {"name": "observed_interval", "optional": false, "nullable": false, "type": "object", "notes": "Start/end in the stated clock domain with uncertainty."},
+        {"name": "semantics", "optional": false, "nullable": false, "type": "enum", "notes": "One of request, result, inventory, lifecycle, state, native_rejection; absent capability never promotes a record to a stronger class."},
+        {"name": "quality", "optional": false, "nullable": false, "type": "object", "notes": "Per-record quality; loss stays visible."}
       ]
     },
     "ExposureObject": {
       "fields": [
-        {"name": "object_token", "optional": false, "type": "string", "notes": "Session-local token; never a physical address."},
-        {"name": "generation", "optional": false, "type": "u64", "notes": "Lineage generation; intervals split and merge only within one lineage."},
-        {"name": "object_class", "optional": false, "type": "label", "notes": "Catalog object class (queue, buffer, channel, mapping, heap-object)."},
-        {"name": "namespace", "optional": false, "type": "label", "notes": "Address namespace of the token."},
-        {"name": "origin_source", "optional": false, "type": "label", "notes": "Catalog source that first observed the object."},
-        {"name": "lifecycle_status", "optional": false, "type": "label", "notes": "Created, live, released, quarantined or unknown."},
-        {"name": "state", "optional": false, "type": "label", "notes": "Last resolved state with evidence; unresolved stays explicit."},
-        {"name": "state_evidence", "optional": false, "type": "array", "notes": "Evidence ids supporting the state claim."},
-        {"name": "expected_boundary", "optional": true, "type": "object", "notes": "Admitted revert boundary or declared duration, when an obligation applies."},
-        {"name": "uncertainty", "optional": false, "type": "object", "notes": "Explicit gaps: alias, reuse, loss, missed events."}
+        {"name": "object_token", "optional": false, "nullable": false, "type": "string", "notes": "Session-local token; never a physical address."},
+        {"name": "generation", "optional": false, "nullable": false, "type": "u64", "notes": "Lineage generation; intervals split and merge only within one lineage."},
+        {"name": "object_class", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies frozen object classes."},
+        {"name": "namespace", "optional": false, "nullable": false, "type": "label", "notes": "Address namespace of the token."},
+        {"name": "origin_source", "optional": false, "nullable": false, "type": "label", "notes": "Catalog source that first observed the object."},
+        {"name": "lifecycle_status", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies frozen lifecycle statuses."},
+        {"name": "state", "optional": false, "nullable": false, "type": "label", "notes": "Last resolved state with evidence; unresolved stays explicit."},
+        {"name": "state_evidence", "optional": false, "nullable": false, "type": "array", "notes": "Evidence ids supporting the state claim."},
+        {"name": "expected_boundary", "optional": true, "nullable": false, "type": "object", "notes": "Admitted revert boundary or declared duration. Absent when no obligation applies; never null."},
+        {"name": "uncertainty", "optional": false, "nullable": false, "type": "object", "notes": "Explicit gaps: alias, reuse, loss, missed events."}
       ]
     },
     "BaselineSample": {
       "fields": [
-        {"name": "sample_id", "optional": false, "type": "string", "notes": "Session-unique sample handle."},
-        {"name": "source_id", "optional": false, "type": "label", "notes": "Catalog source entry."},
-        {"name": "start_time", "optional": false, "type": "u64", "notes": "Sample start in the stated clock domain."},
-        {"name": "end_time", "optional": false, "type": "u64", "notes": "Sample end; samples are interval-valued, never atomic graphs by totals alone."},
-        {"name": "scope", "optional": false, "type": "label", "notes": "Scanned scope (pool, map region, device class)."},
-        {"name": "counts", "optional": false, "type": "object", "notes": "Observed counts keyed by catalog counter name."},
-        {"name": "units", "optional": false, "type": "label", "notes": "Count units; unknown units disable ratio rules."},
-        {"name": "visited", "optional": false, "type": "u64", "notes": "Entries visited by the scan."},
-        {"name": "returned", "optional": false, "type": "u64", "notes": "Records returned; bounded separately from visited."},
-        {"name": "bounded", "optional": false, "type": "boolean", "notes": "True when the scan hit a bound and the result is explicitly partial."},
-        {"name": "atomicity", "optional": false, "type": "label", "notes": "Atomic, interval or unknown; unproved atomicity stays interval."},
-        {"name": "quality", "optional": false, "type": "object", "notes": "Per-sample quality."}
+        {"name": "sample_id", "optional": false, "nullable": false, "type": "string", "notes": "Session-unique sample handle."},
+        {"name": "source_id", "optional": false, "nullable": false, "type": "label", "notes": "Catalog source entry."},
+        {"name": "start_time", "optional": false, "nullable": false, "type": "u64", "notes": "Sample start in the stated clock domain."},
+        {"name": "end_time", "optional": false, "nullable": false, "type": "u64", "notes": "Sample end; samples are interval-valued, never atomic graphs by totals alone."},
+        {"name": "scope", "optional": false, "nullable": false, "type": "label", "notes": "Scanned scope (pool, map region, device class)."},
+        {"name": "counts", "optional": false, "nullable": false, "type": "object", "notes": "Observed counts keyed by vocabularies deferred counter name."},
+        {"name": "units", "optional": false, "nullable": false, "type": "label", "notes": "Vocabularies frozen units; unknown units disable ratio rules."},
+        {"name": "visited", "optional": false, "nullable": false, "type": "u64", "notes": "Entries visited by the scan."},
+        {"name": "returned", "optional": false, "nullable": false, "type": "u64", "notes": "Records returned; bounded separately from visited."},
+        {"name": "bounded", "optional": false, "nullable": false, "type": "boolean", "notes": "True when the scan hit a bound and the result is explicitly partial."},
+        {"name": "atomicity", "optional": false, "nullable": false, "type": "label", "notes": "Atomic, interval or unknown; unproved atomicity stays interval."},
+        {"name": "quality", "optional": false, "nullable": false, "type": "object", "notes": "Per-sample quality."}
       ]
     },
     "PolicyResult": {
       "fields": [
-        {"name": "rule_id", "optional": false, "type": "string", "notes": "Stable authored rule id."},
-        {"name": "scope_id", "optional": false, "type": "string", "notes": "Scope the rule was evaluated against."},
-        {"name": "result", "optional": false, "type": "enum", "notes": "One of conforms, deviates_known, violates, inconclusive, unavailable."},
-        {"name": "evidence_ids", "optional": false, "type": "array", "notes": "Evidence supporting this result."},
-        {"name": "missing_sources", "optional": false, "type": "array", "notes": "Required sources absent from the capture."},
-        {"name": "exceptions_applied", "optional": false, "type": "array", "notes": "Bounded exceptions that applied, each naming its rule."},
-        {"name": "clock_domain", "optional": false, "type": "label", "notes": "Clock domain of the temporal evaluation."},
-        {"name": "reason", "optional": false, "type": "string", "notes": "Human-readable rule/outcome explanation with a next investigation."}
+        {"name": "rule_id", "optional": false, "nullable": false, "type": "string", "notes": "Stable authored rule id."},
+        {"name": "scope_id", "optional": false, "nullable": false, "type": "string", "notes": "Scope the rule was evaluated against."},
+        {"name": "result", "optional": false, "nullable": false, "type": "enum", "notes": "One of conforms, deviates_known, violates, inconclusive, unavailable."},
+        {"name": "evidence_ids", "optional": false, "nullable": false, "type": "array", "notes": "Evidence supporting this result."},
+        {"name": "missing_sources", "optional": false, "nullable": false, "type": "array", "notes": "Required sources absent from the capture."},
+        {"name": "exceptions_applied", "optional": false, "nullable": false, "type": "array", "notes": "Bounded exceptions that applied, each naming its rule."},
+        {"name": "clock_domain", "optional": false, "nullable": false, "type": "label", "notes": "Clock domain of the temporal evaluation."},
+        {"name": "reason", "optional": false, "nullable": false, "type": "string", "notes": "Human-readable rule/outcome explanation with a next investigation."}
       ]
     },
     "ComparisonResult": {
       "fields": [
-        {"name": "metric_id", "optional": false, "type": "string", "notes": "Compared metric."},
-        {"name": "compatibility", "optional": false, "type": "enum", "notes": "One of compatible, incompatible, unavailable."},
-        {"name": "reason", "optional": false, "type": "string", "notes": "Per-metric compatibility reason; no numeric delta for incompatible metrics."},
-        {"name": "left_evidence", "optional": false, "type": "string", "notes": "Left-capture evidence handle."},
-        {"name": "right_evidence", "optional": false, "type": "string", "notes": "Right-capture evidence handle."},
-        {"name": "delta", "optional": true, "type": "s64", "notes": "Exact delta; present only for compatible metrics."},
-        {"name": "unit", "optional": false, "type": "label", "notes": "Delta unit."},
-        {"name": "scope", "optional": false, "type": "label", "notes": "Comparison scope that was compatibility-checked."},
-        {"name": "quality", "optional": false, "type": "object", "notes": "Per-comparison quality."}
+        {"name": "metric_id", "optional": false, "nullable": false, "type": "string", "notes": "Compared metric."},
+        {"name": "compatibility", "optional": false, "nullable": false, "type": "enum", "notes": "One of compatible, incompatible, unavailable."},
+        {"name": "reason", "optional": false, "nullable": false, "type": "string", "notes": "Per-metric compatibility reason; no numeric delta for incompatible metrics."},
+        {"name": "left_evidence", "optional": false, "nullable": false, "type": "string", "notes": "Left-capture evidence handle."},
+        {"name": "right_evidence", "optional": false, "nullable": false, "type": "string", "notes": "Right-capture evidence handle."},
+        {"name": "delta", "optional": true, "nullable": true, "type": "s64", "notes": "Absent for incompatible metrics; null with reason when compatible but uncomputable."},
+        {"name": "unit", "optional": false, "nullable": false, "type": "label", "notes": "Delta unit."},
+        {"name": "scope", "optional": false, "nullable": false, "type": "label", "notes": "Comparison scope that was compatibility-checked."},
+        {"name": "quality", "optional": false, "nullable": false, "type": "object", "notes": "Per-comparison quality."}
       ]
     }
   },
@@ -377,7 +418,7 @@
       "oracle": "Independent owned-operation ledger plus native result agreement; wrapper success alone never establishes state.",
       "subject": "guest-kernel-memory-management",
       "peer": "none-observed",
-      "namespace": "guest-virtual",
+      "namespace": "guest_virtual",
       "source_assumptions": "Admitted journal channel, exact cell identity, safe attachment proof."
     },
     {
@@ -387,7 +428,7 @@
       "oracle": "Owned direct-map fixture with exact counts; interval, alias and race bounds checked.",
       "subject": "guest-direct-map",
       "peer": "none-observed",
-      "namespace": "guest-physical",
+      "namespace": "guest_physical",
       "source_assumptions": "Bounded scan completes inside one second on the admitted reference cell."
     },
     {
@@ -397,7 +438,7 @@
       "oracle": "Independent identity, generation and lifecycle ledger; failure, alias, reuse and loss never invent state.",
       "subject": "guest-kernel-allocator",
       "peer": "none-observed",
-      "namespace": "session-token",
+      "namespace": "session_token",
       "source_assumptions": "Source-admitted resolver with declared address space and generation model."
     },
     {
@@ -407,7 +448,7 @@
       "oracle": "Independent create, use and teardown ledger; coherent memory is not synonymous with host-shared.",
       "subject": "guest-driver-virtio",
       "peer": "host-device",
-      "namespace": "guest-physical",
+      "namespace": "guest_physical",
       "source_assumptions": "Queue identity survives the capture window; steady traffic is independently driven."
     },
     {
@@ -417,18 +458,28 @@
       "oracle": "Owned allocation ledger with attach, map, use and destruction kept distinct.",
       "subject": "guest-kernel-allocator",
       "peer": "device-or-subsystem",
-      "namespace": "session-token",
+      "namespace": "session_token",
       "source_assumptions": "Shared origin is admitted; generic buffer objects never imply confidential sharing."
     },
     {
       "id": "interface-activity",
       "family": "host interfaces",
-      "positive_setup": "Covered guest/host interface activity is observed on the matching cell.",
+      "positive_setup": "Covered SNP GHCB and #VC interface activity is observed on the matching SNP cell.",
       "oracle": "Coverage and rejection-source catalog; supported native errors are facts and rate changes never prove an attack.",
       "subject": "guest-kernel-cc-platform",
       "peer": "host-hypervisor",
-      "namespace": "interface-register",
-      "source_assumptions": "Interface source admitted for the exact platform; unavailable subchannels labeled separately."
+      "namespace": "interface_register",
+      "source_assumptions": "SNP interface source admitted for the exact cell; unavailable subchannels labeled separately."
+    },
+    {
+      "id": "tdx-ve-interface-activity",
+      "family": "host interfaces",
+      "positive_setup": "Covered TDX #VE interface activity is observed on the matching TDX cell with per-exit metadata.",
+      "oracle": "TDX exit catalog with supported native errors as facts; rate changes never prove an attack.",
+      "subject": "guest-kernel-cc-platform",
+      "peer": "host-tdx-module",
+      "namespace": "interface_register",
+      "source_assumptions": "TDX #VE source admitted for the exact cell; SNP evidence never qualifies TDX."
     },
     {
       "id": "channel-lifetimes",
@@ -437,7 +488,7 @@
       "oracle": "Host-facing versus confidential-paravisor negative controls; no inference into paravisor internal memory.",
       "subject": "guest-kernel-vmbus",
       "peer": "host-or-paravisor",
-      "namespace": "channel-relid",
+      "namespace": "channel_relid",
       "source_assumptions": "Peer topology is known; channel lifetime events are complete or explicitly gapped."
     },
     {
@@ -447,7 +498,7 @@
       "oracle": "Independent mapping fixtures; inventory only, never a claim to trace every access.",
       "subject": "guest-kernel-memory-management",
       "peer": "device",
-      "namespace": "guest-physical",
+      "namespace": "guest_physical",
       "source_assumptions": "Mapping class supported by the selected stack; disallowed uses stay unsupported."
     },
     {
@@ -457,7 +508,7 @@
       "oracle": "Configuration fixtures set independently of the collector; no payload and no exfiltration verdict.",
       "subject": "guest-configuration",
       "peer": "none-observed",
-      "namespace": "not-applicable",
+      "namespace": "not_applicable",
       "source_assumptions": "Configuration sources are allowlisted; facts are point-in-time unless a change source exists."
     },
     {
@@ -467,17 +518,17 @@
       "oracle": "Segment-level agreement ledger; missing bounce events never imply direct private DMA.",
       "subject": "guest-driver-dma",
       "peer": "host-device",
-      "namespace": "guest-physical",
+      "namespace": "guest_physical",
       "source_assumptions": "Path admission per operation; outer completion observed independently."
     },
     {
       "id": "authored-policy-finding",
       "family": "policy",
-      "positive_setup": "An unexpected covered operation trips an authored rule; a proved lifecycle violation and an inconclusive-on-unknown case are also shown.",
-      "oracle": "Golden policy files with expected findings; unknown required evidence prevents conformity.",
+      "positive_setup": "An unexpected covered operation trips an authored rule; a proved lifecycle violation, an independently established configuration deviation, and an inconclusive-on-unknown case are also shown.",
+      "oracle": "Golden policy files with expected findings, including configuration fixtures set independently of the collector; unknown required evidence prevents conformity.",
       "subject": "capture-evidence",
       "peer": "none-observed",
-      "namespace": "not-applicable",
+      "namespace": "not_applicable",
       "source_assumptions": "Policy file immutable for the run; all applicable rules intersect."
     },
     {
@@ -487,7 +538,7 @@
       "oracle": "Identity, profile, workload, window and unit compatibility checks; smaller totals never imply improved confidentiality.",
       "subject": "capture-evidence",
       "peer": "none-observed",
-      "namespace": "not-applicable",
+      "namespace": "not_applicable",
       "source_assumptions": "Both captures carry the facts the requested metrics need."
     },
     {
@@ -497,17 +548,17 @@
       "oracle": "Injected-loss fixtures with exact expected gaps; no silent fallback and no loss converted to zero.",
       "subject": "capture-evidence",
       "peer": "none-observed",
-      "namespace": "not-applicable",
+      "namespace": "not_applicable",
       "source_assumptions": "Every bounded operation carries a deadline; exhaustion is explicit."
     },
     {
       "id": "operator-walkthrough",
       "family": "usefulness",
-      "positive_setup": "Healthy, seeded-unexpected, boot and pre-attach, incomplete, and metadata-indistinguishable cases each render with a next action.",
-      "oracle": "Held-out healthy workloads with zero false violations; seeded findings explainable end to end.",
+      "positive_setup": "Healthy, seeded-unexpected, boot and pre-attach, incomplete, and metadata-indistinguishable cases each render with a next action; an exact candidate artifact qualifies across the supported cells.",
+      "oracle": "Held-out healthy workloads with zero false violations; seeded findings explainable end to end; exact-candidate bytes evidenced per cell.",
       "subject": "capture-evidence",
       "peer": "none-observed",
-      "namespace": "not-applicable",
+      "namespace": "not_applicable",
       "source_assumptions": "Examples ship with accurate provenance; provisional data is labeled as such."
     }
   ]

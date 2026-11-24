@@ -9,10 +9,13 @@ capability, source, platform, record, reason, reservation,
 exit and scenario entries. The two stay in lockstep; when
 they disagree, the catalog wins and this document is fixed.
 
-None of the capabilities below ship yet. Requesting one
-refuses honestly until its adapter lands with test
-evidence on an admitted cell. Ordinary-Linux evidence
-never qualifies a confidential-guest claim.
+None of the capabilities below ship yet. Requesting a
+planned exposure capability rejects it as unknown (exit
+2) until its adapter lands with test evidence on an
+admitted cell; the reserved journal names parse but
+refuse as having no record channel (exit 3).
+Ordinary-Linux evidence never qualifies a
+confidential-guest claim.
 
 ## Capability families
 
@@ -49,9 +52,10 @@ environment dumps are never collected; see
 
 Every fact names its catalog source, the exact admitted
 platform cell, and the address namespace of its fields.
-Namespaces never mix: guest-virtual, guest-physical,
-device, interface and session-token values stay separate,
-and no token is a physical address. The required cells
+Namespaces never mix: guest_virtual, guest_physical,
+session_token, interface_register and channel_relid
+values stay separate, and no token is a physical
+address. The required cells
 are one exact SNP guest, one standalone TDX guest and
 one Hyper-V guest with its paravisor topology; ordinary
 Linux is the reference cell for ordinary capabilities

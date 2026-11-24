@@ -25,12 +25,12 @@ bindings, rules and bounded exceptions:
   "subject_scope": "virtio-queue-lifetimes",
   "applies_to": {"platform": "sev-snp", "profile": "pinned"},
   "required_sources": ["dma-virtio-paths"],
-  "clock": "guest-monotonic-active",
+  "clock": "guest_monotonic_active",
   "role_bindings": {"queue": "snapshot-role-1"},
   "rules": [
     {
       "rule_id": "no-unexpected-queue",
-      "selector": {"operation": "create", "direction": "shared"},
+      "selector": {"capability": "dma-paths", "source_id": "dma-virtio-paths", "semantics": "request"},
       "permitted": "allowlisted-only",
       "limit": {"window": "capture", "max": "0"},
       "obligation": null
@@ -43,11 +43,13 @@ bindings, rules and bounded exceptions:
 Rules have stable ids, selector AND constraints over
 finite enumerated fields and exact labels, a permitted
 operation and direction, per-operation or window limits,
-and an optional admitted lifecycle obligation. There
-are no arbitrary expressions and no unrestricted
-patterns. All applicable rules intersect; an exception
-names one rule and one constraint and cannot bypass
-others.
+and an optional admitted lifecycle obligation. Selector
+fields come from the frozen catalog vocabularies; kind,
+direction, caller and counter labels stay unusable until
+their deferred freeze. There are no arbitrary
+expressions and no unrestricted patterns. All applicable
+rules intersect; an exception names one rule and one
+constraint and cannot bypass others.
 
 ## Evaluation
 
@@ -58,7 +60,7 @@ inconclusive, never an allowlist match. Known
 out-of-allowlist activity inside a closed declared
 scope is a violation; activity outside the scope is
 shown separately. Result precedence is violates, then
-inconclusive, then deviates-known, then conforms, and
+inconclusive, then deviates_known, then conforms, and
 an unavailable required source counts as inconclusive.
 Known positive findings survive unrelated data loss
 with the remaining gaps visible. Capture validity,
