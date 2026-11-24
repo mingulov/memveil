@@ -94,3 +94,41 @@ Session, event and report 0.3.0 plus standalone policy
 ship yet and current readers refuse them. See
 [format compatibility](format-compatibility.md) and the
 [schema notes](../schemas/README.md).
+
+## Capture comparison compatibility
+
+Two persisted captures compare metric by metric. Each
+metric first passes the compatibility predicate below;
+only a compatible metric gets an exact delta (right
+minus left, in the shared unit). A refused metric
+carries its typed reason and no numeric delta, and one
+refused metric never hides the comparable unaffected
+metrics beside it.
+
+Checks run in order; the first failure names the reason:
+
+| Order | Reason | Meaning |
+| --- | --- | --- |
+| 1 | `metric_missing` | Metric absent on one side; reported `unavailable` |
+| 2 | `unit_mismatch` | Units differ; no delta across units |
+| 3 | `scope_mismatch` | Scopes differ; scan scopes stay distinct |
+| 4 | `legacy_input` | One side predates integrity metadata |
+| 5 | `epoch_mismatch` | Epochs differ; counters restarted |
+| 6 | `device_binding_mismatch` | Bound devices differ |
+| 7 | `workload_mismatch` | Workloads differ under an equal profile |
+| 8 | `source_meaning_change` | The metric's source changed meaning |
+| 9 | `clock_mismatch` | Clock domains differ |
+| 10 | `window_mismatch` | Window bounds differ |
+| 11 | `partial_census` | Census-derived metric with a bounded scan |
+| 12 | `compatible` | Predicate passed; delta rules below apply |
+
+Compatible rows carry `delta` except when a side is
+unknown (`value_unknown`, null delta with reason) or
+the difference overflows the signed range
+(`delta_overflow`, null delta with reason).
+
+Incomplete journal events never enter a delta: the
+comparator reads finalized metric values only. A
+comparison whose requested metrics include refused rows
+exits 4 with per-metric reasons; counts stay counts and
+never become verdicts about the guest.
