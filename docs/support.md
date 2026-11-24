@@ -118,8 +118,8 @@ fallback are not provided.
   dropped child), and `memcg` refuses `load-enomem`
   under its calibrated limit.
 - This repository's booted matrix (below) qualifies
-  the 6.0 and 6.6 attempt-only rows for the exact
-  sealed bytes named there.
+  the 6.0, 6.6, and 6.10 attempt-only rows for the
+  exact sealed bytes named there.
 
 ## Configuration and artifact admission
 
@@ -247,8 +247,10 @@ retained `.deb` install (T5 step-1 journey receipt
 those exact bytes; rows not listed as PASS for this build
 were not run on this build. Refused capabilities stay
 measured observations recorded with their exact refusal
-codes. Evidence: T5 row receipt `receipt.json` per row
-dir (run `20261123T104854Z`) plus `summary.txt`.
+codes. Evidence: row receipt `receipt.json` per row dir
+plus `summary.txt` (T5 rows run `20261123T104854Z`;
+T8 rows the sweep run `20261123T153825Z`, except
+6.18.0, which cites the retry run `20261123T163836Z`).
 `SHORT-COVERED` means memveil persisted fewer events
 than the oracle saw and declared the difference as loss;
 the row fails if the declared loss does not cover the
@@ -264,6 +266,18 @@ gap.
 | 6.12.114-btf | 6.12.114-mv-6.12.114-btf | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.12.114-btf/receipt.json` |
 | 6.12.114-nobtf | 6.12.114-mv-6.12.114-nobtf | available | refused (`btf-absent-config`) | refused (`btf-absent-config`) | PASS (attempt-only; counts only) | `matrix-out/6.12.114-nobtf/receipt.json` |
 | 7.0.14-lockdown | 7.0.14-070014-generic | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | refused (`lockdown-confidentiality`) | PASS (no admitted caps; all refusals exit 3) | `matrix-out/7.0.14-lockdown/receipt.json` |
+| 5.15 | 5.15.223-0515223-generic | refused (`floor`) | refused (`floor`) | refused (`floor`) | PASS (no admitted caps; all refusals exit 3) | `matrix-out/5.15/receipt.json` |
+| 6.10 | 6.10.14-061014-generic | available | refused (`floor`) | refused (`floor`) | PASS (attempt-only; busy SHORT-COVERED) | `matrix-out/6.10/receipt.json` |
+| 6.12 | 6.12.114-0612114-generic | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.12/receipt.json` |
+| 6.12.0 | 6.12.0-061200-generic | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.12.0/receipt.json` |
+| 6.12.114-rt | 6.12.114-mv-6.12.114-rt | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 22) | `matrix-out/6.12.114-rt/receipt.json` |
+| 6.12.114-debug | 6.12.114-mv-6.12.114-debug | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.12.114-debug/receipt.json` |
+| 6.18 | 6.18.58-061858-generic | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-out/6.18/receipt.json` |
+| 6.18.0 | 6.18.0-061800-generic | available | available | available | PASS (5/5 EXACT, complete_for_scope, loss 0) | `matrix-retry1/6.18.0/receipt.json` |
+| 7.1 | 7.1.13-070113-generic | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 25) | `matrix-out/7.1/receipt.json` |
+| 7.2 | 7.2.6-070206-generic | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 59) | `matrix-out/7.2/receipt.json` |
+| 7.3-rc3 | 7.3.0-070300rc3-generic | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 51) | `matrix-out/7.3-rc3/receipt.json` |
+| 7.3 | 7.3.0-mv-7.3 | available | available | available | PASS (4 EXACT + map SHORT-COVERED, partial, loss 2) | `matrix-out/7.3/receipt.json` |
 
 Notes:
 
@@ -276,13 +290,15 @@ Notes:
   loss); a `--kernel 7.0` preflight row on the same
   sealed bytes was all-EXACT with loss 0
   (`matrix-preflight/`).
-- Rows not listed above were not run on this build and
-  are not claimed: 5.15, 6.10, 6.12, 6.12.0,
-  6.12.114-rt, 6.12.114-debug, 6.18, 6.18.0, 7.1, 7.2,
-  7.3-rc3, 7.3. They are follow-up campaign material;
-  the 0.1.0 rows for some of them sit in the
-  historical appendix below and do not qualify this
-  build.
+- The 6.18.0 row cites the retry run: its sweep row
+  never booted (host-side vhost errors in
+  `console.txt`, `vng exit timeout`), and the retry
+  passed all-EXACT with loss 0.
+- The five T8 SHORT-COVERED map rows declared their
+  gaps as loss: 6.12.114-rt 42474 of 42496 (loss 22),
+  7.1 12263 of 12288 (loss 25), 7.2 25221 of 25280
+  (loss 59), 7.3-rc3 30093 of 30144 (loss 51), 7.3
+  26174 of 26176 (loss 2).
 - A positive `stop.open_mappings` count means the
   kernel never released those mappings, not that the
   product lost their unmaps; see
