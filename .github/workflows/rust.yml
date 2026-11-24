@@ -189,11 +189,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            binutils bpftrace bpftool cpio python3-pytest \
+            binutils bpftrace bpftool cpio llvm python3-pytest \
             python3-yaml rpm rpm2cpio strace
           # readelf (binutils), rpmbuild (rpm), rpm2cpio,
           # cpio, and strace serve the packaging and
-          # cleanroom suites; bpftrace and bpftool are only
+          # cleanroom suites; llvm-objdump (llvm) serves the
+          # BPF negatives proofs, which fail closed without
+          # it; bpftrace and bpftool are only
           # resolved (never executed) by two matrix unit
           # tests over mocked row runs. The runner already
           # ships git, a C toolchain, ssh-keygen, and
