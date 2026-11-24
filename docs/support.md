@@ -244,8 +244,11 @@ to the matrix binary, and the clean-VM journey ran the
 retained `.deb` install (T5 step-1 journey and step-6
 package receipts privately retained). Every recorded row
 passed for
-those exact bytes; rows not listed as PASS for this build
-were not run on this build. Refused capabilities stay
+those exact bytes. The table below states verdicts for the
+T5-admitted rows; the other 12 kernels were measured on
+these same bytes by the T8 campaign (all PASS — see
+`evidence/matrix/` in the archive) but carry no verdict
+in this table. Refused capabilities stay
 measured observations recorded with their exact refusal
 codes. Evidence: row receipt `receipt.json` per
 `evidence/matrix/<row>/` dir in
@@ -279,11 +282,12 @@ Notes:
   loss); a `--kernel 7.0` preflight row on the same
   sealed bytes was all-EXACT with loss 0
   (preflight receipt privately retained).
-- Rows not listed above were not run on this build and
-  are not claimed: 5.15, 6.10, 6.12, 6.12.0,
+- Rows not listed above carry no verdict in this table:
+  5.15, 6.10, 6.12, 6.12.0,
   6.12.114-rt, 6.12.114-debug, 6.18, 6.18.0, 7.1, 7.2,
-  7.3-rc3, 7.3. They are follow-up campaign material;
-  the 0.1.0 rows for some of them sit in the
+  7.3-rc3, 7.3. The T8 campaign measured all of them on
+  these bytes (all PASS — see `evidence/matrix/` in the
+  archive); the 0.1.0 rows for some of them sit in the
   historical appendix below and do not qualify this
   build.
 - A positive `stop.open_mappings` count means the

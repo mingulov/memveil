@@ -48,8 +48,10 @@ bundle notes below stay as the history of that prerelease.
 >   results name one binary by hash (see release notes); the
 >   matrix ran bundle mode of the canonical binary, byte-identical
 >   to the `.deb` install (all three package binaries share one
->   sha256). Rows
->   not listed as PASS for this build were not run on this build.
+>   sha256). Rows not listed as PASS carry no verdict;
+>   the T8 campaign measured all 20 matrix kernels on
+>   this build (see `evidence/matrix/` in the evidence
+>   archive).
 >   A machine-local `qualify` receipt records that a smoke
 >   capture worked on one host; it is not release qualification
 >   and does not hash the memveil executable — re-run `qualify`
@@ -160,9 +162,12 @@ The sealed artifacts, all from the one seal:
 | `qualification-evidence.tar.gz` | `16d320ff6ad15d20fd9c1fc3b9f6dc9f2c21000109c218310f4de7b8036cc7fe` | 303131684 |
 | `tested-payload.sha256` | `5dff6a1737eca7fa7e80b2a0260e48657fc9340271f60e021d422014159de99a` | 37696 |
 
-These hashes are re-verified by the T5 campaign's
+These six hashes are re-verified by the T5 campaign's
 pre-VM gates (6/6 match `candidate.json`) and the
-release lists them in `SHA256SUMS.txt`.
+release lists them in `SHA256SUMS.txt`. The three export
+rows are bound by `qualification.json` (gates plus evidence
+archive record) instead; verify them against the release
+assets on download.
 The T8 full-repeat campaign completed the full 20-row matrix,
 so this prerelease carries the full export (table above):
 `tested-payload.sha256` (312 entries over bundle, `.deb` and
