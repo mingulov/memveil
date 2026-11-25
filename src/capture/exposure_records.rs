@@ -23,6 +23,20 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::fmt;
 
+/// Frozen record shapes shared with the model validator.
+///
+/// Path-included from the model module rather than copied, so the
+/// seal path and `ExposureFact::validate` enforce one frozen table
+/// each; the path resolves from this file's directory in both
+/// compilation modes (public module path and test path include).
+/// Only the closed-vocabulary tables are read here; the remaining
+/// items ride along unused. The second include of the model file is
+/// deliberate sharing, not an accidental duplicate module.
+#[allow(dead_code)]
+#[allow(clippy::duplicate_mod)]
+#[path = "../model/exposure.rs"]
+mod exposure_shapes;
+
 /// Ten legacy event kinds in integrity-table order.
 pub const LEGACY_KINDS: [&str; 10] = [
     "bounce_attempt",
@@ -1343,6 +1357,28 @@ fn fact_identity(text: &str) -> Option<SealedEvidenceKey> {
     })
 }
 
+/// True when a fact line's closed enum labels stay in their frozen sets.
+///
+/// Well-typed-but-unknown `semantics` or `clock_domain` values fail
+/// the seal exactly like a malformed field: the seal verifies false
+/// rather than admitting them as verdict evidence. Membership reuses
+/// the model validator's frozen tables, never a copy.
+fn fact_enums_valid(text: &str) -> bool {
+    let Ok(JsonValue::Object(fields)) = parse_value(text) else {
+        return false;
+    };
+    let Some(JsonValue::Object(data)) = find_field(&fields, "data") else {
+        return false;
+    };
+    let (Some(JsonValue::Str(semantics)), Some(JsonValue::Str(clock))) = (
+        find_field(data, "semantics"),
+        find_field(data, "clock_domain"),
+    ) else {
+        return false;
+    };
+    exposure_shapes::is_semantics(semantics) && exposure_shapes::is_clock_domain(clock)
+}
+
 /// Seal verification outcome over a snapshot's literal bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealReport {
@@ -1451,9 +1487,11 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
                 if kind == EXPOSURE_FACT_KIND {
                     // Identity alone never admits a fact: the whole
                     // line must normalize, so every remaining fact
-                    // field keeps its canonical shape and type.
+                    // field keeps its canonical shape and type, and
+                    // the closed enum labels must stay in their
+                    // frozen sets, like the oracle's field check.
                     match fact_identity(text) {
-                        Some(key) if normalize_record(text).is_ok() => {
+                        Some(key) if normalize_record(text).is_ok() && fact_enums_valid(text) => {
                             fact_keys.push(key);
                         }
                         _ => contained_ok = false,
@@ -2372,5 +2410,116 @@ mod tests {
             big < small * 3,
             "doubled input must cost well under 3x, took {small:?} then {big:?}"
         );
+    }
+
+    /// One settled quality channel with measured zero loss.
+    fn settled_channel() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("status", FieldValue::Text("complete_for_scope")),
+            ("loss_count", FieldValue::UInt(0)),
+        ])
+    }
+
+    /// One sealed single-fact snapshot carrying the given enum labels.
+    ///
+    /// The fact line renders through the canonical encoder and the
+    /// seal commits to the literal bytes, so only the enum gate can
+    /// refuse: any other refusal would be a builder bug.
+    fn sealed_fact_snapshot(semantics: &str, clock_domain: &str) -> String {
+        let quality = FieldValue::Object(vec![
+            ("detail", settled_channel()),
+            ("aggregate", settled_channel()),
+            ("identity", settled_channel()),
+            ("baseline", settled_channel()),
+            ("terminal", settled_channel()),
+        ]);
+        let data = FieldValue::Object(vec![
+            ("evidence_id", FieldValue::Text("ev-1")),
+            ("source_id", FieldValue::Text("sharing-census")),
+            ("epoch", FieldValue::UInt(7)),
+            ("operation_id", FieldValue::Text("op-1")),
+            ("kind", FieldValue::Text("census-entry")),
+            ("direction", FieldValue::Text("egress")),
+            ("generation", FieldValue::UInt(1)),
+            ("offset", FieldValue::UInt(0)),
+            ("length_bytes", FieldValue::UInt(4096)),
+            ("native_result", FieldValue::Int(0)),
+            ("caller_class", FieldValue::Text("allocator")),
+            ("peer_class", FieldValue::Text("none-observed")),
+            ("clock_domain", FieldValue::Text(clock_domain)),
+            (
+                "observed_interval",
+                FieldValue::Object(vec![
+                    ("start", FieldValue::UInt(1_000_000_000)),
+                    ("end", FieldValue::UInt(1_000_000_100)),
+                    ("uncertainty", FieldValue::UInt(50)),
+                ]),
+            ),
+            ("semantics", FieldValue::Text(semantics)),
+            ("quality", quality),
+        ]);
+        let line = render_canonical(&[
+            ("schema_version", FieldValue::Text("0.3.0")),
+            ("session_id", FieldValue::Text("sealed-enum-1")),
+            ("seq", FieldValue::UInt(0)),
+            ("ts_ns", FieldValue::UInt(1_100_000_000)),
+            ("kind", FieldValue::Text(EXPOSURE_FACT_KIND)),
+            (
+                "source",
+                FieldValue::Object(vec![
+                    ("hook", FieldValue::Text("synthetic:exposure")),
+                    ("backend", FieldValue::Text("synthetic")),
+                    ("profile_id", FieldValue::Text("synthetic-census-1")),
+                    ("measurement", FieldValue::Text("observed")),
+                    ("correlation", FieldValue::Text("direct")),
+                ]),
+            ),
+            ("data", data),
+        ])
+        .unwrap();
+        let literal = format!("{line}\n");
+        let entry = literal
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        let bytes = literal.len();
+        let digest = sha256_hex(literal.as_bytes());
+        let kinds = "\"bounce_attempt\":\"0\",\"map_result\":\"0\",\"unmap\":\"0\",\"copy\":\"0\",\
+            \"sync_request\":\"0\",\"transition_result\":\"0\",\"pool_sample\":\"0\",\"gap\":\"0\",\
+            \"marker\":\"0\",\"counter_snapshot\":\"0\",\"exposure_fact\":\"1\"";
+        let integrity = format!(
+            "{{\"algorithm\":\"sha256\",\"events_bytes\":\"{bytes}\",\"line_count\":\"1\",\
+            \"first_seq\":\"0\",\"last_seq\":\"0\",\"events_sha256\":\"{digest}\",\
+            \"kinds\":{{{kinds}}}}}"
+        );
+        format!(
+            "{{\"session\":{{\"session_id\":\"sealed-enum-1\",\
+            \"capture\":{{\"integrity\":{integrity}}}}},\
+            \"event_lines\":[\"{entry}\"]}}"
+        )
+    }
+
+    #[test]
+    fn seal_refuses_unknown_fact_enums() {
+        let bad_semantics = sealed_fact_snapshot("guess", "guest_monotonic_active");
+        let report = verify_sealed_snapshot(&bad_semantics).expect("tainted parses");
+        assert!(!report.verified, "unknown semantics cannot verify");
+        let bad_clock = sealed_fact_snapshot("inventory", "wall_clock");
+        let report = verify_sealed_snapshot(&bad_clock).expect("tainted parses");
+        assert!(!report.verified, "unknown clock domain cannot verify");
+    }
+
+    #[test]
+    fn seal_accepts_every_frozen_fact_enum() {
+        for semantics in exposure_shapes::SEMANTICS {
+            let snapshot = sealed_fact_snapshot(semantics, "guest_monotonic_active");
+            let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+            assert!(report.verified, "frozen semantics {semantics} must verify");
+        }
+        for clock in exposure_shapes::CLOCK_DOMAINS {
+            let snapshot = sealed_fact_snapshot("inventory", clock);
+            let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+            assert!(report.verified, "frozen clock domain {clock} must verify");
+        }
     }
 }

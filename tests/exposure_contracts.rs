@@ -16,8 +16,8 @@ mod exposure_records;
 mod exposure_quality;
 
 use exposure::{
-    BaselineSample, ComparisonResult, CoverageSource, ExposureFact, ExposureObject,
-    POLICY_MAX_BYTES, POLICY_MAX_EXCEPTIONS_PER_RULE, POLICY_MAX_RULES, PolicyResult,
+    BaselineSample, CLOCK_DOMAINS, ComparisonResult, CoverageSource, ExposureFact, ExposureObject,
+    POLICY_MAX_BYTES, POLICY_MAX_EXCEPTIONS_PER_RULE, POLICY_MAX_RULES, PolicyResult, SEMANTICS,
     is_exposure_version,
 };
 use exposure_quality::RuleOutcome;
@@ -33,6 +33,8 @@ const CROSS_EPOCH: &str = include_str!("exposure/fixtures/contracts/cross_epoch_
 const MISSING_TERMINAL: &str = include_str!("exposure/fixtures/contracts/missing_terminal.json");
 const FOREIGN_SESSION: &str = include_str!("exposure/fixtures/contracts/foreign_session.json");
 const MALFORMED_FACT: &str = include_str!("exposure/fixtures/contracts/malformed_fact.json");
+const INVALID_SEMANTICS: &str = include_str!("exposure/fixtures/contracts/invalid_semantics.json");
+const INVALID_CLOCK: &str = include_str!("exposure/fixtures/contracts/invalid_clock_domain.json");
 
 fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
     facts
@@ -149,6 +151,39 @@ fn foreign_session_and_malformed_facts_cannot_verify() {
         );
         assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
         assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
+    }
+}
+
+#[test]
+fn unknown_fact_enums_cannot_verify() {
+    for (name, snapshot) in [
+        ("unknown semantics", INVALID_SEMANTICS),
+        ("unknown clock domain", INVALID_CLOCK),
+    ] {
+        let report = verify_sealed_snapshot(snapshot).expect("tainted parses");
+        assert!(!report.verified, "{name} evidence cannot verify");
+        let terminal = snapshot_terminal_status(snapshot).expect("tainted carries terminal");
+        assert_eq!(terminal, "complete_for_scope", "{name} stays settled");
+        let outcome = exposure_quality::rule_outcome(
+            report.verified,
+            &terminal,
+            &[("sharing-census", "available", true)],
+        );
+        assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
+        assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
+    }
+
+    // Every frozen enum value still validates: the seal gate refuses
+    // unknown labels without over-tightening known ones.
+    for semantics in SEMANTICS {
+        let mut fact = ExposureFact::example("ev-1", "sharing-census", 7);
+        fact.semantics = semantics.to_string();
+        fact.validate().unwrap();
+    }
+    for clock in CLOCK_DOMAINS {
+        let mut fact = ExposureFact::example("ev-1", "sharing-census", 7);
+        fact.clock_domain = clock.to_string();
+        fact.validate().unwrap();
     }
 }
 

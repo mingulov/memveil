@@ -522,6 +522,53 @@ def test_persisted_foreign_and_malformed_snapshots_refused():
             jsonschema.validate(json.loads(line), schema)
 
 
+def test_persisted_unknown_enum_snapshots_refused():
+    required = ["sharing-census"]
+    schema = load_schema("event-v0.3.0.schema.json")
+    for name in ("invalid_semantics.json", "invalid_clock_domain.json"):
+        snapshot = load(name)
+        assert not seal_verified(snapshot), \
+            "persisted %s must fail the seal" % name
+        assert snapshot_verdict(snapshot, required) == "inconclusive"
+        with pytest.raises(jsonschema.ValidationError):
+            for line in snapshot["event_lines"]:
+                jsonschema.validate(json.loads(line), schema)
+
+
+def test_unknown_fact_enums_cannot_satisfy_rule():
+    def mistyped_semantics(event):
+        event["data"]["semantics"] = "guess"
+
+    def mistyped_clock(event):
+        event["data"]["clock_domain"] = "wall_clock"
+
+    for mutator, label in ((mistyped_semantics, "semantics"),
+                           (mistyped_clock, "clock domain")):
+        mutated = resealed_mutation(mutator)
+        assert not seal_verified(mutated), \
+            "unknown %s must fail the seal" % label
+        assert not rule_satisfied(mutated, ["sharing-census"]), \
+            "unknown-%s evidence never satisfies" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def test_every_frozen_fact_enum_verifies():
+    def relabel(field, value):
+        def apply(event):
+            event["data"][field] = value
+        return apply
+
+    for semantics in FROZEN_SEMANTICS:
+        mutated = resealed_mutation(relabel("semantics", semantics))
+        assert seal_verified(mutated), \
+            "frozen semantics %r must verify" % semantics
+    for clock in FROZEN_CLOCK:
+        mutated = resealed_mutation(relabel("clock_domain", clock))
+        assert seal_verified(mutated), \
+            "frozen clock domain %r must verify" % clock
+
+
 def test_missing_terminal_evidence_is_partial():
     required = ["sharing-census"]
     assert snapshot_verdict(load("sealed_snapshot.json"),
