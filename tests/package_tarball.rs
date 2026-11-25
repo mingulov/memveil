@@ -303,19 +303,42 @@ fn profiles_mirror_sources() {
         fs::read(set.bundle.join("profiles").join("manifest.txt")).unwrap(),
         fs::read(root.join("profiles").join("manifest.txt")).unwrap()
     );
-    let mut staged: Vec<String> = fs::read_dir(set.bundle.join("profiles"))
-        .expect("profiles")
-        .flatten()
-        .map(|e| e.file_name().to_str().unwrap().to_string())
-        .collect();
-    staged.sort();
-    let mut source: Vec<String> = fs::read_dir(root.join("profiles"))
-        .expect("source profiles")
-        .flatten()
-        .map(|e| e.file_name().to_str().unwrap().to_string())
-        .filter(|n| n == "manifest.txt" || n.ends_with(".json"))
-        .collect();
-    source.sort();
+    fn collect_profiles(dir: &std::path::Path, filtered: bool) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let mut entries: Vec<_> = fs::read_dir(&current)
+                .expect("profiles")
+                .flatten()
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.is_file() {
+                    let name =
+                        path.file_name().unwrap().to_str().unwrap();
+                    if !filtered
+                        || name == "manifest.txt"
+                        || name.ends_with(".json")
+                    {
+                        out.push(
+                            path.strip_prefix(dir)
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .replace('\\', "/"),
+                        );
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+    let staged = collect_profiles(&set.bundle.join("profiles"), false);
+    let source = collect_profiles(&root.join("profiles"), true);
     assert_eq!(staged, source);
 }
 
