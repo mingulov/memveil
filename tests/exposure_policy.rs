@@ -158,6 +158,11 @@ fn unfinalized_capture_with_covered_fact_is_inconclusive() {
     let out = evaluate(&policy, &input).expect("evaluate");
     let result = only(&out.results);
     assert_eq!(result.result, "inconclusive");
+    assert_eq!(result.evidence_ids, vec!["ev-1".to_string()]);
+    assert_eq!(
+        result.exceptions_applied,
+        vec!["no-unexpected-queue:admitted-device-path".to_string()]
+    );
     assert!(result.reason.contains("unfinalized"));
     assert_eq!(out.overall, "inconclusive");
     assert_eq!(strict_exit(&out.overall), 4);
@@ -476,6 +481,13 @@ fn exceeded_duration_proves_in_censored_capture() {
     let out = evaluate(&policy, &input).expect("evaluate");
     let result = only(&out.results);
     assert_eq!(result.result, "violates");
+    assert!(
+        result.reason.contains(
+            "tok-1 reached released after 6000 in guest_monotonic_active, exceeding limit 5000"
+        ),
+        "duration reason names token, status, measured duration, clock and limit: {}",
+        result.reason
+    );
     assert_eq!(strict_exit(&out.overall), 5);
 }
 

@@ -706,14 +706,19 @@ fn eval_fact_rule(
                     render_list(&capped, rest)
                 ));
             }
-            let evs: Vec<String> = unknown.iter().map(|(id, _)| id.clone()).collect();
+            // An unfinalized capture keeps the exceptions that
+            // applied and the covered evidence: the outcome
+            // stays partial, but the allowlist match is still
+            // supporting evidence for this result.
+            let mut evs: Vec<String> = unknown.iter().map(|(id, _)| id.clone()).collect();
+            evs.extend(covered_ids);
             PolicyResult {
                 rule_id: rule.rule_id.clone(),
                 scope_id: policy.subject_scope.clone(),
                 result: outcome.to_string(),
                 evidence_ids: cap_list(evs, MAX_EVIDENCE_IDS).0,
                 missing_sources: missing.to_vec(),
-                exceptions_applied: Vec::new(),
+                exceptions_applied: cap_list(applied, MAX_EVIDENCE_IDS).0,
                 clock_domain: policy.clock.clone(),
                 reason: inconclusive_reason(&rule.rule_id, details),
             }
@@ -816,6 +821,7 @@ fn eval_obligation_rule(
         .find(|(field, _)| field == "source_id")
         .map(|(_, value)| value.as_str());
     let mut nonconforming: Vec<String> = Vec::new();
+    let mut duration_overruns: Vec<String> = Vec::new();
     let mut details: Vec<String> = Vec::new();
     let mut selected = 0usize;
     for object in objects {
@@ -882,8 +888,14 @@ fn eval_obligation_rule(
             let clock = obligation.clock.as_deref().unwrap_or("");
             match (&object.elapsed, &object.elapsed_clock) {
                 (Some(elapsed), Some(have)) if have == clock => {
-                    if *elapsed > within && !nonconforming.contains(&reference) {
-                        nonconforming.push(reference.clone());
+                    if *elapsed > within {
+                        duration_overruns.push(format!(
+                            "{} reached {} after {} in {}, exceeding limit {}",
+                            object.object_token, object.lifecycle_status, elapsed, clock, within
+                        ));
+                        if !nonconforming.contains(&reference) {
+                            nonconforming.push(reference.clone());
+                        }
                     }
                 }
                 (Some(_), Some(have)) => {
@@ -916,6 +928,16 @@ fn eval_obligation_rule(
                 obligation.status,
                 render_list(&ids, rest)
             );
+            if !duration_overruns.is_empty() {
+                duration_overruns.sort();
+                duration_overruns.dedup();
+                let over = duration_overruns.len().saturating_sub(MAX_REASON_DETAILS);
+                duration_overruns.truncate(MAX_REASON_DETAILS);
+                reason.push_str(&format!(
+                    "; duration: {}",
+                    render_list(&duration_overruns, over)
+                ));
+            }
             if !details.is_empty() {
                 reason.push_str(&format!(
                     "; {} records need resolution (unknown)",
