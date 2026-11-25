@@ -878,6 +878,33 @@ fn reader_enforces_document_bounds() {
 }
 
 #[test]
+fn oversized_policy_file_refuses_too_big() {
+    let path = std::env::temp_dir().join(format!(
+        "policy-check-oversized-{}.json",
+        std::process::id()
+    ));
+    fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).expect("write oversized file");
+    let code = read_policy_file(&path)
+        .expect_err("oversized file refuses")
+        .code;
+    fs::remove_file(&path).expect("remove oversized file");
+    assert_eq!(code, "too-big");
+}
+
+#[test]
+fn endless_policy_source_refuses_without_reading_it_all() {
+    let (done, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = read_policy_file(Path::new("/dev/zero")).map(|_| "parsed");
+        let _ = done.send(outcome.map_err(|err| err.code));
+    });
+    let outcome = wait
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("bounded read finishes promptly");
+    assert_eq!(outcome.unwrap_err(), "too-big");
+}
+
+#[test]
 fn json_parser_handles_values_and_escapes() {
     let value = parse_json(
         r#"{"s": "a\"b\\c\/d\u0008e\u000cf\n\r\té", "n": -12.5e2, "t": true, "f": false, "z": null, "a": [1, "x"], "u": "\u0041\u00e9"}"#,

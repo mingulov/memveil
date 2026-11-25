@@ -27,6 +27,7 @@ use crate::exposure_policy::{
     POLICY_SCHEMA_VERSION, Policy, Prerequisites, Rule,
 };
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::Path;
 
 /// Policy file cap in bytes (1 MiB).
@@ -92,9 +93,18 @@ impl std::error::Error for ReadError {}
 
 /// Read and validate one policy file.
 pub fn read_policy_file(path: &Path) -> Result<Policy, ReadError> {
-    let bytes = std::fs::read(path).map_err(|err| {
+    // Bound the read itself: one byte past the cap is
+    // enough to prove too-big, and an endless source
+    // must never be read to the end first.
+    let file = std::fs::File::open(path).map_err(|err| {
         ReadError::new("io-error", format!("cannot read {}: {err}", path.display()))
     })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_POLICY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            ReadError::new("io-error", format!("cannot read {}: {err}", path.display()))
+        })?;
     if bytes.len() > MAX_POLICY_BYTES {
         return Err(ReadError::new(
             "too-big",
