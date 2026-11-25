@@ -378,8 +378,8 @@ impl<'a> Parser<'a> {
                     // scalar value instead of re-validating the
                     // whole tail on every character.
                     let start = self.pos - 1;
-                    let width = utf8_char_width(byte)
-                        .ok_or_else(|| self.fail("bad UTF-8 in string"))?;
+                    let width =
+                        utf8_char_width(byte).ok_or_else(|| self.fail("bad UTF-8 in string"))?;
                     let end = start + width;
                     if end > self.bytes.len() {
                         return Err(self.fail("bad UTF-8 in string"));
