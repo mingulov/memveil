@@ -871,7 +871,7 @@ fn blank_and_unlisted_units_refuse_their_metrics() {
                 "unit-unknown",
                 "cap-left-030",
                 "cap-right-030",
-                "",
+                "unknown",
                 "guest-direct-map",
             ),
             refused_row(
@@ -880,7 +880,7 @@ fn blank_and_unlisted_units_refuse_their_metrics() {
                 "unit-unknown",
                 "cap-left-030",
                 "cap-right-030",
-                "bytes",
+                "unknown",
                 "guest-driver-virtio",
             ),
             refused_row(
@@ -889,7 +889,7 @@ fn blank_and_unlisted_units_refuse_their_metrics() {
                 "unit-unknown",
                 "cap-left-030",
                 "cap-right-030",
-                "counts",
+                "unknown",
                 "guest-driver-virtio",
             ),
             compatible_row(
@@ -956,9 +956,64 @@ fn unlisted_units_refuse_without_input_refusal() {
                 "unit-unknown",
                 "cap-left-031",
                 "cap-right-031",
-                left_unit,
+                "unknown",
                 "guest-direct-map",
             )],
+            "units {left_unit:?} vs {right_unit:?}"
+        );
+    }
+}
+
+#[test]
+fn unit_unknown_rows_record_unknown_unit() {
+    // A unit-unknown refusal never copies the invalid
+    // input label into the result: the row records the
+    // catalog unknown unit, so every emitted unit stays
+    // inside the frozen bytes/unknown vocabulary.
+    let pair = |left_unit: &str, right_unit: &str| {
+        let left = capture(
+            "cap-left-031",
+            "idle-snapshot",
+            41,
+            "snp-guest-01",
+            standard_meanings(),
+            1000,
+            2000,
+            "guest_monotonic_active",
+            false,
+            false,
+            vec![metric(
+                "shared-bytes",
+                Some(1),
+                None,
+                left_unit,
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            )],
+        );
+        let mut right = left.clone();
+        right.evidence_id = "cap-right-031".to_string();
+        right.metrics[0].unit = right_unit.to_string();
+        right.metrics[0].value = Some(9);
+        (left, right)
+    };
+    for (left_unit, right_unit) in [
+        ("", ""),
+        ("", "bytes"),
+        ("bytes", "   "),
+        ("counts", "counts"),
+        ("counts", "bytes"),
+        ("bytes", "counts"),
+        ("\u{1c}", "\u{1c}"),
+        ("bytes", "a\x00b"),
+    ] {
+        let (left, right) = pair(left_unit, right_unit);
+        let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].reason, "unit-unknown");
+        assert_eq!(
+            rows[0].unit, "unknown",
             "units {left_unit:?} vs {right_unit:?}"
         );
     }

@@ -169,7 +169,8 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 /// refuses its row as unknown. A unit outside the frozen
 /// vocabulary (`bytes`, `unknown`) — a blank unit
 /// included — likewise refuses its row as `unit-unknown`
-/// with no delta. A non-blank string with a control
+/// with no delta and records the result unit as
+/// `unknown`. A non-blank string with a control
 /// character is malformed input: meanings refuse as
 /// `invalid-meaning`, clocks as `invalid-clock`, reasons as
 /// `invalid-value`. An invalid input refuses the whole
@@ -229,7 +230,8 @@ fn has_control(value: &str) -> bool {
 
 /// Frozen unit vocabulary from the exposure catalog:
 /// only these labels compare; anything else (a blank
-/// label included) records no unit.
+/// label included) refuses as unknown and records the
+/// catalog `unknown` result unit.
 const KNOWN_UNITS: [&str; 2] = ["bytes", "unknown"];
 
 fn is_known_unit(unit: &str) -> bool {
@@ -281,13 +283,17 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         );
     };
     if !is_known_unit(&left_metric.unit) || !is_known_unit(&right_metric.unit) {
+        // The refusal never copies the invalid input
+        // label: the row records the catalog unknown
+        // unit so it stays inside the frozen
+        // ComparisonResult vocabulary.
         return refused(
             metric_id,
             "incompatible",
             "unit-unknown",
             left,
             right,
-            &left_metric.unit,
+            "unknown",
             &left_metric.scope,
         );
     }

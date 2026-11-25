@@ -131,7 +131,8 @@ so the capture refuses as `invalid-value`. Units
 compare only when both sides name the frozen
 catalog vocabulary (`bytes`, `unknown`); any other
 unit label refuses its metric as `unit-unknown`
-with no delta.
+with no delta and records the result unit as
+`unknown`, never the invalid input label.
 
 A control character (U+0000-U+001F or U+007F-U+009F)
 in a meaning, clock label or reason is malformed
@@ -148,7 +149,7 @@ Checks run in order; the first failure names the reason:
 | Order | Reason | Meaning |
 | --- | --- | --- |
 | 1 | `metric-missing` | Metric absent on one side; reported `unavailable` |
-| 2 | `unit-unknown` | A side names a unit outside the frozen `bytes`/`unknown` vocabulary; a blank unit counts as no unit |
+| 2 | `unit-unknown` | A side names a unit outside the frozen `bytes`/`unknown` vocabulary; a blank unit counts as no unit and the row records `unknown` |
 | 3 | `unit-mismatch` | Units differ; no delta across units |
 | 4 | `scope-mismatch` | Scopes differ; scan scopes stay distinct |
 | 5 | `legacy-input` | One side predates integrity metadata |

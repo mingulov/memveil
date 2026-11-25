@@ -225,8 +225,23 @@ def expect_compatible(left_metric, right_metric):
 
 # Frozen unit vocabulary from the exposure
 # catalog: only these labels compare; anything else
-# (a blank label included) records no unit.
+# (a blank label included) refuses as unknown and
+# records the catalog unknown result unit.
 KNOWN_UNITS = ("bytes", "unknown")
+
+
+def expect_unit(left, right, metric_id, reason):
+    """Independent result-unit oracle: the emitted label.
+
+    A unit-unknown refusal never copies the invalid
+    input label; it records the catalog unknown unit.
+    Every other row carries the present side's unit.
+    """
+    if reason == "unit-unknown":
+        return "unknown"
+    anchor = metric_by_id(left, metric_id) \
+        or metric_by_id(right, metric_id)
+    return anchor["unit"]
 
 
 def expect_row(case, left, right, metric_id):
@@ -360,11 +375,12 @@ def test_fixture_expectations_match_oracle():
                         row.get("delta"))
             assert row["left_evidence"] == left["evidence_id"]
             assert row["right_evidence"] == right["evidence_id"]
+            assert row["unit"] == expect_unit(
+                left, right, metric_id, reason), \
+                "%s/%s: unit follows the oracle" % (
+                    name, metric_id)
             anchor = metric_by_id(left, metric_id) \
                 or metric_by_id(right, metric_id)
-            assert row["unit"] == anchor["unit"], \
-                "%s/%s: unit follows the present side" % (
-                    name, metric_id)
             assert row["scope"] == anchor["scope"], \
                 "%s/%s: scope follows the present side" % (
                     name, metric_id)
@@ -756,9 +772,10 @@ def test_blank_units_are_unknown():
 
 def test_unlisted_units_are_unknown():
     # A unit outside the frozen vocabulary (bytes,
-    # unknown) records no unit even when both sides
-    # agree on the label: the metric refuses as
-    # unknown with no delta. A control character in a
+    # unknown) records the unknown result unit even
+    # when both sides agree on the label: the metric
+    # refuses as unknown with no delta. A control
+    # character in a
     # unit never refuses the whole input here; the
     # future capture reader owns malformed refusal.
     cases = [
@@ -909,3 +926,22 @@ def test_rust_suite_covers_tricky_string_battery():
                    r'"\n"', r'"\r"', r'"\x0b"',
                    r'"\x0c"', r'"a\x00b"'):
         assert escape in suite, "rust battery lacks %s" % escape
+
+
+def test_unit_unknown_rows_record_unknown_unit():
+    # A unit-unknown refusal never copies the invalid
+    # input label into the result: the row records the
+    # catalog unknown unit, so every emitted unit stays
+    # inside the frozen bytes/unknown vocabulary.
+    for name in all_fixtures():
+        fixture = load_fixture(name)
+        if "refused" in fixture:
+            continue
+        for row in fixture["expected"]:
+            assert row["unit"] in KNOWN_UNITS, \
+                "%s/%s: unit %r outside bytes/unknown" % (
+                    name, row["metric_id"], row["unit"])
+            if row["reason"] == "unit-unknown":
+                assert row["unit"] == "unknown", \
+                    "%s/%s: unit-unknown row keeps %r" % (
+                        name, row["metric_id"], row["unit"])
