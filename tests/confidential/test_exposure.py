@@ -417,23 +417,33 @@ class DistinguishingContentTests(unittest.TestCase):
         self.assertGreater(pairs, 0, "spec-08 needs at least one with/without pair")
         positions = {id(step): index for index, step in enumerate(case["control_flow"])}
         modeled_index = min(positions[id(step)] for step in modeled)
+        modeled_ids = {id(step) for step in modeled}
         first_trace = [step for step in case["control_flow"]
-                       if step["object"].endswith("-1")]
+                       if positions[id(step)] < modeled_index
+                       and (step["object"].endswith("-1")
+                            or step["object"] == "none")]
         second_trace = [step for step in case["control_flow"]
-                        if step["object"].endswith("-2")]
+                        if positions[id(step)] > modeled_index
+                        and id(step) not in modeled_ids
+                        and (step["object"].endswith("-2")
+                             or step["object"] == "none")]
         self.assertTrue(first_trace and second_trace,
                         "spec-08 needs ordered observations for both traces")
         self.assertEqual(len(first_trace), len(second_trace),
                          "paired traces must observe the same number of steps")
         self.assertTrue(all(positions[id(step)] < modeled_index
-                            for step in first_trace),
+                            for step in case["control_flow"]
+                            if step["object"].endswith("-1")),
                         "the first trace must precede the modeled host read")
         self.assertTrue(all(positions[id(step)] > modeled_index
-                            for step in second_trace),
+                            for step in case["control_flow"]
+                            if step["object"].endswith("-2")),
                         "the second trace must follow the modeled host read")
 
         def normalized(step):
-            base = step["object"][:-2]
+            base = step["object"]
+            if base != "none":
+                base = base[:-2]
             action = step["action"]
             if action.startswith("reread-"):
                 action = action[len("re"):]
