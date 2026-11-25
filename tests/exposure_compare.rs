@@ -1298,6 +1298,71 @@ fn input_validation_order_is_documented() {
     assert_eq!(refusal.reason, "invalid-value");
 }
 
+// case: delta-overflow
+#[test]
+fn overflow_in_both_directions_stays_compatible_without_value() {
+    let left = capture(
+        "cap-left-023",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "counter-up",
+                Some(0),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+            metric(
+                "counter-down",
+                Some(u64::MAX),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+        ],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-023".to_string();
+    right.metrics[0].value = Some(u64::MAX);
+    right.metrics[1].value = Some(0);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+    assert_eq!(
+        rows,
+        vec![
+            compatible_row(
+                "counter-up",
+                "cap-left-023",
+                "cap-right-023",
+                None,
+                Some("delta-overflow"),
+                "bytes",
+                "guest-direct-map",
+            ),
+            compatible_row(
+                "counter-down",
+                "cap-left-023",
+                "cap-right-023",
+                None,
+                Some("delta-overflow"),
+                "bytes",
+                "guest-direct-map",
+            ),
+        ]
+    );
+}
+
 #[test]
 fn predicate_order_is_deterministic() {
     // Epoch and workload both differ: the earlier epoch
@@ -1333,4 +1398,66 @@ fn predicate_order_is_deterministic() {
     assert_eq!(rows[0].compatibility, "incompatible");
     assert_eq!(rows[0].reason, "epoch-mismatch");
     assert_eq!(rows[0].delta, None);
+}
+
+#[test]
+fn predicate_order_holds_across_new_checks() {
+    // Each pair fails two checks; the earlier check in the
+    // documented order names the reason.
+    let left = capture(
+        "cap-left-024",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(1),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let reason_of = |right: &Capture| {
+        let rows = compare_captures(&left, right).expect("valid comparison inputs");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].compatibility, "incompatible");
+        assert_eq!(rows[0].delta, None);
+        rows[0].reason.clone()
+    };
+    // Profile beats workload.
+    let mut right = left.clone();
+    right.profile_id = "linux-x86_64-7.0-hardened".to_string();
+    right.workload = "io-batch".to_string();
+    assert_eq!(reason_of(&right), "profile-mismatch");
+    // Per-side source beats a meaning change.
+    let mut right = left.clone();
+    right.metrics[0].source_id = "queue-ledger".to_string();
+    right
+        .source_meanings
+        .insert("census-direct-map".to_string(), "meaning-2".to_string());
+    assert_eq!(reason_of(&right), "source-mismatch");
+    // Device binding beats profile.
+    let mut right = left.clone();
+    right.platform_cell = "tdx-guest-02".to_string();
+    right.profile_id = "linux-x86_64-7.0-hardened".to_string();
+    assert_eq!(reason_of(&right), "device-binding-mismatch");
+    // Clock beats window.
+    let mut right = left.clone();
+    right.clock_domain = "guest_boottime_elapsed".to_string();
+    right.window_end = 3000;
+    assert_eq!(reason_of(&right), "clock-mismatch");
+    // Window beats census.
+    let mut right = left.clone();
+    right.window_end = 3000;
+    right.census_bounded = true;
+    right.metrics[0].census_derived = true;
+    assert_eq!(reason_of(&right), "window-mismatch");
 }

@@ -14,8 +14,9 @@ Covered families: equal-profile/different-workload,
 different-epoch/device binding, source meaning change,
 unequal window/clock, partial census, legacy input, plus
 profile mismatch, per-side source mismatch, unknown
-source meaning, refused invalid inputs, a fully
-compatible golden and metric-shape edges.
+source meaning, refused invalid inputs, delta
+overflow in both directions, a fully compatible golden
+and metric-shape edges.
 """
 
 import json
@@ -51,6 +52,9 @@ FAMILIES = {
     ],
     "unknown source meaning": [
         "source_meaning_unknown.json",
+    ],
+    "delta overflow": [
+        "delta_overflow.json",
     ],
     "unequal window/clock": [
         "unequal_window.json",
@@ -397,3 +401,158 @@ def test_rust_suite_covers_every_fixture():
         assert case in suite, \
             "rust suite never mentions case %s" % case
     assert "exposure_compare.rs" in suite
+
+
+# Per-metric refusal reasons in predicate order. The
+# order test walks adjacent pairs through the oracle and
+# the docs test requires the compatibility table to list
+# this same sequence.
+CHECK_ORDER = (
+    "metric-missing",
+    "unit-mismatch",
+    "scope-mismatch",
+    "legacy-input",
+    "epoch-mismatch",
+    "device-binding-mismatch",
+    "profile-mismatch",
+    "workload-mismatch",
+    "source-mismatch",
+    "source-meaning-unknown",
+    "source-meaning-change",
+    "clock-mismatch",
+    "window-mismatch",
+    "partial-census",
+)
+
+
+def base_pair():
+    """Two fully compatible captures with one metric."""
+    meanings = {"census-direct-map": "meaning-1",
+                "queue-ledger": "meaning-1"}
+
+    def side(evidence):
+        return {
+            "census_bounded": False,
+            "epoch": "41",
+            "evidence_id": evidence,
+            "legacy": False,
+            "metrics": [{
+                "census_derived": False,
+                "metric_id": "x",
+                "scope": "guest-direct-map",
+                "source_id": "census-direct-map",
+                "unit": "bytes",
+                "value": "1",
+            }],
+            "platform_cell": "snp-guest-01",
+            "profile_id": "linux-x86_64-7.0-reference",
+            "source_meanings": dict(meanings),
+            "window": {"clock_domain": "guest_monotonic_active",
+                       "end": "2000", "start": "1000"},
+            "workload": "idle-snapshot",
+        }
+
+    left = side("cap-left-order")
+    right = side("cap-right-order")
+    right["metrics"][0]["value"] = "9"
+    return left, right
+
+
+def break_check(reason, left, right):
+    """Fail exactly one compatibility check on the pair."""
+    metric = right["metrics"][0]
+    if reason == "metric-missing":
+        right["metrics"] = []
+    elif reason == "unit-mismatch":
+        metric["unit"] = "unknown"
+    elif reason == "scope-mismatch":
+        metric["scope"] = "guest-driver-virtio"
+    elif reason == "legacy-input":
+        right["legacy"] = True
+    elif reason == "epoch-mismatch":
+        right["epoch"] = "42"
+    elif reason == "device-binding-mismatch":
+        right["platform_cell"] = "tdx-guest-02"
+    elif reason == "profile-mismatch":
+        right["profile_id"] = "linux-x86_64-7.0-hardened"
+    elif reason == "workload-mismatch":
+        right["workload"] = "io-batch"
+    elif reason == "source-mismatch":
+        metric["source_id"] = "queue-ledger"
+    elif reason == "source-meaning-unknown":
+        del left["source_meanings"]["census-direct-map"]
+        del right["source_meanings"]["census-direct-map"]
+    elif reason == "source-meaning-change":
+        right["source_meanings"]["census-direct-map"] = "meaning-2"
+    elif reason == "clock-mismatch":
+        right["window"]["clock_domain"] = "guest_boottime_elapsed"
+    elif reason == "window-mismatch":
+        right["window"]["end"] = "3000"
+    elif reason == "partial-census":
+        metric["census_derived"] = True
+        right["census_bounded"] = True
+    else:  # pragma: no cover
+        raise AssertionError("no breaker for %s" % reason)
+
+
+def test_checks_run_in_documented_order():
+    for index in range(len(CHECK_ORDER) - 1):
+        earlier = CHECK_ORDER[index]
+        later = CHECK_ORDER[index + 1]
+        if earlier == "metric-missing":
+            continue  # absence preempts every check; see below
+        if (earlier, later) == ("source-meaning-unknown",
+                                "source-meaning-change"):
+            continue  # mutually exclusive by construction
+        left, right = base_pair()
+        break_check(earlier, left, right)
+        break_check(later, left, right)
+        assert validate_capture(left) is None
+        assert validate_capture(right) is None
+        compatibility, reason, _delta = expect_row(
+            "order", left, right, "x")
+        assert compatibility == "incompatible", (earlier, later)
+        assert reason == earlier, \
+            "want %s before %s, got %s" % (earlier, later, reason)
+    # A missing metric preempts every later check at once.
+    left, right = base_pair()
+    for reason in CHECK_ORDER:
+        if reason != "metric-missing":
+            break_check(reason, left, right)
+    break_check("metric-missing", left, right)
+    compatibility, reason, _delta = expect_row(
+        "order", left, right, "x")
+    assert (compatibility, reason) == ("unavailable", "metric-missing")
+    # The last check beats the delta stage: a bounded census
+    # row with an unknown value still refuses.
+    left, right = base_pair()
+    break_check("partial-census", left, right)
+    left["metrics"][0]["value"] = None
+    left["metrics"][0]["value_reason"] = "source-unavailable"
+    compatibility, reason, _delta = expect_row(
+        "order", left, right, "x")
+    assert (compatibility, reason) == ("incompatible", "partial-census")
+    # Validation order mirrors the product: duplicates beat a
+    # backward window, and the left capture goes first.
+    left, right = base_pair()
+    left["metrics"].append(dict(left["metrics"][0]))
+    left["window"]["start"] = "3000"
+    left["window"]["end"] = "2000"
+    assert validate_capture(left) == "duplicate-metric"
+    left, right = base_pair()
+    left["metrics"][0]["value"] = None
+    right["metrics"].append(dict(right["metrics"][0]))
+    assert validate_capture(left) == "invalid-value"
+    assert validate_capture(right) == "duplicate-metric"
+    assert (validate_capture(left) or validate_capture(right)) \
+        == "invalid-value"
+
+
+def test_docs_table_follows_check_order():
+    with open(COVERAGE_DOC, encoding="utf-8") as handle:
+        doc = handle.read()
+    section = doc.split("Checks run in order;")[1]
+    section = section.split("Compatible rows carry")[0]
+    codes = re.findall(r"^\|\s*\d+\s*\|\s*`([^`]+)`",
+                       section, re.MULTILINE)
+    assert tuple(codes) == CHECK_ORDER + ("compatible",), codes
