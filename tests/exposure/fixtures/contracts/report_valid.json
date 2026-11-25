@@ -1,0 +1,109 @@
+{
+  "schema_version": "0.3.0",
+  "session_id": "exposure-sealed-1",
+  "synthetic": true,
+  "engine_version": "0.2.0",
+  "environment": {
+    "mode": "unknown",
+    "detection": "unverified",
+    "asserted_mode": null,
+    "attestation": "not_performed",
+    "evidence": []
+  },
+  "device_catalog": {
+    "devices": []
+  },
+  "quality": {
+    "detail": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "synthetic census snapshot",
+      "reason": "Synthetic control; this capture is synthetic."
+    },
+    "aggregate": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "synthetic census snapshot",
+      "reason": "Synthetic control; this capture is synthetic."
+    },
+    "correlation": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "synthetic census snapshot",
+      "reason": "Synthetic control; this capture is synthetic."
+    },
+    "baseline": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "synthetic census snapshot",
+      "reason": "Synthetic control; this capture is synthetic."
+    },
+    "terminal": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "synthetic census snapshot",
+      "reason": "Synthetic control; this capture is synthetic."
+    }
+  },
+  "verdict": {
+    "name": "complete",
+    "loss_ratio_bps": "0",
+    "delivered": "0"
+  },
+  "metrics": [],
+  "findings": [],
+  "limitations": [],
+  "integrity": {
+    "status": "verified",
+    "verified_bytes": "2314",
+    "verified_events": "3"
+  },
+  "policy_results": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "scope_id": "virtio-queues",
+      "result": "conforms",
+      "evidence_ids": [
+        "ev-1"
+      ],
+      "missing_sources": [],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "No unexpected queue appeared; next check the ledger."
+    }
+  ],
+  "comparisons": [
+    {
+      "metric_id": "shared-pages",
+      "compatibility": "compatible",
+      "reason": "Same identity, profile, workload, window and unit.",
+      "left_evidence": "ev-left",
+      "right_evidence": "ev-right",
+      "delta": 0,
+      "unit": "bytes",
+      "scope": "direct-map",
+      "quality": {
+        "detail": {
+          "status": "complete_for_scope",
+          "loss_count": "0"
+        },
+        "aggregate": {
+          "status": "complete_for_scope",
+          "loss_count": "0"
+        },
+        "identity": {
+          "status": "complete_for_scope",
+          "loss_count": "0"
+        },
+        "baseline": {
+          "status": "complete_for_scope",
+          "loss_count": "0"
+        },
+        "terminal": {
+          "status": "complete_for_scope",
+          "loss_count": "0"
+        }
+      }
+    }
+  ]
+}

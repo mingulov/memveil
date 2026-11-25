@@ -1,0 +1,265 @@
+{
+  "session": {
+    "schema_version": "0.3.0",
+    "session_id": "exposure-sealed-1",
+    "synthetic": true,
+    "product": {
+      "name": "memveil",
+      "version": "0.2.0",
+      "build": null
+    },
+    "environment": {
+      "mode": "unknown",
+      "detection": "unverified",
+      "asserted_mode": null,
+      "attestation": "not_performed",
+      "evidence": []
+    },
+    "capture": {
+      "mode": "synthetic",
+      "window": {
+        "start_ns": "1000000000",
+        "end_ns": "4000000000"
+      },
+      "filters": {
+        "device": null
+      },
+      "finalized": true,
+      "end_reason": "duration",
+      "integrity": {
+        "algorithm": "sha256",
+        "events_bytes": "2376",
+        "line_count": "3",
+        "first_seq": "0",
+        "last_seq": "2",
+        "events_sha256": "e6cb4187e3d6a57925b28f4f5776b1c84225a10bf055665189434f7d274e2518",
+        "kinds": {
+          "bounce_attempt": "0",
+          "map_result": "0",
+          "unmap": "0",
+          "copy": "0",
+          "sync_request": "0",
+          "transition_result": "0",
+          "pool_sample": "0",
+          "gap": "0",
+          "marker": "1",
+          "counter_snapshot": "0",
+          "exposure_fact": "2"
+        }
+      }
+    },
+    "device_catalog": {
+      "devices": []
+    },
+    "baseline": {
+      "complete": false,
+      "region_observations": []
+    },
+    "capabilities": {
+      "bounce_attempts": {
+        "status": "unavailable",
+        "reason": "No attempt source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      },
+      "mapping_lifecycle": {
+        "status": "unavailable",
+        "reason": "No lifecycle source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      },
+      "copy_bytes": {
+        "status": "unavailable",
+        "reason": "No copy source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      },
+      "sync_requests": {
+        "status": "unavailable",
+        "reason": "No sync source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      },
+      "conversion_results": {
+        "status": "unavailable",
+        "reason": "No conversion source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      },
+      "region_state": {
+        "status": "unavailable",
+        "reason": "No region source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      },
+      "pool_stats": {
+        "status": "unavailable",
+        "reason": "No pool source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      },
+      "task_context": {
+        "status": "unavailable",
+        "reason": "No task source in this fixture.",
+        "hooks": [],
+        "profile_id": null
+      }
+    },
+    "quality": {
+      "detail": {
+        "status": "complete_for_scope",
+        "loss_count": "0",
+        "scope": "synthetic census snapshot",
+        "reason": "Synthetic control; this capture is synthetic."
+      },
+      "aggregate": {
+        "status": "complete_for_scope",
+        "loss_count": "0",
+        "scope": "synthetic census snapshot",
+        "reason": "Synthetic control; this capture is synthetic."
+      },
+      "correlation": {
+        "status": "complete_for_scope",
+        "loss_count": "0",
+        "scope": "synthetic census snapshot",
+        "reason": "Synthetic control; this capture is synthetic."
+      },
+      "baseline": {
+        "status": "complete_for_scope",
+        "loss_count": "0",
+        "scope": "synthetic census snapshot",
+        "reason": "Synthetic control; this capture is synthetic."
+      },
+      "terminal": {
+        "status": "complete_for_scope",
+        "loss_count": "0",
+        "scope": "synthetic census snapshot",
+        "reason": "Synthetic control; this capture is synthetic."
+      }
+    },
+    "stop": {
+      "outcome": "complete",
+      "reason": "",
+      "budget_ms": "60000",
+      "elapsed_ms": "30",
+      "admission_closed": true,
+      "quiescence_observed": true,
+      "writers_settled": "1",
+      "in_flight_at_close": "0",
+      "late_submits_drained": "0",
+      "drained_records": "3",
+      "busy_at_drain": false,
+      "counters_valid": true,
+      "open_mappings": "0"
+    },
+    "exposure": {
+      "sources": [
+        {
+          "source_id": "sharing-census",
+          "capability": "census",
+          "profile_id": "synthetic-census-1",
+          "subject_id": "guest-direct-map",
+          "platform_cell": "ordinary-linux",
+          "address_namespace": "guest_physical",
+          "phase": "pre_attach",
+          "status": "available",
+          "reason": "adapter-unimplemented",
+          "window": {
+            "start_ns": "1000000000",
+            "end_ns": "4000000000"
+          },
+          "quality": {
+            "detail": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "aggregate": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "identity": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "baseline": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "terminal": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            }
+          }
+        }
+      ],
+      "objects": [
+        {
+          "object_token": "tok-1",
+          "generation": "1",
+          "object_class": "buffer",
+          "namespace": "session_token",
+          "origin_source": "heap-dmabuf-objects",
+          "lifecycle_status": "live",
+          "state": "shared",
+          "state_evidence": [
+            "ev-1"
+          ],
+          "expected_boundary": {
+            "boundary_type": "revert_boundary",
+            "reference": "release"
+          },
+          "uncertainty": {
+            "alias_unknown": false,
+            "reuse_unknown": false,
+            "loss_unknown": false,
+            "events_missed": false
+          }
+        }
+      ],
+      "baseline_samples": [
+        {
+          "sample_id": "sample-1",
+          "source_id": "sharing-census",
+          "start_time": "1000000000",
+          "end_time": "1000500000",
+          "scope": "direct-map",
+          "counts": {
+            "shared-pages": "12"
+          },
+          "units": "bytes",
+          "visited": "64",
+          "returned": "1",
+          "bounded": false,
+          "atomicity": "interval",
+          "quality": {
+            "detail": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "aggregate": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "identity": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "baseline": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            },
+            "terminal": {
+              "status": "complete_for_scope",
+              "loss_count": "0"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "event_lines": [
+    "{\"schema_version\":\"0.3.0\",\"session_id\":\"exposure-sealed-1\",\"seq\":\"0\",\"ts_ns\":\"1100000000\",\"kind\":\"exposure_fact\",\"source\":{\"hook\":\"synthetic:exposure\",\"backend\":\"synthetic\",\"profile_id\":\"synthetic-census-1\",\"measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"evidence_id\":\"ev-1\",\"source_id\":\"sharing-census\",\"epoch\":\"7\",\"operation_id\":\"op-1\",\"kind\":\"census-entry\",\"direction\":\"egress\",\"object_token\":\"tok-1\",\"generation\":\"1\",\"offset\":\"0\",\"length_bytes\":\"4096\",\"native_result\":0,\"caller_class\":\"allocator\",\"peer_class\":\"none-observed\",\"clock_domain\":\"guest_monotonic_active\",\"observed_interval\":{\"start\":\"1000000000\",\"end\":\"1000000100\",\"uncertainty\":\"50\"},\"semantics\":\"inventory\",\"quality\":{\"detail\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"aggregate\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"identity\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"baseline\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"terminal\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"}},\"parent_operation_id_reason\":\"\"}}\n",
+    "{\"schema_version\":\"0.3.0\",\"session_id\":\"exposure-sealed-1\",\"seq\":\"1\",\"ts_ns\":\"1200000000\",\"kind\":\"exposure_fact\",\"source\":{\"hook\":\"synthetic:exposure\",\"backend\":\"synthetic\",\"profile_id\":\"synthetic-census-1\",\"measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"evidence_id\":\"ev-2\",\"source_id\":\"sharing-census\",\"epoch\":\"7\",\"operation_id\":\"op-2\",\"parent_operation_id\":\"op-1\",\"kind\":\"census-entry\",\"direction\":\"egress\",\"object_token\":\"tok-1\",\"generation\":\"1\",\"offset\":\"0\",\"length_bytes\":\"4096\",\"native_result\":null,\"native_result_reason\":\"withheld\",\"caller_class\":\"allocator\",\"peer_class\":\"none-observed\",\"clock_domain\":\"guest_monotonic_active\",\"observed_interval\":{\"start\":\"1000000000\",\"end\":\"1000000100\",\"uncertainty\":\"50\"},\"semantics\":\"inventory\",\"quality\":{\"detail\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"aggregate\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"identity\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"baseline\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"},\"terminal\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"}}}}\n",
+    "{\"schema_version\":\"0.3.0\",\"session_id\":\"exposure-sealed-1\",\"seq\":\"2\",\"ts_ns\":\"1300000000\",\"kind\":\"marker\",\"source\":{\"hook\":\"synthetic:exposure\",\"backend\":\"synthetic\",\"profile_id\":\"synthetic-census-1\",\"measurement\":\"observed\",\"correlation\":\"direct\"},\"data\":{\"text\":\"census sealed\"}}\n"
+  ]
+}
