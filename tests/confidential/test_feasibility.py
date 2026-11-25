@@ -61,8 +61,7 @@ PROOF_CLAIM_TOKENS = frozenset((
     "confirmed", "complete", "completed", "admitted",
 ))
 
-NEGATION_TOKENS = frozenset(("no", "not", "never", "un", "non", "without"))
-NEGATION_PREFIXES = ("un", "non")
+NEGATION_TOKENS = frozenset(("no", "not", "never", "without"))
 
 ANNOTATED_PROOF = "PASS (verified on target)"
 
@@ -73,27 +72,27 @@ def _load(path):
 
 
 def _word_tokens(value):
-    return re.findall(r"[a-z]+", value.lower())
+    return re.findall(r"[a-z]+(?:-[a-z]+)*", value.lower())
 
 
 def _claims_proof(value):
     """True when a proof value asserts proof without a negation marker.
 
-    Tokenize on non-letters (case-insensitive): RED if any token is a
-    proof-claim word unless a negation marker is present in the value,
-    either as a bare token (``no``, ``not``, ...) or as an ``un``/``non``
-    prefix (so ``unproven`` counts as negated).
+    Tokenize on non-letters except hyphens (case-insensitive), so a
+    hyphenated form such as ``non-pass`` stays one token: RED if any
+    token is a bare proof-claim word unless an exact negation token
+    (``no``, ``not``, ``never``, ``without``) is present as a full
+    token. A bare ``un``/``non`` token, or an ``un``/``non`` prefix on
+    some other word (``under``, ``unit``), is not a negation marker:
+    only the prefix attached to the claim word itself (``unproven``,
+    ``non-pass``, ``unverified``) counts as negated, and such forms
+    are single tokens outside the claim set. Hence ``under verified
+    conditions`` REDs while ``unproven`` stays GREEN.
     """
     tokens = _word_tokens(value)
     if not any(token in PROOF_CLAIM_TOKENS for token in tokens):
         return False
-    for token in tokens:
-        if token in NEGATION_TOKENS:
-            return False
-        for prefix in NEGATION_PREFIXES:
-            if token.startswith(prefix) and len(token) > len(prefix):
-                return False
-    return True
+    return not any(token in NEGATION_TOKENS for token in tokens)
 
 
 def validate(matrix_path, catalog_path):
@@ -351,6 +350,28 @@ def check_proof_negated_ok(tmpdir):
     assert validate(path, CATALOG_PATH) == []
 
 
+def check_proof_under_verified_red(tmpdir, group):
+    def plant(matrix):
+        if group == "row":
+            matrix["rows"][0]["real_semantics"] = "under verified conditions"
+        else:
+            matrix["proof_status"]["platform_milestones"] = (
+                "under verified conditions")
+    path = _mutated(tmpdir, "mut-under-verified-%s.json" % group, plant)
+    errors = validate(path, CATALOG_PATH)
+    assert any("claims PASS" in error for error in errors), errors
+
+
+def check_proof_prefix_negated_ok(tmpdir):
+    def plant(matrix):
+        matrix["rows"][0]["real_semantics"] = "unproven on any target"
+        matrix["rows"][1]["verifier_acceptance"] = "non-pass for this cell"
+        matrix["proof_status"]["platform_milestones"] = (
+            "unverified on every target")
+    path = _mutated(tmpdir, "prefix-negated-proof.json", plant)
+    assert validate(path, CATALOG_PATH) == []
+
+
 def run_self_checks():
     failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -378,6 +399,11 @@ def run_self_checks():
              lambda: [check_proof_annotated_red(tmpdir, group)
                       for group in ("row", "proof_status")]),
             ("proof-negated-ok", lambda: check_proof_negated_ok(tmpdir)),
+            ("proof-under-verified-red",
+             lambda: [check_proof_under_verified_red(tmpdir, group)
+                      for group in ("row", "proof_status")]),
+            ("proof-prefix-negated-ok",
+             lambda: check_proof_prefix_negated_ok(tmpdir)),
         ]
         for label, scenario in scenarios:
             try:
@@ -461,6 +487,15 @@ def test_annotated_proof_rejected(tmp_path, group):
 
 def test_negated_proof_accepted(tmp_path):
     check_proof_negated_ok(str(tmp_path))
+
+
+@_parametrize("group", ["row", "proof_status"])
+def test_under_verified_conditions_rejected(tmp_path, group):
+    check_proof_under_verified_red(str(tmp_path), group)
+
+
+def test_prefix_negated_proof_accepted(tmp_path):
+    check_proof_prefix_negated_ok(str(tmp_path))
 
 
 if __name__ == "__main__":
