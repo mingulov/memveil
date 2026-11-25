@@ -1959,10 +1959,18 @@ def main(argv):
             os.makedirs(os.path.join(staged, sub))
         for shipped, (source, _digest) in sorted(bpf_inputs.items()):
             shutil.copy2(source, os.path.join(staged, "bpf", shipped))
-        for name in sorted(os.listdir(os.path.join(root, "profiles"))):
-            if name == "manifest.txt" or name.endswith(".json"):
-                shutil.copy2(os.path.join(root, "profiles", name),
-                             os.path.join(staged, "profiles", name))
+        for base, dirs, files in os.walk(os.path.join(root, "profiles")):
+            dirs.sort()
+            for name in sorted(files):
+                if not (name == "manifest.txt"
+                        or name.endswith(".json")):
+                    continue
+                src = os.path.join(base, name)
+                rel = os.path.relpath(
+                    src, os.path.join(root, "profiles"))
+                dest = os.path.join(staged, "profiles", rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(src, dest)
         # Ship the whole manuals tree: quickstart and support
         # reference troubleshooting, performance, resource-limits,
         # and permissions, so staging a subset would ship dangling

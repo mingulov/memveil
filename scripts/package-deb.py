@@ -659,10 +659,16 @@ def main(argv):
             if not os.path.isfile(src):
                 fail("bundle lacks BPF object %s" % name)
             shutil.copy2(src, os.path.join(libdir, name))
-        for name in sorted(os.listdir(
-                os.path.join(bundle, "profiles"))):
-            shutil.copy2(os.path.join(bundle, "profiles", name),
-                         os.path.join(profdir, name))
+        for base, dirs, files in os.walk(
+                os.path.join(bundle, "profiles")):
+            dirs.sort()
+            for name in sorted(files):
+                src = os.path.join(base, name)
+                rel = os.path.relpath(
+                    src, os.path.join(bundle, "profiles"))
+                dest = os.path.join(profdir, rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(src, dest)
         if not os.path.isfile(os.path.join(profdir, "manifest.txt")):
             fail("staged profiles/ lacks manifest.txt")
         for base, dirs, files in os.walk(
