@@ -61,10 +61,12 @@ fn shim_pipe() -> (RawFd, RawFd) {
 
 /// One pipe with the read end left blocking (both ends close-on-exec).
 ///
-/// The capacity is grown past one full chunk before any write lands:
-/// every blocking case pre-fills the pipe while no reader exists, and
-/// a small default buffer would hang the writer outside the timeout
-/// guard that only wraps the off-thread read.
+/// Capacity for one full chunk is ensured before any write lands: the
+/// current size is queried and grown to 1MiB only when below 65536
+/// bytes, then the final capacity is asserted. Every blocking case
+/// pre-fills the pipe while no reader exists, and a small default
+/// buffer would hang the writer outside the timeout guard that only
+/// wraps the off-thread read.
 fn blocking_shim_pipe() -> (RawFd, RawFd) {
     let mut ends = [0 as libc::c_int; 2];
     // SAFETY: `ends` outlives the call; both fds are owned on success.
