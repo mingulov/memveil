@@ -150,8 +150,14 @@ def seal_verified(snapshot):
     An absent integrity object verifies false; a present non-object
     or an unknown integrity field or kind raises, mirroring the Rust
     snapshot path. A well-formed seal that mismatches the bytes
-    verifies false.
+    verifies false. Every line ends in a newline and carries its
+    position as its sequence number; violations raise.
     """
+    for position, line in enumerate(snapshot["event_lines"]):
+        if not line.endswith("\n"):
+            raise ValueError("line %d lacks trailing newline" % position)
+        if json.loads(line).get("seq") != str(position):
+            raise ValueError("line %d sequence mismatch" % position)
     capture = snapshot["session"]["capture"]
     if "integrity" not in capture:
         return False
@@ -280,6 +286,20 @@ def test_snapshot_path_refuses_unknown_and_non_object_integrity():
         seal_verified(null)
     assert not seal_verified(load("unsealed_snapshot.json")), \
         "absent integrity stays merely unsealed"
+
+
+def test_snapshot_lines_carry_position_and_trailing_newline():
+    sealed = load("sealed_snapshot.json")
+    shifted = json.loads(json.dumps(sealed))
+    line = json.loads(shifted["event_lines"][0])
+    line["seq"] = "5"
+    shifted["event_lines"][0] = json.dumps(line) + "\n"
+    with pytest.raises(ValueError):
+        seal_verified(shifted)
+    stripped = json.loads(json.dumps(sealed))
+    stripped["event_lines"][0] = stripped["event_lines"][0].rstrip("\n")
+    with pytest.raises(ValueError):
+        seal_verified(stripped)
 
 
 def test_missing_terminal_evidence_is_partial():

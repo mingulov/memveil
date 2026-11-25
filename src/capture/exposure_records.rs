@@ -1273,7 +1273,7 @@ pub struct SealReport {
     pub lines: u64,
 }
 
-fn line_kind(line: &str) -> Option<String> {
+fn line_identity(line: &str) -> Option<(String, Option<u64>)> {
     let value = parse_value(line).ok()?;
     let JsonValue::Object(fields) = &value else {
         return None;
@@ -1281,18 +1281,23 @@ fn line_kind(line: &str) -> Option<String> {
     let JsonValue::Str(kind) = find_field(fields, "kind")? else {
         return None;
     };
-    if LEGACY_KINDS.contains(&kind.as_str()) || kind == EXPOSURE_FACT_KIND {
-        Some(kind.clone())
-    } else {
-        None
+    if !(LEGACY_KINDS.contains(&kind.as_str()) || kind == EXPOSURE_FACT_KIND) {
+        return None;
     }
+    let seq = match find_field(fields, "seq") {
+        Some(JsonValue::Str(text)) if is_canonical_u64(text) => text.parse::<u64>().ok(),
+        _ => None,
+    };
+    Some((kind.clone(), seq))
 }
 
 /// Verify one sealed snapshot: a session object plus its literal lines.
 ///
 /// The snapshot carries `session` with `capture.integrity` and
 /// `event_lines` holding the literal line bytes as JSON strings.
-/// Malformed snapshot framing is an error; a well-formed snapshot
+/// Every line ends in a newline and carries its position as its
+/// sequence number. Malformed snapshot framing is an error; a
+/// well-formed snapshot
 /// whose bytes, counts or kind census differ from the commitment
 /// verifies false. An absent integrity object verifies false, while
 /// a present non-object or an unknown integrity field is an error:
@@ -1316,13 +1321,19 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     let mut literal: Vec<u8> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
     let mut lines_ok = true;
-    for line in lines {
+    for (position, line) in lines.iter().enumerate() {
         let JsonValue::Str(text) = line else {
             return Err(SealError::new("event_lines", "expected string lines"));
         };
+        if !text.ends_with('\n') {
+            return Err(SealError::new("event_lines", "missing trailing newline"));
+        }
         literal.extend_from_slice(text.as_bytes());
-        match line_kind(text) {
-            Some(kind) => kinds.push(kind),
+        match line_identity(text) {
+            Some((kind, Some(seq))) if seq == position as u64 => kinds.push(kind),
+            Some(_) => {
+                return Err(SealError::new("event_lines", "sequence mismatch"));
+            }
             None => lines_ok = false,
         }
     }

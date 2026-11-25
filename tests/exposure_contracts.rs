@@ -189,6 +189,21 @@ fn snapshot_path_refuses_unknown_and_non_object_integrity() {
 }
 
 #[test]
+fn snapshot_lines_carry_position_and_trailing_newline() {
+    let shifted = SEALED.replacen("\\\"seq\\\":\\\"0\\\"", "\\\"seq\\\":\\\"5\\\"", 1);
+    assert_ne!(shifted, SEALED);
+    let err = verify_sealed_snapshot(&shifted).unwrap_err();
+    assert_eq!(err.what, "event_lines");
+    assert_eq!(err.message, "sequence mismatch");
+
+    let stripped = SEALED.replacen("\\n\"", "\"", 1);
+    assert_ne!(stripped, SEALED);
+    let err = verify_sealed_snapshot(&stripped).unwrap_err();
+    assert_eq!(err.what, "event_lines");
+    assert_eq!(err.message, "missing trailing newline");
+}
+
+#[test]
 fn tampered_bytes_fail_the_seal() {
     let report = verify_sealed_snapshot(SEALED).expect("positive control seals");
     assert!(report.verified);
