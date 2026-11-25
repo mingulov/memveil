@@ -61,21 +61,23 @@ FAMILIES = {
 
 # Reason codes the compatibility table documents. The word
 # list stays in lockstep with the per-metric predicate.
+# Reasons are hyphenated slugs per the frozen catalog
+# label rule; closed enums keep underscores.
 REASONS = (
     "compatible",
-    "metric_missing",
-    "unit_mismatch",
-    "scope_mismatch",
-    "legacy_input",
-    "epoch_mismatch",
-    "device_binding_mismatch",
-    "workload_mismatch",
-    "source_meaning_change",
-    "clock_mismatch",
-    "window_mismatch",
-    "partial_census",
-    "value_unknown",
-    "delta_overflow",
+    "metric-missing",
+    "unit-mismatch",
+    "scope-mismatch",
+    "legacy-input",
+    "epoch-mismatch",
+    "device-binding-mismatch",
+    "workload-mismatch",
+    "source-meaning-change",
+    "clock-mismatch",
+    "window-mismatch",
+    "partial-census",
+    "value-unknown",
+    "delta-overflow",
 )
 
 # Conclusion language that must never appear: a smaller
@@ -110,10 +112,10 @@ def metric_by_id(capture, metric_id):
 def expect_compatible(left_metric, right_metric):
     """Independent delta oracle: exact difference or null."""
     if left_metric["value"] is None or right_metric["value"] is None:
-        return None, "value_unknown"
+        return None, "value-unknown"
     delta = int(right_metric["value"]) - int(left_metric["value"])
     if delta < -(2 ** 63) or delta > 2 ** 63 - 1:
-        return None, "delta_overflow"
+        return None, "delta-overflow"
     return delta, None
 
 
@@ -122,33 +124,33 @@ def expect_row(case, left, right, metric_id):
     left_metric = metric_by_id(left, metric_id)
     right_metric = metric_by_id(right, metric_id)
     if left_metric is None or right_metric is None:
-        return ("unavailable", "metric_missing", "absent")
+        return ("unavailable", "metric-missing", "absent")
     if left_metric["unit"] != right_metric["unit"]:
-        return ("incompatible", "unit_mismatch", "absent")
+        return ("incompatible", "unit-mismatch", "absent")
     if left_metric["scope"] != right_metric["scope"]:
-        return ("incompatible", "scope_mismatch", "absent")
+        return ("incompatible", "scope-mismatch", "absent")
     if left.get("legacy", False) or right.get("legacy", False):
-        return ("incompatible", "legacy_input", "absent")
+        return ("incompatible", "legacy-input", "absent")
     if left["epoch"] != right["epoch"]:
-        return ("incompatible", "epoch_mismatch", "absent")
+        return ("incompatible", "epoch-mismatch", "absent")
     if left["platform_cell"] != right["platform_cell"]:
-        return ("incompatible", "device_binding_mismatch", "absent")
+        return ("incompatible", "device-binding-mismatch", "absent")
     if left["workload"] != right["workload"]:
-        return ("incompatible", "workload_mismatch", "absent")
+        return ("incompatible", "workload-mismatch", "absent")
     source = left_metric["source_id"]
     if (left["source_meanings"].get(source)
             != right["source_meanings"].get(source)):
-        return ("incompatible", "source_meaning_change", "absent")
+        return ("incompatible", "source-meaning-change", "absent")
     if (left["window"]["clock_domain"]
             != right["window"]["clock_domain"]):
-        return ("incompatible", "clock_mismatch", "absent")
+        return ("incompatible", "clock-mismatch", "absent")
     if (left["window"]["start"] != right["window"]["start"]
             or left["window"]["end"] != right["window"]["end"]):
-        return ("incompatible", "window_mismatch", "absent")
+        return ("incompatible", "window-mismatch", "absent")
     if (left_metric.get("census_derived", False)
             and (left.get("census_bounded", False)
                  or right.get("census_bounded", False))):
-        return ("incompatible", "partial_census", "absent")
+        return ("incompatible", "partial-census", "absent")
     delta, reason = expect_compatible(left_metric, right_metric)
     if reason is not None:
         return ("compatible", "compatible", ("null", reason))

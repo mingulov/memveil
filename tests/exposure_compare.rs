@@ -164,7 +164,7 @@ fn workload_change_refuses_all_metrics() {
             refused_row(
                 "shared-bytes",
                 "incompatible",
-                "workload_mismatch",
+                "workload-mismatch",
                 "cap-left-001",
                 "cap-right-001",
                 "bytes",
@@ -173,7 +173,7 @@ fn workload_change_refuses_all_metrics() {
             refused_row(
                 "queue-count",
                 "incompatible",
-                "workload_mismatch",
+                "workload-mismatch",
                 "cap-left-001",
                 "cap-right-001",
                 "bytes",
@@ -217,7 +217,7 @@ fn epoch_reset_refuses_all_metrics() {
         vec![refused_row(
             "shared-bytes",
             "incompatible",
-            "epoch_mismatch",
+            "epoch-mismatch",
             "cap-left-002",
             "cap-right-002",
             "bytes",
@@ -260,7 +260,7 @@ fn device_binding_change_refuses_all_metrics() {
         vec![refused_row(
             "shared-bytes",
             "incompatible",
-            "device_binding_mismatch",
+            "device-binding-mismatch",
             "cap-left-003",
             "cap-right-003",
             "bytes",
@@ -318,7 +318,7 @@ fn meaning_change_refuses_only_its_source() {
             refused_row(
                 "shared-bytes",
                 "incompatible",
-                "source_meaning_change",
+                "source-meaning-change",
                 "cap-left-004",
                 "cap-right-004",
                 "bytes",
@@ -371,7 +371,7 @@ fn unequal_window_refuses_all_metrics() {
         vec![refused_row(
             "shared-bytes",
             "incompatible",
-            "window_mismatch",
+            "window-mismatch",
             "cap-left-005",
             "cap-right-005",
             "bytes",
@@ -414,7 +414,7 @@ fn clock_change_refuses_all_metrics() {
         vec![refused_row(
             "shared-bytes",
             "incompatible",
-            "clock_mismatch",
+            "clock-mismatch",
             "cap-left-006",
             "cap-right-006",
             "bytes",
@@ -470,7 +470,7 @@ fn partial_census_keeps_unaffected_metrics() {
             refused_row(
                 "shared-bytes",
                 "incompatible",
-                "partial_census",
+                "partial-census",
                 "cap-left-007",
                 "cap-right-007",
                 "bytes",
@@ -523,7 +523,7 @@ fn legacy_side_refuses_all_metrics() {
         vec![refused_row(
             "shared-bytes",
             "incompatible",
-            "legacy_input",
+            "legacy-input",
             "cap-left-008",
             "cap-right-008",
             "bytes",
@@ -608,7 +608,7 @@ fn equal_captures_yield_exact_deltas() {
                 "cap-left-009",
                 "cap-right-009",
                 None,
-                Some("value_unknown"),
+                Some("value-unknown"),
                 "bytes",
                 "guest-kernel-allocator",
             ),
@@ -687,7 +687,7 @@ fn missing_unit_and_scope_shapes_refuse() {
             refused_row(
                 "left-only",
                 "unavailable",
-                "metric_missing",
+                "metric-missing",
                 "cap-left-010",
                 "cap-right-010",
                 "bytes",
@@ -696,7 +696,7 @@ fn missing_unit_and_scope_shapes_refuse() {
             refused_row(
                 "unit-split",
                 "incompatible",
-                "unit_mismatch",
+                "unit-mismatch",
                 "cap-left-010",
                 "cap-right-010",
                 "bytes",
@@ -705,7 +705,7 @@ fn missing_unit_and_scope_shapes_refuse() {
             refused_row(
                 "scope-split",
                 "incompatible",
-                "scope_mismatch",
+                "scope-mismatch",
                 "cap-left-010",
                 "cap-right-010",
                 "bytes",
@@ -714,7 +714,7 @@ fn missing_unit_and_scope_shapes_refuse() {
             refused_row(
                 "right-only",
                 "unavailable",
-                "metric_missing",
+                "metric-missing",
                 "cap-left-010",
                 "cap-right-010",
                 "bytes",
@@ -758,7 +758,7 @@ fn overflowing_delta_stays_compatible_without_value() {
             "cap-left-011",
             "cap-right-011",
             None,
-            Some("delta_overflow"),
+            Some("delta-overflow"),
             "bytes",
             "guest-direct-map",
         )]
@@ -798,6 +798,6 @@ fn predicate_order_is_deterministic() {
     let rows = compare_captures(&left, &right);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].compatibility, "incompatible");
-    assert_eq!(rows[0].reason, "epoch_mismatch");
+    assert_eq!(rows[0].reason, "epoch-mismatch");
     assert_eq!(rows[0].delta, None);
 }

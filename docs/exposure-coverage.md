@@ -109,23 +109,23 @@ Checks run in order; the first failure names the reason:
 
 | Order | Reason | Meaning |
 | --- | --- | --- |
-| 1 | `metric_missing` | Metric absent on one side; reported `unavailable` |
-| 2 | `unit_mismatch` | Units differ; no delta across units |
-| 3 | `scope_mismatch` | Scopes differ; scan scopes stay distinct |
-| 4 | `legacy_input` | One side predates integrity metadata |
-| 5 | `epoch_mismatch` | Epochs differ; counters restarted |
-| 6 | `device_binding_mismatch` | Bound devices differ |
-| 7 | `workload_mismatch` | Workloads differ under an equal profile |
-| 8 | `source_meaning_change` | The metric's source changed meaning |
-| 9 | `clock_mismatch` | Clock domains differ |
-| 10 | `window_mismatch` | Window bounds differ |
-| 11 | `partial_census` | Census-derived metric with a bounded scan |
+| 1 | `metric-missing` | Metric absent on one side; reported `unavailable` |
+| 2 | `unit-mismatch` | Units differ; no delta across units |
+| 3 | `scope-mismatch` | Scopes differ; scan scopes stay distinct |
+| 4 | `legacy-input` | One side predates integrity metadata |
+| 5 | `epoch-mismatch` | Epochs differ; counters restarted |
+| 6 | `device-binding-mismatch` | Bound devices differ |
+| 7 | `workload-mismatch` | Workloads differ under an equal profile |
+| 8 | `source-meaning-change` | The metric's source changed meaning |
+| 9 | `clock-mismatch` | Clock domains differ |
+| 10 | `window-mismatch` | Window bounds differ |
+| 11 | `partial-census` | Census-derived metric with a bounded scan |
 | 12 | `compatible` | Predicate passed; delta rules below apply |
 
 Compatible rows carry `delta` except when a side is
-unknown (`value_unknown`, null delta with reason) or
+unknown (`value-unknown`, null delta with reason) or
 the difference overflows the signed range
-(`delta_overflow`, null delta with reason).
+(`delta-overflow`, null delta with reason).
 
 Incomplete journal events never enter a delta: the
 comparator reads finalized metric values only. A

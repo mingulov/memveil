@@ -144,7 +144,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "unavailable",
-            "metric_missing",
+            "metric-missing",
             left,
             right,
             &shape.unit,
@@ -155,7 +155,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "unit_mismatch",
+            "unit-mismatch",
             left,
             right,
             &left_metric.unit,
@@ -166,7 +166,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "scope_mismatch",
+            "scope-mismatch",
             left,
             right,
             &left_metric.unit,
@@ -177,7 +177,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "legacy_input",
+            "legacy-input",
             left,
             right,
             &left_metric.unit,
@@ -188,7 +188,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "epoch_mismatch",
+            "epoch-mismatch",
             left,
             right,
             &left_metric.unit,
@@ -199,7 +199,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "device_binding_mismatch",
+            "device-binding-mismatch",
             left,
             right,
             &left_metric.unit,
@@ -210,7 +210,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "workload_mismatch",
+            "workload-mismatch",
             left,
             right,
             &left_metric.unit,
@@ -222,7 +222,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "source_meaning_change",
+            "source-meaning-change",
             left,
             right,
             &left_metric.unit,
@@ -233,7 +233,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "clock_mismatch",
+            "clock-mismatch",
             left,
             right,
             &left_metric.unit,
@@ -244,7 +244,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "window_mismatch",
+            "window-mismatch",
             left,
             right,
             &left_metric.unit,
@@ -255,7 +255,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         return refused(
             metric_id,
             "incompatible",
-            "partial_census",
+            "partial-census",
             left,
             right,
             &left_metric.unit,
@@ -270,7 +270,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             left_evidence: left.evidence_id.clone(),
             right_evidence: right.evidence_id.clone(),
             delta: None,
-            delta_reason: Some("value_unknown".to_string()),
+            delta_reason: Some("value-unknown".to_string()),
             unit: left_metric.unit.clone(),
             scope: left_metric.scope.clone(),
             quality: Quality::complete(),
@@ -288,7 +288,7 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         delta_reason: if delta.is_some() {
             None
         } else {
-            Some("delta_overflow".to_string())
+            Some("delta-overflow".to_string())
         },
         unit: left_metric.unit.clone(),
         scope: left_metric.scope.clone(),
