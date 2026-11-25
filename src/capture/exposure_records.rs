@@ -18,6 +18,7 @@
 //! leaf takes exactly its canonical JSON type, arrays hold strings
 //! only, and anything without a canonical order is refused.
 
+use std::collections::HashMap;
 use std::fmt;
 
 /// Ten legacy event kinds in integrity-table order.
@@ -1642,7 +1643,7 @@ pub fn parse_policy_file(text: &str) -> Result<PolicySummary, RecordError> {
     let Some(JsonValue::Array(exceptions)) = find_field(top, "exceptions") else {
         return Err(RecordError::new("exceptions", "expected array"));
     };
-    let mut per_rule: Vec<(&str, usize)> = Vec::new();
+    let mut per_rule: HashMap<&str, usize> = HashMap::with_capacity(exceptions.len());
     for entry in exceptions {
         let JsonValue::Object(fields) = entry else {
             return Err(RecordError::new("exceptions", "expected object entries"));
@@ -1650,12 +1651,9 @@ pub fn parse_policy_file(text: &str) -> Result<PolicySummary, RecordError> {
         let Some(JsonValue::Str(handle)) = find_field(fields, "rule_id") else {
             return Err(RecordError::new("exceptions", "expected rule handle"));
         };
-        match per_rule.iter_mut().find(|(seen, _)| *seen == handle) {
-            Some((_, count)) => *count += 1,
-            None => per_rule.push((handle, 1)),
-        }
+        *per_rule.entry(handle).or_insert(0) += 1;
     }
-    for (_, count) in &per_rule {
+    for count in per_rule.values() {
         if *count > POLICY_FILE_MAX_EXCEPTIONS_PER_RULE {
             return Err(RecordError::new("exceptions", "too many exceptions"));
         }
@@ -2176,6 +2174,32 @@ mod tests {
 
         let wrong_version = policy_doc(rule, "").replacen("\"0.1.0\"", "\"9.9.9\"", 1);
         assert!(parse_policy_file(&wrong_version).is_err());
+    }
+
+    #[test]
+    fn policy_loader_stays_linear_in_distinct_rule_ids() {
+        const DISTINCT: usize = 25_000;
+        let mut exceptions = String::new();
+        for index in 0..DISTINCT {
+            if index > 0 {
+                exceptions.push(',');
+            }
+            exceptions.push_str(&format!("{{\"rule_id\":\"e{index:05}\"}}"));
+        }
+        let policy = policy_doc("{\"rule_id\":\"r\"}", &exceptions);
+        assert!(
+            policy.len() <= POLICY_FILE_MAX_BYTES,
+            "synthetic policy fits the byte cap"
+        );
+        let start = std::time::Instant::now();
+        let summary = parse_policy_file(&policy).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(summary.rules, 1);
+        assert_eq!(summary.exceptions, DISTINCT);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "25,000 distinct rule IDs must parse in well under a second, took {elapsed:?}"
+        );
     }
 
     #[test]
