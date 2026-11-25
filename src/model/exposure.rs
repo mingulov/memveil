@@ -471,6 +471,34 @@ pub fn example_quality() -> Quality {
     ]
 }
 
+/// An unobserved quality block: every channel unavailable, every
+/// loss unknown. An unimplemented adapter never claims a measured
+/// zero; unknown loss never collapses to one.
+pub fn unavailable_quality() -> Quality {
+    [
+        ChannelQuality {
+            status: "unavailable".to_string(),
+            loss: None,
+        },
+        ChannelQuality {
+            status: "unavailable".to_string(),
+            loss: None,
+        },
+        ChannelQuality {
+            status: "unavailable".to_string(),
+            loss: None,
+        },
+        ChannelQuality {
+            status: "unavailable".to_string(),
+            loss: None,
+        },
+        ChannelQuality {
+            status: "unavailable".to_string(),
+            loss: None,
+        },
+    ]
+}
+
 /// Check all five channels independently.
 pub fn validate_quality(quality: &Quality, field: &str) -> Result<(), ExposureError> {
     for (index, channel) in quality.iter().enumerate() {
@@ -523,7 +551,7 @@ impl CoverageSource {
             reason: "adapter-unimplemented".to_string(),
             window_start_ns: 1_000_000_000,
             window_end_ns: 2_000_000_000,
-            quality: example_quality(),
+            quality: unavailable_quality(),
         }
     }
 
@@ -1175,6 +1203,18 @@ mod tests {
         let mut mixed = CoverageSource::example();
         mixed.capability = "host-interfaces".to_string();
         assert!(mixed.validate().is_err());
+    }
+
+    #[test]
+    fn unavailable_example_carries_unknown_loss() {
+        let example = CoverageSource::example();
+        assert_eq!(example.status, "unavailable");
+        assert_eq!(example.reason, "adapter-unimplemented");
+        for channel in &example.quality {
+            assert_eq!(channel.status, "unavailable");
+            assert_eq!(channel.loss, None);
+        }
+        example.validate().unwrap();
     }
 
     #[test]

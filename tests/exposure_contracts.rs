@@ -31,6 +31,8 @@ const UNSEALED: &str = include_str!("exposure/fixtures/contracts/unsealed_snapsh
 const DUPLICATE: &str = include_str!("exposure/fixtures/contracts/duplicate_evidence.json");
 const CROSS_EPOCH: &str = include_str!("exposure/fixtures/contracts/cross_epoch_evidence.json");
 const MISSING_TERMINAL: &str = include_str!("exposure/fixtures/contracts/missing_terminal.json");
+const FOREIGN_SESSION: &str = include_str!("exposure/fixtures/contracts/foreign_session.json");
+const MALFORMED_FACT: &str = include_str!("exposure/fixtures/contracts/malformed_fact.json");
 
 fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
     facts
@@ -127,6 +129,26 @@ fn duplicate_source_and_cross_epoch_evidence_rejected() {
         assert!(owned.len() >= 2, "{name} carries two identities");
         let err = check_evidence_keys(&borrowed(&owned)).unwrap_err();
         assert_eq!(err.what, what);
+    }
+}
+
+#[test]
+fn foreign_session_and_malformed_facts_cannot_verify() {
+    for (name, snapshot) in [
+        ("foreign session", FOREIGN_SESSION),
+        ("malformed fact", MALFORMED_FACT),
+    ] {
+        let report = verify_sealed_snapshot(snapshot).expect("tainted parses");
+        assert!(!report.verified, "{name} evidence cannot verify");
+        let terminal = snapshot_terminal_status(snapshot).expect("tainted carries terminal");
+        assert_eq!(terminal, "complete_for_scope", "{name} stays settled");
+        let outcome = exposure_quality::rule_outcome(
+            report.verified,
+            &terminal,
+            &[("sharing-census", "available", true)],
+        );
+        assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
+        assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
     }
 }
 

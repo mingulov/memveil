@@ -19,6 +19,8 @@
 //! only, and anything without a canonical order is refused.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 /// Ten legacy event kinds in integrity-table order.
@@ -924,6 +926,9 @@ fn render_field(key: &str, value: &JsonValue, out: &mut Vec<u8>) -> Result<(), R
             }
             JsonValue::Array(_) => Err(RecordError::new(key, "unexpected composite")),
             JsonValue::Object(_) => Err(RecordError::new(key, "no canonical order")),
+            // Array fields never render as scalars: a bare string
+            // is a mistyped record, not a one-element array.
+            _ if STRING_ARRAY_KEYS.contains(&key) => Err(RecordError::new(key, "expected array")),
             _ => render_scalar(key, value, out),
         },
     }
@@ -1368,15 +1373,29 @@ fn line_identity(line: &str) -> Option<(String, Option<u64>)> {
     Some((kind.clone(), seq))
 }
 
+/// Session handle carried by one snapshot line, when well-formed.
+fn line_session(line: &str) -> Option<String> {
+    let value = parse_value(line).ok()?;
+    let JsonValue::Object(fields) = &value else {
+        return None;
+    };
+    match find_field(fields, "session_id") {
+        Some(JsonValue::Str(id)) => Some(id.clone()),
+        _ => None,
+    }
+}
+
 /// Verify one sealed snapshot: a session object plus its literal lines.
 ///
 /// The snapshot carries `session` with `capture.integrity` and
 /// `event_lines` holding the literal line bytes as JSON strings.
-/// Every line ends in a newline and carries its position as its
-/// sequence number; one entry holds exactly one physical line under
-/// the reader's 64 KiB bound. Malformed snapshot framing is an
-/// error; a well-formed snapshot whose bytes, counts or kind census
-/// differ from the commitment, or whose fact identities break
+/// Every line ends in a newline, carries its position as its
+/// sequence number, and belongs to the snapshot's own session;
+/// one entry holds exactly one physical line under the reader's
+/// 64 KiB bound. Malformed snapshot framing is an error; a
+/// well-formed snapshot whose bytes, counts or kind census differ
+/// from the commitment, whose lines stray from the session, whose
+/// fact fields fail validation, or whose fact identities break
 /// containment, verifies false. An absent integrity object verifies
 /// false, while a present non-object or an unknown integrity field
 /// is an error: no unsealed sidecar can supply policy evidence.
@@ -1392,6 +1411,10 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     };
     let Some(JsonValue::Object(session)) = find_field(top, "session") else {
         return Err(SealError::new("session", "expected object"));
+    };
+    let expected_session = match find_field(session, "session_id") {
+        Some(JsonValue::Str(id)) => id.as_str(),
+        _ => return Err(SealError::new("session_id", "expected string")),
     };
     let Some(JsonValue::Array(lines)) = find_field(top, "event_lines") else {
         return Err(SealError::new("event_lines", "expected array"));
@@ -1419,10 +1442,21 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
         literal.extend_from_slice(text.as_bytes());
         match line_identity(text) {
             Some((kind, Some(seq))) if seq == position as u64 => {
+                // Every line belongs to the snapshot's own session,
+                // mirroring the capture reader's per-event check; a
+                // foreign-session line verifies false, never errors.
+                if line_session(text).as_deref() != Some(expected_session) {
+                    lines_ok = false;
+                }
                 if kind == EXPOSURE_FACT_KIND {
+                    // Identity alone never admits a fact: the whole
+                    // line must normalize, so every remaining fact
+                    // field keeps its canonical shape and type.
                     match fact_identity(text) {
-                        Some(key) => fact_keys.push(key),
-                        None => contained_ok = false,
+                        Some(key) if normalize_record(text).is_ok() => {
+                            fact_keys.push(key);
+                        }
+                        _ => contained_ok = false,
                     }
                 }
                 kinds.push(kind);
@@ -1725,19 +1759,24 @@ pub struct EvidenceKey<'a> {
 ///
 /// Every evidence handle appears once per snapshot, and one source
 /// contributes to exactly one epoch per snapshot; anything else is
-/// refused, never merged.
+/// refused, never merged. Both checks run in linear time over hash
+/// sets, so doubling the snapshot near-doubles the cost.
 pub fn check_evidence_keys(keys: &[EvidenceKey]) -> Result<(), RecordError> {
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::with_capacity(keys.len());
     for key in keys {
-        if seen.contains(&key.evidence_id) {
+        if !seen.insert(key.evidence_id) {
             return Err(RecordError::new("evidence_id", "duplicate evidence"));
         }
-        seen.push(key.evidence_id);
     }
-    for (index, key) in keys.iter().enumerate() {
-        for other in &keys[index + 1..] {
-            if key.source_id == other.source_id && key.epoch != other.epoch {
+    let mut epochs: HashMap<&str, u64> = HashMap::new();
+    for key in keys {
+        match epochs.entry(key.source_id) {
+            Entry::Occupied(prior) if *prior.get() != key.epoch => {
                 return Err(RecordError::new("source_id", "cross-epoch evidence"));
+            }
+            Entry::Occupied(_) => {}
+            Entry::Vacant(slot) => {
+                slot.insert(key.epoch);
             }
         }
     }
@@ -1965,6 +2004,64 @@ mod tests {
             let err = normalize_record(&bad).unwrap_err();
             assert_eq!(err.what, "evidence_ids", "mutation {to}");
         }
+    }
+
+    #[test]
+    fn normalize_refuses_scalar_strings_in_array_fields() {
+        let policy = render_canonical(&[
+            ("rule_id", FieldValue::Text("r")),
+            ("scope_id", FieldValue::Text("s")),
+            ("result", FieldValue::Text("conforms")),
+            (
+                "evidence_ids",
+                FieldValue::Array(vec![FieldValue::Text("ev-1")]),
+            ),
+            ("missing_sources", FieldValue::Array(vec![])),
+            ("exceptions_applied", FieldValue::Array(vec![])),
+            ("clock_domain", FieldValue::Text("guest_monotonic_active")),
+            ("reason", FieldValue::Text("quiet")),
+        ])
+        .unwrap();
+        assert_eq!(normalize_record(&policy).unwrap(), policy);
+        for (from, to, what) in [
+            (
+                "\"evidence_ids\":[\"ev-1\"]",
+                "\"evidence_ids\":\"ev-1\"",
+                "evidence_ids",
+            ),
+            (
+                "\"missing_sources\":[]",
+                "\"missing_sources\":\"sharing-census\"",
+                "missing_sources",
+            ),
+            (
+                "\"exceptions_applied\":[]",
+                "\"exceptions_applied\":\"r\"",
+                "exceptions_applied",
+            ),
+        ] {
+            let bad = policy.replacen(from, to, 1);
+            assert_ne!(bad, policy, "mutation {to}");
+            let err = normalize_record(&bad).unwrap_err();
+            assert_eq!(err.what, what, "mutation {to}");
+            assert_eq!(err.message, "expected array", "mutation {to}");
+        }
+        let object = "{\"object_token\":\"tok-1\",\"generation\":\"1\",\
+            \"object_class\":\"buffer\",\"namespace\":\"session_token\",\
+            \"origin_source\":\"heap-dmabuf-objects\",\"lifecycle_status\":\"live\",\
+            \"state\":\"shared\",\"state_evidence\":[\"ev-1\"],\
+            \"uncertainty\":{\"alias_unknown\":false,\
+            \"reuse_unknown\":false,\"loss_unknown\":false,\"events_missed\":false}}";
+        assert_eq!(normalize_record(object).unwrap(), object);
+        let bad = object.replacen(
+            "\"state_evidence\":[\"ev-1\"]",
+            "\"state_evidence\":\"ev-1\"",
+            1,
+        );
+        assert_ne!(bad, object);
+        let err = normalize_record(&bad).unwrap_err();
+        assert_eq!(err.what, "state_evidence");
+        assert_eq!(err.message, "expected array");
     }
 
     #[test]
@@ -2246,5 +2343,34 @@ mod tests {
             },
         ];
         assert_eq!(check_evidence_keys(&mixed).unwrap_err().what, "source_id");
+    }
+
+    #[test]
+    fn evidence_containment_scales_linearly() {
+        fn elapsed_for(count: usize) -> std::time::Duration {
+            let ids: Vec<String> = (0..count).map(|index| format!("ev-{index:05}")).collect();
+            let keys: Vec<EvidenceKey<'_>> = ids
+                .iter()
+                .map(|id| EvidenceKey {
+                    evidence_id: id,
+                    source_id: "sharing-census",
+                    epoch: 7,
+                })
+                .collect();
+            // Best of three runs, to smooth scheduling noise.
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                check_evidence_keys(&keys).unwrap();
+                best = best.min(start.elapsed());
+            }
+            best
+        }
+        let small = elapsed_for(10_000);
+        let big = elapsed_for(20_000);
+        assert!(
+            big < small * 3,
+            "doubled input must cost well under 3x, took {small:?} then {big:?}"
+        );
     }
 }

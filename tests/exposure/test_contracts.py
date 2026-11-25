@@ -131,9 +131,99 @@ def check_source_capability(entry):
 
 def check_missing_sources(entry):
     """Missing sources name catalog entries, never free slugs."""
-    for source in entry["missing_sources"]:
+    missing = entry["missing_sources"]
+    assert isinstance(missing, list), "missing_sources must be an array"
+    for source in missing:
         assert source in SOURCE_CAPABILITIES, \
             "unknown missing source %r" % source
+
+
+def check_policy_result_arrays(entry):
+    """Policy-result array fields hold string arrays, never scalars.
+
+    Mirrors the report schema: each of the three fields is an
+    array of strings, so a bare string refuses here as it does
+    in the schema and in the Rust normalizer.
+    """
+    for field in ("evidence_ids", "missing_sources",
+                  "exceptions_applied"):
+        values = entry[field]
+        assert isinstance(values, list), "%s must be an array" % field
+        for value in values:
+            assert isinstance(value, str), \
+                "%s holds strings only" % field
+    check_missing_sources(entry)
+
+
+EXPOSURE_FACT_OPTIONAL = ("parent_operation_id",
+                            "parent_operation_id_reason", "object_token",
+                            "object_token_reason", "native_result_reason")
+I64MIN = -(2**63)
+I64MAX = 2**63 - 1
+
+
+def check_maybe_pairing(fact, base, where):
+    """An absent key carries no reason; a null needs one; a value none."""
+    reason_key = base + "_reason"
+    valued = base in fact
+    reasoned = reason_key in fact
+    if not valued:
+        assert not reasoned, "%s strays without %s" % (reason_key, base)
+        return
+    value = fact[base]
+    if value is None:
+        assert reasoned, "%s null needs %s" % (base, reason_key)
+    else:
+        assert isinstance(value, str), "%s must be a string" % where
+        assert not reasoned, "%s strays beside a value" % reason_key
+    if reasoned:
+        assert isinstance(fact[reason_key], str), \
+            "%s must be a string" % reason_key
+
+
+def fact_fields_valid(fact):
+    """True when every exposure-fact field keeps its frozen shape.
+
+    Mirrors the event schema and the Rust snapshot path: the
+    required keys are present, nothing unknown rides along, u64
+    leaves are canonical, closed labels stay in their frozen
+    sets, quality channels are well-formed, and each nullable
+    leaf pairs with its reason key exactly when null.
+    """
+    try:
+        if not isinstance(fact, dict):
+            return False
+        allowed = set(EXPOSURE_FACT_REQUIRED) | set(EXPOSURE_FACT_OPTIONAL)
+        if set(fact.keys()) - allowed:
+            return False
+        for field in EXPOSURE_FACT_REQUIRED:
+            assert field in fact, "missing fact field %s" % field
+        if fact["source_id"] not in SOURCE_CAPABILITIES:
+            return False
+        check_u64(fact["epoch"], "epoch")
+        check_u64(fact["generation"], "generation")
+        check_u64(fact["offset"], "offset")
+        check_u64(fact["length_bytes"], "length_bytes")
+        assert fact["semantics"] in FROZEN_SEMANTICS
+        assert fact["clock_domain"] in FROZEN_CLOCK
+        check_quality(fact["quality"], "fact quality")
+        check_maybe_pairing(fact, "parent_operation_id", "parent")
+        check_maybe_pairing(fact, "object_token", "object token")
+        native = fact["native_result"]
+        reasoned = "native_result_reason" in fact
+        if native is None:
+            assert reasoned, "null native result needs a reason"
+        else:
+            assert isinstance(native, int) \
+                and not isinstance(native, bool), "native type"
+            assert I64MIN <= native <= I64MAX, "native range"
+            assert not reasoned, "native reason strays beside a value"
+        if reasoned:
+            assert isinstance(fact["native_result_reason"], str), \
+                "native reason type"
+    except (AssertionError, KeyError, TypeError):
+        return False
+    return True
 
 
 def facts_from_lines(snapshot):
@@ -184,10 +274,14 @@ def seal_verified(snapshot):
     or an unknown integrity field or kind raises, mirroring the Rust
     snapshot path. A well-formed seal that mismatches the bytes, or
     whose fact identities break containment, verifies false. Every
-    line ends in a newline and carries its position as its sequence
-    number; one entry holds exactly one physical line under the
-    reader's 64 KiB bound. Framing violations raise.
+    line ends in a newline, carries its position as its sequence
+    number, and belongs to the snapshot's own session; one entry
+    holds exactly one physical line under the reader's 64 KiB
+    bound. Framing violations raise. A foreign-session line or an
+    exposure fact whose remaining fields fail validation verifies
+    false, like a containment break: neither can support a verdict.
     """
+    expected_session = snapshot["session"].get("session_id")
     for position, line in enumerate(snapshot["event_lines"]):
         if not line.endswith("\n"):
             raise ValueError("line %d lacks trailing newline" % position)
@@ -195,8 +289,14 @@ def seal_verified(snapshot):
             raise ValueError("line %d holds extra newline" % position)
         if len(line.encode("utf-8")) > SNAPSHOT_MAX_LINE_BYTES:
             raise ValueError("line %d too large" % position)
-        if json.loads(line).get("seq") != str(position):
+        event = json.loads(line)
+        if event.get("seq") != str(position):
             raise ValueError("line %d sequence mismatch" % position)
+        if event.get("session_id") != expected_session:
+            return False
+        if event.get("kind") == "exposure_fact" \
+                and not fact_fields_valid(event.get("data")):
+            return False
     capture = snapshot["session"]["capture"]
     if "integrity" not in capture:
         return False
@@ -367,6 +467,61 @@ def test_snapshot_lines_split_and_bound_physical_lines():
     assert not seal_verified(capped), "edited bytes must fail the seal"
 
 
+def resealed_mutation(mutator):
+    """The sealed snapshot with line 0 mutated and the seal recomputed."""
+    snapshot = json.loads(json.dumps(load("sealed_snapshot.json")))
+    lines = snapshot["event_lines"]
+    event = json.loads(lines[0])
+    assert event["kind"] == "exposure_fact"
+    mutator(event)
+    lines[0] = json.dumps(event, separators=(",", ":")) + "\n"
+    raw = "".join(lines).encode("utf-8")
+    snapshot["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    return snapshot
+
+
+def test_foreign_session_fact_cannot_satisfy_rule():
+    def foreign(event):
+        event["session_id"] = "other-session"
+
+    mutated = resealed_mutation(foreign)
+    assert not seal_verified(mutated), \
+        "foreign-session fact must fail the seal"
+    assert not rule_satisfied(mutated, ["sharing-census"]), \
+        "foreign-session evidence never satisfies"
+    assert snapshot_verdict(mutated, ["sharing-census"]) == "inconclusive"
+
+
+def test_malformed_fact_fields_cannot_satisfy_rule():
+    def mistyped(event):
+        event["data"]["native_result"] = "0"
+
+    mutated = resealed_mutation(mistyped)
+    assert not seal_verified(mutated), \
+        "mistyped fact field must fail the seal"
+    assert not rule_satisfied(mutated, ["sharing-census"]), \
+        "malformed fact evidence never satisfies"
+    assert snapshot_verdict(mutated, ["sharing-census"]) == "inconclusive"
+
+
+def test_persisted_foreign_and_malformed_snapshots_refused():
+    required = ["sharing-census"]
+    foreign = load("foreign_session.json")
+    assert not seal_verified(foreign), \
+        "persisted foreign-session snapshot must fail the seal"
+    assert snapshot_verdict(foreign, required) == "inconclusive"
+    malformed = load("malformed_fact.json")
+    assert not seal_verified(malformed), \
+        "persisted malformed-fact snapshot must fail the seal"
+    assert snapshot_verdict(malformed, required) == "inconclusive"
+    schema = load_schema("event-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        for line in malformed["event_lines"]:
+            jsonschema.validate(json.loads(line), schema)
+
+
 def test_missing_terminal_evidence_is_partial():
     required = ["sharing-census"]
     assert snapshot_verdict(load("sealed_snapshot.json"),
@@ -500,7 +655,8 @@ def test_all_fixtures_validate_against_schemas():
     report_schema = load_schema("report-v0.3.0.schema.json")
     policy_schema = load_schema("policy-v0.1.0.schema.json")
     sealed_names = ("sealed_snapshot.json", "duplicate_evidence.json",
-                    "cross_epoch_evidence.json", "missing_terminal.json")
+                    "cross_epoch_evidence.json", "missing_terminal.json",
+                    "foreign_session.json")
     for name in sealed_names:
         snapshot = load(name)
         jsonschema.validate(snapshot["session"], session_schema)
@@ -657,6 +813,22 @@ def test_policy_bounds_enforced():
     schema = load_schema("policy-v0.1.0.schema.json")
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(empty, schema)
+
+
+def test_policy_result_arrays_reject_scalar_strings():
+    schema = load_schema("report-v0.3.0.schema.json")
+    report = load("report_valid.json")
+    check_policy_result_arrays(report["policy_results"][0])
+    scalars = {"evidence_ids": "ev-1",
+               "missing_sources": "sharing-census",
+               "exceptions_applied": "rule-1"}
+    for field, scalar in scalars.items():
+        mutated = json.loads(json.dumps(report))
+        mutated["policy_results"][0][field] = scalar
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(mutated, schema)
+        with pytest.raises(AssertionError):
+            check_policy_result_arrays(mutated["policy_results"][0])
 
 
 def test_report_records_shape():
