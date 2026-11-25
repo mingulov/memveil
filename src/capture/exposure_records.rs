@@ -54,6 +54,45 @@ pub const LEGACY_KINDS: [&str; 10] = [
 /// Exposure-fact extension kind for 0.3.0 streams.
 pub const EXPOSURE_FACT_KIND: &str = "exposure_fact";
 
+/// Event-line contract selected by a snapshot's session version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SealContract {
+    /// 0.1.x sessions: ten legacy kinds under legacy rules.
+    Legacy,
+    /// 0.3.0 sessions: legacy kinds plus exposure facts, new checks.
+    Exposure,
+}
+
+/// Legacy session versions selecting the legacy line contract.
+const LEGACY_SESSION_VERSIONS: [&str; 4] = ["0.1.1", "0.1.2", "0.1.3", "0.1.4"];
+
+/// Legacy line versions admitted under the legacy contract.
+const LEGACY_LINE_VERSIONS: [&str; 2] = ["0.1.1", "0.1.2"];
+
+/// Exposure line version: the only version under the exposure contract.
+const EXPOSURE_LINE_VERSION: &str = "0.3.0";
+
+/// Schema length bounds for the three free source strings.
+const SOURCE_BOUNDS: [(&str, usize); 3] = [("hook", 256), ("backend", 64), ("profile_id", 128)];
+
+/// The event-line contract a session selects, or `None` when unknown.
+///
+/// A 0.3.0 session selects the exposure contract; a 0.1.x session
+/// selects the legacy contract. The seal validates every line under
+/// the session's contract, so legacy captures verify under legacy
+/// rules while 0.3.0 lines keep the new checks, and neither side
+/// admits the other's version.
+fn session_contract(session: &[(String, JsonValue)]) -> Option<SealContract> {
+    let version = sealed_str(session, "schema_version")?;
+    if version == EXPOSURE_LINE_VERSION {
+        Some(SealContract::Exposure)
+    } else if LEGACY_SESSION_VERSIONS.contains(&version) {
+        Some(SealContract::Legacy)
+    } else {
+        None
+    }
+}
+
 /// Digest of the empty event stream.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
@@ -1385,15 +1424,23 @@ fn fact_sealed_valid(text: &str) -> bool {
     fact_from_data(data).is_some_and(|fact| fact.validate().is_ok())
 }
 
-/// True when the envelope source block carries frozen labels.
+/// True when the envelope source block keeps its schema shape.
 ///
-/// The hook, backend and profile leaves stay free strings; the
-/// measurement and correlation leaves come from the model's frozen
-/// tables, never a copy.
+/// The hook, backend and profile leaves stay within their schema
+/// bounds; the measurement and correlation leaves come from the
+/// model's frozen tables, never a copy.
 fn source_labels_valid(fields: &[(String, JsonValue)]) -> bool {
     let Some(JsonValue::Object(source)) = find_field(fields, "source") else {
         return false;
     };
+    for (leaf, limit) in SOURCE_BOUNDS {
+        let Some(JsonValue::Str(text)) = find_field(source, leaf) else {
+            return false;
+        };
+        if !is_sized_text(text, limit) {
+            return false;
+        }
+    }
     let Some(JsonValue::Str(measurement)) = find_field(source, "measurement") else {
         return false;
     };
@@ -1401,6 +1448,103 @@ fn source_labels_valid(fields: &[(String, JsonValue)]) -> bool {
         return false;
     };
     exposure_shapes::is_measurement(measurement) && exposure_shapes::is_correlation(correlation)
+}
+
+/// True for a non-empty string within its schema bound.
+///
+/// Length counts characters, like the schema's `maxLength`, not bytes.
+fn is_sized_text(value: &str, limit: usize) -> bool {
+    !value.is_empty() && value.chars().count() <= limit
+}
+
+/// True for a canonical u64 decimal string leaf.
+fn is_u64_value(value: &JsonValue) -> bool {
+    matches!(value, JsonValue::Str(text) if is_canonical_u64(text))
+}
+
+/// True for a bounded opaque identifier leaf.
+fn is_opaque_value(value: &JsonValue) -> bool {
+    matches!(value, JsonValue::Str(text) if exposure_shapes::is_opaque_id(text))
+}
+
+/// True for a bare JSON integer leaf.
+///
+/// The parser already canonicalizes bare integers to i64 text, so
+/// any parsed number qualifies; anything beyond i64 never parses.
+fn is_bare_int_value(value: &JsonValue) -> bool {
+    matches!(value, JsonValue::Num(_))
+}
+
+/// True for a null leaf or one passing the value check.
+fn is_null_or(value: &JsonValue, check: fn(&JsonValue) -> bool) -> bool {
+    matches!(value, JsonValue::Null) || check(value)
+}
+
+/// True when the object carries exactly the required keys.
+///
+/// Object keys are unique by parse, so required presence plus the
+/// length match admits nothing unknown.
+fn exact_keys(data: &[(String, JsonValue)], required: &[&str]) -> bool {
+    data.len() == required.len() && required.iter().all(|key| find_field(data, key).is_some())
+}
+
+/// True when the required keys are present and nothing unknown rides along.
+fn shaped_keys(data: &[(String, JsonValue)], required: &[&str], allowed: &[&str]) -> bool {
+    required.iter().all(|key| find_field(data, key).is_some())
+        && data.iter().all(|(key, _)| allowed.contains(&key.as_str()))
+}
+
+/// True when a legacy observer context keeps its schema shape.
+///
+/// The relation is fixed; cpu, pid, tgid, comm and cgroup_id are
+/// optional bounded leaves. Only legacy lines carry one.
+fn observer_context_valid(value: &JsonValue) -> bool {
+    const LEAVES: [&str; 6] = ["cpu", "pid", "tgid", "comm", "cgroup_id", "relation"];
+    let JsonValue::Object(context) = value else {
+        return false;
+    };
+    for (key, _) in context {
+        if !LEAVES.contains(&key.as_str()) {
+            return false;
+        }
+    }
+    let Some(JsonValue::Str(relation)) = find_field(context, "relation") else {
+        return false;
+    };
+    if relation != "execution_context_only" {
+        return false;
+    }
+    for (leaf, limit) in [
+        ("cpu", 1_048_575_i64),
+        ("pid", 4_194_304),
+        ("tgid", 4_194_304),
+    ] {
+        if let Some(value) = find_field(context, leaf) {
+            let JsonValue::Num(text) = value else {
+                return false;
+            };
+            let Ok(number) = text.parse::<i64>() else {
+                return false;
+            };
+            if !(0..=limit).contains(&number) {
+                return false;
+            }
+        }
+    }
+    if let Some(value) = find_field(context, "comm") {
+        let JsonValue::Str(comm) = value else {
+            return false;
+        };
+        if comm.chars().count() > 64 {
+            return false;
+        }
+    }
+    if let Some(value) = find_field(context, "cgroup_id")
+        && !is_opaque_value(value)
+    {
+        return false;
+    }
+    true
 }
 
 fn sealed_str<'v>(data: &'v [(String, JsonValue)], key: &str) -> Option<&'v str> {
@@ -1547,25 +1691,53 @@ fn fact_from_data(data: &[(String, JsonValue)]) -> Option<exposure_shapes::Expos
 
 /// True when one event envelope keeps its canonical shape.
 ///
-/// The seven envelope keys are present with nothing unknown, the
-/// version is the exposure contract, the timestamp is a canonical
-/// u64, and the source carries its five string leaves with frozen
-/// labels. Sequence and session checks stay with the seal loop, as
-/// with facts; the caller owns kind membership.
-fn event_envelope_valid(fields: &[(String, JsonValue)]) -> bool {
-    if fields.len() != ENVELOPE_FIELDS.len() {
-        return false;
-    }
-    for key in ENVELOPE_FIELDS {
-        if find_field(fields, key).is_none() {
-            return false;
+/// The seven envelope keys are present with nothing unknown, except
+/// that a legacy line may carry a validated observer context; the
+/// version is the session's contract, the timestamp is a canonical
+/// u64, and the source carries its five string leaves within their
+/// bounds with frozen labels. Sequence and session checks stay with
+/// the seal loop, as with facts; the caller owns kind membership.
+fn event_envelope_valid(fields: &[(String, JsonValue)], contract: SealContract) -> bool {
+    match contract {
+        SealContract::Exposure => {
+            if fields.len() != ENVELOPE_FIELDS.len() {
+                return false;
+            }
+            for key in ENVELOPE_FIELDS {
+                if find_field(fields, key).is_none() {
+                    return false;
+                }
+            }
+            let Some(JsonValue::Str(version)) = find_field(fields, "schema_version") else {
+                return false;
+            };
+            if version != EXPOSURE_LINE_VERSION {
+                return false;
+            }
         }
-    }
-    let Some(JsonValue::Str(version)) = find_field(fields, "schema_version") else {
-        return false;
-    };
-    if version != "0.3.0" {
-        return false;
+        SealContract::Legacy => {
+            let Some(JsonValue::Str(version)) = find_field(fields, "schema_version") else {
+                return false;
+            };
+            if !LEGACY_LINE_VERSIONS.contains(&version.as_str()) {
+                return false;
+            }
+            for key in ENVELOPE_FIELDS {
+                if find_field(fields, key).is_none() {
+                    return false;
+                }
+            }
+            for (key, _) in fields {
+                if key != "observer_context" && !ENVELOPE_FIELDS.contains(&key.as_str()) {
+                    return false;
+                }
+            }
+            if let Some(context) = find_field(fields, "observer_context")
+                && !observer_context_valid(context)
+            {
+                return false;
+            }
+        }
     }
     if !matches!(find_field(fields, "session_id"), Some(JsonValue::Str(_))) {
         return false;
@@ -1618,40 +1790,546 @@ fn bounce_payload_valid(data: &[(String, JsonValue)]) -> bool {
         && exposure_shapes::is_opaque_id(operation)
 }
 
-/// True when a non-fact line keeps its envelope payload shape.
-///
-/// Every event line carries the canonical envelope, so a dropped
-/// timestamp, a foreign version, or an unfrozen source label fails
-/// the seal rather than verifying. Every line carries an object
-/// `data` payload, and every legacy payload carries at least one
-/// key, so a dropped, mistyped or empty payload fails the seal. A
-/// marker's payload holds exactly its bounded `text` annotation and
-/// a bounce attempt carries exactly its four schema leaves,
-/// mirroring the event schema; other legacy kinds keep their
-/// per-kind payloads with the capture reader.
-fn non_fact_shape_valid(kind: &str, text: &str) -> bool {
-    let Ok(JsonValue::Object(fields)) = parse_value(text) else {
-        return false;
-    };
-    if !event_envelope_valid(&fields) {
+/// True when a map-result payload keeps its schema shape.
+fn map_result_valid(data: &[(String, JsonValue)]) -> bool {
+    const REQUIRED: [&str; 7] = [
+        "operation_id",
+        "success",
+        "mapping_id",
+        "return_code",
+        "mapped_bytes",
+        "wire_generation",
+        "wire_identity",
+    ];
+    if !exact_keys(data, &REQUIRED) {
         return false;
     }
-    let Some(JsonValue::Object(data)) = find_field(&fields, "data") else {
+    let Some(operation) = find_field(data, "operation_id") else {
         return false;
     };
+    if !is_opaque_value(operation) {
+        return false;
+    }
+    let success = match find_field(data, "success") {
+        Some(JsonValue::Bool(flag)) => *flag,
+        _ => return false,
+    };
+    let Some(mapping) = find_field(data, "mapping_id") else {
+        return false;
+    };
+    if !is_null_or(mapping, is_opaque_value) {
+        return false;
+    }
+    let Some(native) = find_field(data, "return_code") else {
+        return false;
+    };
+    if !is_null_or(native, is_bare_int_value) {
+        return false;
+    }
+    let Some(mapped) = find_field(data, "mapped_bytes") else {
+        return false;
+    };
+    if !is_null_or(mapped, is_u64_value) {
+        return false;
+    }
+    let Some(generation) = find_field(data, "wire_generation") else {
+        return false;
+    };
+    if !is_null_or(generation, is_u64_value) {
+        return false;
+    }
+    let Some(identity) = find_field(data, "wire_identity") else {
+        return false;
+    };
+    if !matches!(identity, JsonValue::Null)
+        && !matches!(identity, JsonValue::Str(text) if text == "known" || text == "unassigned")
+    {
+        return false;
+    }
+    let unassigned = matches!(identity, JsonValue::Str(text) if text == "unassigned");
+    if success && !unassigned && (!is_opaque_value(mapping) || !is_u64_value(mapped)) {
+        return false;
+    }
+    if success && unassigned && (!matches!(mapping, JsonValue::Null) || !is_u64_value(mapped)) {
+        return false;
+    }
+    if !success
+        && (!matches!(mapping, JsonValue::Null)
+            || !matches!(mapped, JsonValue::Null)
+            || !matches!(identity, JsonValue::Null))
+    {
+        return false;
+    }
+    if matches!(generation, JsonValue::Null) && !matches!(identity, JsonValue::Null) {
+        return false;
+    }
+    if matches!(identity, JsonValue::Null)
+        && !matches!(generation, JsonValue::Null)
+        && (success || !matches!(generation, JsonValue::Str(text) if text == "0"))
+    {
+        return false;
+    }
+    true
+}
+
+/// True when an unmap payload keeps its schema shape.
+fn unmap_valid(data: &[(String, JsonValue)]) -> bool {
+    const REQUIRED: [&str; 3] = ["mapping_id", "wire_generation", "wire_identity"];
+    if !exact_keys(data, &REQUIRED) {
+        return false;
+    }
+    let Some(mapping) = find_field(data, "mapping_id") else {
+        return false;
+    };
+    if !is_null_or(mapping, is_opaque_value) {
+        return false;
+    }
+    let Some(generation) = find_field(data, "wire_generation") else {
+        return false;
+    };
+    if !is_null_or(generation, is_u64_value) {
+        return false;
+    }
+    let Some(identity) = find_field(data, "wire_identity") else {
+        return false;
+    };
+    if !matches!(identity, JsonValue::Null)
+        && !matches!(identity, JsonValue::Str(text) if text == "known" || text == "miss")
+    {
+        return false;
+    }
+    if matches!(generation, JsonValue::Null) && !matches!(identity, JsonValue::Null) {
+        return false;
+    }
+    if matches!(identity, JsonValue::Null) && !matches!(generation, JsonValue::Null) {
+        return false;
+    }
+    if matches!(mapping, JsonValue::Null)
+        && !matches!(identity, JsonValue::Str(text) if text == "miss")
+    {
+        return false;
+    }
+    true
+}
+
+/// True when a copy payload keeps its schema shape.
+///
+/// Copies require observed measurement. The pool-private and
+/// offset flags exist from line version 0.1.2 on; a 0.1.1 copy
+/// carrying them refuses.
+fn copy_valid(
+    data: &[(String, JsonValue)],
+    source: &[(String, JsonValue)],
+    line_version: &str,
+) -> bool {
+    const BASE: [&str; 4] = ["operation_id", "mapping_id", "direction", "bytes"];
+    const EXTENDED: [&str; 6] = [
+        "operation_id",
+        "mapping_id",
+        "direction",
+        "bytes",
+        "pool_private",
+        "offset_past_allocation",
+    ];
+    let allowed: &[&str] = if line_version == "0.1.1" {
+        &BASE
+    } else {
+        &EXTENDED
+    };
+    if !shaped_keys(data, &BASE, allowed) {
+        return false;
+    }
+    if !matches!(find_field(source, "measurement"), Some(JsonValue::Str(text)) if text == "observed")
+    {
+        return false;
+    }
+    let Some(operation) = find_field(data, "operation_id") else {
+        return false;
+    };
+    if !is_opaque_value(operation) {
+        return false;
+    }
+    let Some(mapping) = find_field(data, "mapping_id") else {
+        return false;
+    };
+    if !is_null_or(mapping, is_opaque_value) {
+        return false;
+    }
+    let Some(direction) = find_field(data, "direction") else {
+        return false;
+    };
+    if !matches!(direction, JsonValue::Str(text) if text == "original_to_bounce" || text == "bounce_to_original")
+    {
+        return false;
+    }
+    let Some(bytes) = find_field(data, "bytes") else {
+        return false;
+    };
+    if !is_u64_value(bytes) {
+        return false;
+    }
+    for flag in ["pool_private", "offset_past_allocation"] {
+        if let Some(value) = find_field(data, flag)
+            && !matches!(value, JsonValue::Bool(true))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when a sync-request payload keeps its schema shape.
+fn sync_request_valid(data: &[(String, JsonValue)]) -> bool {
+    const REQUIRED: [&str; 5] = [
+        "operation_id",
+        "mapping_id",
+        "offset_known",
+        "offset",
+        "length",
+    ];
+    if !exact_keys(data, &REQUIRED) {
+        return false;
+    }
+    let Some(operation) = find_field(data, "operation_id") else {
+        return false;
+    };
+    if !is_opaque_value(operation) {
+        return false;
+    }
+    let Some(mapping) = find_field(data, "mapping_id") else {
+        return false;
+    };
+    if !is_null_or(mapping, is_opaque_value) {
+        return false;
+    }
+    let known = match find_field(data, "offset_known") {
+        Some(JsonValue::Bool(flag)) => *flag,
+        _ => return false,
+    };
+    let Some(offset) = find_field(data, "offset") else {
+        return false;
+    };
+    if !is_null_or(offset, is_u64_value) {
+        return false;
+    }
+    let Some(length) = find_field(data, "length") else {
+        return false;
+    };
+    if !is_u64_value(length) {
+        return false;
+    }
+    if known && !is_u64_value(offset) {
+        return false;
+    }
+    if !known && !matches!(offset, JsonValue::Null) {
+        return false;
+    }
+    true
+}
+
+/// True when a transition-result payload keeps its schema shape.
+fn transition_result_valid(data: &[(String, JsonValue)]) -> bool {
+    const REQUIRED: [&str; 6] = [
+        "region_id",
+        "requested_state",
+        "success",
+        "return_code",
+        "offset",
+        "length",
+    ];
+    const ALLOWED: [&str; 9] = [
+        "region_id",
+        "requested_state",
+        "success",
+        "return_code",
+        "offset",
+        "length",
+        "address_space",
+        "resolution",
+        "generation",
+    ];
+    if !shaped_keys(data, &REQUIRED, &ALLOWED) {
+        return false;
+    }
+    let Some(region) = find_field(data, "region_id") else {
+        return false;
+    };
+    if !is_opaque_value(region) {
+        return false;
+    }
+    let Some(state) = find_field(data, "requested_state") else {
+        return false;
+    };
+    if !matches!(state, JsonValue::Str(text) if text == "shared" || text == "private") {
+        return false;
+    }
+    if !matches!(find_field(data, "success"), Some(JsonValue::Bool(_))) {
+        return false;
+    }
+    let Some(native) = find_field(data, "return_code") else {
+        return false;
+    };
+    if !is_null_or(native, is_bare_int_value) {
+        return false;
+    }
+    let Some(offset) = find_field(data, "offset") else {
+        return false;
+    };
+    if !is_u64_value(offset) {
+        return false;
+    }
+    let Some(length) = find_field(data, "length") else {
+        return false;
+    };
+    if !is_u64_value(length) {
+        return false;
+    }
+    if let Some(space) = find_field(data, "address_space")
+        && !matches!(space, JsonValue::Str(text)
+            if text == "guest_physical"
+                || text == "kernel_virtual"
+                || text == "iova"
+                || text == "identity_only")
+    {
+        return false;
+    }
+    if let Some(resolution) = find_field(data, "resolution")
+        && !matches!(resolution, JsonValue::Str(text) if text == "resolved" || text == "unresolved")
+    {
+        return false;
+    }
+    if let Some(value) = find_field(data, "generation") {
+        let JsonValue::Num(text) = value else {
+            return false;
+        };
+        let Ok(number) = text.parse::<i64>() else {
+            return false;
+        };
+        if number < 1 {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when a pool-sample payload keeps its schema shape.
+fn pool_sample_valid(data: &[(String, JsonValue)]) -> bool {
+    const REQUIRED: [&str; 4] = ["pool_id", "used_bytes", "capacity_bytes", "unit"];
+    const ALLOWED: [&str; 8] = [
+        "pool_id",
+        "used_bytes",
+        "capacity_bytes",
+        "unit",
+        "allocator",
+        "unit_bytes",
+        "hiwater_bytes",
+        "reason",
+    ];
+    if !shaped_keys(data, &REQUIRED, &ALLOWED) {
+        return false;
+    }
+    let Some(pool) = find_field(data, "pool_id") else {
+        return false;
+    };
+    if !is_opaque_value(pool) {
+        return false;
+    }
+    for leaf in ["used_bytes", "capacity_bytes"] {
+        let Some(value) = find_field(data, leaf) else {
+            return false;
+        };
+        if !is_null_or(value, is_u64_value) {
+            return false;
+        }
+    }
+    let Some(unit) = find_field(data, "unit") else {
+        return false;
+    };
+    if !matches!(unit, JsonValue::Str(text) if text == "bytes" || text == "unknown") {
+        return false;
+    }
+    if let Some(allocator) = find_field(data, "allocator")
+        && !is_opaque_value(allocator)
+    {
+        return false;
+    }
+    if let Some(unit_bytes) = find_field(data, "unit_bytes")
+        && !is_u64_value(unit_bytes)
+    {
+        return false;
+    }
+    if let Some(hiwater) = find_field(data, "hiwater_bytes")
+        && !is_null_or(hiwater, is_u64_value)
+    {
+        return false;
+    }
+    if let Some(reason) = find_field(data, "reason")
+        && !matches!(reason, JsonValue::Str(text)
+            if text == "denied" || text == "absent" || text == "unparseable")
+    {
+        return false;
+    }
+    true
+}
+
+/// True when a gap payload keeps its schema shape.
+fn gap_valid(data: &[(String, JsonValue)]) -> bool {
+    const REQUIRED: [&str; 5] = [
+        "channel",
+        "lost_count",
+        "reason",
+        "window_start_ns",
+        "window_end_ns",
+    ];
+    if !exact_keys(data, &REQUIRED) {
+        return false;
+    }
+    let Some(channel) = find_field(data, "channel") else {
+        return false;
+    };
+    if !matches!(channel, JsonValue::Str(text)
+        if text == "detail"
+            || text == "aggregate"
+            || text == "correlation"
+            || text == "baseline"
+            || text == "terminal")
+    {
+        return false;
+    }
+    let Some(lost) = find_field(data, "lost_count") else {
+        return false;
+    };
+    if !is_null_or(lost, is_u64_value) {
+        return false;
+    }
+    let Some(reason) = find_field(data, "reason") else {
+        return false;
+    };
+    if !matches!(reason, JsonValue::Str(text) if is_sized_text(text, 512)) {
+        return false;
+    }
+    let Some(start) = find_field(data, "window_start_ns") else {
+        return false;
+    };
+    if !is_u64_value(start) {
+        return false;
+    }
+    let Some(end) = find_field(data, "window_end_ns") else {
+        return false;
+    };
+    is_u64_value(end)
+}
+
+/// True when a counter-snapshot payload keeps its schema shape.
+fn counter_snapshot_valid(data: &[(String, JsonValue)]) -> bool {
+    const REQUIRED: [&str; 5] = ["counter_id", "epoch", "scope", "value", "unit"];
+    if !exact_keys(data, &REQUIRED) {
+        return false;
+    }
+    let Some(counter) = find_field(data, "counter_id") else {
+        return false;
+    };
+    if !matches!(counter, JsonValue::Str(text) if is_sized_text(text, 128)) {
+        return false;
+    }
+    let Some(epoch) = find_field(data, "epoch") else {
+        return false;
+    };
+    if !is_u64_value(epoch) {
+        return false;
+    }
+    let Some(scope_value) = find_field(data, "scope") else {
+        return false;
+    };
+    let JsonValue::Object(scope) = scope_value else {
+        return false;
+    };
+    if !shaped_keys(scope, &["profile_id"], &["device_id", "profile_id"]) {
+        return false;
+    }
+    if let Some(device) = find_field(scope, "device_id")
+        && !is_null_or(device, is_opaque_value)
+    {
+        return false;
+    }
+    let Some(profile) = find_field(scope, "profile_id") else {
+        return false;
+    };
+    if !matches!(profile, JsonValue::Str(text) if is_sized_text(text, 128)) {
+        return false;
+    }
+    let Some(value) = find_field(data, "value") else {
+        return false;
+    };
+    if !is_u64_value(value) {
+        return false;
+    }
+    let Some(unit) = find_field(data, "unit") else {
+        return false;
+    };
+    matches!(unit, JsonValue::Str(text) if is_sized_text(text, 32))
+}
+
+/// True when a legacy payload keeps its per-kind schema shape.
+///
+/// Every legacy kind carries exactly its schema leaves; a copy
+/// additionally requires observed measurement, and its two toggle
+/// flags exist from line version 0.1.2 on. Mirrors the event
+/// schemas and the oracle.
+fn legacy_payload_valid(
+    kind: &str,
+    data: &[(String, JsonValue)],
+    source: &[(String, JsonValue)],
+    line_version: &str,
+) -> bool {
     match kind {
         "marker" => {
-            if data.len() != 1 {
+            if !exact_keys(data, &["text"]) {
                 return false;
             }
             let Some(JsonValue::Str(annotation)) = find_field(data, "text") else {
                 return false;
             };
-            !annotation.is_empty() && annotation.chars().count() <= 256
+            is_sized_text(annotation, 256)
         }
         "bounce_attempt" => bounce_payload_valid(data),
-        _ => !data.is_empty(),
+        "map_result" => map_result_valid(data),
+        "unmap" => unmap_valid(data),
+        "copy" => copy_valid(data, source, line_version),
+        "sync_request" => sync_request_valid(data),
+        "transition_result" => transition_result_valid(data),
+        "pool_sample" => pool_sample_valid(data),
+        "gap" => gap_valid(data),
+        "counter_snapshot" => counter_snapshot_valid(data),
+        _ => false,
     }
+}
+
+/// True when a non-fact line keeps its envelope payload shape.
+///
+/// Every event line carries the canonical envelope under the
+/// session's contract, so a dropped timestamp, a foreign version,
+/// or an unfrozen source label fails the seal rather than
+/// verifying. Every line carries an object `data` payload keeping
+/// its per-kind schema shape, mirroring the event schemas; a copy
+/// additionally requires observed measurement.
+fn non_fact_shape_valid(kind: &str, text: &str, contract: SealContract) -> bool {
+    let Ok(JsonValue::Object(fields)) = parse_value(text) else {
+        return false;
+    };
+    if !event_envelope_valid(&fields, contract) {
+        return false;
+    }
+    let Some(JsonValue::Object(data)) = find_field(&fields, "data") else {
+        return false;
+    };
+    let Some(JsonValue::Object(source)) = find_field(&fields, "source") else {
+        return false;
+    };
+    let Some(JsonValue::Str(version)) = find_field(&fields, "schema_version") else {
+        return false;
+    };
+    legacy_payload_valid(kind, data, source, version)
 }
 
 /// Seal verification outcome over a snapshot's literal bytes.
@@ -1700,17 +2378,19 @@ fn line_session(line: &str) -> Option<String> {
 ///
 /// The snapshot carries `session` with `capture.integrity` and
 /// `event_lines` holding the literal line bytes as JSON strings.
-/// Every line ends in a newline, carries its position as its
-/// sequence number, and belongs to the snapshot's own session;
-/// one entry holds exactly one physical line under the reader's
-/// 64 KiB bound. Malformed snapshot framing is an error; a
-/// well-formed snapshot whose bytes, counts or kind census differ
-/// from the commitment, whose lines stray from the session, whose
-/// fact data fails model validation, whose non-fact payloads lose
-/// their shape, or whose fact identities break containment,
-/// verifies false. An absent integrity object verifies
-/// false, while a present non-object or an unknown integrity field
-/// is an error: no unsealed sidecar can supply policy evidence.
+/// The session version selects the exposure or legacy line
+/// contract; an unknown contract verifies false. Every line ends
+/// in a newline, carries its position as its sequence number, and
+/// belongs to the snapshot's own session; one entry holds exactly
+/// one physical line under the reader's 64 KiB bound. Malformed
+/// snapshot framing is an error; a well-formed snapshot whose
+/// bytes, counts or kind census differ from the commitment, whose
+/// lines stray from the session or their contract, whose fact data
+/// fails model validation, whose non-fact payloads lose their
+/// shape, or whose fact identities break containment, verifies
+/// false. An absent integrity object verifies false, while a
+/// present non-object or an unknown integrity field is an error:
+/// no unsealed sidecar can supply policy evidence.
 pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     let value = parse_value(text).map_err(|err| SealError::new(err.what, err.message))?;
     let JsonValue::Object(top) = &value else {
@@ -1728,13 +2408,14 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
         Some(JsonValue::Str(id)) => id.as_str(),
         _ => return Err(SealError::new("session_id", "expected string")),
     };
+    let contract = session_contract(session);
     let Some(JsonValue::Array(lines)) = find_field(top, "event_lines") else {
         return Err(SealError::new("event_lines", "expected array"));
     };
     let mut literal: Vec<u8> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
     let mut fact_keys: Vec<SealedEvidenceKey> = Vec::new();
-    let mut lines_ok = true;
+    let mut lines_ok = contract.is_some();
     let mut contained_ok = true;
     for (position, line) in lines.iter().enumerate() {
         let JsonValue::Str(text) = line else {
@@ -1760,18 +2441,34 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
                 if line_session(text).as_deref() != Some(expected_session) {
                     lines_ok = false;
                 }
-                if kind == EXPOSURE_FACT_KIND {
-                    // Identity alone never admits a fact: the whole
-                    // line must normalize and its data must pass the
-                    // model validator, like the oracle's field check.
-                    match fact_identity(text) {
-                        Some(key) if fact_sealed_valid(text) => {
-                            fact_keys.push(key);
+                match contract {
+                    Some(SealContract::Exposure) => {
+                        if kind == EXPOSURE_FACT_KIND {
+                            // Identity alone never admits a fact: the whole
+                            // line must normalize and its data must pass the
+                            // model validator, like the oracle's field check.
+                            match fact_identity(text) {
+                                Some(key) if fact_sealed_valid(text) => {
+                                    fact_keys.push(key);
+                                }
+                                _ => contained_ok = false,
+                            }
+                        } else if !non_fact_shape_valid(&kind, text, SealContract::Exposure) {
+                            lines_ok = false;
                         }
-                        _ => contained_ok = false,
                     }
-                } else if !non_fact_shape_valid(&kind, text) {
-                    lines_ok = false;
+                    Some(SealContract::Legacy) => {
+                        // Exposure facts exist only under the exposure
+                        // contract; legacy lines keep legacy rules.
+                        if kind == EXPOSURE_FACT_KIND
+                            || !non_fact_shape_valid(&kind, text, SealContract::Legacy)
+                        {
+                            lines_ok = false;
+                        }
+                    }
+                    None => {
+                        lines_ok = false;
+                    }
                 }
                 kinds.push(kind);
             }
@@ -1929,6 +2626,89 @@ pub fn snapshot_terminal_status(text: &str) -> Result<String, SealError> {
         return Err(SealError::new("terminal", "expected status"));
     };
     Ok(status.clone())
+}
+
+/// One required source's verdict inputs read from a snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredSourceEvidence {
+    /// True when the source id appears in session exposure sources.
+    pub present: bool,
+    /// Source status; empty when the source is absent.
+    pub status: String,
+    /// True when at least one quality channel carries usable evidence.
+    pub quality_usable: bool,
+}
+
+/// Read one required source's status and quality usability.
+///
+/// The session exposure sources must exist; a missing source id
+/// reads as absent rather than erroring. Quality usability is
+/// emergent: any channel reporting a usable status counts, and an
+/// unreadable quality block counts as unusable, failing closed
+/// toward an incomplete verdict rather than satisfaction.
+pub fn snapshot_source_evidence(
+    text: &str,
+    source_id: &str,
+) -> Result<RequiredSourceEvidence, SealError> {
+    let value = parse_value(text).map_err(|err| SealError::new(err.what, err.message))?;
+    let JsonValue::Object(top) = &value else {
+        return Err(SealError::new("snapshot", "expected object"));
+    };
+    let Some(JsonValue::Object(session)) = find_field(top, "session") else {
+        return Err(SealError::new("session", "expected object"));
+    };
+    let Some(JsonValue::Object(exposure)) = find_field(session, "exposure") else {
+        return Err(SealError::new("exposure", "expected object"));
+    };
+    let Some(JsonValue::Array(sources)) = find_field(exposure, "sources") else {
+        return Err(SealError::new("sources", "expected array"));
+    };
+    let absent = RequiredSourceEvidence {
+        present: false,
+        status: String::new(),
+        quality_usable: false,
+    };
+    for entry in sources {
+        let JsonValue::Object(fields) = entry else {
+            continue;
+        };
+        let Some(JsonValue::Str(id)) = find_field(fields, "source_id") else {
+            continue;
+        };
+        if id != source_id {
+            continue;
+        }
+        let Some(JsonValue::Str(status)) = find_field(fields, "status") else {
+            return Err(SealError::new("status", "expected string"));
+        };
+        return Ok(RequiredSourceEvidence {
+            present: true,
+            status: status.clone(),
+            quality_usable: source_quality_usable(fields),
+        });
+    }
+    Ok(absent)
+}
+
+/// True when a coverage entry keeps a usable quality channel.
+///
+/// Usability follows the channel rule shared with the verdict
+/// gate: a settled or partial channel carries evidence, anything
+/// else does not. Unreadable channels count as unusable.
+fn source_quality_usable(entry: &[(String, JsonValue)]) -> bool {
+    let Some(JsonValue::Object(quality)) = find_field(entry, "quality") else {
+        return false;
+    };
+    for (_, node) in quality {
+        let JsonValue::Object(channel) = node else {
+            continue;
+        };
+        if matches!(find_field(channel, "status"), Some(JsonValue::Str(text)) if text == "complete_for_scope" || text == "partial")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Policy file size cap in bytes.
@@ -2854,6 +3634,138 @@ mod tests {
         )
     }
 
+    /// One canonical line under an explicit contract version, with an
+    /// optional observer context.
+    fn versioned_line(
+        seq: u64,
+        version: &'static str,
+        kind: &'static str,
+        source: FieldValue<'_>,
+        data: FieldValue<'_>,
+        observer: Option<FieldValue<'_>>,
+    ) -> String {
+        let mut fields: Vec<(&str, FieldValue)> = vec![
+            ("schema_version", FieldValue::Text(version)),
+            ("session_id", FieldValue::Text(PROBE_SESSION)),
+            ("seq", FieldValue::UInt(seq)),
+            ("ts_ns", FieldValue::UInt(1_300_000_000 + seq)),
+            ("kind", FieldValue::Text(kind)),
+            ("source", source),
+        ];
+        if let Some(context) = observer {
+            fields.push(("observer_context", context));
+        }
+        fields.push(("data", data));
+        render_canonical(&fields).unwrap()
+    }
+
+    /// One valid map-result payload: a successful known mapping.
+    fn map_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("success", FieldValue::Bool(true)),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("return_code", FieldValue::Int(0)),
+            ("mapped_bytes", FieldValue::UInt(4096)),
+            ("wire_generation", FieldValue::UInt(3)),
+            ("wire_identity", FieldValue::Text("known")),
+        ])
+    }
+
+    /// One valid unmap payload: a known wire release.
+    fn unmap_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("wire_generation", FieldValue::UInt(3)),
+            ("wire_identity", FieldValue::Text("known")),
+        ])
+    }
+
+    /// One valid copy payload: an observed CPU bounce copy.
+    fn copy_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("direction", FieldValue::Text("original_to_bounce")),
+            ("bytes", FieldValue::UInt(512)),
+        ])
+    }
+
+    /// One valid sync-request payload: a known-offset request.
+    fn sync_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("offset_known", FieldValue::Bool(true)),
+            ("offset", FieldValue::UInt(128)),
+            ("length", FieldValue::UInt(512)),
+        ])
+    }
+
+    /// One valid transition-result payload: a shared conversion.
+    fn transition_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("region_id", FieldValue::Text("r-1")),
+            ("requested_state", FieldValue::Text("shared")),
+            ("success", FieldValue::Bool(true)),
+            ("return_code", FieldValue::Int(0)),
+            ("offset", FieldValue::UInt(0)),
+            ("length", FieldValue::UInt(4096)),
+        ])
+    }
+
+    /// One valid pool-sample payload: a byte-unit reading.
+    fn pool_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("pool_id", FieldValue::Text("swiotlb")),
+            ("used_bytes", FieldValue::UInt(1024)),
+            ("capacity_bytes", FieldValue::UInt(4096)),
+            ("unit", FieldValue::Text("bytes")),
+        ])
+    }
+
+    /// One valid gap payload: a measured detail loss.
+    fn gap_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("channel", FieldValue::Text("detail")),
+            ("lost_count", FieldValue::UInt(3)),
+            ("reason", FieldValue::Text("ring full")),
+            ("window_start_ns", FieldValue::UInt(100)),
+            ("window_end_ns", FieldValue::UInt(200)),
+        ])
+    }
+
+    /// One valid counter-snapshot payload: a profile-scoped reading.
+    fn counter_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("counter_id", FieldValue::Text("swiotlb.bounce_attempts")),
+            ("epoch", FieldValue::UInt(7)),
+            (
+                "scope",
+                FieldValue::Object(vec![("profile_id", FieldValue::Text("p-1"))]),
+            ),
+            ("value", FieldValue::UInt(42)),
+            ("unit", FieldValue::Text("count")),
+        ])
+    }
+
+    /// One envelope source block with one leaf replaced.
+    fn probe_source_leaf<'a>(leaf: &str, value: FieldValue<'a>) -> FieldValue<'a> {
+        let mut fields: Vec<(&str, FieldValue)> = vec![
+            ("hook", FieldValue::Text("synthetic:exposure")),
+            ("backend", FieldValue::Text("synthetic")),
+            ("profile_id", FieldValue::Text("synthetic-census-1")),
+            ("measurement", FieldValue::Text("observed")),
+            ("correlation", FieldValue::Text("direct")),
+        ];
+        let slot = fields
+            .iter_mut()
+            .find(|(seen, _)| *seen == leaf)
+            .expect("known source leaf");
+        slot.1 = value;
+        FieldValue::Object(fields)
+    }
+
     /// One sealed snapshot carrying exactly the given literal lines.
     ///
     /// Each line renders through the canonical encoder and the seal
@@ -2896,7 +3808,109 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"session\":{{\"session_id\":\"{PROBE_SESSION}\",\
+            "{{\"session\":{{\"schema_version\":\"0.3.0\",\
+            \"session_id\":\"{PROBE_SESSION}\",\
+            \"capture\":{{\"integrity\":{integrity}}}}},\
+            \"event_lines\":[{rendered}]}}"
+        )
+    }
+
+    /// Escape literal lines into snapshot string entries.
+    fn escape_entries(lines: &[String]) -> (String, Vec<String>) {
+        let literal: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let entries: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                format!("{line}\n")
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+            })
+            .collect();
+        (literal, entries)
+    }
+
+    /// One sealed 0.3.0 snapshot with explicit per-kind counts.
+    ///
+    /// Unlisted kinds commit zero; the exposure-fact count rides in
+    /// the same table. Only the shape gates can refuse the lines.
+    fn sealed_kind_snapshot(lines: &[String], counts: &[(&str, u64)]) -> String {
+        assert!(!lines.is_empty(), "probe snapshot carries lines");
+        let (literal, entries) = escape_entries(lines);
+        let bytes = literal.len();
+        let digest = sha256_hex(literal.as_bytes());
+        let count = lines.len() as u64;
+        let mut table = String::new();
+        for (index, name) in LEGACY_KINDS.iter().enumerate() {
+            let committed = counts
+                .iter()
+                .find(|(seen, _)| seen == name)
+                .map(|(_, total)| *total)
+                .unwrap_or(0);
+            if index > 0 {
+                table.push(',');
+            }
+            table.push_str(&format!("\"{name}\":\"{committed}\""));
+        }
+        let facts = counts
+            .iter()
+            .find(|(seen, _)| *seen == EXPOSURE_FACT_KIND)
+            .map(|(_, total)| *total)
+            .unwrap_or(0);
+        table.push_str(&format!(",\"{EXPOSURE_FACT_KIND}\":\"{facts}\""));
+        let integrity = format!(
+            "{{\"algorithm\":\"sha256\",\"events_bytes\":\"{bytes}\",\"line_count\":\"{count}\",\
+            \"first_seq\":\"0\",\"last_seq\":\"{}\",\"events_sha256\":\"{digest}\",\
+            \"kinds\":{{{table}}}}}",
+            count - 1
+        );
+        let rendered = entries
+            .iter()
+            .map(|entry| format!("\"{entry}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"session\":{{\"schema_version\":\"0.3.0\",\
+            \"session_id\":\"{PROBE_SESSION}\",\
+            \"capture\":{{\"integrity\":{integrity}}}}},\
+            \"event_lines\":[{rendered}]}}"
+        )
+    }
+
+    /// One sealed legacy snapshot: a 0.1.4 session with a ten-key
+    /// kinds table committing to exactly the given literal lines.
+    fn sealed_legacy_snapshot(lines: &[String], counts: &[(&str, u64)]) -> String {
+        assert!(!lines.is_empty(), "probe snapshot carries lines");
+        let (literal, entries) = escape_entries(lines);
+        let bytes = literal.len();
+        let digest = sha256_hex(literal.as_bytes());
+        let count = lines.len() as u64;
+        let mut table = String::new();
+        for (index, name) in LEGACY_KINDS.iter().enumerate() {
+            let committed = counts
+                .iter()
+                .find(|(seen, _)| seen == name)
+                .map(|(_, total)| *total)
+                .unwrap_or(0);
+            if index > 0 {
+                table.push(',');
+            }
+            table.push_str(&format!("\"{name}\":\"{committed}\""));
+        }
+        let integrity = format!(
+            "{{\"algorithm\":\"sha256\",\"events_bytes\":\"{bytes}\",\"line_count\":\"{count}\",\
+            \"first_seq\":\"0\",\"last_seq\":\"{}\",\"events_sha256\":\"{digest}\",\
+            \"kinds\":{{{table}}}}}",
+            count - 1
+        );
+        let rendered = entries
+            .iter()
+            .map(|entry| format!("\"{entry}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"session\":{{\"schema_version\":\"0.1.4\",\
+            \"session_id\":\"{PROBE_SESSION}\",\
             \"capture\":{{\"integrity\":{integrity}}}}},\
             \"event_lines\":[{rendered}]}}"
         )
@@ -3299,5 +4313,669 @@ mod tests {
                 .expect("tainted parses");
             assert!(!report.verified, "bounce with {name} cannot verify");
         }
+    }
+
+    #[test]
+    fn seal_dispatches_on_session_contract() {
+        // A legacy session with valid 0.1.1 lines verifies under
+        // legacy rules.
+        let lines = vec![
+            versioned_line(
+                0,
+                "0.1.1",
+                "bounce_attempt",
+                probe_source(),
+                bounce_payload(),
+                None,
+            ),
+            versioned_line(
+                1,
+                "0.1.1",
+                "bounce_attempt",
+                probe_source(),
+                bounce_payload(),
+                None,
+            ),
+        ];
+        let snapshot = sealed_legacy_snapshot(&lines, &[("bounce_attempt", 2)]);
+        let report = verify_sealed_snapshot(&snapshot).expect("legacy parses");
+        assert!(report.verified, "valid legacy lines must verify");
+        // An unknown session contract refuses even with valid lines.
+        let forged = snapshot.replacen(
+            "\"schema_version\":\"0.1.4\"",
+            "\"schema_version\":\"9.9.9\"",
+            1,
+        );
+        assert_ne!(forged, snapshot);
+        let report = verify_sealed_snapshot(&forged).expect("forged parses");
+        assert!(!report.verified, "unknown contract cannot verify");
+        // A missing session contract refuses.
+        let missing = snapshot.replacen("\"schema_version\":\"0.1.4\",", "", 1);
+        assert_ne!(missing, snapshot);
+        let report = verify_sealed_snapshot(&missing).expect("missing parses");
+        assert!(!report.verified, "missing contract cannot verify");
+        // An exposure fact verifies nowhere under a legacy contract.
+        let fact = fact_line(0, default_fact_data("inventory", "guest_monotonic_active"));
+        let snapshot =
+            sealed_kind_snapshot(std::slice::from_ref(&fact), &[(EXPOSURE_FACT_KIND, 1)]);
+        let legacy = snapshot.replacen(
+            "\"schema_version\":\"0.3.0\"",
+            "\"schema_version\":\"0.1.4\"",
+            1,
+        );
+        assert_ne!(legacy, snapshot);
+        let report = verify_sealed_snapshot(&legacy).expect("tainted parses");
+        assert!(!report.verified, "fact under legacy contract cannot verify");
+        // A 0.3.0 line verifies nowhere under a legacy contract.
+        let marker = versioned_line(
+            0,
+            "0.3.0",
+            "marker",
+            probe_source(),
+            FieldValue::Object(vec![("text", FieldValue::Text("x"))]),
+            None,
+        );
+        let snapshot = sealed_kind_snapshot(std::slice::from_ref(&marker), &[("marker", 1)]);
+        let legacy = snapshot.replacen(
+            "\"schema_version\":\"0.3.0\"",
+            "\"schema_version\":\"0.1.4\"",
+            1,
+        );
+        assert_ne!(legacy, snapshot);
+        let report = verify_sealed_snapshot(&legacy).expect("tainted parses");
+        assert!(
+            !report.verified,
+            "0.3.0 line under legacy contract cannot verify"
+        );
+    }
+
+    #[test]
+    fn seal_validates_all_legacy_payloads() {
+        let marker_text = || FieldValue::Object(vec![("text", FieldValue::Text("census sealed"))]);
+        let cases: Vec<(&'static str, FieldValue<'static>)> = vec![
+            ("bounce_attempt", bounce_payload()),
+            ("map_result", map_payload()),
+            ("unmap", unmap_payload()),
+            ("copy", copy_payload()),
+            ("sync_request", sync_payload()),
+            ("transition_result", transition_payload()),
+            ("pool_sample", pool_payload()),
+            ("gap", gap_payload()),
+            ("marker", marker_text()),
+            ("counter_snapshot", counter_payload()),
+        ];
+        for (kind, payload) in cases {
+            let line = versioned_line(0, "0.3.0", kind, probe_source(), payload, None);
+            let snapshot = sealed_kind_snapshot(std::slice::from_ref(&line), &[(kind, 1)]);
+            let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+            assert!(report.verified, "valid {kind} must verify");
+            let bogus = FieldValue::Object(vec![("bogus", FieldValue::Text("x"))]);
+            let line = versioned_line(0, "0.3.0", kind, probe_source(), bogus, None);
+            let snapshot = sealed_kind_snapshot(std::slice::from_ref(&line), &[(kind, 1)]);
+            let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
+            assert!(!report.verified, "bogus {kind} cannot verify");
+        }
+    }
+
+    #[test]
+    fn seal_enforces_legacy_conditionals() {
+        let derived = probe_source_with("derived", "direct");
+        let unassigned = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("success", FieldValue::Bool(true)),
+            ("mapping_id", FieldValue::Null),
+            ("return_code", FieldValue::Int(0)),
+            ("mapped_bytes", FieldValue::UInt(4096)),
+            ("wire_generation", FieldValue::UInt(3)),
+            ("wire_identity", FieldValue::Text("unassigned")),
+        ]);
+        let failed_wire = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("success", FieldValue::Bool(false)),
+            ("mapping_id", FieldValue::Null),
+            ("return_code", FieldValue::Int(-12)),
+            ("mapped_bytes", FieldValue::Null),
+            ("wire_generation", FieldValue::UInt(0)),
+            ("wire_identity", FieldValue::Null),
+        ]);
+        let success_without_mapping = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("success", FieldValue::Bool(true)),
+            ("mapping_id", FieldValue::Null),
+            ("return_code", FieldValue::Int(0)),
+            ("mapped_bytes", FieldValue::UInt(4096)),
+            ("wire_generation", FieldValue::UInt(3)),
+            ("wire_identity", FieldValue::Text("known")),
+        ]);
+        let failed_with_mapping = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("success", FieldValue::Bool(false)),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("return_code", FieldValue::Int(0)),
+            ("mapped_bytes", FieldValue::Null),
+            ("wire_generation", FieldValue::Null),
+            ("wire_identity", FieldValue::Null),
+        ]);
+        let null_generation_known = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("success", FieldValue::Bool(true)),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("return_code", FieldValue::Int(0)),
+            ("mapped_bytes", FieldValue::UInt(4096)),
+            ("wire_generation", FieldValue::Null),
+            ("wire_identity", FieldValue::Text("known")),
+        ]);
+        let missed = FieldValue::Object(vec![
+            ("mapping_id", FieldValue::Null),
+            ("wire_generation", FieldValue::UInt(3)),
+            ("wire_identity", FieldValue::Text("miss")),
+        ]);
+        let non_wire = FieldValue::Object(vec![
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("wire_generation", FieldValue::Null),
+            ("wire_identity", FieldValue::Null),
+        ]);
+        let null_mapping_known = FieldValue::Object(vec![
+            ("mapping_id", FieldValue::Null),
+            ("wire_generation", FieldValue::UInt(3)),
+            ("wire_identity", FieldValue::Text("known")),
+        ]);
+        let null_identity_wired = FieldValue::Object(vec![
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("wire_generation", FieldValue::UInt(3)),
+            ("wire_identity", FieldValue::Null),
+        ]);
+        let unknown_offset = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Null),
+            ("offset_known", FieldValue::Bool(false)),
+            ("offset", FieldValue::Null),
+            ("length", FieldValue::UInt(512)),
+        ]);
+        let known_without_offset = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("offset_known", FieldValue::Bool(true)),
+            ("offset", FieldValue::Null),
+            ("length", FieldValue::UInt(512)),
+        ]);
+        let unknown_with_offset = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("offset_known", FieldValue::Bool(false)),
+            ("offset", FieldValue::UInt(128)),
+            ("length", FieldValue::UInt(512)),
+        ]);
+        let resolved = FieldValue::Object(vec![
+            ("region_id", FieldValue::Text("r-1")),
+            ("requested_state", FieldValue::Text("private")),
+            ("success", FieldValue::Bool(false)),
+            ("return_code", FieldValue::Null),
+            ("offset", FieldValue::UInt(0)),
+            ("length", FieldValue::UInt(4096)),
+            ("address_space", FieldValue::Text("iova")),
+            ("resolution", FieldValue::Text("unresolved")),
+            ("generation", FieldValue::Int(2)),
+        ]);
+        let zero_generation = FieldValue::Object(vec![
+            ("region_id", FieldValue::Text("r-1")),
+            ("requested_state", FieldValue::Text("shared")),
+            ("success", FieldValue::Bool(true)),
+            ("return_code", FieldValue::Int(0)),
+            ("offset", FieldValue::UInt(0)),
+            ("length", FieldValue::UInt(4096)),
+            ("generation", FieldValue::Int(0)),
+        ]);
+        let unknown_pool = FieldValue::Object(vec![
+            ("pool_id", FieldValue::Text("swiotlb")),
+            ("used_bytes", FieldValue::Null),
+            ("capacity_bytes", FieldValue::Null),
+            ("unit", FieldValue::Text("unknown")),
+            ("reason", FieldValue::Text("denied")),
+        ]);
+        let paged_pool = FieldValue::Object(vec![
+            ("pool_id", FieldValue::Text("swiotlb")),
+            ("used_bytes", FieldValue::UInt(1)),
+            ("capacity_bytes", FieldValue::UInt(2)),
+            ("unit", FieldValue::Text("pages")),
+        ]);
+        let unknown_loss = FieldValue::Object(vec![
+            ("channel", FieldValue::Text("terminal")),
+            ("lost_count", FieldValue::Null),
+            ("reason", FieldValue::Text("dropped")),
+            ("window_start_ns", FieldValue::UInt(100)),
+            ("window_end_ns", FieldValue::UInt(200)),
+        ]);
+        let empty_reason = FieldValue::Object(vec![
+            ("channel", FieldValue::Text("detail")),
+            ("lost_count", FieldValue::UInt(3)),
+            ("reason", FieldValue::Text("")),
+            ("window_start_ns", FieldValue::UInt(100)),
+            ("window_end_ns", FieldValue::UInt(200)),
+        ]);
+        let device_scope = FieldValue::Object(vec![
+            ("counter_id", FieldValue::Text("c")),
+            ("epoch", FieldValue::UInt(0)),
+            (
+                "scope",
+                FieldValue::Object(vec![
+                    ("device_id", FieldValue::Text("dev-1")),
+                    ("profile_id", FieldValue::Text("p-1")),
+                ]),
+            ),
+            ("value", FieldValue::UInt(0)),
+            ("unit", FieldValue::Text("u")),
+        ]);
+        let empty_scope = FieldValue::Object(vec![
+            ("counter_id", FieldValue::Text("c")),
+            ("epoch", FieldValue::UInt(0)),
+            ("scope", FieldValue::Object(vec![])),
+            ("value", FieldValue::UInt(0)),
+            ("unit", FieldValue::Text("u")),
+        ]);
+        let flagged_copy = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("direction", FieldValue::Text("bounce_to_original")),
+            ("bytes", FieldValue::UInt(512)),
+            ("pool_private", FieldValue::Bool(true)),
+            ("offset_past_allocation", FieldValue::Bool(true)),
+        ]);
+        let sideways_copy = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("direction", FieldValue::Text("sideways")),
+            ("bytes", FieldValue::UInt(512)),
+        ]);
+        let rows: Vec<(&str, &str, FieldValue, FieldValue, bool)> = vec![
+            (
+                "unassigned map",
+                "map_result",
+                unassigned,
+                probe_source(),
+                true,
+            ),
+            (
+                "failed wire map",
+                "map_result",
+                failed_wire,
+                probe_source(),
+                true,
+            ),
+            (
+                "success without mapping",
+                "map_result",
+                success_without_mapping,
+                probe_source(),
+                false,
+            ),
+            (
+                "failure with mapping",
+                "map_result",
+                failed_with_mapping,
+                probe_source(),
+                false,
+            ),
+            (
+                "null generation with known identity",
+                "map_result",
+                null_generation_known,
+                probe_source(),
+                false,
+            ),
+            ("missed unmap", "unmap", missed, probe_source(), true),
+            ("non-wire unmap", "unmap", non_wire, probe_source(), true),
+            (
+                "null mapping with known identity",
+                "unmap",
+                null_mapping_known,
+                probe_source(),
+                false,
+            ),
+            (
+                "null identity on wire",
+                "unmap",
+                null_identity_wired,
+                probe_source(),
+                false,
+            ),
+            (
+                "unknown sync offset",
+                "sync_request",
+                unknown_offset,
+                probe_source(),
+                true,
+            ),
+            (
+                "known sync offset missing",
+                "sync_request",
+                known_without_offset,
+                probe_source(),
+                false,
+            ),
+            (
+                "unknown sync offset valued",
+                "sync_request",
+                unknown_with_offset,
+                probe_source(),
+                false,
+            ),
+            (
+                "resolved transition",
+                "transition_result",
+                resolved,
+                probe_source(),
+                true,
+            ),
+            (
+                "zero transition generation",
+                "transition_result",
+                zero_generation,
+                probe_source(),
+                false,
+            ),
+            (
+                "unknown pool reading",
+                "pool_sample",
+                unknown_pool,
+                probe_source(),
+                true,
+            ),
+            (
+                "paged pool unit",
+                "pool_sample",
+                paged_pool,
+                probe_source(),
+                false,
+            ),
+            (
+                "unknown gap loss",
+                "gap",
+                unknown_loss,
+                probe_source(),
+                true,
+            ),
+            (
+                "empty gap reason",
+                "gap",
+                empty_reason,
+                probe_source(),
+                false,
+            ),
+            (
+                "device counter scope",
+                "counter_snapshot",
+                device_scope,
+                probe_source(),
+                true,
+            ),
+            (
+                "empty counter scope",
+                "counter_snapshot",
+                empty_scope,
+                probe_source(),
+                false,
+            ),
+            ("flagged copy", "copy", flagged_copy, probe_source(), true),
+            (
+                "sideways copy",
+                "copy",
+                sideways_copy,
+                probe_source(),
+                false,
+            ),
+            ("derived copy", "copy", copy_payload(), derived, false),
+        ];
+        for (name, kind, payload, source, expect) in rows {
+            let line = versioned_line(0, "0.3.0", kind, source, payload, None);
+            let snapshot = sealed_kind_snapshot(std::slice::from_ref(&line), &[(kind, 1)]);
+            let report = verify_sealed_snapshot(&snapshot).expect("probe parses");
+            assert_eq!(report.verified, expect, "{name}");
+        }
+    }
+
+    #[test]
+    fn seal_gates_copy_extras_on_line_version() {
+        let extras = FieldValue::Object(vec![
+            ("operation_id", FieldValue::Text("op-1")),
+            ("mapping_id", FieldValue::Text("m-1")),
+            ("direction", FieldValue::Text("original_to_bounce")),
+            ("bytes", FieldValue::UInt(512)),
+            ("pool_private", FieldValue::Bool(true)),
+            ("offset_past_allocation", FieldValue::Bool(true)),
+        ]);
+        for (version, expect) in [("0.1.1", false), ("0.1.2", true)] {
+            let line = versioned_line(0, version, "copy", probe_source(), extras.clone(), None);
+            let snapshot = sealed_legacy_snapshot(std::slice::from_ref(&line), &[("copy", 1)]);
+            let report = verify_sealed_snapshot(&snapshot).expect("probe parses");
+            assert_eq!(report.verified, expect, "copy extras under {version}");
+        }
+    }
+
+    #[test]
+    fn seal_enforces_source_string_bounds() {
+        let hook_over = "x".repeat(257);
+        let hook_max = "x".repeat(256);
+        let backend_over = "x".repeat(65);
+        let backend_max = "x".repeat(64);
+        let profile_over = "x".repeat(129);
+        let profile_max = "x".repeat(128);
+        let rows: Vec<(&str, FieldValue, bool)> = vec![
+            (
+                "empty hook",
+                probe_source_leaf("hook", FieldValue::Text("")),
+                false,
+            ),
+            (
+                "overlong hook",
+                probe_source_leaf("hook", FieldValue::Text(&hook_over)),
+                false,
+            ),
+            (
+                "bounded hook",
+                probe_source_leaf("hook", FieldValue::Text(&hook_max)),
+                true,
+            ),
+            (
+                "empty backend",
+                probe_source_leaf("backend", FieldValue::Text("")),
+                false,
+            ),
+            (
+                "overlong backend",
+                probe_source_leaf("backend", FieldValue::Text(&backend_over)),
+                false,
+            ),
+            (
+                "bounded backend",
+                probe_source_leaf("backend", FieldValue::Text(&backend_max)),
+                true,
+            ),
+            (
+                "empty profile",
+                probe_source_leaf("profile_id", FieldValue::Text("")),
+                false,
+            ),
+            (
+                "overlong profile",
+                probe_source_leaf("profile_id", FieldValue::Text(&profile_over)),
+                false,
+            ),
+            (
+                "bounded profile",
+                probe_source_leaf("profile_id", FieldValue::Text(&profile_max)),
+                true,
+            ),
+        ];
+        for (name, source, expect) in rows {
+            let line = fact_line_with_source(
+                0,
+                default_fact_data("inventory", "guest_monotonic_active"),
+                source.clone(),
+            );
+            let report =
+                verify_sealed_snapshot(&sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0))
+                    .expect("probe parses");
+            assert_eq!(report.verified, expect, "fact with {name}");
+            let marker = versioned_line(
+                0,
+                "0.3.0",
+                "marker",
+                source,
+                FieldValue::Object(vec![("text", FieldValue::Text("census sealed"))]),
+                None,
+            );
+            let report = verify_sealed_snapshot(&sealed_kind_snapshot(
+                std::slice::from_ref(&marker),
+                &[("marker", 1)],
+            ))
+            .expect("probe parses");
+            assert_eq!(report.verified, expect, "marker with {name}");
+        }
+    }
+
+    #[test]
+    fn seal_validates_observer_context() {
+        let context = FieldValue::Object(vec![
+            ("cpu", FieldValue::Int(3)),
+            ("pid", FieldValue::Int(100)),
+            ("tgid", FieldValue::Int(100)),
+            ("comm", FieldValue::Text("memveil")),
+            ("cgroup_id", FieldValue::Text("cgroup-1")),
+            ("relation", FieldValue::Text("execution_context_only")),
+        ]);
+        let line = versioned_line(
+            0,
+            "0.1.1",
+            "bounce_attempt",
+            probe_source(),
+            bounce_payload(),
+            Some(context.clone()),
+        );
+        let snapshot =
+            sealed_legacy_snapshot(std::slice::from_ref(&line), &[("bounce_attempt", 1)]);
+        let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+        assert!(report.verified, "legacy context must verify");
+        let bad = FieldValue::Object(vec![("relation", FieldValue::Text("owner"))]);
+        let line = versioned_line(
+            0,
+            "0.1.1",
+            "bounce_attempt",
+            probe_source(),
+            bounce_payload(),
+            Some(bad),
+        );
+        let snapshot =
+            sealed_legacy_snapshot(std::slice::from_ref(&line), &[("bounce_attempt", 1)]);
+        let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
+        assert!(!report.verified, "bad legacy context cannot verify");
+        let modern = versioned_line(
+            0,
+            "0.3.0",
+            "marker",
+            probe_source(),
+            FieldValue::Object(vec![("text", FieldValue::Text("census sealed"))]),
+            Some(context),
+        );
+        let snapshot = sealed_kind_snapshot(std::slice::from_ref(&modern), &[("marker", 1)]);
+        let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
+        assert!(
+            !report.verified,
+            "0.3.0 line with observer context cannot verify"
+        );
+    }
+
+    /// One quality block with every channel reporting the given
+    /// status and loss.
+    fn probe_quality_all(status: &'static str, loss: FieldValue<'static>) -> FieldValue<'static> {
+        let mut channels: Vec<(&'static str, FieldValue<'static>)> = Vec::new();
+        for name in ["detail", "aggregate", "identity", "baseline", "terminal"] {
+            channels.push((
+                name,
+                FieldValue::Object(vec![
+                    ("status", FieldValue::Text(status)),
+                    ("loss_count", loss.clone()),
+                ]),
+            ));
+        }
+        FieldValue::Object(channels)
+    }
+
+    /// One coverage-source entry carrying the given status and quality.
+    fn probe_coverage_source(
+        status: &'static str,
+        quality: FieldValue<'static>,
+    ) -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("source_id", FieldValue::Text("sharing-census")),
+            ("status", FieldValue::Text(status)),
+            ("quality", quality),
+        ])
+    }
+
+    /// One snapshot carrying the given coverage sources and no lines.
+    fn source_snapshot(sources: Vec<FieldValue<'_>>) -> String {
+        render_canonical(&[
+            (
+                "session",
+                FieldValue::Object(vec![
+                    ("schema_version", FieldValue::Text("0.3.0")),
+                    ("session_id", FieldValue::Text(PROBE_SESSION)),
+                    (
+                        "exposure",
+                        FieldValue::Object(vec![("sources", FieldValue::Array(sources))]),
+                    ),
+                ]),
+            ),
+            ("event_lines", FieldValue::Array(vec![])),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn snapshot_source_evidence_reads_quality() {
+        let settled = probe_quality_all("complete_for_scope", FieldValue::UInt(0));
+        let snapshot = source_snapshot(vec![probe_coverage_source("available", settled)]);
+        let evidence =
+            snapshot_source_evidence(&snapshot, "sharing-census").expect("reads evidence");
+        assert!(evidence.present);
+        assert_eq!(evidence.status, "available");
+        assert!(evidence.quality_usable);
+
+        let missing = probe_quality_all("unavailable", FieldValue::Null);
+        let snapshot = source_snapshot(vec![probe_coverage_source("partial", missing)]);
+        let evidence =
+            snapshot_source_evidence(&snapshot, "sharing-census").expect("reads evidence");
+        assert!(evidence.present);
+        assert_eq!(evidence.status, "partial");
+        assert!(!evidence.quality_usable, "no usable channel");
+
+        let snapshot = source_snapshot(vec![probe_coverage_source(
+            "partial",
+            quality_with_status("detail", "unavailable"),
+        )]);
+        let evidence =
+            snapshot_source_evidence(&snapshot, "sharing-census").expect("reads evidence");
+        assert!(evidence.quality_usable, "one usable channel suffices");
+
+        let absent =
+            snapshot_source_evidence(&snapshot, "egress-controls").expect("reads evidence");
+        assert!(!absent.present);
+        assert_eq!(absent.status, "");
+        assert!(!absent.quality_usable);
+
+        let bare = render_canonical(&[
+            (
+                "session",
+                FieldValue::Object(vec![
+                    ("schema_version", FieldValue::Text("0.3.0")),
+                    ("session_id", FieldValue::Text(PROBE_SESSION)),
+                ]),
+            ),
+            ("event_lines", FieldValue::Array(vec![])),
+        ])
+        .unwrap();
+        let err = snapshot_source_evidence(&bare, "sharing-census").unwrap_err();
+        assert_eq!(err.what, "exposure");
     }
 }

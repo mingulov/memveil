@@ -281,22 +281,127 @@ ENVELOPE_FIELDS = ("schema_version", "session_id", "seq", "ts_ns",
 SOURCE_FIELDS = ("hook", "backend", "profile_id", "measurement",
                  "correlation")
 
+EXPOSURE_CONTRACT = "exposure"
+LEGACY_CONTRACT = "legacy"
+LEGACY_SESSION_VERSIONS = ("0.1.1", "0.1.2", "0.1.3", "0.1.4")
+LEGACY_LINE_VERSIONS = ("0.1.1", "0.1.2")
+SOURCE_BOUNDS = (("hook", 256), ("backend", 64), ("profile_id", 128))
 
-def event_envelope_valid(event):
+
+def snapshot_contract(session):
+    """The event-line contract a session selects, or None when unknown.
+
+    A 0.3.0 session selects the exposure contract; a 0.1.x session
+    selects the legacy contract. The seal validates every line
+    under the session's contract, so legacy captures verify under
+    legacy rules while 0.3.0 lines keep the new checks, and neither
+    side admits the other's version.
+    """
+    version = session.get("schema_version")
+    if version == "0.3.0":
+        return EXPOSURE_CONTRACT
+    if version in LEGACY_SESSION_VERSIONS:
+        return LEGACY_CONTRACT
+    return None
+
+
+def is_u64_text(value):
+    """True for a canonical u64 decimal string within range."""
+    return isinstance(value, str) and U64RE.fullmatch(value) is not None \
+        and int(value) <= U64MAX
+
+
+def is_opaque_text(value):
+    """True for a bounded opaque identifier."""
+    return isinstance(value, str) \
+        and OPAQUE_RE.fullmatch(value) is not None
+
+
+def is_bare_int(value):
+    """True for a bare JSON integer, never a boolean."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def is_sized_text(value, limit):
+    """True for a non-empty string within the schema length bound."""
+    return isinstance(value, str) and 1 <= len(value) <= limit
+
+
+def source_bounds_valid(source):
+    """True when hook, backend and profile_id keep their bounds."""
+    try:
+        for field, limit in SOURCE_BOUNDS:
+            if not is_sized_text(source[field], limit):
+                return False
+    except (KeyError, TypeError):
+        return False
+    return True
+
+
+def observer_context_valid(value):
+    """True when a legacy observer context keeps its schema shape.
+
+    The relation is fixed; cpu, pid, tgid, comm and cgroup_id are
+    optional bounded leaves. Only legacy lines carry one.
+    """
+    try:
+        if not isinstance(value, dict):
+            return False
+        allowed = {"cpu", "pid", "tgid", "comm", "cgroup_id",
+                   "relation"}
+        if set(value.keys()) - allowed:
+            return False
+        if value.get("relation") != "execution_context_only":
+            return False
+        for field, limit in (("cpu", 1048575), ("pid", 4194304),
+                             ("tgid", 4194304)):
+            if field in value:
+                number = value[field]
+                if not is_bare_int(number):
+                    return False
+                if not 0 <= number <= limit:
+                    return False
+        if "comm" in value:
+            comm = value["comm"]
+            if not isinstance(comm, str) or len(comm) > 64:
+                return False
+        if "cgroup_id" in value:
+            check_opaque_id(value["cgroup_id"], "cgroup_id")
+    except (AssertionError, KeyError, TypeError):
+        return False
+    return True
+
+
+def event_envelope_valid(event, contract):
     """True when one event envelope keeps its canonical shape.
 
-    The seven envelope keys are present with nothing unknown, the
-    version is the exposure contract, the timestamp is a canonical
-    u64, and the source carries its five string leaves with frozen
-    labels. Sequence and session checks stay with the seal loop,
-    as in Rust; the caller owns kind membership.
+    The seven envelope keys are present with nothing unknown,
+    except that a legacy line may carry a validated observer
+    context; the version is the session's contract, the timestamp
+    is a canonical u64, and the source carries its five string
+    leaves within their bounds with frozen labels. Sequence and
+    session checks stay with the seal loop, as in Rust; the caller
+    owns kind membership.
     """
     try:
         if not isinstance(event, dict):
             return False
-        if set(event.keys()) != set(ENVELOPE_FIELDS):
-            return False
-        if event["schema_version"] != "0.3.0":
+        keys = set(event.keys())
+        if contract == EXPOSURE_CONTRACT:
+            if keys != set(ENVELOPE_FIELDS):
+                return False
+            if event["schema_version"] != "0.3.0":
+                return False
+        elif contract == LEGACY_CONTRACT:
+            if event.get("schema_version") not in LEGACY_LINE_VERSIONS:
+                return False
+            allowed = set(ENVELOPE_FIELDS) | {"observer_context"}
+            if keys - allowed or not set(ENVELOPE_FIELDS) <= keys:
+                return False
+            if "observer_context" in event and not observer_context_valid(
+                    event["observer_context"]):
+                return False
+        else:
             return False
         if not isinstance(event["session_id"], str):
             return False
@@ -306,9 +411,8 @@ def event_envelope_valid(event):
             return False
         if set(source.keys()) != set(SOURCE_FIELDS):
             return False
-        for field in ("hook", "backend", "profile_id"):
-            if not isinstance(source[field], str):
-                return False
+        if not source_bounds_valid(source):
+            return False
         if source["measurement"] not in FROZEN_MEASUREMENT:
             return False
         if source["correlation"] not in FROZEN_CORRELATION:
@@ -318,20 +422,24 @@ def event_envelope_valid(event):
     return True
 
 
-def fact_envelope_valid(event):
+def fact_envelope_valid(event, contract):
     """True when an exposure-fact line keeps its canonical envelope.
 
-    Mirrors the Rust normalizer's envelope checks plus the seal
-    path's frozen source labels: the seven envelope keys are
-    present with nothing unknown, the version is the exposure
+    Exposure facts exist only under the exposure contract.
+    Otherwise mirrors the Rust normalizer's envelope checks plus
+    the seal path's frozen source labels: the seven envelope keys
+    are present with nothing unknown, the version is the exposure
     contract, the timestamp is a canonical u64, and the source
-    carries its five string leaves with frozen labels. Sequence
-    and session checks stay with the seal loop, as in Rust.
+    carries its five string leaves within their bounds with frozen
+    labels. Sequence and session checks stay with the seal loop,
+    as in Rust.
     """
+    if contract != EXPOSURE_CONTRACT:
+        return False
     if not isinstance(event, dict):
         return False
     return event.get("kind") == "exposure_fact" \
-        and event_envelope_valid(event)
+        and event_envelope_valid(event, contract)
 
 
 def bounce_payload_valid(data):
@@ -354,15 +462,319 @@ def bounce_payload_valid(data):
     return True
 
 
-def non_fact_fields_valid(event):
+def map_result_valid(data):
+    """True when a map-result payload keeps its schema shape."""
+    try:
+        if set(data.keys()) != {"operation_id", "success", "mapping_id",
+                                "return_code", "mapped_bytes",
+                                "wire_generation", "wire_identity"}:
+            return False
+        if not is_opaque_text(data["operation_id"]):
+            return False
+        success = data["success"]
+        if not isinstance(success, bool):
+            return False
+        mapping = data["mapping_id"]
+        if mapping is not None and not is_opaque_text(mapping):
+            return False
+        native = data["return_code"]
+        if native is not None and not is_bare_int(native):
+            return False
+        mapped = data["mapped_bytes"]
+        if mapped is not None and not is_u64_text(mapped):
+            return False
+        generation = data["wire_generation"]
+        if generation is not None and not is_u64_text(generation):
+            return False
+        identity = data["wire_identity"]
+        if identity is not None \
+                and identity not in ("known", "unassigned"):
+            return False
+        if success and identity != "unassigned":
+            if not is_opaque_text(mapping) or not is_u64_text(mapped):
+                return False
+        if success and identity == "unassigned":
+            if mapping is not None or not is_u64_text(mapped):
+                return False
+        if not success:
+            if mapping is not None or mapped is not None \
+                    or identity is not None:
+                return False
+        if generation is None and identity is not None:
+            return False
+        if identity is None and generation is not None \
+                and (success or generation != "0"):
+            return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def unmap_valid(data):
+    """True when an unmap payload keeps its schema shape."""
+    try:
+        if set(data.keys()) != {"mapping_id", "wire_generation",
+                                "wire_identity"}:
+            return False
+        mapping = data["mapping_id"]
+        if mapping is not None and not is_opaque_text(mapping):
+            return False
+        generation = data["wire_generation"]
+        if generation is not None and not is_u64_text(generation):
+            return False
+        identity = data["wire_identity"]
+        if identity is not None and identity not in ("known", "miss"):
+            return False
+        if generation is None and identity is not None:
+            return False
+        if identity is None and generation is not None:
+            return False
+        if mapping is None and identity != "miss":
+            return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def copy_valid(data, source, line_version):
+    """True when a copy payload keeps its schema shape.
+
+    Copies require observed measurement. The pool-private and
+    offset flags exist from line version 0.1.2 on; a 0.1.1 copy
+    carrying them refuses.
+    """
+    try:
+        allowed = {"operation_id", "mapping_id", "direction", "bytes"}
+        if line_version != "0.1.1":
+            allowed |= {"pool_private", "offset_past_allocation"}
+        keys = set(data.keys())
+        if keys - allowed \
+                or not {"operation_id", "mapping_id", "direction",
+                        "bytes"} <= keys:
+            return False
+        if not isinstance(source, dict):
+            return False
+        if source.get("measurement") != "observed":
+            return False
+        if not is_opaque_text(data["operation_id"]):
+            return False
+        mapping = data["mapping_id"]
+        if mapping is not None and not is_opaque_text(mapping):
+            return False
+        if data["direction"] not in ("original_to_bounce",
+                                     "bounce_to_original"):
+            return False
+        if not is_u64_text(data["bytes"]):
+            return False
+        for flag in ("pool_private", "offset_past_allocation"):
+            if flag in data and data[flag] is not True:
+                return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def sync_request_valid(data):
+    """True when a sync-request payload keeps its schema shape."""
+    try:
+        if set(data.keys()) != {"operation_id", "mapping_id",
+                                "offset_known", "offset", "length"}:
+            return False
+        if not is_opaque_text(data["operation_id"]):
+            return False
+        mapping = data["mapping_id"]
+        if mapping is not None and not is_opaque_text(mapping):
+            return False
+        known = data["offset_known"]
+        if not isinstance(known, bool):
+            return False
+        offset = data["offset"]
+        if offset is not None and not is_u64_text(offset):
+            return False
+        if not is_u64_text(data["length"]):
+            return False
+        if known and not is_u64_text(offset):
+            return False
+        if not known and offset is not None:
+            return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def transition_result_valid(data):
+    """True when a transition-result payload keeps its schema shape."""
+    try:
+        required = {"region_id", "requested_state", "success",
+                    "return_code", "offset", "length"}
+        allowed = required | {"address_space", "resolution",
+                              "generation"}
+        keys = set(data.keys())
+        if keys - allowed or not required <= keys:
+            return False
+        if not is_opaque_text(data["region_id"]):
+            return False
+        if data["requested_state"] not in ("shared", "private"):
+            return False
+        if not isinstance(data["success"], bool):
+            return False
+        native = data["return_code"]
+        if native is not None and not is_bare_int(native):
+            return False
+        if not is_u64_text(data["offset"]):
+            return False
+        if not is_u64_text(data["length"]):
+            return False
+        if "address_space" in data and data["address_space"] not in (
+                "guest_physical", "kernel_virtual", "iova",
+                "identity_only"):
+            return False
+        if "resolution" in data \
+                and data["resolution"] not in ("resolved", "unresolved"):
+            return False
+        if "generation" in data:
+            generation = data["generation"]
+            if not is_bare_int(generation):
+                return False
+            if not 1 <= generation <= I64MAX:
+                return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def pool_sample_valid(data):
+    """True when a pool-sample payload keeps its schema shape."""
+    try:
+        required = {"pool_id", "used_bytes", "capacity_bytes", "unit"}
+        allowed = required | {"allocator", "unit_bytes",
+                              "hiwater_bytes", "reason"}
+        keys = set(data.keys())
+        if keys - allowed or not required <= keys:
+            return False
+        if not is_opaque_text(data["pool_id"]):
+            return False
+        for field in ("used_bytes", "capacity_bytes"):
+            if data[field] is not None \
+                    and not is_u64_text(data[field]):
+                return False
+        if data["unit"] not in ("bytes", "unknown"):
+            return False
+        if "allocator" in data \
+                and not is_opaque_text(data["allocator"]):
+            return False
+        if "unit_bytes" in data \
+                and not is_u64_text(data["unit_bytes"]):
+            return False
+        if "hiwater_bytes" in data:
+            hiwater = data["hiwater_bytes"]
+            if hiwater is not None and not is_u64_text(hiwater):
+                return False
+        if "reason" in data and data["reason"] not in (
+                "denied", "absent", "unparseable"):
+            return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def gap_valid(data):
+    """True when a gap payload keeps its schema shape."""
+    try:
+        if set(data.keys()) != {"channel", "lost_count", "reason",
+                                "window_start_ns", "window_end_ns"}:
+            return False
+        if data["channel"] not in ("detail", "aggregate", "correlation",
+                                   "baseline", "terminal"):
+            return False
+        lost = data["lost_count"]
+        if lost is not None and not is_u64_text(lost):
+            return False
+        if not is_sized_text(data["reason"], 512):
+            return False
+        if not is_u64_text(data["window_start_ns"]):
+            return False
+        if not is_u64_text(data["window_end_ns"]):
+            return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def counter_snapshot_valid(data):
+    """True when a counter-snapshot payload keeps its schema shape."""
+    try:
+        if set(data.keys()) != {"counter_id", "epoch", "scope", "value",
+                                "unit"}:
+            return False
+        if not is_sized_text(data["counter_id"], 128):
+            return False
+        if not is_u64_text(data["epoch"]):
+            return False
+        scope = data["scope"]
+        if not isinstance(scope, dict):
+            return False
+        keys = set(scope.keys())
+        if keys - {"device_id", "profile_id"} \
+                or "profile_id" not in keys:
+            return False
+        if "device_id" in scope:
+            device = scope["device_id"]
+            if device is not None and not is_opaque_text(device):
+                return False
+        if not is_sized_text(scope["profile_id"], 128):
+            return False
+        if not is_u64_text(data["value"]):
+            return False
+        if not is_sized_text(data["unit"], 32):
+            return False
+    except (AttributeError, KeyError, TypeError):
+        return False
+    return True
+
+
+def legacy_payload_valid(kind, data, source, line_version):
+    """True when a legacy payload keeps its per-kind schema shape.
+
+    Every legacy kind carries exactly its schema leaves; a copy
+    additionally requires observed measurement, and its two
+    toggle flags exist from line version 0.1.2 on. Mirrors the
+    event schemas and the Rust snapshot path.
+    """
+    if not isinstance(data, dict):
+        return False
+    if kind == "marker":
+        return set(data.keys()) == {"text"} \
+            and is_sized_text(data["text"], 256)
+    if kind == "bounce_attempt":
+        return bounce_payload_valid(data)
+    if kind == "map_result":
+        return map_result_valid(data)
+    if kind == "unmap":
+        return unmap_valid(data)
+    if kind == "copy":
+        return copy_valid(data, source, line_version)
+    if kind == "sync_request":
+        return sync_request_valid(data)
+    if kind == "transition_result":
+        return transition_result_valid(data)
+    if kind == "pool_sample":
+        return pool_sample_valid(data)
+    if kind == "gap":
+        return gap_valid(data)
+    if kind == "counter_snapshot":
+        return counter_snapshot_valid(data)
+    return False
+
+
+def non_fact_fields_valid(event, contract):
     """True when a non-fact line keeps its envelope payload shape.
 
     The kind is a legacy seal kind, the envelope keeps its
-    canonical shape with frozen source labels, and the object
-    ``data`` payload carries at least one key. A marker's payload
-    holds exactly its bounded ``text`` annotation and a bounce
-    attempt carries exactly its four schema leaves, mirroring the
-    event schema and the Rust snapshot path.
+    canonical shape under the session's contract with bounded
+    source strings and frozen labels, and the object ``data``
+    payload keeps its per-kind schema shape. Mirrors the event
+    schemas and the Rust snapshot path.
     """
     try:
         if not isinstance(event, dict):
@@ -370,21 +782,11 @@ def non_fact_fields_valid(event):
         kind = event.get("kind")
         if kind == "exposure_fact" or kind not in SEAL_KINDS:
             return False
-        if not event_envelope_valid(event):
+        if not event_envelope_valid(event, contract):
             return False
-        data = event.get("data")
-        if not isinstance(data, dict):
-            return False
-        if kind == "marker":
-            if set(data.keys()) != {"text"}:
-                return False
-            text = data["text"]
-            if not isinstance(text, str) or not 1 <= len(text) <= 256:
-                return False
-            return True
-        if kind == "bounce_attempt":
-            return bounce_payload_valid(data)
-        return len(data) > 0
+        return legacy_payload_valid(kind, event.get("data"),
+                                    event.get("source"),
+                                    event.get("schema_version"))
     except (AttributeError, TypeError):
         return False
 
@@ -445,18 +847,26 @@ def seal_verified(snapshot):
     a non-object kinds table, or an unknown integrity field or kind
     raises, mirroring the Rust snapshot path. A well-formed seal that
     mismatches the bytes, that leaves a census kind uncommitted, or
-    whose fact identities break containment, verifies false. Every
-    line parses without duplicated keys, ends in a newline, carries
-    its position as its sequence number, and belongs to the
-    snapshot's own session; one entry holds exactly one physical
-    line under the reader's 64 KiB bound. Framing violations raise.
-    A foreign-session line, a duplicated key, an exposure fact whose
-    envelope, source labels or fields fail validation, or a non-fact
-    line whose envelope, source labels or payload loses its shape
-    verifies false, like a containment break: none can support a
-    verdict.
+    whose fact identities break containment, verifies false. The
+    session carries its string session id even when the stream is
+    empty, and its version selects the exposure or legacy line
+    contract; an unknown contract verifies false. Every line parses
+    without duplicated keys, ends in a newline, carries its
+    position as its sequence number, and belongs to the snapshot's
+    own session; one entry holds exactly one physical line under
+    the reader's 64 KiB bound. Framing violations raise. A
+    foreign-session line, a duplicated key, an exposure fact whose
+    envelope, source labels or fields fail validation, or a
+    non-fact line whose envelope, source labels or payload loses
+    its shape verifies false, like a containment break: none can
+    support a verdict.
     """
     expected_session = snapshot["session"].get("session_id")
+    if not isinstance(expected_session, str):
+        return False
+    contract = snapshot_contract(snapshot["session"])
+    if contract is None:
+        return False
     for position, line in enumerate(snapshot["event_lines"]):
         if not line.endswith("\n"):
             raise ValueError("line %d lacks trailing newline" % position)
@@ -475,11 +885,11 @@ def seal_verified(snapshot):
         if event.get("session_id") != expected_session:
             return False
         if event.get("kind") == "exposure_fact":
-            if not fact_envelope_valid(event):
+            if not fact_envelope_valid(event, contract):
                 return False
             if not fact_fields_valid(event.get("data")):
                 return False
-        elif not non_fact_fields_valid(event):
+        elif not non_fact_fields_valid(event, contract):
             return False
     capture = snapshot["session"]["capture"]
     if "integrity" not in capture:
@@ -532,11 +942,38 @@ def cross_epoch_error(facts):
     return None
 
 
+def source_evidence_state(entry):
+    """Complete, incomplete, or absent for one required source entry.
+
+    An available source carries usable evidence. A partial source
+    does only when at least one quality channel stays usable; a
+    partial source with no usable channel is incomplete evidence,
+    never satisfaction. Anything else (a missing entry, an
+    unavailable, disabled, not-applicable or unknown status) is
+    absent, and stays inconclusive.
+    """
+    if entry is None:
+        return "absent"
+    status = entry.get("status")
+    if status == "available":
+        return "complete"
+    if status != "partial":
+        return "absent"
+    quality = entry.get("quality")
+    if isinstance(quality, dict):
+        for node in quality.values():
+            if isinstance(node, dict) and node.get("status") in (
+                    "complete_for_scope", "partial"):
+                return "complete"
+    return "incomplete"
+
+
 def rule_satisfied(snapshot, required_sources):
     """A rule is satisfied only by sealed, settled, covering evidence.
 
-    Usable metadata alone never satisfies: every required source
-    needs at least one sealed fact whose ``source_id`` equals it.
+    Every required source needs complete evidence, and usable
+    metadata alone never satisfies: every required source needs at
+    least one sealed fact whose ``source_id`` equals it.
     """
     if not required_sources:
         return False
@@ -549,8 +986,7 @@ def rule_satisfied(snapshot, required_sources):
     by_source = {entry["source_id"]: entry
                  for entry in session["exposure"]["sources"]}
     for source in required_sources:
-        entry = by_source.get(source)
-        if entry is None or entry["status"] not in ("available", "partial"):
+        if source_evidence_state(by_source.get(source)) != "complete":
             return False
     facts = facts_from_lines(snapshot)
     if not facts:
@@ -564,13 +1000,34 @@ def rule_satisfied(snapshot, required_sources):
     return cross_epoch_error(facts) is None
 
 
+def evidence_incomplete(snapshot, required_sources):
+    """True when sealed, settled evidence leaves a source incomplete.
+
+    Every required source is present, and at least one carries
+    incomplete evidence: partial status with no usable quality
+    channel. Unsealed, unsettled, or absent-source snapshots never
+    qualify; they keep their weaker verdict.
+    """
+    if not required_sources:
+        return False
+    if not seal_verified(snapshot):
+        return False
+    by_source = {entry["source_id"]: entry
+                 for entry in snapshot["session"]["exposure"]["sources"]}
+    states = [source_evidence_state(by_source.get(source))
+              for source in required_sources]
+    return "absent" not in states and "incomplete" in states
+
+
 def snapshot_verdict(snapshot, required_sources):
-    """Satisfied, partial, or inconclusive; never a vacuous pass."""
+    """Satisfied, partial, incomplete, or inconclusive; never vacuous."""
     if rule_satisfied(snapshot, required_sources):
         return "satisfied"
     session = snapshot["session"]
     if session["quality"]["terminal"]["status"] != "complete_for_scope":
         return "partial"
+    if evidence_incomplete(snapshot, required_sources):
+        return "incomplete"
     return "inconclusive"
 
 
@@ -958,6 +1415,87 @@ def resealed_bounce(mutator):
     return snapshot
 
 
+def snapshot_from_reader(name):
+    """A snapshot dict converted from a reader fixture directory."""
+    directory = os.path.join(REPO, "tests", "fixtures", "reader", name)
+    with open(os.path.join(directory, "session.json"),
+              encoding="utf-8") as handle:
+        session = json.load(handle, object_pairs_hook=_unique_object)
+    with open(os.path.join(directory, "events.ndjson"),
+              encoding="utf-8") as handle:
+        lines = handle.read().splitlines(keepends=True)
+    return {"session": session, "event_lines": lines}
+
+
+def resealed_snapshot_lines(snapshot, mutator, index):
+    """A copy of the snapshot with one event line mutated, resealed.
+
+    Unlike the sealed-control helpers, the snapshot and the line
+    index are explicit, so legacy snapshots can be mutated too.
+    The seal is recomputed; the kind census is the caller's.
+    """
+    out = json.loads(json.dumps(snapshot))
+    lines = out["event_lines"]
+    event = json.loads(lines[index])
+    mutator(event)
+    lines[index] = json.dumps(event, separators=(",", ":")) + "\n"
+    raw = "".join(lines).encode("utf-8")
+    out["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    return out
+
+
+# One schema-valid payload per legacy event kind, shared by the
+# per-kind controls. Each control is validated against the event
+# schema in-test, so a stale payload fails loudly, never silently.
+VALID_LEGACY_PAYLOADS = {
+    "bounce_attempt": {"device_id": "dev-1", "requested_bytes": "4096",
+                       "forced": True, "operation_id": "op-9"},
+    "map_result": {"operation_id": "op-1", "success": True,
+                   "mapping_id": "m-1", "return_code": 0,
+                   "mapped_bytes": "4096", "wire_generation": "3",
+                   "wire_identity": "known"},
+    "unmap": {"mapping_id": "m-1", "wire_generation": "3",
+              "wire_identity": "known"},
+    "copy": {"operation_id": "op-1", "mapping_id": "m-1",
+             "direction": "original_to_bounce", "bytes": "512"},
+    "sync_request": {"operation_id": "op-1", "mapping_id": "m-1",
+                     "offset_known": True, "offset": "128",
+                     "length": "512"},
+    "transition_result": {"region_id": "r-1", "requested_state": "shared",
+                          "success": True, "return_code": 0,
+                          "offset": "0", "length": "4096"},
+    "pool_sample": {"pool_id": "swiotlb", "used_bytes": "1024",
+                    "capacity_bytes": "4096", "unit": "bytes"},
+    "gap": {"channel": "detail", "lost_count": "3", "reason": "ring full",
+            "window_start_ns": "100", "window_end_ns": "200"},
+    "marker": {"text": "census sealed"},
+    "counter_snapshot": {"counter_id": "swiotlb.bounce_attempts",
+                         "epoch": "7", "scope": {"profile_id": "p-1"},
+                         "value": "42", "unit": "count"},
+}
+
+
+def resealed_kind_event(kind, data, source_mutator=None):
+    """The sealed snapshot with the marker line retargeted, resealed.
+
+    The marker line becomes ``kind`` carrying ``data`` (and an
+    optionally retouched source); the kind census follows, so only
+    the shape gates can refuse.
+    """
+    def retarget(event):
+        event.update(kind=kind, data=data)
+        if source_mutator is not None:
+            source_mutator(event["source"])
+
+    snapshot = resealed_marker_event(retarget)
+    if kind != "marker":
+        snapshot["session"]["capture"]["integrity"]["kinds"].update(
+            {kind: "1", "marker": "0"})
+    return snapshot
+
+
 def test_empty_reasons_cannot_verify():
     def empty_parent(event):
         event["data"]["parent_operation_id_reason"] = ""
@@ -1050,9 +1588,10 @@ def test_non_fact_lines_keep_their_envelope():
             "inconclusive"
     control = json.loads(load("sealed_snapshot.json")["event_lines"][2])
     assert control["kind"] == "marker"
-    assert non_fact_fields_valid(control), "valid marker must verify"
+    assert non_fact_fields_valid(control, EXPOSURE_CONTRACT), \
+        "valid marker must verify"
     control["kind"] = "frobnicate"
-    assert not non_fact_fields_valid(control), \
+    assert not non_fact_fields_valid(control, EXPOSURE_CONTRACT), \
         "unknown kind verifies nowhere"
 
 
@@ -1137,6 +1676,320 @@ def test_source_labels_come_from_frozen_sets():
             assert seal_verified(mutated), \
                 "frozen labels %r/%r must verify" % (measurement,
                                                     correlation)
+
+
+def test_legacy_snapshots_verify_under_legacy_rules():
+    for name in ("sealed-complete", "sealed-partial", "sealed-empty"):
+        snapshot = snapshot_from_reader(name)
+        assert seal_verified(snapshot), \
+            "legacy %s must verify under legacy rules" % name
+    assert seal_verified(load("legacy_sealed.json")), \
+        "persisted legacy snapshot must verify"
+
+
+def test_unknown_session_contract_refuses():
+    assert snapshot_contract(
+        load("sealed_snapshot.json")["session"]) == "exposure"
+    assert snapshot_contract(
+        load("legacy_sealed.json")["session"]) == "legacy"
+    forged = json.loads(json.dumps(load("sealed_snapshot.json")))
+    forged["session"]["schema_version"] = "9.9.9"
+    assert snapshot_contract(forged["session"]) is None
+    assert not seal_verified(forged), \
+        "unknown contract must fail the seal"
+    assert snapshot_verdict(forged, ["sharing-census"]) == "inconclusive"
+    missing = json.loads(json.dumps(load("sealed_snapshot.json")))
+    del missing["session"]["schema_version"]
+    assert snapshot_contract(missing["session"]) is None
+    assert not seal_verified(missing), \
+        "missing contract must fail the seal"
+
+
+def test_legacy_per_kind_payloads_validated():
+    schema = load_schema("event-v0.3.0.schema.json")
+    for kind, data in sorted(VALID_LEGACY_PAYLOADS.items()):
+        control = resealed_kind_event(kind, json.loads(json.dumps(data)))
+        jsonschema.validate(json.loads(control["event_lines"][2]), schema)
+        assert seal_verified(control), "valid %s must verify" % kind
+        assert snapshot_verdict(control, ["sharing-census"]) == "satisfied"
+        mutated = resealed_kind_event(kind, {"bogus": "x"})
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(json.loads(mutated["event_lines"][2]),
+                                schema)
+        assert not seal_verified(mutated), \
+            "bogus %s must fail the seal" % kind
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+CONDITIONAL_PAYLOADS = {
+"valid": [
+    ("map_result", {"operation_id": "op-1", "success": True,
+                    "mapping_id": None, "return_code": 0,
+                    "mapped_bytes": "4096", "wire_generation": "3",
+                    "wire_identity": "unassigned"}),
+    ("map_result", {"operation_id": "op-1", "success": False,
+                    "mapping_id": None, "return_code": -12,
+                    "mapped_bytes": None, "wire_generation": "0",
+                    "wire_identity": None}),
+    ("map_result", {"operation_id": "op-1", "success": False,
+                    "mapping_id": None, "return_code": None,
+                    "mapped_bytes": None, "wire_generation": None,
+                    "wire_identity": None}),
+    ("unmap", {"mapping_id": None, "wire_generation": "3",
+               "wire_identity": "miss"}),
+    ("unmap", {"mapping_id": "m-1", "wire_generation": None,
+               "wire_identity": None}),
+    ("sync_request", {"operation_id": "op-1", "mapping_id": None,
+                      "offset_known": False, "offset": None,
+                      "length": "512"}),
+    ("transition_result", {"region_id": "r-1",
+                           "requested_state": "private",
+                           "success": False, "return_code": None,
+                           "offset": "0", "length": "4096",
+                           "address_space": "iova",
+                           "resolution": "unresolved",
+                           "generation": 2}),
+    ("pool_sample", {"pool_id": "swiotlb", "used_bytes": None,
+                     "capacity_bytes": None, "unit": "unknown",
+                     "reason": "denied"}),
+    ("gap", {"channel": "terminal", "lost_count": None,
+             "reason": "dropped", "window_start_ns": "100",
+             "window_end_ns": "200"}),
+    ("counter_snapshot", {"counter_id": "c", "epoch": "0",
+                          "scope": {"device_id": "dev-1",
+                                    "profile_id": "p-1"},
+                          "value": "0", "unit": "u"}),
+    ("copy", {"operation_id": "op-1", "mapping_id": "m-1",
+              "direction": "bounce_to_original", "bytes": "512",
+              "pool_private": True,
+              "offset_past_allocation": True}),
+],
+"invalid": [
+    ("map_result", {"operation_id": "op-1", "success": True,
+                    "mapping_id": None, "return_code": 0,
+                    "mapped_bytes": "4096", "wire_generation": "3",
+                    "wire_identity": "known"}),
+    ("map_result", {"operation_id": "op-1", "success": False,
+                    "mapping_id": "m-1", "return_code": 0,
+                    "mapped_bytes": None, "wire_generation": None,
+                    "wire_identity": None}),
+    ("map_result", {"operation_id": "op-1", "success": True,
+                    "mapping_id": "m-1", "return_code": 0,
+                    "mapped_bytes": "4096", "wire_generation": None,
+                    "wire_identity": "known"}),
+    ("unmap", {"mapping_id": None, "wire_generation": "3",
+               "wire_identity": "known"}),
+    ("unmap", {"mapping_id": "m-1", "wire_generation": "3",
+               "wire_identity": None}),
+    ("sync_request", {"operation_id": "op-1", "mapping_id": "m-1",
+                      "offset_known": True, "offset": None,
+                      "length": "512"}),
+    ("sync_request", {"operation_id": "op-1", "mapping_id": "m-1",
+                      "offset_known": False, "offset": "128",
+                      "length": "512"}),
+    ("transition_result", {"region_id": "r-1",
+                           "requested_state": "shared",
+                           "success": True, "return_code": 0,
+                           "offset": "0", "length": "4096",
+                           "generation": 0}),
+    ("pool_sample", {"pool_id": "swiotlb", "used_bytes": "1",
+                     "capacity_bytes": "2", "unit": "pages"}),
+    ("gap", {"channel": "detail", "lost_count": "3", "reason": "",
+             "window_start_ns": "100", "window_end_ns": "200"}),
+    ("counter_snapshot", {"counter_id": "c", "epoch": "0",
+                          "scope": {}, "value": "0", "unit": "u"}),
+    ("copy", {"operation_id": "op-1", "mapping_id": "m-1",
+              "direction": "sideways", "bytes": "512"}),
+    ("copy", {"operation_id": "op-1", "mapping_id": "m-1",
+              "direction": "original_to_bounce", "bytes": "512",
+              "pool_private": False}),
+]}
+
+
+def test_legacy_conditional_payloads_validated():
+    schema = load_schema("event-v0.3.0.schema.json")
+    valid = CONDITIONAL_PAYLOADS["valid"]
+    invalid = CONDITIONAL_PAYLOADS["invalid"]
+    for kind, data in valid:
+        control = resealed_kind_event(kind, data)
+        jsonschema.validate(json.loads(control["event_lines"][2]), schema)
+        assert seal_verified(control), \
+            "valid %s %r must verify" % (kind, data)
+    for kind, data in invalid:
+        mutated = resealed_kind_event(kind, data)
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(json.loads(mutated["event_lines"][2]),
+                                schema)
+        assert not seal_verified(mutated), \
+            "invalid %s %r must fail the seal" % (kind, data)
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def test_legacy_copy_requires_observed_measurement():
+    def derived(source):
+        source["measurement"] = "derived"
+
+    payload = json.loads(json.dumps(VALID_LEGACY_PAYLOADS["copy"]))
+    mutated = resealed_kind_event("copy", payload, derived)
+    schema = load_schema("event-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(json.loads(mutated["event_lines"][2]), schema)
+    assert not seal_verified(mutated), \
+        "derived copy must fail the seal"
+    assert snapshot_verdict(mutated, ["sharing-census"]) == "inconclusive"
+    control = resealed_kind_event(
+        "copy", json.loads(json.dumps(VALID_LEGACY_PAYLOADS["copy"])))
+    assert seal_verified(control), "observed copy must verify"
+
+
+def test_legacy_copy_extras_follow_line_version():
+    extras = json.loads(json.dumps(VALID_LEGACY_PAYLOADS["copy"]))
+    extras.update(pool_private=True, offset_past_allocation=True)
+    modern = resealed_kind_event("copy", dict(extras))
+    assert seal_verified(modern), "0.3.0 copy extras must verify"
+    tainted = json.loads(json.dumps(load("legacy_sealed.json")))
+    lines = tainted["event_lines"]
+    event = json.loads(lines[0])
+    event.update(kind="copy", data=dict(extras))
+    lines[0] = json.dumps(event, separators=(",", ":")) + "\n"
+    tainted["session"]["capture"]["integrity"]["kinds"].update(
+        copy="1", bounce_attempt="2")
+    raw = "".join(lines).encode("utf-8")
+    tainted["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(json.loads(tainted["event_lines"][0]),
+                            load_schema("event-v0.1.1.schema.json"))
+    assert not seal_verified(tainted), \
+        "0.1.1 copy extras must fail the seal"
+    upgraded = json.loads(json.dumps(tainted))
+    event = json.loads(upgraded["event_lines"][0])
+    event["schema_version"] = "0.1.2"
+    upgraded["event_lines"][0] = \
+        json.dumps(event, separators=(",", ":")) + "\n"
+    raw = "".join(upgraded["event_lines"]).encode("utf-8")
+    upgraded["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    jsonschema.validate(json.loads(upgraded["event_lines"][0]),
+                        load_schema("event-v0.1.2.schema.json"))
+    assert seal_verified(upgraded), "0.1.2 copy extras must verify"
+
+
+def test_source_string_bounds_enforced():
+    schema = load_schema("event-v0.3.0.schema.json")
+    for field, limit in (("hook", 256), ("backend", 64),
+                         ("profile_id", 128)):
+        for value, label in (("", "empty"),
+                             ("x" * (limit + 1), "overlong")):
+            def apply(event, field=field, value=value):
+                event["source"][field] = value
+
+            mutated = resealed_mutation(apply)
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(json.loads(mutated["event_lines"][0]),
+                                    schema)
+            assert not seal_verified(mutated), \
+                "fact with %s %s must fail the seal" % (label, field)
+            assert snapshot_verdict(mutated, ["sharing-census"]) == \
+                "inconclusive"
+            marked = resealed_marker_event(apply)
+            assert not seal_verified(marked), \
+                "marker with %s %s must fail the seal" % (label, field)
+            assert snapshot_verdict(marked, ["sharing-census"]) == \
+                "inconclusive"
+        for value in ("x", "x" * limit):
+            def apply(event, field=field, value=value):
+                event["source"][field] = value
+
+            assert seal_verified(resealed_mutation(apply)), \
+                "fact with bounded %s must verify" % field
+            assert seal_verified(resealed_marker_event(apply)), \
+                "marker with bounded %s must verify" % field
+
+
+def test_empty_seal_requires_session_id():
+    snapshot = json.loads(json.dumps(load("sealed_snapshot.json")))
+    snapshot["event_lines"] = []
+    integrity = snapshot["session"]["capture"]["integrity"]
+    integrity.update(events_bytes="0", line_count="0", first_seq=None,
+                     last_seq=None, events_sha256=EMPTY_SHA256,
+                     kinds=dict.fromkeys(integrity["kinds"], "0"))
+    assert seal_verified(snapshot), "empty control must verify"
+    del snapshot["session"]["session_id"]
+    assert not seal_verified(snapshot), \
+        "empty seal without a session id must fail"
+
+
+def test_incomplete_required_evidence_yields_incomplete():
+    persisted = load("incomplete_source.json")
+    assert seal_verified(persisted), "incomplete evidence still seals"
+    assert not rule_satisfied(persisted, ["sharing-census"]), \
+        "incomplete evidence never satisfies"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "incomplete"
+    jsonschema.validate(persisted["session"],
+                        load_schema("session-v0.3.0.schema.json"))
+    event_schema = load_schema("event-v0.3.0.schema.json")
+    for line in persisted["event_lines"]:
+        jsonschema.validate(json.loads(line), event_schema)
+    mutated = json.loads(json.dumps(load("sealed_snapshot.json")))
+    source = mutated["session"]["exposure"]["sources"][0]
+    source.update(status="partial", reason="access-denied")
+    for channel in source["quality"].values():
+        channel.update(status="unavailable", loss_count=None)
+    assert seal_verified(mutated)
+    assert snapshot_verdict(mutated, ["sharing-census"]) == "incomplete"
+    usable = json.loads(json.dumps(load("sealed_snapshot.json")))
+    usable["session"]["exposure"]["sources"][0].update(
+        status="partial", reason="access-denied")
+    assert snapshot_verdict(usable, ["sharing-census"]) == "satisfied", \
+        "partial source with usable quality still satisfies"
+
+
+def test_legacy_observer_context_validated():
+    context = {"cpu": 3, "pid": 100, "tgid": 100, "comm": "memveil",
+               "cgroup_id": "cgroup-1",
+               "relation": "execution_context_only"}
+    snapshot = resealed_snapshot_lines(
+        load("legacy_sealed.json"),
+        lambda event: event.update(
+            observer_context=json.loads(json.dumps(context))), 0)
+    jsonschema.validate(json.loads(snapshot["event_lines"][0]),
+                        load_schema("event-v0.1.1.schema.json"))
+    assert seal_verified(snapshot), "legacy context must verify"
+    bad = resealed_snapshot_lines(
+        load("legacy_sealed.json"),
+        lambda event: event.update(
+            observer_context={"relation": "owner"}), 0)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(json.loads(bad["event_lines"][0]),
+                            load_schema("event-v0.1.1.schema.json"))
+    assert not seal_verified(bad), \
+        "bad legacy context must fail the seal"
+    modern = resealed_marker_event(
+        lambda event: event.update(
+            observer_context=json.loads(json.dumps(context))))
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(json.loads(modern["event_lines"][2]),
+                            load_schema("event-v0.3.0.schema.json"))
+    assert not seal_verified(modern), \
+        "0.3.0 line with observer context must fail the seal"
+
+
+def test_persisted_shape_refusals_refused():
+    schema = load_schema("event-v0.3.0.schema.json")
+    for name in ("bad_gap_payload.json", "empty_hook.json"):
+        persisted = load(name)
+        assert not seal_verified(persisted), \
+            "%s must fail the seal" % name
+        assert snapshot_verdict(persisted, ["sharing-census"]) == \
+            "inconclusive"
+        with pytest.raises(jsonschema.ValidationError):
+            for line in persisted["event_lines"]:
+                jsonschema.validate(json.loads(line), schema)
 
 
 def test_persisted_source_scope_needs_matching_facts():

@@ -22,8 +22,8 @@ use exposure::{
 };
 use exposure_quality::RuleOutcome;
 use exposure_records::{
-    EvidenceKey, check_evidence_keys, sealed_evidence_keys, snapshot_terminal_status,
-    verify_sealed_snapshot,
+    EvidenceKey, check_evidence_keys, sealed_evidence_keys, snapshot_source_evidence,
+    snapshot_terminal_status, verify_sealed_snapshot,
 };
 
 const SEALED: &str = include_str!("exposure/fixtures/contracts/sealed_snapshot.json");
@@ -46,6 +46,10 @@ const GUESS_MEASUREMENT: &str = include_str!("exposure/fixtures/contracts/guess_
 const SEALED_WITH_BOUNCE: &str =
     include_str!("exposure/fixtures/contracts/sealed_with_bounce.json");
 const SOURCE_SCOPE: &str = include_str!("exposure/fixtures/contracts/source_scope.json");
+const LEGACY_SEALED: &str = include_str!("exposure/fixtures/contracts/legacy_sealed.json");
+const INCOMPLETE_SOURCE: &str = include_str!("exposure/fixtures/contracts/incomplete_source.json");
+const BAD_GAP: &str = include_str!("exposure/fixtures/contracts/bad_gap_payload.json");
+const EMPTY_HOOK: &str = include_str!("exposure/fixtures/contracts/empty_hook.json");
 
 fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
     facts
@@ -184,7 +188,7 @@ fn required_sources_need_matching_sealed_facts() {
     let outcome = exposure_quality::rule_outcome_with_facts(
         true,
         &terminal,
-        &[("sharing-census", "available", true)],
+        &[("sharing-census", "available", true, true)],
         &sources,
     );
     assert_eq!(outcome, RuleOutcome::Satisfied);
@@ -196,7 +200,7 @@ fn required_sources_need_matching_sealed_facts() {
         let outcome = exposure_quality::rule_outcome_with_facts(
             true,
             "complete_for_scope",
-            &[("sharing-census", "available", true)],
+            &[("sharing-census", "available", true, true)],
             &facts,
         );
         assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} never satisfies");
@@ -219,15 +223,26 @@ fn replayed_sources(snapshot: &str) -> Vec<String> {
 }
 
 /// The composed verdict over one snapshot for one required source.
+///
+/// The required source's status and quality usability come from the
+/// snapshot's own session, never from a hardcoded triple, so an
+/// incomplete persisted source reaches the gate unchanged.
 fn seal_verdict(snapshot: &str) -> RuleOutcome {
     let report = verify_sealed_snapshot(snapshot).expect("snapshot parses");
     let terminal = snapshot_terminal_status(snapshot).expect("snapshot carries terminal");
     let owned = replayed_sources(snapshot);
     let sources: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let evidence =
+        snapshot_source_evidence(snapshot, "sharing-census").expect("snapshot carries sources");
     exposure_quality::rule_outcome_with_facts(
         report.verified,
         &terminal,
-        &[("sharing-census", "available", true)],
+        &[(
+            "sharing-census",
+            evidence.status.as_str(),
+            evidence.present,
+            evidence.quality_usable,
+        )],
         &sources,
     )
 }
@@ -270,6 +285,32 @@ fn source_scoped_verdict_needs_matching_facts() {
         "facts from another source never satisfy"
     );
     assert_ne!(outcome, RuleOutcome::Satisfied, "never satisfies");
+}
+
+#[test]
+fn legacy_snapshot_verifies_under_legacy_rules() {
+    let report = verify_sealed_snapshot(LEGACY_SEALED).expect("legacy parses");
+    assert!(report.verified, "valid legacy lines must verify");
+}
+
+#[test]
+fn persisted_shape_refusals_cannot_verify() {
+    for (name, snapshot) in [("bad gap payload", BAD_GAP), ("empty hook", EMPTY_HOOK)] {
+        let report = verify_sealed_snapshot(snapshot).expect("tainted parses");
+        assert!(!report.verified, "{name} cannot verify");
+        let outcome = seal_verdict(snapshot);
+        assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
+        assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
+    }
+}
+
+#[test]
+fn incomplete_source_evidence_is_incomplete() {
+    let report = verify_sealed_snapshot(INCOMPLETE_SOURCE).expect("partial parses");
+    assert!(report.verified, "incomplete evidence still seals");
+    let outcome = seal_verdict(INCOMPLETE_SOURCE);
+    assert_eq!(outcome, RuleOutcome::Incomplete);
+    assert_ne!(outcome, RuleOutcome::Satisfied);
 }
 
 #[test]
