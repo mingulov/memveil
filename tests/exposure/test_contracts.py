@@ -51,6 +51,12 @@ QUALITY_CHANNELS = ("detail", "aggregate", "identity", "baseline",
 SESSION_CHANNELS = ("detail", "aggregate", "correlation", "baseline",
                     "terminal")
 
+INTEGRITY_KEYS = ("algorithm", "events_bytes", "line_count",
+                  "first_seq", "last_seq", "events_sha256", "kinds")
+SEAL_KINDS = ("bounce_attempt", "map_result", "unmap", "copy",
+              "sync_request", "transition_result", "pool_sample",
+              "gap", "marker", "counter_snapshot", "exposure_fact")
+
 COVERAGE_SOURCE_REQUIRED = ("source_id", "capability", "profile_id",
                             "subject_id", "platform_cell",
                             "address_namespace", "phase", "status",
@@ -112,12 +118,17 @@ def facts_from_lines(snapshot):
 
 
 def integrity_self_consistent(integrity):
+    unknown = sorted(set(integrity.keys()) - set(INTEGRITY_KEYS))
+    if unknown:
+        raise ValueError("unknown integrity field %r" % unknown[0])
     assert integrity["algorithm"] == "sha256"
     check_u64(integrity["events_bytes"], "events_bytes")
     lines = check_u64(integrity["line_count"], "line_count")
     kinds = integrity["kinds"]
     total = 0
-    for _name, value in sorted(kinds.items()):
+    for name, value in sorted(kinds.items()):
+        if name not in SEAL_KINDS:
+            raise ValueError("unknown integrity kind %r" % name)
         total += check_u64(value, "kinds")
     assert total == lines, "kind sum differs from line_count"
     assert HEX64RE.fullmatch(integrity["events_sha256"]), "digest shape"
@@ -134,10 +145,19 @@ def integrity_self_consistent(integrity):
 
 
 def seal_verified(snapshot):
-    """True only when the committed seal matches the literal bytes."""
-    integrity = snapshot["session"]["capture"].get("integrity")
-    if not isinstance(integrity, dict):
+    """True only when the committed seal matches the literal bytes.
+
+    An absent integrity object verifies false; a present non-object
+    or an unknown integrity field or kind raises, mirroring the Rust
+    snapshot path. A well-formed seal that mismatches the bytes
+    verifies false.
+    """
+    capture = snapshot["session"]["capture"]
+    if "integrity" not in capture:
         return False
+    integrity = capture["integrity"]
+    if not isinstance(integrity, dict):
+        raise ValueError("integrity must be an object")
     try:
         integrity_self_consistent(integrity)
     except AssertionError:
@@ -242,6 +262,24 @@ def test_duplicate_source_and_cross_epoch_evidence_rejected():
                               ["sharing-census"])
     assert not rule_satisfied(load("cross_epoch_evidence.json"),
                               ["sharing-census"])
+
+
+def test_snapshot_path_refuses_unknown_and_non_object_integrity():
+    sealed = load("sealed_snapshot.json")
+    bogus = json.loads(json.dumps(sealed))
+    bogus["session"]["capture"]["integrity"]["bogus"] = "0"
+    with pytest.raises(ValueError):
+        seal_verified(bogus)
+    kinds = json.loads(json.dumps(sealed))
+    kinds["session"]["capture"]["integrity"]["kinds"]["bogus"] = "1"
+    with pytest.raises(ValueError):
+        seal_verified(kinds)
+    null = json.loads(json.dumps(sealed))
+    null["session"]["capture"]["integrity"] = None
+    with pytest.raises(ValueError):
+        seal_verified(null)
+    assert not seal_verified(load("unsealed_snapshot.json")), \
+        "absent integrity stays merely unsealed"
 
 
 def test_missing_terminal_evidence_is_partial():

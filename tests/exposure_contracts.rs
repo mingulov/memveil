@@ -163,6 +163,32 @@ fn canonical_encoding_round_trips_exactly() {
 }
 
 #[test]
+fn snapshot_path_refuses_unknown_and_non_object_integrity() {
+    let bogus = SEALED.replacen(
+        "\"integrity\": {",
+        "\"integrity\": {\n        \"bogus\": \"0\",",
+        1,
+    );
+    assert_ne!(bogus, SEALED);
+    let err = verify_sealed_snapshot(&bogus).unwrap_err();
+    assert_eq!(err.what, "integrity");
+    assert_eq!(err.message, "unknown field");
+
+    let null = SEALED.replacen(
+        "\"integrity\": {",
+        "\"integrity\": null, \"sidelined\": {",
+        1,
+    );
+    assert_ne!(null, SEALED);
+    let err = verify_sealed_snapshot(&null).unwrap_err();
+    assert_eq!(err.what, "integrity");
+    assert_eq!(err.message, "expected object");
+
+    let unsealed = verify_sealed_snapshot(UNSEALED).expect("unsealed parses");
+    assert!(!unsealed.verified);
+}
+
+#[test]
 fn tampered_bytes_fail_the_seal() {
     let report = verify_sealed_snapshot(SEALED).expect("positive control seals");
     assert!(report.verified);

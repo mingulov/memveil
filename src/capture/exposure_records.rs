@@ -40,6 +40,17 @@ pub const EXPOSURE_FACT_KIND: &str = "exposure_fact";
 /// Digest of the empty event stream.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+/// The seven integrity keys in seal order; nothing else is admitted.
+const INTEGRITY_KEYS: [&str; 7] = [
+    "algorithm",
+    "events_bytes",
+    "line_count",
+    "first_seq",
+    "last_seq",
+    "events_sha256",
+    "kinds",
+];
+
 /// Canonical event-envelope field order.
 pub const ENVELOPE_FIELDS: [&str; 7] = [
     "schema_version",
@@ -1158,22 +1169,13 @@ pub fn parse_integrity_seal(text: &str) -> Result<IntegritySeal, SealError> {
     let JsonValue::Object(fields) = &value else {
         return Err(SealError::new("integrity", "expected object"));
     };
-    const KEYS: [&str; 7] = [
-        "algorithm",
-        "events_bytes",
-        "line_count",
-        "first_seq",
-        "last_seq",
-        "events_sha256",
-        "kinds",
-    ];
-    for key in KEYS {
+    for key in INTEGRITY_KEYS {
         if find_field(fields, key).is_none() {
             return Err(SealError::new("integrity", "missing field"));
         }
     }
     for (key, _) in fields {
-        if !KEYS.contains(&key.as_str()) {
+        if !INTEGRITY_KEYS.contains(&key.as_str()) {
             return Err(SealError::new("integrity", "unknown field"));
         }
     }
@@ -1292,8 +1294,9 @@ fn line_kind(line: &str) -> Option<String> {
 /// `event_lines` holding the literal line bytes as JSON strings.
 /// Malformed snapshot framing is an error; a well-formed snapshot
 /// whose bytes, counts or kind census differ from the commitment
-/// verifies false. An absent integrity object verifies false: no
-/// unsealed sidecar can supply policy evidence.
+/// verifies false. An absent integrity object verifies false, while
+/// a present non-object or an unknown integrity field is an error:
+/// no unsealed sidecar can supply policy evidence.
 pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     let value = parse_value(text).map_err(|err| SealError::new(err.what, err.message))?;
     let JsonValue::Object(top) = &value else {
@@ -1330,8 +1333,13 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
         return Ok(unsealed);
     };
     let JsonValue::Object(fields) = integrity else {
-        return Ok(unsealed);
+        return Err(SealError::new("integrity", "expected object"));
     };
+    for (key, _) in fields {
+        if !INTEGRITY_KEYS.contains(&key.as_str()) {
+            return Err(SealError::new("integrity", "unknown field"));
+        }
+    }
     let mut rendered = Vec::new();
     render_ordered_for_seal(fields, &mut rendered)?;
     let seal_text =
@@ -1367,18 +1375,9 @@ fn render_ordered_for_seal(
     fields: &[(String, JsonValue)],
     out: &mut Vec<u8>,
 ) -> Result<(), SealError> {
-    const ORDER: [&str; 7] = [
-        "algorithm",
-        "events_bytes",
-        "line_count",
-        "first_seq",
-        "last_seq",
-        "events_sha256",
-        "kinds",
-    ];
     out.push(b'{');
     let mut first = true;
-    for key in ORDER {
+    for key in INTEGRITY_KEYS {
         let Some(value) = find_field(fields, key) else {
             continue;
         };
