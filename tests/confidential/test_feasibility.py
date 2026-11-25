@@ -6,8 +6,9 @@ Checks the sibling ``feasibility.json`` against the frozen exposure
 catalog: exact per-source/per-cell coverage, catalog vocabulary,
 per-row evidence contracts, verdict/reason consistency, and the
 no-claims guard. The guard rejects any platform milestone id, any
-non-negated admission wording anywhere in the matrix, and any PASS
-proof state in the row proof columns or the top-level proof_status.
+non-negated admission wording anywhere in the matrix, and any
+non-negated proof-claim token (pass, proven, verified, ...) in the row
+proof columns or the top-level proof_status.
 
 Runs two ways: ``python3 -m pytest test_feasibility.py`` for the
 regression suite, or ``python3 test_feasibility.py [matrix catalog]``
@@ -17,6 +18,7 @@ committed matrix plus every RED/GREEN rejection scenario.
 
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -54,10 +56,44 @@ MILESTONE_IDS = (
 NEGATED_ADMISSION = (
     "no admitted cell selected", "no admitted cell is selected")
 
+PROOF_CLAIM_TOKENS = frozenset((
+    "pass", "passed", "proven", "verified", "demonstrated",
+    "confirmed", "complete", "completed", "admitted",
+))
+
+NEGATION_TOKENS = frozenset(("no", "not", "never", "un", "non", "without"))
+NEGATION_PREFIXES = ("un", "non")
+
+ANNOTATED_PROOF = "PASS (verified on target)"
+
 
 def _load(path):
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _word_tokens(value):
+    return re.findall(r"[a-z]+", value.lower())
+
+
+def _claims_proof(value):
+    """True when a proof value asserts proof without a negation marker.
+
+    Tokenize on non-letters (case-insensitive): RED if any token is a
+    proof-claim word unless a negation marker is present in the value,
+    either as a bare token (``no``, ``not``, ...) or as an ``un``/``non``
+    prefix (so ``unproven`` counts as negated).
+    """
+    tokens = _word_tokens(value)
+    if not any(token in PROOF_CLAIM_TOKENS for token in tokens):
+        return False
+    for token in tokens:
+        if token in NEGATION_TOKENS:
+            return False
+        for prefix in NEGATION_PREFIXES:
+            if token.startswith(prefix) and len(token) > len(prefix):
+                return False
+    return True
 
 
 def validate(matrix_path, catalog_path):
@@ -131,7 +167,7 @@ def validate(matrix_path, catalog_path):
                 errors.append("%s: empty %s" % (label, column))
         for column in ("verifier_acceptance", "real_semantics"):
             value = row.get(column)
-            if isinstance(value, str) and value.strip().lower() == "pass":
+            if isinstance(value, str) and _claims_proof(value):
                 errors.append("%s: %s claims PASS without proof"
                               % (label, column))
         evidence = row.get("evidence")
@@ -169,7 +205,7 @@ def validate(matrix_path, catalog_path):
     proof_status = matrix.get("proof_status")
     if isinstance(proof_status, dict):
         for key, value in proof_status.items():
-            if isinstance(value, str) and value.strip().lower() == "pass":
+            if isinstance(value, str) and _claims_proof(value):
                 errors.append("proof_status %r claims PASS without proof"
                               % (key,))
 
@@ -283,6 +319,38 @@ def check_proof_status_red(tmpdir):
     assert any("proof_status" in error for error in errors), errors
 
 
+def check_proof_claim_red(tmpdir, group, claim):
+    def plant(matrix):
+        if group == "row":
+            matrix["rows"][0]["real_semantics"] = claim
+        else:
+            matrix["proof_status"]["platform_milestones"] = claim
+    path = _mutated(tmpdir, "mut-claim-%s-%s.json" % (group, claim), plant)
+    errors = validate(path, CATALOG_PATH)
+    assert any("claims PASS" in error for error in errors), errors
+
+
+def check_proof_annotated_red(tmpdir, group):
+    def plant(matrix):
+        if group == "row":
+            matrix["rows"][0]["real_semantics"] = ANNOTATED_PROOF
+        else:
+            matrix["proof_status"]["platform_milestones"] = ANNOTATED_PROOF
+    path = _mutated(tmpdir, "mut-annotated-%s.json" % group, plant)
+    errors = validate(path, CATALOG_PATH)
+    assert any("claims PASS" in error for error in errors), errors
+
+
+def check_proof_negated_ok(tmpdir):
+    def plant(matrix):
+        matrix["rows"][0]["real_semantics"] = "not proven on any target"
+        matrix["rows"][1]["verifier_acceptance"] = "unverified"
+        matrix["proof_status"]["platform_milestones"] = (
+            "NOT_RUN (no proof collected)")
+    path = _mutated(tmpdir, "negated-proof.json", plant)
+    assert validate(path, CATALOG_PATH) == []
+
+
 def run_self_checks():
     failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -302,6 +370,14 @@ def run_self_checks():
                       for column in ("verifier_acceptance",
                                      "real_semantics")]),
             ("proof-status-red", lambda: check_proof_status_red(tmpdir)),
+            ("proof-claims-red",
+             lambda: [check_proof_claim_red(tmpdir, group, claim)
+                      for group in ("row", "proof_status")
+                      for claim in sorted(PROOF_CLAIM_TOKENS)]),
+            ("proof-annotated-red",
+             lambda: [check_proof_annotated_red(tmpdir, group)
+                      for group in ("row", "proof_status")]),
+            ("proof-negated-ok", lambda: check_proof_negated_ok(tmpdir)),
         ]
         for label, scenario in scenarios:
             try:
@@ -370,6 +446,21 @@ def test_each_proof_column_rejects_pass(tmp_path, column):
 
 def test_proof_status_rejects_pass(tmp_path):
     check_proof_status_red(str(tmp_path))
+
+
+@_parametrize("group", ["row", "proof_status"])
+@_parametrize("claim", sorted(PROOF_CLAIM_TOKENS))
+def test_each_proof_claim_token_rejected(tmp_path, group, claim):
+    check_proof_claim_red(str(tmp_path), group, claim)
+
+
+@_parametrize("group", ["row", "proof_status"])
+def test_annotated_proof_rejected(tmp_path, group):
+    check_proof_annotated_red(str(tmp_path), group)
+
+
+def test_negated_proof_accepted(tmp_path):
+    check_proof_negated_ok(str(tmp_path))
 
 
 if __name__ == "__main__":
