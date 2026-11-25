@@ -152,6 +152,18 @@ fn covered_operation_deviates_known() {
 }
 
 #[test]
+fn unfinalized_capture_with_covered_fact_is_inconclusive() {
+    let policy = parse_policy_text(CLOSED_POLICY).expect("parse");
+    let input = input_bundle(false, &[SOURCE], vec![fact("ev-1", "host-device")], vec![]);
+    let out = evaluate(&policy, &input).expect("evaluate");
+    let result = only(&out.results);
+    assert_eq!(result.result, "inconclusive");
+    assert!(result.reason.contains("unfinalized"));
+    assert_eq!(out.overall, "inconclusive");
+    assert_eq!(strict_exit(&out.overall), 4);
+}
+
+#[test]
 fn uncovered_operation_violates() {
     let policy = parse_policy_text(CLOSED_POLICY).expect("parse");
     let input = input_bundle(

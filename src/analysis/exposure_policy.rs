@@ -632,10 +632,13 @@ fn eval_fact_rule(
         "unavailable"
     } else if !unknown.is_empty() {
         "inconclusive"
+    } else if !input.finalized {
+        // An unfinalized capture outranks a covered
+        // deviation: absence is unproved, so even a fully
+        // admitted operation cannot settle the rule.
+        "inconclusive"
     } else if !applied.is_empty() {
         "deviates_known"
-    } else if !input.finalized {
-        "inconclusive"
     } else {
         "conforms"
     };
