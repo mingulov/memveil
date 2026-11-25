@@ -1,0 +1,594 @@
+{
+  "feasibility_version": "0.1.0",
+  "catalog_version": "0.1.0",
+  "scope_note": "Read-only kernel-source survey against the frozen exposure catalog. No live proof, no attachment, no VM access, no lease requested or used. No platform milestone is claimed: every proof leg is BLOCKED and every platform milestone is NOT_RUN.",
+  "cells_required": ["sev-snp", "tdx-standalone", "hyper-v"],
+  "verdict_enum": ["feasible-unproven", "blocked-no-lease", "no-safe-source", "not-applicable"],
+  "verdict_rules": {
+    "feasible-unproven": "Pinned sources expose a candidate observation point with file:symbol evidence; verifier acceptance and real semantics are unproven and no admitted cell is selected.",
+    "blocked-no-lease": "A candidate may exist but feasibility hinges on cell-specific facts (exact target image, boot flow, paravisor routing/topology) obtainable only with a lease.",
+    "no-safe-source": "Reviewed sources expose no safe observation point for this entry.",
+    "not-applicable": "This platform cannot produce the entry; a catalog reason explains why."
+  },
+  "sources_reviewed": [
+    {
+      "source_ref": "upstream-v7.0",
+      "origin": "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.tar.xz",
+      "sha256": "bb7f6d80b387c757b7d14bb93028fcb90f793c5c0d367736ee815a100b3891f0",
+      "checksum_against": "cdn.kernel.org sha256sums.asc entry for linux-7.0.tar.xz",
+      "identity": "top-level Makefile VERSION=7 PATCHLEVEL=0 SUBLEVEL=0 EXTRAVERSION empty; release tarball of the v7.0 tag, matching the profile-recorded pin revision 028ef9c96e96197026887c0f092424679298aae8 (tarballs carry no embedded git SHA; tag correspondence assumed and stated)",
+      "profile_pins": ["profiles/linux-x86_64-6plus-reference.json", "profiles/linux-x86_64-7.0-reference.json"]
+    },
+    {
+      "source_ref": "upstream-v7.0-docs",
+      "origin": "same v7.0 tree, Documentation/",
+      "files": ["Documentation/virt/coco/sev-guest.rst", "Documentation/virt/coco/tdx-guest.rst", "Documentation/arch/x86/tdx.rst", "Documentation/virt/hyperv/coco.rst"],
+      "role": "mechanism descriptions only; every matrix row cites code evidence, not docs"
+    }
+  ],
+  "illustrative_only": {
+    "note": "NOT evidence for any cell: no target image is selected. A local distro build-headers tree plus its boot config illustrate a force-none lockdown default with BTF enabled (CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y, CONFIG_DEBUG_INFO_BTF=y, CONFIG_BPF_SYSCALL=y); target-image lockdown/BTF/config stays a lease-gated question on every row."
+  },
+  "proof_status": {
+    "safe_attachment_readout": "BLOCKED-no-lease",
+    "positive_fixture_oracle": "BLOCKED-no-lease",
+    "platform_milestones": "NOT_RUN (no lease requested or used)"
+  },
+  "rows": [
+    {
+      "source_id": "conversion-requests",
+      "capability": "conversion-journal",
+      "cell": "sev-snp",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/core.c:410-424", "what": "snp_set_memory_shared/private entry points, SNP-gated"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/mm/mem_encrypt_amd.c:293-306", "what": "set_memory path callers of the SNP conversion entry points"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/include/asm/x86_init.h:151-166", "what": "x86_platform enc_status_change_prepare/finish op contract"}
+      ],
+      "lease_gated": ["safe fentry/tracepoint attachment proof on the exact target image", "positive owned-conversion fixture with independent oracle", "boot-phase conversions precede tracer attach (early_set_pages_state, initial_vc_handler)"],
+      "reviewer_notes": "Source available with exact symbols; verifier and semantics unproven; no admitted cell selected."
+    },
+    {
+      "source_id": "conversion-requests",
+      "capability": "conversion-journal",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:964-999", "what": "tdx_enc_status_changed plus prepare/finish wrappers"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:1162-1163", "what": "x86_platform guest ops wired to the TDX wrappers"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "positive owned-conversion fixture with independent oracle", "SNP evidence never qualifies TDX"],
+      "reviewer_notes": "Source available with exact symbols; verifier and semantics unproven; no admitted cell selected."
+    },
+    {
+      "source_id": "conversion-requests",
+      "capability": "conversion-journal",
+      "cell": "hyper-v",
+      "verdict": "blocked-no-lease",
+      "reason": "lease-pending",
+      "availability": "image-dependent",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:893-894", "what": "Hyper-V overwrites the x86_platform enc_status_change ops with hv_vtom present/visibility handlers"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:736-755", "what": "comment records #VC/#VE routed to a paravisor on isolation VMs"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:677-700", "what": "hv_mark_gpa_visibility hypercall wrapper"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:859-879", "what": "isolation-type switch: VBS vs SNP vs TDX paths"}
+      ],
+      "lease_gated": ["which conversion path executes depends on the cell isolation type and paravisor version", "paravisor routing of conversion notifications is cell-specific", "safe attachment plus positive fixture proof"],
+      "reviewer_notes": "Feasibility undecidable from guest sources alone; needs the exact cell. No proof attempted."
+    },
+    {
+      "source_id": "sharing-census",
+      "capability": "census",
+      "cell": "sev-snp",
+      "verdict": "blocked-no-lease",
+      "reason": "lease-pending",
+      "availability": "image-dependent",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:43-49", "what": "iomem_resource export backing a direct-map/inventory scan"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:164", "what": "/proc/iomem readout source"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/vc-handle.c:1035", "what": "boot-phase GHCB handler: sharing changes before tracer attach are possible"}
+      ],
+      "lease_gated": ["pre-attach inventory timing and boot availability on the exact target image", "bounded-scan proof (1s budget, exact owned deltas) on the named cell", "huge-page/alias/vmalloc behavior on the cell"],
+      "reviewer_notes": "Scan mechanism exists but pre-attach feasibility needs the named cell. No proof attempted."
+    },
+    {
+      "source_id": "sharing-census",
+      "capability": "census",
+      "cell": "tdx-standalone",
+      "verdict": "blocked-no-lease",
+      "reason": "lease-pending",
+      "availability": "image-dependent",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:43-49", "what": "iomem_resource export backing a direct-map/inventory scan"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:164", "what": "/proc/iomem readout source"}
+      ],
+      "lease_gated": ["pre-attach inventory timing and boot availability on the exact target image", "bounded-scan proof on the named cell", "SNP census evidence never qualifies TDX"],
+      "reviewer_notes": "Scan mechanism exists but pre-attach feasibility needs the named cell. No proof attempted."
+    },
+    {
+      "source_id": "sharing-census",
+      "capability": "census",
+      "cell": "hyper-v",
+      "verdict": "blocked-no-lease",
+      "reason": "lease-pending",
+      "availability": "image-dependent",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:43-49", "what": "iomem_resource export backing a direct-map/inventory scan"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:164", "what": "/proc/iomem readout source"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:736-755", "what": "paravisor routing affects which sharing transitions are guest-visible"}
+      ],
+      "lease_gated": ["pre-attach inventory timing and boot availability on the exact target image", "paravisor-held sharing is outside guest scan reach; topology needs the cell", "bounded-scan proof on the named cell"],
+      "reviewer_notes": "Scan mechanism exists but pre-attach feasibility needs the named cell. No proof attempted."
+    },
+    {
+      "source_id": "object-lineage",
+      "capability": "object-lifetimes",
+      "cell": "sev-snp",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/kmem.h:12-180", "what": "kmalloc/kfree/kmem_cache_alloc/free/mm_page_alloc/free tracepoints (14 events in file)"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "identity/generation/lifecycle ledger agreement with an independent oracle", "alias/reuse/loss behavior on the cell"],
+      "reviewer_notes": "Generic allocator observation points; platform-independent source. No admitted cell selected."
+    },
+    {
+      "source_id": "object-lineage",
+      "capability": "object-lifetimes",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/kmem.h:12-180", "what": "kmalloc/kfree/kmem_cache_alloc/free/mm_page_alloc/free tracepoints (14 events in file)"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "identity/generation/lifecycle ledger agreement with an independent oracle"],
+      "reviewer_notes": "Generic allocator observation points; platform-independent source. No admitted cell selected."
+    },
+    {
+      "source_id": "object-lineage",
+      "capability": "object-lifetimes",
+      "cell": "hyper-v",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/kmem.h:12-180", "what": "kmalloc/kfree/kmem_cache_alloc/free/mm_page_alloc/free tracepoints (14 events in file)"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "identity/generation/lifecycle ledger agreement with an independent oracle"],
+      "reviewer_notes": "Generic allocator observation points; platform-independent source. No admitted cell selected."
+    },
+    {
+      "source_id": "dma-virtio-paths",
+      "capability": "dma-paths",
+      "cell": "sev-snp",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_alloc/dma_free coherent alloc/free, dma_alloc_pages/dma_free_pages non-coherent page alloc/free, and dma_map_phys physical-mapping tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "coherent memory is not synonymous with host-shared; path admission per operation"],
+      "reviewer_notes": "DMA tracepoints plus virtqueue fentry candidates; one SNP run cannot qualify other cells. No admitted cell selected."
+    },
+    {
+      "source_id": "dma-virtio-paths",
+      "capability": "dma-paths",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_alloc/dma_free coherent alloc/free, dma_alloc_pages/dma_free_pages non-coherent page alloc/free, and dma_map_phys physical-mapping tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "SNP evidence never qualifies TDX"],
+      "reviewer_notes": "DMA tracepoints plus virtqueue fentry candidates; platform-independent source. No admitted cell selected."
+    },
+    {
+      "source_id": "dma-virtio-paths",
+      "capability": "dma-paths",
+      "cell": "hyper-v",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_alloc/dma_free coherent alloc/free, dma_alloc_pages/dma_free_pages non-coherent page alloc/free, and dma_map_phys physical-mapping tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "VMBus-backed devices need the vmbus-channels source alongside"],
+      "reviewer_notes": "DMA tracepoints plus virtqueue fentry candidates; platform-independent source. No admitted cell selected."
+    },
+    {
+      "source_id": "heap-dmabuf-objects",
+      "capability": "shared-buffers",
+      "cell": "sev-snp",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma_buf.h:96-149", "what": "dma_buf export/mmap/mmap_internal/put/dynamic_attach/detach/fd/get tracepoints"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "shared origin must be proven per object; generic buffer objects never imply confidential sharing", "owned allocation ledger agreement (attach/map/use/destruction distinct)"],
+      "reviewer_notes": "Candidate dma-buf export/map/put tracepoints; full lifecycle coverage unproven (put is a reference drop, not destruction); origin admission needs producer proof. No admitted cell selected."
+    },
+    {
+      "source_id": "heap-dmabuf-objects",
+      "capability": "shared-buffers",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma_buf.h:96-149", "what": "dma_buf export/mmap/mmap_internal/put/dynamic_attach/detach/fd/get tracepoints"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "shared origin must be proven per object; generic buffer objects never imply confidential sharing"],
+      "reviewer_notes": "Candidate dma-buf export/map/put tracepoints; full lifecycle coverage unproven (put is a reference drop, not destruction); origin admission needs producer proof. No admitted cell selected."
+    },
+    {
+      "source_id": "heap-dmabuf-objects",
+      "capability": "shared-buffers",
+      "cell": "hyper-v",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma_buf.h:96-149", "what": "dma_buf export/mmap/mmap_internal/put/dynamic_attach/detach/fd/get tracepoints"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "shared origin must be proven per object; generic buffer objects never imply confidential sharing"],
+      "reviewer_notes": "Candidate dma-buf export/map/put tracepoints; full lifecycle coverage unproven (put is a reference drop, not destruction); origin admission needs producer proof. No admitted cell selected."
+    },
+    {
+      "source_id": "ghcb-exceptions",
+      "capability": "host-interfaces",
+      "cell": "sev-snp",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/vc-shared.c:444", "what": "sev_es_ghcb_hv_call central GHCB call site (plain function)"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/vc-handle.c:957-1009", "what": "#VC entry DEFINE_IDTENTRY_VC_KERNEL/USER with noinstr discipline; critical paths forbidden to instrument"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/core.c:284", "what": "page-state-change GHCB caller (PSC path)"}
+      ],
+      "lease_gated": ["GHCB call-site attachment must be proven safe including calls from noinstr #VC context", "direct #VC entry/exit instrumentation is UNSUPPORTED (noinstr context)", "covered interface activity with native-error facts on the exact cell"],
+      "reviewer_notes": "GHCB call sites observable in principle; #VC entry itself is noinstr. No admitted cell selected."
+    },
+    {
+      "source_id": "ghcb-exceptions",
+      "capability": "host-interfaces",
+      "cell": "tdx-standalone",
+      "verdict": "not-applicable",
+      "reason": "not-applicable-platform",
+      "availability": "not-applicable",
+      "verifier_acceptance": "not-applicable",
+      "real_semantics": "not-applicable",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/core.c:1089-1092", "what": "setup_ghcb returns early unless CC_ATTR_GUEST_STATE_ENCRYPT is set"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/core.c:1230-1237", "what": "sev_es_init_vc_handling returns early unless CC_ATTR_GUEST_STATE_ENCRYPT is set"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/core.c:30-40", "what": "intel_cc_platform_has answers true only for MEM_ENCRYPT/GUEST_MEM_ENCRYPT/UNROLL_STRING_IO and false otherwise, so both SEV gates stay off on a TDX guest"}
+      ],
+      "lease_gated": [],
+      "reviewer_notes": "N/A with reason: #VC/GHCB cannot fire on a TDX guest; absence of events is not the basis."
+    },
+    {
+      "source_id": "ghcb-exceptions",
+      "capability": "host-interfaces",
+      "cell": "hyper-v",
+      "verdict": "blocked-no-lease",
+      "reason": "lease-pending",
+      "availability": "image-dependent",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/vc-shared.c:444", "what": "sev_es_ghcb_hv_call central GHCB call site (plain function)"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:736-755", "what": "comment records #VC routed to a paravisor on isolation VMs"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:859-879", "what": "isolation-type switch: GHCB relevance depends on SNP-vs-TDX-vs-VBS cell"}
+      ],
+      "lease_gated": ["whether GHCB/#VC terminates at the paravisor or stays guest-observable is cell-specific", "peer topology (host vs paravisor) needs the exact cell", "safe attachment plus positive interface-activity proof"],
+      "reviewer_notes": "Feasibility undecidable from guest sources alone; needs the exact cell. No proof attempted."
+    },
+    {
+      "source_id": "tdx-conversions",
+      "capability": "host-interfaces",
+      "cell": "sev-snp",
+      "verdict": "not-applicable",
+      "reason": "not-applicable-platform",
+      "availability": "not-applicable",
+      "verifier_acceptance": "not-applicable",
+      "real_semantics": "not-applicable",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:1123", "what": "TDX guest capability set only after TDX platform detection"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:1162-1163", "what": "TDX conversion ops wired only on a detected TDX guest"}
+      ],
+      "lease_gated": [],
+      "reviewer_notes": "N/A with reason: TDX conversion path cannot run on an SNP guest; absence of events is not the basis."
+    },
+    {
+      "source_id": "tdx-conversions",
+      "capability": "host-interfaces",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:964-999", "what": "tdx_enc_status_changed plus prepare/finish wrappers"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:1162-1163", "what": "x86_platform guest ops wired to the TDX wrappers"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "positive owned-conversion fixture with independent oracle", "SNP evidence never qualifies TDX"],
+      "reviewer_notes": "Source available with exact symbols; verifier and semantics unproven; no admitted cell selected."
+    },
+    {
+      "source_id": "tdx-conversions",
+      "capability": "host-interfaces",
+      "cell": "hyper-v",
+      "verdict": "blocked-no-lease",
+      "reason": "lease-pending",
+      "availability": "image-dependent",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:893-894", "what": "Hyper-V overwrites the x86_platform enc_status_change ops with VTOM handlers"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:736-755", "what": "comment records paravisor-routed #VE on isolation VMs"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:859-879", "what": "isolation-type switch: TDX relevance depends on the cell type"}
+      ],
+      "lease_gated": ["whether TDX conversion notification stays guest-observable under the paravisor is cell-specific", "peer topology needs the exact cell", "safe attachment plus positive fixture proof"],
+      "reviewer_notes": "Feasibility undecidable from guest sources alone; needs the exact cell. No proof attempted."
+    },
+    {
+      "source_id": "tdx-ve-metadata",
+      "capability": "host-interfaces",
+      "cell": "sev-snp",
+      "verdict": "not-applicable",
+      "reason": "not-applicable-platform",
+      "availability": "not-applicable",
+      "verifier_acceptance": "not-applicable",
+      "real_semantics": "not-applicable",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/include/asm/idtentry.h:683-685", "what": "#VE declared only under CONFIG_INTEL_TDX_GUEST"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:1123", "what": "TDX guest capability set only after TDX platform detection"}
+      ],
+      "lease_gated": [],
+      "reviewer_notes": "N/A with reason: #VE cannot fire on an SNP guest; absence of events is not the basis."
+    },
+    {
+      "source_id": "tdx-ve-metadata",
+      "capability": "host-interfaces",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/kernel/traps.c:1642-1663", "what": "exc_virtualization_exception dispatcher (plain IDT entry)"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:781", "what": "tdx_get_ve_info per-exit metadata reader (plain function)"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/tdx/tdx.c:862-870", "what": "tdx_handle_virt_exception handler (plain function)"}
+      ],
+      "lease_gated": ["safe attachment proof on the exact target image", "per-exit metadata coverage with native-error facts on the cell", "SNP evidence never qualifies TDX"],
+      "reviewer_notes": "Plain handler functions give observation candidates; verifier and semantics unproven. No admitted cell selected."
+    },
+    {
+      "source_id": "tdx-ve-metadata",
+      "capability": "host-interfaces",
+      "cell": "hyper-v",
+      "verdict": "blocked-no-lease",
+      "reason": "lease-pending",
+      "availability": "image-dependent",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/kernel/traps.c:1642-1663", "what": "exc_virtualization_exception dispatcher (plain IDT entry)"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/hyperv/ivm.c:736-755", "what": "comment records #VE routed to a paravisor on isolation VMs"}
+      ],
+      "lease_gated": ["whether #VE metadata stays guest-observable under the paravisor is cell-specific", "peer topology needs the exact cell", "safe attachment plus positive interface-activity proof"],
+      "reviewer_notes": "Feasibility undecidable from guest sources alone; needs the exact cell. No proof attempted."
+    },
+    {
+      "source_id": "vmbus-channels",
+      "capability": "host-interfaces",
+      "cell": "sev-snp",
+      "verdict": "not-applicable",
+      "reason": "not-applicable-platform",
+      "availability": "not-applicable",
+      "verifier_acceptance": "not-applicable",
+      "real_semantics": "not-applicable",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/vmbus_drv.c:2970", "what": "VMBus driver refuses to bind without Hyper-V initialization"}
+      ],
+      "lease_gated": [],
+      "reviewer_notes": "N/A with reason: VMBus exists only on Hyper-V; absence of events is not the basis."
+    },
+    {
+      "source_id": "vmbus-channels",
+      "capability": "host-interfaces",
+      "cell": "tdx-standalone",
+      "verdict": "not-applicable",
+      "reason": "not-applicable-platform",
+      "availability": "not-applicable",
+      "verifier_acceptance": "not-applicable",
+      "real_semantics": "not-applicable",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/vmbus_drv.c:2970", "what": "VMBus driver refuses to bind without Hyper-V initialization"}
+      ],
+      "lease_gated": [],
+      "reviewer_notes": "N/A with reason: VMBus exists only on Hyper-V; absence of events is not the basis."
+    },
+    {
+      "source_id": "vmbus-channels",
+      "capability": "host-interfaces",
+      "cell": "hyper-v",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/hv_trace.h:11-276", "what": "vmbus offer/rescind/open/close/gpadl-created/gpadl-torndown/teardown-gpadl/negotiate-version/release-relid tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/channel.c:580-586", "what": "vmbus_establish_gpadl GPADL setup entry"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/channel.c:652-750", "what": "__vmbus_open channel-open path with gpadl/open trace emission"}
+      ],
+      "lease_gated": ["host-facing vs paravisor peer topology needs the exact cell; no inference into paravisor internal memory", "offer/GPADL/flags agreement across channel lifetime with independent ledger", "safe attachment plus positive fixture proof"],
+      "reviewer_notes": "Candidate offer/GPADL/open/close/teardown/release tracepoints; lifetime coverage unproven; peer topology is lease-gated. No admitted cell selected."
+    },
+    {
+      "source_id": "mapping-inventory-scan",
+      "capability": "mapping-inventory",
+      "cell": "sev-snp",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:43-49", "what": "iomem_resource export"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:164", "what": "/proc/iomem readout source"},
+        {"source_ref": "upstream-v7.0", "pointer": "mm/ioremap.c:52", "what": "ioremap_prot mapping entry (fentry candidate)"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/dax/super.c:45-49", "what": "DAX device infrastructure present (dax_read_lock)"}
+      ],
+      "lease_gated": ["supported mapping-class proof (presence/absence/unsupported fixtures) on the exact cell", "inventory only; never a claim to trace every access", "safe attachment proof"],
+      "reviewer_notes": "iomem/ioremap/DAX sources present; class support needs the cell. No admitted cell selected."
+    },
+    {
+      "source_id": "mapping-inventory-scan",
+      "capability": "mapping-inventory",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:43-49", "what": "iomem_resource export"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:164", "what": "/proc/iomem readout source"},
+        {"source_ref": "upstream-v7.0", "pointer": "mm/ioremap.c:52", "what": "ioremap_prot mapping entry (fentry candidate)"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/dax/super.c:45-49", "what": "DAX device infrastructure present (dax_read_lock)"}
+      ],
+      "lease_gated": ["supported mapping-class proof on the exact cell", "inventory only; never a claim to trace every access", "safe attachment proof"],
+      "reviewer_notes": "iomem/ioremap/DAX sources present; class support needs the cell. No admitted cell selected."
+    },
+    {
+      "source_id": "mapping-inventory-scan",
+      "capability": "mapping-inventory",
+      "cell": "hyper-v",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:43-49", "what": "iomem_resource export"},
+        {"source_ref": "upstream-v7.0", "pointer": "kernel/resource.c:164", "what": "/proc/iomem readout source"},
+        {"source_ref": "upstream-v7.0", "pointer": "mm/ioremap.c:52", "what": "ioremap_prot mapping entry (fentry candidate)"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/dax/super.c:45-49", "what": "DAX device infrastructure present (dax_read_lock)"}
+      ],
+      "lease_gated": ["supported mapping-class proof on the exact cell", "inventory only; never a claim to trace every access", "safe attachment proof"],
+      "reviewer_notes": "iomem/ioremap/DAX sources present; class support needs the cell. No admitted cell selected."
+    },
+    {
+      "source_id": "egress-controls",
+      "capability": "exposure-context",
+      "cell": "sev-snp",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "security/lockdown/lockdown.c:159", "what": "lockdown securityfs readout file (mode 0644)"},
+        {"source_ref": "upstream-v7.0", "pointer": "security/lockdown/lockdown.c:20-22", "what": "NONE/INTEGRITY_MAX/CONFIDENTIALITY_MAX levels via cmdline or Kconfig"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/linux/security.h:145-155", "what": "LOCKDOWN_BPF_WRITE_USER/BPF_READ_KERNEL/TRACEFS restriction reasons"},
+        {"source_ref": "upstream-v7.0", "pointer": "mm/swapfile.c:2971-3002", "what": "/proc/swaps readout (swap_show)"},
+        {"source_ref": "upstream-v7.0", "pointer": "fs/proc/meminfo.c:45", "what": "meminfo swap facts via si_swapinfo"}
+      ],
+      "lease_gated": ["target-image lockdown mode and BTF presence are cell-specific and gate BPF attach", "configuration fixtures set independently of the collector", "facts are point-in-time unless a change source exists"],
+      "reviewer_notes": "Allowlisted config readouts exist; target-image hardening is lease-gated. No admitted cell selected."
+    },
+    {
+      "source_id": "egress-controls",
+      "capability": "exposure-context",
+      "cell": "tdx-standalone",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "security/lockdown/lockdown.c:159", "what": "lockdown securityfs readout file (mode 0644)"},
+        {"source_ref": "upstream-v7.0", "pointer": "security/lockdown/lockdown.c:20-22", "what": "NONE/INTEGRITY_MAX/CONFIDENTIALITY_MAX levels via cmdline or Kconfig"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/linux/security.h:145-155", "what": "LOCKDOWN_BPF_WRITE_USER/BPF_READ_KERNEL/TRACEFS restriction reasons"},
+        {"source_ref": "upstream-v7.0", "pointer": "mm/swapfile.c:2971-3002", "what": "/proc/swaps readout (swap_show)"},
+        {"source_ref": "upstream-v7.0", "pointer": "fs/proc/meminfo.c:45", "what": "meminfo swap facts via si_swapinfo"}
+      ],
+      "lease_gated": ["target-image lockdown mode and BTF presence are cell-specific and gate BPF attach", "configuration fixtures set independently of the collector", "facts are point-in-time unless a change source exists"],
+      "reviewer_notes": "Allowlisted config readouts exist; target-image hardening is lease-gated. No admitted cell selected."
+    },
+    {
+      "source_id": "egress-controls",
+      "capability": "exposure-context",
+      "cell": "hyper-v",
+      "verdict": "feasible-unproven",
+      "reason": "cell-unselected",
+      "availability": "candidate-present",
+      "verifier_acceptance": "unproven",
+      "real_semantics": "unproven",
+      "evidence": [
+        {"source_ref": "upstream-v7.0", "pointer": "security/lockdown/lockdown.c:159", "what": "lockdown securityfs readout file (mode 0644)"},
+        {"source_ref": "upstream-v7.0", "pointer": "security/lockdown/lockdown.c:20-22", "what": "NONE/INTEGRITY_MAX/CONFIDENTIALITY_MAX levels via cmdline or Kconfig"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/linux/security.h:145-155", "what": "LOCKDOWN_BPF_WRITE_USER/BPF_READ_KERNEL/TRACEFS restriction reasons"},
+        {"source_ref": "upstream-v7.0", "pointer": "mm/swapfile.c:2971-3002", "what": "/proc/swaps readout (swap_show)"},
+        {"source_ref": "upstream-v7.0", "pointer": "fs/proc/meminfo.c:45", "what": "meminfo swap facts via si_swapinfo"}
+      ],
+      "lease_gated": ["target-image lockdown mode and BTF presence are cell-specific and gate BPF attach", "configuration fixtures set independently of the collector", "facts are point-in-time unless a change source exists"],
+      "reviewer_notes": "Allowlisted config readouts exist; target-image hardening is lease-gated. No admitted cell selected."
+    }
+  ]
+}
