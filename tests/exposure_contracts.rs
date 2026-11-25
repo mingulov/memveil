@@ -35,6 +35,17 @@ const FOREIGN_SESSION: &str = include_str!("exposure/fixtures/contracts/foreign_
 const MALFORMED_FACT: &str = include_str!("exposure/fixtures/contracts/malformed_fact.json");
 const INVALID_SEMANTICS: &str = include_str!("exposure/fixtures/contracts/invalid_semantics.json");
 const INVALID_CLOCK: &str = include_str!("exposure/fixtures/contracts/invalid_clock_domain.json");
+const EMPTY_REASON: &str = include_str!("exposure/fixtures/contracts/empty_reason.json");
+const DUPLICATE_SEQ: &str = include_str!("exposure/fixtures/contracts/duplicate_seq.json");
+const MISSING_CENSUS_KIND: &str =
+    include_str!("exposure/fixtures/contracts/missing_census_kind.json");
+const NULL_FACT_QUALITY: &str = include_str!("exposure/fixtures/contracts/null_fact_quality.json");
+const MARKER_MISSING_TS: &str = include_str!("exposure/fixtures/contracts/marker_missing_ts.json");
+const EMPTY_BOUNCE: &str = include_str!("exposure/fixtures/contracts/empty_bounce.json");
+const GUESS_MEASUREMENT: &str = include_str!("exposure/fixtures/contracts/guess_measurement.json");
+const SEALED_WITH_BOUNCE: &str =
+    include_str!("exposure/fixtures/contracts/sealed_with_bounce.json");
+const SOURCE_SCOPE: &str = include_str!("exposure/fixtures/contracts/source_scope.json");
 
 fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
     facts
@@ -63,21 +74,11 @@ fn unsealed_snapshot_cannot_satisfy_rule() {
     assert!(sealed.verified);
     let terminal = snapshot_terminal_status(SEALED).expect("control carries terminal");
     assert_eq!(terminal, "complete_for_scope");
-    let outcome = exposure_quality::rule_outcome(
-        sealed.verified,
-        &terminal,
-        &[("sharing-census", "available", true)],
-    );
-    assert_eq!(outcome, RuleOutcome::Satisfied);
+    assert_eq!(seal_verdict(SEALED), RuleOutcome::Satisfied);
 
     let unsealed = verify_sealed_snapshot(UNSEALED).expect("unsealed parses");
     assert!(!unsealed.verified);
-    let terminal = snapshot_terminal_status(UNSEALED).expect("unsealed carries terminal");
-    let outcome = exposure_quality::rule_outcome(
-        unsealed.verified,
-        &terminal,
-        &[("sharing-census", "available", true)],
-    );
+    let outcome = seal_verdict(UNSEALED);
     assert_eq!(outcome, RuleOutcome::Inconclusive);
     assert_ne!(outcome, RuleOutcome::Satisfied);
 }
@@ -119,12 +120,7 @@ fn duplicate_source_and_cross_epoch_evidence_rejected() {
     ] {
         let report = verify_sealed_snapshot(snapshot).expect("tainted parses");
         assert!(!report.verified, "{name} evidence cannot verify");
-        let terminal = snapshot_terminal_status(snapshot).expect("tainted carries terminal");
-        let outcome = exposure_quality::rule_outcome(
-            report.verified,
-            &terminal,
-            &[("sharing-census", "available", true)],
-        );
+        let outcome = seal_verdict(snapshot);
         assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
         assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
         let owned = sealed_evidence_keys(snapshot).expect("tainted replays");
@@ -144,11 +140,7 @@ fn foreign_session_and_malformed_facts_cannot_verify() {
         assert!(!report.verified, "{name} evidence cannot verify");
         let terminal = snapshot_terminal_status(snapshot).expect("tainted carries terminal");
         assert_eq!(terminal, "complete_for_scope", "{name} stays settled");
-        let outcome = exposure_quality::rule_outcome(
-            report.verified,
-            &terminal,
-            &[("sharing-census", "available", true)],
-        );
+        let outcome = seal_verdict(snapshot);
         assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
         assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
     }
@@ -164,11 +156,7 @@ fn unknown_fact_enums_cannot_verify() {
         assert!(!report.verified, "{name} evidence cannot verify");
         let terminal = snapshot_terminal_status(snapshot).expect("tainted carries terminal");
         assert_eq!(terminal, "complete_for_scope", "{name} stays settled");
-        let outcome = exposure_quality::rule_outcome(
-            report.verified,
-            &terminal,
-            &[("sharing-census", "available", true)],
-        );
+        let outcome = seal_verdict(snapshot);
         assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
         assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
     }
@@ -216,27 +204,87 @@ fn required_sources_need_matching_sealed_facts() {
     }
 }
 
+/// Replayed fact sources for the composed seal-to-verdict path.
+///
+/// Snapshots that refuse replay carry no covering facts; the seal
+/// gate already failed them, so an empty source list is exact.
+fn replayed_sources(snapshot: &str) -> Vec<String> {
+    sealed_evidence_keys(snapshot)
+        .map(|keys| {
+            keys.iter()
+                .map(|key| key.source_id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// The composed verdict over one snapshot for one required source.
+fn seal_verdict(snapshot: &str) -> RuleOutcome {
+    let report = verify_sealed_snapshot(snapshot).expect("snapshot parses");
+    let terminal = snapshot_terminal_status(snapshot).expect("snapshot carries terminal");
+    let owned = replayed_sources(snapshot);
+    let sources: Vec<&str> = owned.iter().map(String::as_str).collect();
+    exposure_quality::rule_outcome_with_facts(
+        report.verified,
+        &terminal,
+        &[("sharing-census", "available", true)],
+        &sources,
+    )
+}
+
+#[test]
+fn persisted_seal_refusals_cannot_verify() {
+    for (name, snapshot) in [
+        ("empty reason", EMPTY_REASON),
+        ("duplicate seq", DUPLICATE_SEQ),
+        ("null fact quality", NULL_FACT_QUALITY),
+        ("marker without ts_ns", MARKER_MISSING_TS),
+        ("empty bounce", EMPTY_BOUNCE),
+        ("guessed measurement", GUESS_MEASUREMENT),
+    ] {
+        let report = verify_sealed_snapshot(snapshot).expect("tainted parses");
+        assert!(!report.verified, "{name} evidence cannot verify");
+        let outcome = seal_verdict(snapshot);
+        assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
+        assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
+    }
+    let err = verify_sealed_snapshot(MISSING_CENSUS_KIND).unwrap_err();
+    assert_eq!(err.what, "kinds");
+}
+
+#[test]
+fn sealed_bounce_control_verifies_and_satisfies() {
+    let report = verify_sealed_snapshot(SEALED_WITH_BOUNCE).expect("bounce control seals");
+    assert!(report.verified);
+    assert_eq!(seal_verdict(SEALED_WITH_BOUNCE), RuleOutcome::Satisfied);
+}
+
+#[test]
+fn source_scoped_verdict_needs_matching_facts() {
+    let report = verify_sealed_snapshot(SOURCE_SCOPE).expect("scope seals");
+    assert!(report.verified, "well-formed foreign facts still seal");
+    let outcome = seal_verdict(SOURCE_SCOPE);
+    assert_eq!(
+        outcome,
+        RuleOutcome::Inconclusive,
+        "facts from another source never satisfy"
+    );
+    assert_ne!(outcome, RuleOutcome::Satisfied, "never satisfies");
+}
+
 #[test]
 fn missing_terminal_evidence_is_partial() {
     let settled = verify_sealed_snapshot(SEALED).expect("positive control seals");
+    assert!(settled.verified);
     let terminal = snapshot_terminal_status(SEALED).expect("control carries terminal");
     assert_eq!(terminal, "complete_for_scope");
-    let outcome = exposure_quality::rule_outcome(
-        settled.verified,
-        &terminal,
-        &[("sharing-census", "available", true)],
-    );
-    assert_eq!(outcome, RuleOutcome::Satisfied);
+    assert_eq!(seal_verdict(SEALED), RuleOutcome::Satisfied);
 
     let unsettled = verify_sealed_snapshot(MISSING_TERMINAL).expect("partial parses");
     assert!(unsettled.verified, "partial evidence still seals");
     let terminal = snapshot_terminal_status(MISSING_TERMINAL).expect("partial carries terminal");
     assert_ne!(terminal, "complete_for_scope");
-    let outcome = exposure_quality::rule_outcome(
-        unsettled.verified,
-        &terminal,
-        &[("sharing-census", "available", true)],
-    );
+    let outcome = seal_verdict(MISSING_TERMINAL);
     assert_eq!(outcome, RuleOutcome::Partial);
     assert_ne!(outcome, RuleOutcome::Satisfied);
 }

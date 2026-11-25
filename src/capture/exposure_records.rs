@@ -1360,7 +1360,8 @@ fn fact_identity(text: &str) -> Option<SealedEvidenceKey> {
 /// True when one fact line validates completely at the seal boundary.
 ///
 /// The whole line must normalize (canonical envelope, field order,
-/// scalar types and canonical numerics) and its data must build an
+/// scalar types and canonical numerics), its envelope source must
+/// carry frozen labels, and its data must build an
 /// [`exposure_shapes::ExposureFact`] passing the model validator:
 /// peer-class and source membership, interval order, quality-channel
 /// statuses, maybe/reason pairing, closed enum sets and identifier
@@ -1375,10 +1376,31 @@ fn fact_sealed_valid(text: &str) -> bool {
     let Ok(JsonValue::Object(fields)) = parse_value(text) else {
         return false;
     };
+    if !source_labels_valid(&fields) {
+        return false;
+    }
     let Some(JsonValue::Object(data)) = find_field(&fields, "data") else {
         return false;
     };
     fact_from_data(data).is_some_and(|fact| fact.validate().is_ok())
+}
+
+/// True when the envelope source block carries frozen labels.
+///
+/// The hook, backend and profile leaves stay free strings; the
+/// measurement and correlation leaves come from the model's frozen
+/// tables, never a copy.
+fn source_labels_valid(fields: &[(String, JsonValue)]) -> bool {
+    let Some(JsonValue::Object(source)) = find_field(fields, "source") else {
+        return false;
+    };
+    let Some(JsonValue::Str(measurement)) = find_field(source, "measurement") else {
+        return false;
+    };
+    let Some(JsonValue::Str(correlation)) = find_field(source, "correlation") else {
+        return false;
+    };
+    exposure_shapes::is_measurement(measurement) && exposure_shapes::is_correlation(correlation)
 }
 
 fn sealed_str<'v>(data: &'v [(String, JsonValue)], key: &str) -> Option<&'v str> {
@@ -1397,6 +1419,11 @@ fn sealed_u64(data: &[(String, JsonValue)], key: &str) -> Option<u64> {
 }
 
 /// One maybe/absent leaf with its typed reason, or `None` when mistyped.
+///
+/// An absent reason key and an explicit empty reason differ: only
+/// the absent key decodes to no reason. An explicit empty string is
+/// neither absent nor a typed reason, so it fails the seal rather
+/// than decoding as if the key were omitted.
 fn sealed_maybe(
     data: &[(String, JsonValue)],
     base: &str,
@@ -1404,6 +1431,7 @@ fn sealed_maybe(
     let reason_key = format!("{base}_reason");
     let reason = match find_field(data, reason_key.as_str()) {
         None => String::new(),
+        Some(JsonValue::Str(text)) if text.is_empty() => return None,
         Some(JsonValue::Str(text)) => text.clone(),
         Some(_) => return None,
     };
@@ -1438,9 +1466,14 @@ fn sealed_interval(data: &[(String, JsonValue)]) -> Option<(u64, u64, u64)> {
     ))
 }
 
+/// One native result with its typed reason, or `None` when mistyped.
+///
+/// As with [`sealed_maybe`], an explicit empty reason is neither
+/// absent nor typed, so it fails the seal.
 fn sealed_native(data: &[(String, JsonValue)]) -> Option<(Option<i64>, String)> {
     let reason = match find_field(data, "native_result_reason") {
         None => String::new(),
+        Some(JsonValue::Str(text)) if text.is_empty() => return None,
         Some(JsonValue::Str(text)) => text.clone(),
         Some(_) => return None,
     };
@@ -1512,30 +1545,113 @@ fn fact_from_data(data: &[(String, JsonValue)]) -> Option<exposure_shapes::Expos
     })
 }
 
+/// True when one event envelope keeps its canonical shape.
+///
+/// The seven envelope keys are present with nothing unknown, the
+/// version is the exposure contract, the timestamp is a canonical
+/// u64, and the source carries its five string leaves with frozen
+/// labels. Sequence and session checks stay with the seal loop, as
+/// with facts; the caller owns kind membership.
+fn event_envelope_valid(fields: &[(String, JsonValue)]) -> bool {
+    if fields.len() != ENVELOPE_FIELDS.len() {
+        return false;
+    }
+    for key in ENVELOPE_FIELDS {
+        if find_field(fields, key).is_none() {
+            return false;
+        }
+    }
+    let Some(JsonValue::Str(version)) = find_field(fields, "schema_version") else {
+        return false;
+    };
+    if version != "0.3.0" {
+        return false;
+    }
+    if !matches!(find_field(fields, "session_id"), Some(JsonValue::Str(_))) {
+        return false;
+    }
+    let Some(JsonValue::Str(ts_ns)) = find_field(fields, "ts_ns") else {
+        return false;
+    };
+    if !is_canonical_u64(ts_ns) {
+        return false;
+    }
+    if !matches!(find_field(fields, "kind"), Some(JsonValue::Str(_))) {
+        return false;
+    }
+    let Some(JsonValue::Object(source)) = find_field(fields, "source") else {
+        return false;
+    };
+    if source.len() != SOURCE_FIELDS.len() {
+        return false;
+    }
+    for key in SOURCE_FIELDS {
+        if !matches!(find_field(source, key), Some(JsonValue::Str(_))) {
+            return false;
+        }
+    }
+    source_labels_valid(fields)
+}
+
+/// True when a bounce-attempt payload keeps its schema shape.
+///
+/// The payload carries exactly the four schema leaves: two opaque
+/// identifiers, a canonical byte count, and a bare flag.
+fn bounce_payload_valid(data: &[(String, JsonValue)]) -> bool {
+    if data.len() != 4 {
+        return false;
+    }
+    let Some(JsonValue::Str(device)) = find_field(data, "device_id") else {
+        return false;
+    };
+    let Some(JsonValue::Str(bytes)) = find_field(data, "requested_bytes") else {
+        return false;
+    };
+    if !matches!(find_field(data, "forced"), Some(JsonValue::Bool(_))) {
+        return false;
+    }
+    let Some(JsonValue::Str(operation)) = find_field(data, "operation_id") else {
+        return false;
+    };
+    exposure_shapes::is_opaque_id(device)
+        && is_canonical_u64(bytes)
+        && exposure_shapes::is_opaque_id(operation)
+}
+
 /// True when a non-fact line keeps its envelope payload shape.
 ///
-/// Every event line carries an object `data` payload, so a dropped
-/// or mistyped payload fails the seal rather than verifying. A
-/// marker's payload holds exactly its bounded `text` annotation,
+/// Every event line carries the canonical envelope, so a dropped
+/// timestamp, a foreign version, or an unfrozen source label fails
+/// the seal rather than verifying. Every line carries an object
+/// `data` payload, and every legacy payload carries at least one
+/// key, so a dropped, mistyped or empty payload fails the seal. A
+/// marker's payload holds exactly its bounded `text` annotation and
+/// a bounce attempt carries exactly its four schema leaves,
 /// mirroring the event schema; other legacy kinds keep their
 /// per-kind payloads with the capture reader.
 fn non_fact_shape_valid(kind: &str, text: &str) -> bool {
     let Ok(JsonValue::Object(fields)) = parse_value(text) else {
         return false;
     };
+    if !event_envelope_valid(&fields) {
+        return false;
+    }
     let Some(JsonValue::Object(data)) = find_field(&fields, "data") else {
         return false;
     };
-    if kind != "marker" {
-        return true;
+    match kind {
+        "marker" => {
+            if data.len() != 1 {
+                return false;
+            }
+            let Some(JsonValue::Str(annotation)) = find_field(data, "text") else {
+                return false;
+            };
+            !annotation.is_empty() && annotation.chars().count() <= 256
+        }
+        "bounce_attempt" => bounce_payload_valid(data),
+        _ => !data.is_empty(),
     }
-    if data.len() != 1 {
-        return false;
-    }
-    let Some(JsonValue::Str(annotation)) = find_field(data, "text") else {
-        return false;
-    };
-    !annotation.is_empty() && annotation.chars().count() <= 256
 }
 
 /// Seal verification outcome over a snapshot's literal bytes.
@@ -2652,24 +2768,37 @@ mod tests {
     }
 
     fn probe_source() -> FieldValue<'static> {
+        probe_source_with("observed", "direct")
+    }
+
+    /// One envelope source block carrying the given labels.
+    fn probe_source_with(
+        measurement: &'static str,
+        correlation: &'static str,
+    ) -> FieldValue<'static> {
         FieldValue::Object(vec![
             ("hook", FieldValue::Text("synthetic:exposure")),
             ("backend", FieldValue::Text("synthetic")),
             ("profile_id", FieldValue::Text("synthetic-census-1")),
-            ("measurement", FieldValue::Text("observed")),
-            ("correlation", FieldValue::Text("direct")),
+            ("measurement", FieldValue::Text(measurement)),
+            ("correlation", FieldValue::Text(correlation)),
         ])
     }
 
     /// One canonical fact line at the given sequence position.
     fn fact_line(seq: u64, data: FactData) -> String {
+        fact_line_with_source(seq, data, probe_source())
+    }
+
+    /// One canonical fact line carrying the given source block.
+    fn fact_line_with_source(seq: u64, data: FactData, source: FieldValue<'_>) -> String {
         render_canonical(&[
             ("schema_version", FieldValue::Text("0.3.0")),
             ("session_id", FieldValue::Text(PROBE_SESSION)),
             ("seq", FieldValue::UInt(seq)),
             ("ts_ns", FieldValue::UInt(1_100_000_000 + seq)),
             ("kind", FieldValue::Text(EXPOSURE_FACT_KIND)),
-            ("source", probe_source()),
+            ("source", source),
             ("data", FieldValue::Object(data)),
         ])
         .unwrap()
@@ -2677,18 +2806,52 @@ mod tests {
 
     /// One canonical marker line; `None` drops the payload entirely.
     fn marker_line(seq: u64, data: Option<FieldValue<'_>>) -> String {
+        legacy_line(seq, "marker", Some(1_300_000_000), probe_source(), data)
+    }
+
+    /// One canonical legacy line; `None` timestamp or payload drops it.
+    fn legacy_line(
+        seq: u64,
+        kind: &'static str,
+        ts_ns: Option<u64>,
+        source: FieldValue<'_>,
+        data: Option<FieldValue<'_>>,
+    ) -> String {
         let mut fields: Vec<(&str, FieldValue)> = vec![
             ("schema_version", FieldValue::Text("0.3.0")),
             ("session_id", FieldValue::Text(PROBE_SESSION)),
             ("seq", FieldValue::UInt(seq)),
-            ("ts_ns", FieldValue::UInt(1_300_000_000)),
-            ("kind", FieldValue::Text("marker")),
-            ("source", probe_source()),
         ];
+        if let Some(stamp) = ts_ns {
+            fields.push(("ts_ns", FieldValue::UInt(stamp)));
+        }
+        fields.push(("kind", FieldValue::Text(kind)));
+        fields.push(("source", source));
         if let Some(payload) = data {
             fields.push(("data", payload));
         }
         render_canonical(&fields).unwrap()
+    }
+
+    /// One valid bounce-attempt payload.
+    fn bounce_payload() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("device_id", FieldValue::Text("dev-1")),
+            ("requested_bytes", FieldValue::UInt(4096)),
+            ("forced", FieldValue::Bool(false)),
+            ("operation_id", FieldValue::Text("op-9")),
+        ])
+    }
+
+    /// One canonical bounce-attempt line carrying the given payload.
+    fn bounce_line(seq: u64, data: FieldValue<'static>) -> String {
+        legacy_line(
+            seq,
+            "bounce_attempt",
+            Some(1_300_000_000),
+            probe_source(),
+            Some(data),
+        )
     }
 
     /// One sealed snapshot carrying exactly the given literal lines.
@@ -2697,6 +2860,11 @@ mod tests {
     /// commits to the literal bytes, so only the shape gates can
     /// refuse: any other refusal would be a builder bug.
     fn sealed_lines_snapshot(lines: &[String], facts: u64, markers: u64) -> String {
+        sealed_counted_snapshot(lines, facts, markers, 0)
+    }
+
+    /// One sealed snapshot with an explicit bounce-attempt count.
+    fn sealed_counted_snapshot(lines: &[String], facts: u64, markers: u64, bounces: u64) -> String {
         assert!(!lines.is_empty(), "probe snapshot carries lines");
         let literal: String = lines.iter().map(|line| format!("{line}\n")).collect();
         let entries: Vec<String> = lines
@@ -2712,7 +2880,7 @@ mod tests {
         let digest = sha256_hex(literal.as_bytes());
         let count = lines.len() as u64;
         let kinds = format!(
-            "\"bounce_attempt\":\"0\",\"map_result\":\"0\",\"unmap\":\"0\",\"copy\":\"0\",\
+            "\"bounce_attempt\":\"{bounces}\",\"map_result\":\"0\",\"unmap\":\"0\",\"copy\":\"0\",\
             \"sync_request\":\"0\",\"transition_result\":\"0\",\"pool_sample\":\"0\",\"gap\":\"0\",\
             \"marker\":\"{markers}\",\"counter_snapshot\":\"0\",\"exposure_fact\":\"{facts}\""
         );
@@ -2906,6 +3074,230 @@ mod tests {
             let report = verify_sealed_snapshot(&sealed_lines_snapshot(&lines, 1, 1))
                 .expect("tainted parses");
             assert!(!report.verified, "marker with {name} cannot verify");
+        }
+    }
+
+    fn empty_parent_reason(data: &mut FactData) {
+        data.push(("parent_operation_id_reason", FieldValue::Text("")));
+    }
+
+    fn empty_object_reason(data: &mut FactData) {
+        data.push(("object_token_reason", FieldValue::Text("")));
+    }
+
+    fn empty_native_reason(data: &mut FactData) {
+        data.push(("native_result_reason", FieldValue::Text("")));
+    }
+
+    #[test]
+    fn seal_refuses_explicit_empty_reasons() {
+        for (name, mutate) in [
+            ("parent", empty_parent_reason as fn(&mut FactData)),
+            ("object", empty_object_reason as fn(&mut FactData)),
+            ("native", empty_native_reason as fn(&mut FactData)),
+        ] {
+            let snapshot = sealed_mutated_fact(mutate);
+            let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
+            assert!(
+                !report.verified,
+                "explicit empty {name} reason cannot verify"
+            );
+        }
+        // Absent reasons still verify: presence, not emptiness, is the gate.
+        let bare = sealed_fact_snapshot("inventory", "guest_monotonic_active");
+        let report = verify_sealed_snapshot(&bare).expect("control parses");
+        assert!(report.verified, "absent reasons must verify");
+        // A present null with a typed reason still verifies.
+        let mut data = default_fact_data("inventory", "guest_monotonic_active");
+        set_field(&mut data, "native_result", FieldValue::Null);
+        data.push(("native_result_reason", FieldValue::Text("withheld")));
+        let line = fact_line(0, data);
+        let report =
+            verify_sealed_snapshot(&sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0))
+                .expect("control parses");
+        assert!(report.verified, "null with a typed reason must verify");
+    }
+
+    #[test]
+    fn seal_refuses_unknown_source_labels() {
+        for (measurement, correlation) in [
+            ("guess", "direct"),
+            ("observed", "guess"),
+            ("", "direct"),
+            ("observed", ""),
+        ] {
+            let line = fact_line_with_source(
+                0,
+                default_fact_data("inventory", "guest_monotonic_active"),
+                probe_source_with(measurement, correlation),
+            );
+            let report =
+                verify_sealed_snapshot(&sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0))
+                    .expect("tainted parses");
+            assert!(
+                !report.verified,
+                "fact with {measurement}/{correlation} cannot verify"
+            );
+            let marker = legacy_line(
+                0,
+                "marker",
+                Some(1_300_000_000),
+                probe_source_with(measurement, correlation),
+                Some(FieldValue::Object(vec![(
+                    "text",
+                    FieldValue::Text("census sealed"),
+                )])),
+            );
+            let report =
+                verify_sealed_snapshot(&sealed_lines_snapshot(std::slice::from_ref(&marker), 0, 1))
+                    .expect("tainted parses");
+            assert!(
+                !report.verified,
+                "marker with {measurement}/{correlation} cannot verify"
+            );
+        }
+    }
+
+    #[test]
+    fn seal_accepts_frozen_source_labels() {
+        for measurement in exposure_shapes::MEASUREMENTS {
+            for correlation in exposure_shapes::CORRELATIONS {
+                let line = fact_line_with_source(
+                    0,
+                    default_fact_data("inventory", "guest_monotonic_active"),
+                    probe_source_with(measurement, correlation),
+                );
+                let report = verify_sealed_snapshot(&sealed_lines_snapshot(
+                    std::slice::from_ref(&line),
+                    1,
+                    0,
+                ))
+                .expect("control parses");
+                assert!(
+                    report.verified,
+                    "frozen labels {measurement}/{correlation} must verify"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seal_refuses_non_fact_envelope_breaks() {
+        let marker = FieldValue::Object(vec![("text", FieldValue::Text("census sealed"))]);
+        // A missing timestamp refuses.
+        let lines = vec![
+            fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+            legacy_line(1, "marker", None, probe_source(), Some(marker.clone())),
+        ];
+        let report =
+            verify_sealed_snapshot(&sealed_lines_snapshot(&lines, 1, 1)).expect("tainted parses");
+        assert!(!report.verified, "marker without ts_ns cannot verify");
+        // A non-canonical timestamp refuses.
+        let mistimed = legacy_line(
+            1,
+            "marker",
+            Some(1_300_000_000),
+            probe_source(),
+            Some(marker),
+        )
+        .replacen("\"ts_ns\":\"1300000000\"", "\"ts_ns\":\"01\"", 1);
+        let lines = vec![
+            fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+            mistimed,
+        ];
+        let report =
+            verify_sealed_snapshot(&sealed_lines_snapshot(&lines, 1, 1)).expect("tainted parses");
+        assert!(
+            !report.verified,
+            "marker with non-canonical ts_ns cannot verify"
+        );
+        // A foreign schema version refuses.
+        let lines = vec![
+            fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+            marker_line(
+                1,
+                Some(FieldValue::Object(vec![("text", FieldValue::Text("x"))])),
+            )
+            .replacen(
+                "\"schema_version\":\"0.3.0\"",
+                "\"schema_version\":\"0.1.1\"",
+                1,
+            ),
+        ];
+        let report =
+            verify_sealed_snapshot(&sealed_lines_snapshot(&lines, 1, 1)).expect("tainted parses");
+        assert!(
+            !report.verified,
+            "marker with a foreign version cannot verify"
+        );
+        // An unknown kind refuses.
+        let lines = vec![
+            fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+            legacy_line(
+                1,
+                "frobnicate",
+                Some(1_300_000_000),
+                probe_source(),
+                Some(FieldValue::Object(vec![(
+                    "text",
+                    FieldValue::Text("census sealed"),
+                )])),
+            ),
+        ];
+        let report =
+            verify_sealed_snapshot(&sealed_lines_snapshot(&lines, 1, 1)).expect("tainted parses");
+        assert!(!report.verified, "unknown kind cannot verify");
+    }
+
+    #[test]
+    fn seal_validates_bounce_attempt_payloads() {
+        let control = vec![
+            fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+            bounce_line(1, bounce_payload()),
+        ];
+        let report = verify_sealed_snapshot(&sealed_counted_snapshot(&control, 1, 0, 1))
+            .expect("control parses");
+        assert!(report.verified, "valid bounce attempt must verify");
+
+        let empty = FieldValue::Object(vec![]);
+        let missing = FieldValue::Object(vec![
+            ("requested_bytes", FieldValue::UInt(4096)),
+            ("forced", FieldValue::Bool(false)),
+            ("operation_id", FieldValue::Text("op-9")),
+        ]);
+        let mistyped = FieldValue::Object(vec![
+            ("device_id", FieldValue::Text("dev-1")),
+            ("requested_bytes", FieldValue::Text("01")),
+            ("forced", FieldValue::Bool(false)),
+            ("operation_id", FieldValue::Text("op-9")),
+        ]);
+        let unforced = FieldValue::Object(vec![
+            ("device_id", FieldValue::Text("dev-1")),
+            ("requested_bytes", FieldValue::UInt(4096)),
+            ("forced", FieldValue::Text("false")),
+            ("operation_id", FieldValue::Text("op-9")),
+        ]);
+        let padded = FieldValue::Object(vec![
+            ("device_id", FieldValue::Text("dev-1")),
+            ("requested_bytes", FieldValue::UInt(4096)),
+            ("forced", FieldValue::Bool(false)),
+            ("operation_id", FieldValue::Text("op-9")),
+            ("extra", FieldValue::Text("nope")),
+        ]);
+        for (name, payload) in [
+            ("empty payload", empty),
+            ("missing device", missing),
+            ("non-canonical bytes", mistyped),
+            ("mistyped flag", unforced),
+            ("extra key", padded),
+        ] {
+            let lines = vec![
+                fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+                bounce_line(1, payload),
+            ];
+            let report = verify_sealed_snapshot(&sealed_counted_snapshot(&lines, 1, 0, 1))
+                .expect("tainted parses");
+            assert!(!report.verified, "bounce with {name} cannot verify");
         }
     }
 }

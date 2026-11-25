@@ -77,20 +77,19 @@ fn source_usable(status: &str) -> bool {
     status == "available" || status == "partial"
 }
 
-/// Evaluate one rule over a snapshot's settlement state.
+/// Evaluate the metadata gate over a snapshot's settlement state.
 ///
 /// `required` carries one `(source_id, status, present)` triple per
 /// required source. The outcome is [`RuleOutcome::Satisfied`] only for
 /// sealed evidence with a settled terminal channel and every required
 /// source present and usable; an empty required scope never satisfies.
-/// An unsettled terminal channel yields
-/// [`RuleOutcome::Partial`]; anything else is
-/// [`RuleOutcome::Inconclusive`]. Unknown statuses fail closed.
-/// Callers reach this gate only with caller-verified inputs; the
-/// composed seal-to-verdict path is
-/// [`rule_outcome_with_facts`], which additionally requires sealed
-/// facts from each required source.
-pub fn rule_outcome(
+/// An unsettled terminal channel yields [`RuleOutcome::Partial`];
+/// anything else is [`RuleOutcome::Inconclusive`]. Unknown statuses
+/// fail closed. The gate stays private: no caller can satisfy a rule
+/// from metadata alone, only [`rule_outcome_with_facts`] reports a
+/// verdict, and it additionally requires sealed facts from each
+/// required source.
+fn metadata_gate(
     sealed: bool,
     terminal_status: &str,
     required: &[(&str, &str, bool)],
@@ -114,20 +113,21 @@ pub fn rule_outcome(
 /// Evaluate one rule over sealed evidence with replayed fact coverage.
 ///
 /// `required` carries one `(source_id, status, present)` triple per
-/// required source, as in [`rule_outcome`]; `fact_sources` carries one
-/// `source_id` per fact replayed from the sealed lines. The outcome is
-/// [`RuleOutcome::Satisfied`] only when the metadata gate passes and
-/// every required source contributed at least one fact whose
-/// `source_id` equals it: usable metadata alone never satisfies, and
-/// facts from other catalog sources never satisfy a required source.
-/// Anything weaker keeps the metadata gate's weaker outcome.
+/// required source; `fact_sources` carries one `source_id` per fact
+/// replayed from the sealed lines. This is the only verdict path:
+/// the outcome is [`RuleOutcome::Satisfied`] only when the metadata
+/// gate passes and every required source contributed at least one
+/// fact whose `source_id` equals it. Usable metadata alone never
+/// satisfies, and facts from other catalog sources never satisfy a
+/// required source. Anything weaker keeps the metadata gate's weaker
+/// outcome.
 pub fn rule_outcome_with_facts(
     sealed: bool,
     terminal_status: &str,
     required: &[(&str, &str, bool)],
     fact_sources: &[&str],
 ) -> RuleOutcome {
-    let outcome = rule_outcome(sealed, terminal_status, required);
+    let outcome = metadata_gate(sealed, terminal_status, required);
     if outcome != RuleOutcome::Satisfied {
         return outcome;
     }
@@ -160,32 +160,45 @@ mod tests {
     #[test]
     fn rule_outcomes_fail_closed() {
         let full = [("sharing-census", "available", true)];
-        assert_eq!(rule_outcome(true, COMPLETE, &full), RuleOutcome::Satisfied);
+        let covering = ["sharing-census"];
         assert_eq!(
-            rule_outcome(false, COMPLETE, &full),
+            rule_outcome_with_facts(true, COMPLETE, &full, &covering),
+            RuleOutcome::Satisfied
+        );
+        assert_eq!(
+            rule_outcome_with_facts(false, COMPLETE, &full, &covering),
             RuleOutcome::Inconclusive
         );
-        assert_eq!(rule_outcome(true, PARTIAL, &full), RuleOutcome::Partial);
-        assert_eq!(rule_outcome(true, UNAVAILABLE, &full), RuleOutcome::Partial);
-        assert_eq!(rule_outcome(true, "made_up", &full), RuleOutcome::Partial);
+        assert_eq!(
+            rule_outcome_with_facts(true, PARTIAL, &full, &covering),
+            RuleOutcome::Partial
+        );
+        assert_eq!(
+            rule_outcome_with_facts(true, UNAVAILABLE, &full, &covering),
+            RuleOutcome::Partial
+        );
+        assert_eq!(
+            rule_outcome_with_facts(true, "made_up", &full, &covering),
+            RuleOutcome::Partial
+        );
         let missing = [("sharing-census", "available", false)];
         assert_eq!(
-            rule_outcome(true, COMPLETE, &missing),
+            rule_outcome_with_facts(true, COMPLETE, &missing, &covering),
             RuleOutcome::Inconclusive
         );
         let bad = [("sharing-census", "unavailable", true)];
         assert_eq!(
-            rule_outcome(true, COMPLETE, &bad),
+            rule_outcome_with_facts(true, COMPLETE, &bad, &covering),
             RuleOutcome::Inconclusive
         );
         let unknown = [("sharing-census", "made_up", true)];
         assert_eq!(
-            rule_outcome(true, COMPLETE, &unknown),
+            rule_outcome_with_facts(true, COMPLETE, &unknown, &covering),
             RuleOutcome::Inconclusive
         );
         let empty: [(&str, &str, bool); 0] = [];
         assert_eq!(
-            rule_outcome(true, COMPLETE, &empty),
+            rule_outcome_with_facts(true, COMPLETE, &empty, &covering),
             RuleOutcome::Inconclusive
         );
     }

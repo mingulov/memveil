@@ -200,6 +200,10 @@ pub const SOURCE_REASONS: [&str; 8] = [
 pub const BOUNDARY_TYPES: [&str; 2] = ["revert_boundary", "declared_duration"];
 /// Record quality statuses.
 pub const QUALITY_STATUSES: [&str; 3] = ["complete_for_scope", "partial", "unavailable"];
+/// Frozen envelope measurement labels.
+pub const MEASUREMENTS: [&str; 3] = ["observed", "derived", "estimated"];
+/// Frozen envelope correlation labels.
+pub const CORRELATIONS: [&str; 2] = ["direct", "unpaired"];
 
 fn is_one_of(value: &str, table: &[&str]) -> bool {
     table.contains(&value)
@@ -298,6 +302,16 @@ pub fn is_boundary_type(value: &str) -> bool {
 /// True for a record quality status.
 pub fn is_quality_status(value: &str) -> bool {
     is_one_of(value, &QUALITY_STATUSES)
+}
+
+/// True for a frozen envelope measurement label.
+pub fn is_measurement(value: &str) -> bool {
+    is_one_of(value, &MEASUREMENTS)
+}
+
+/// True for a frozen envelope correlation label.
+pub fn is_correlation(value: &str) -> bool {
+    is_one_of(value, &CORRELATIONS)
 }
 
 /// One record validation failure naming its field.
@@ -1118,6 +1132,14 @@ mod tests {
             assert!(is_quality_status(value));
         }
         assert!(!is_quality_status("complete"));
+        for value in MEASUREMENTS {
+            assert!(is_measurement(value));
+        }
+        assert!(!is_measurement("guess"));
+        for value in CORRELATIONS {
+            assert!(is_correlation(value));
+        }
+        assert!(!is_correlation("guess"));
     }
 
     #[test]

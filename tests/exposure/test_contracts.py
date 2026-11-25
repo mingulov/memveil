@@ -50,6 +50,8 @@ FROZEN_UNITS = ("bytes", "unknown")
 FROZEN_POLICY_RESULT = ("conforms", "deviates_known", "violates",
                         "inconclusive", "unavailable")
 FROZEN_COMPATIBILITY = ("compatible", "incompatible", "unavailable")
+FROZEN_MEASUREMENT = ("observed", "derived", "estimated")
+FROZEN_CORRELATION = ("direct", "unpaired")
 QUALITY_CHANNELS = ("detail", "aggregate", "identity", "baseline",
                     "terminal")
 SESSION_CHANNELS = ("detail", "aggregate", "correlation", "baseline",
@@ -92,9 +94,27 @@ EXPOSURE_FACT_REQUIRED = ("evidence_id", "source_id", "epoch",
                           "semantics", "quality")
 
 
+class DuplicateKeyError(ValueError):
+    """One JSON object repeats a key; the seal path refuses these."""
+
+
+def _unique_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise DuplicateKeyError("duplicate key %r" % key)
+        obj[key] = value
+    return obj
+
+
+def loads_strict(text):
+    """Parse JSON refusing duplicate object keys, like the Rust parser."""
+    return json.loads(text, object_pairs_hook=_unique_object)
+
+
 def load(name):
     with open(os.path.join(FIX, name), encoding="utf-8") as handle:
-        return json.load(handle)
+        return json.load(handle, object_pairs_hook=_unique_object)
 
 
 def check_u64(value, where):
@@ -112,6 +132,7 @@ def check_opaque_id(value, where):
 
 
 def check_quality(quality, where):
+    assert isinstance(quality, dict), "%s must be an object" % where
     assert set(quality.keys()) == set(QUALITY_CHANNELS), \
         "%s channels" % where
     for channel in QUALITY_CHANNELS:
@@ -261,14 +282,14 @@ SOURCE_FIELDS = ("hook", "backend", "profile_id", "measurement",
                  "correlation")
 
 
-def fact_envelope_valid(event):
-    """True when an exposure-fact line keeps its canonical envelope.
+def event_envelope_valid(event):
+    """True when one event envelope keeps its canonical shape.
 
-    Mirrors the Rust normalizer's envelope checks: the seven
-    envelope keys are present with nothing unknown, the version
-    is the exposure contract, the timestamp is a canonical u64,
-    and the source carries its five string leaves. Sequence and
-    session checks stay with the seal loop, as in Rust.
+    The seven envelope keys are present with nothing unknown, the
+    version is the exposure contract, the timestamp is a canonical
+    u64, and the source carries its five string leaves with frozen
+    labels. Sequence and session checks stay with the seal loop,
+    as in Rust; the caller owns kind membership.
     """
     try:
         if not isinstance(event, dict):
@@ -285,9 +306,49 @@ def fact_envelope_valid(event):
             return False
         if set(source.keys()) != set(SOURCE_FIELDS):
             return False
-        for field in SOURCE_FIELDS:
+        for field in ("hook", "backend", "profile_id"):
             if not isinstance(source[field], str):
                 return False
+        if source["measurement"] not in FROZEN_MEASUREMENT:
+            return False
+        if source["correlation"] not in FROZEN_CORRELATION:
+            return False
+    except (AssertionError, KeyError, TypeError):
+        return False
+    return True
+
+
+def fact_envelope_valid(event):
+    """True when an exposure-fact line keeps its canonical envelope.
+
+    Mirrors the Rust normalizer's envelope checks plus the seal
+    path's frozen source labels: the seven envelope keys are
+    present with nothing unknown, the version is the exposure
+    contract, the timestamp is a canonical u64, and the source
+    carries its five string leaves with frozen labels. Sequence
+    and session checks stay with the seal loop, as in Rust.
+    """
+    if not isinstance(event, dict):
+        return False
+    return event.get("kind") == "exposure_fact" \
+        and event_envelope_valid(event)
+
+
+def bounce_payload_valid(data):
+    """True when a bounce-attempt payload keeps its schema shape.
+
+    The payload carries exactly the four schema leaves: two opaque
+    identifiers, a canonical byte count, and a bare flag.
+    """
+    try:
+        if set(data.keys()) != {"device_id", "requested_bytes",
+                                "forced", "operation_id"}:
+            return False
+        check_opaque_id(data["device_id"], "device_id")
+        check_u64(data["requested_bytes"], "requested_bytes")
+        if not isinstance(data["forced"], bool):
+            return False
+        check_opaque_id(data["operation_id"], "operation_id")
     except (AssertionError, KeyError, TypeError):
         return False
     return True
@@ -296,25 +357,36 @@ def fact_envelope_valid(event):
 def non_fact_fields_valid(event):
     """True when a non-fact line keeps its envelope payload shape.
 
-    Every event line carries an object ``data`` payload; a marker's
-    payload holds exactly its bounded ``text`` annotation, mirroring
-    the event schema and the Rust snapshot path.
+    The kind is a legacy seal kind, the envelope keeps its
+    canonical shape with frozen source labels, and the object
+    ``data`` payload carries at least one key. A marker's payload
+    holds exactly its bounded ``text`` annotation and a bounce
+    attempt carries exactly its four schema leaves, mirroring the
+    event schema and the Rust snapshot path.
     """
     try:
         if not isinstance(event, dict):
             return False
+        kind = event.get("kind")
+        if kind == "exposure_fact" or kind not in SEAL_KINDS:
+            return False
+        if not event_envelope_valid(event):
+            return False
         data = event.get("data")
         if not isinstance(data, dict):
             return False
-        if event.get("kind") == "marker":
+        if kind == "marker":
             if set(data.keys()) != {"text"}:
                 return False
             text = data["text"]
             if not isinstance(text, str) or not 1 <= len(text) <= 256:
                 return False
+            return True
+        if kind == "bounce_attempt":
+            return bounce_payload_valid(data)
+        return len(data) > 0
     except (AttributeError, TypeError):
         return False
-    return True
 
 
 def facts_from_lines(snapshot):
@@ -322,10 +394,12 @@ def facts_from_lines(snapshot):
 
     No sidecar supplies policy evidence: every fact comes
     from an ``exposure_fact`` line of the sealed stream.
+    Lines parse strictly, so a duplicated key refuses here
+    as it does at the seal.
     """
     facts = []
     for line in snapshot["event_lines"]:
-        event = json.loads(line)
+        event = loads_strict(line)
         if event["kind"] == "exposure_fact":
             facts.append(event["data"])
     return facts
@@ -339,6 +413,12 @@ def integrity_self_consistent(integrity):
     check_u64(integrity["events_bytes"], "events_bytes")
     lines = check_u64(integrity["line_count"], "line_count")
     kinds = integrity["kinds"]
+    if not isinstance(kinds, dict):
+        raise ValueError("kinds must be an object")
+    for name in SEAL_KINDS:
+        if name == "exposure_fact":
+            continue
+        assert name in kinds, "missing integrity kind %r" % name
     total = 0
     for name, value in sorted(kinds.items()):
         if name not in SEAL_KINDS:
@@ -361,17 +441,20 @@ def integrity_self_consistent(integrity):
 def seal_verified(snapshot):
     """True only when the committed seal matches the literal bytes.
 
-    An absent integrity object verifies false; a present non-object
-    or an unknown integrity field or kind raises, mirroring the Rust
-    snapshot path. A well-formed seal that mismatches the bytes, or
+    An absent integrity object verifies false; a present non-object,
+    a non-object kinds table, or an unknown integrity field or kind
+    raises, mirroring the Rust snapshot path. A well-formed seal that
+    mismatches the bytes, that leaves a census kind uncommitted, or
     whose fact identities break containment, verifies false. Every
-    line ends in a newline, carries its position as its sequence
-    number, and belongs to the snapshot's own session; one entry
-    holds exactly one physical line under the reader's 64 KiB
-    bound. Framing violations raise. A foreign-session line, an
-    exposure fact whose envelope or fields fail validation, or a
-    non-fact line whose payload loses its shape verifies false,
-    like a containment break: none can support a verdict.
+    line parses without duplicated keys, ends in a newline, carries
+    its position as its sequence number, and belongs to the
+    snapshot's own session; one entry holds exactly one physical
+    line under the reader's 64 KiB bound. Framing violations raise.
+    A foreign-session line, a duplicated key, an exposure fact whose
+    envelope, source labels or fields fail validation, or a non-fact
+    line whose envelope, source labels or payload loses its shape
+    verifies false, like a containment break: none can support a
+    verdict.
     """
     expected_session = snapshot["session"].get("session_id")
     for position, line in enumerate(snapshot["event_lines"]):
@@ -381,7 +464,10 @@ def seal_verified(snapshot):
             raise ValueError("line %d holds extra newline" % position)
         if len(line.encode("utf-8")) > SNAPSHOT_MAX_LINE_BYTES:
             raise ValueError("line %d too large" % position)
-        event = json.loads(line)
+        try:
+            event = loads_strict(line)
+        except DuplicateKeyError:
+            return False
         if not isinstance(event, dict):
             return False
         if event.get("seq") != str(position):
@@ -830,6 +916,238 @@ def test_rule_needs_facts_from_each_required_source():
     assert snapshot_verdict(snapshot, ["sharing-census"]) == "inconclusive"
 
 
+def resealed_marker_event(mutator):
+    """The sealed snapshot with the whole marker event mutated.
+
+    Unlike :func:`resealed_marker`, the mutation sees the full
+    envelope, so envelope breaks (a dropped timestamp, a stray
+    source key) can be resealed; only the shape gates can refuse.
+    """
+    snapshot = json.loads(json.dumps(load("sealed_snapshot.json")))
+    lines = snapshot["event_lines"]
+    for index, line in enumerate(lines):
+        event = json.loads(line)
+        if event["kind"] != "marker":
+            continue
+        mutator(event)
+        lines[index] = json.dumps(event, separators=(",", ":")) + "\n"
+    raw = "".join(lines).encode("utf-8")
+    snapshot["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    return snapshot
+
+
+def resealed_bounce(mutator):
+    """The bounce control snapshot with the bounce line mutated.
+
+    The seal is recomputed so only the payload gates can refuse.
+    """
+    snapshot = json.loads(json.dumps(load("sealed_with_bounce.json")))
+    lines = snapshot["event_lines"]
+    for index, line in enumerate(lines):
+        event = json.loads(line)
+        if event["kind"] != "bounce_attempt":
+            continue
+        mutator(event)
+        lines[index] = json.dumps(event, separators=(",", ":")) + "\n"
+    raw = "".join(lines).encode("utf-8")
+    snapshot["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    return snapshot
+
+
+def test_empty_reasons_cannot_verify():
+    def empty_parent(event):
+        event["data"]["parent_operation_id_reason"] = ""
+
+    def empty_object(event):
+        event["data"]["object_token_reason"] = ""
+
+    def empty_native(event):
+        event["data"]["native_result_reason"] = ""
+
+    for mutator, label in ((empty_parent, "parent"),
+                           (empty_object, "object"),
+                           (empty_native, "native")):
+        mutated = resealed_mutation(mutator)
+        assert not seal_verified(mutated), \
+            "empty %s reason must fail the seal" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+    persisted = load("empty_reason.json")
+    assert not seal_verified(persisted), \
+        "persisted empty reason must fail the seal"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "inconclusive"
+    schema = load_schema("event-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        for line in persisted["event_lines"]:
+            jsonschema.validate(json.loads(line), schema)
+
+
+def test_duplicate_event_keys_cannot_verify():
+    persisted = load("duplicate_seq.json")
+    assert not seal_verified(persisted), \
+        "duplicated seq must fail the seal"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "inconclusive"
+    with pytest.raises(DuplicateKeyError):
+        loads_strict(persisted["event_lines"][0])
+    assert loads_strict('{"a":"1"}') == {"a": "1"}
+
+
+def test_incomplete_seal_census_cannot_verify():
+    persisted = load("missing_census_kind.json")
+    assert not seal_verified(persisted), \
+        "missing census kind must fail the seal"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "inconclusive"
+    schema = load_schema("session-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(persisted["session"], schema)
+
+
+def test_null_fact_quality_refused_cleanly():
+    persisted = load("null_fact_quality.json")
+    assert not seal_verified(persisted), \
+        "null fact quality must fail the seal"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "inconclusive"
+    schema = load_schema("event-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        for line in persisted["event_lines"]:
+            jsonschema.validate(json.loads(line), schema)
+
+
+def test_non_fact_lines_keep_their_envelope():
+    persisted = load("marker_missing_ts.json")
+    assert not seal_verified(persisted), \
+        "marker without ts_ns must fail the seal"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "inconclusive"
+    schema = load_schema("event-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        for line in persisted["event_lines"]:
+            jsonschema.validate(json.loads(line), schema)
+
+    def drop_ts(event):
+        del event["ts_ns"]
+
+    def bad_ts(event):
+        event["ts_ns"] = "01"
+
+    def bad_version(event):
+        event["schema_version"] = "0.1.1"
+
+    def drop_source_key(event):
+        del event["source"]["correlation"]
+
+    for mutator, label in ((drop_ts, "timestamp"),
+                           (bad_ts, "timestamp shape"),
+                           (bad_version, "schema version"),
+                           (drop_source_key, "source")):
+        mutated = resealed_marker_event(mutator)
+        assert not seal_verified(mutated), \
+            "marker with malformed %s must fail the seal" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+    control = json.loads(load("sealed_snapshot.json")["event_lines"][2])
+    assert control["kind"] == "marker"
+    assert non_fact_fields_valid(control), "valid marker must verify"
+    control["kind"] = "frobnicate"
+    assert not non_fact_fields_valid(control), \
+        "unknown kind verifies nowhere"
+
+
+def test_bounce_attempt_payload_validated():
+    control = load("sealed_with_bounce.json")
+    assert seal_verified(control), "valid bounce control must verify"
+    assert rule_satisfied(control, ["sharing-census"])
+    assert snapshot_verdict(control, ["sharing-census"]) == "satisfied"
+    persisted = load("empty_bounce.json")
+    assert not seal_verified(persisted), \
+        "empty bounce payload must fail the seal"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "inconclusive"
+    schema = load_schema("event-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        for line in persisted["event_lines"]:
+            jsonschema.validate(json.loads(line), schema)
+
+    def drop_device(event):
+        del event["data"]["device_id"]
+
+    def mistype_forced(event):
+        event["data"]["forced"] = "false"
+
+    def mistype_bytes(event):
+        event["data"]["requested_bytes"] = "01"
+
+    def extra_key(event):
+        event["data"]["extra"] = "nope"
+
+    def empty_data(event):
+        event["data"] = {}
+
+    for mutator, label in ((drop_device, "device"),
+                           (mistype_forced, "forced flag"),
+                           (mistype_bytes, "byte count"),
+                           (extra_key, "extra key"),
+                           (empty_data, "empty payload")):
+        mutated = resealed_bounce(mutator)
+        assert not seal_verified(mutated), \
+            "bounce with malformed %s must fail the seal" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def test_source_labels_come_from_frozen_sets():
+    persisted = load("guess_measurement.json")
+    assert not seal_verified(persisted), \
+        "guessed measurement must fail the seal"
+    assert snapshot_verdict(persisted, ["sharing-census"]) == "inconclusive"
+    schema = load_schema("event-v0.3.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        for line in persisted["event_lines"]:
+            jsonschema.validate(json.loads(line), schema)
+
+    def mislabel(leaf, value):
+        def apply(event):
+            event["source"][leaf] = value
+        return apply
+
+    for leaf, value in (("measurement", "guess"),
+                        ("correlation", "guess"),
+                        ("measurement", ""),
+                        ("correlation", "")):
+        mutated = resealed_mutation(mislabel(leaf, value))
+        assert not seal_verified(mutated), \
+            "fact with %s %r must fail the seal" % (leaf, value)
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+    for leaf in ("measurement", "correlation"):
+        mutated = resealed_marker_event(mislabel(leaf, "guess"))
+        assert not seal_verified(mutated), \
+            "marker with guessed %s must fail the seal" % leaf
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+    for measurement in FROZEN_MEASUREMENT:
+        for correlation in FROZEN_CORRELATION:
+            def apply(event):
+                event["source"]["measurement"] = measurement
+                event["source"]["correlation"] = correlation
+
+            mutated = resealed_mutation(apply)
+            assert seal_verified(mutated), \
+                "frozen labels %r/%r must verify" % (measurement,
+                                                    correlation)
+
+
+def test_persisted_source_scope_needs_matching_facts():
+    snapshot = load("source_scope.json")
+    assert seal_verified(snapshot), \
+        "well-formed foreign facts still seal"
+    assert not rule_satisfied(snapshot, ["sharing-census"]), \
+        "facts from another source never satisfy"
+    assert snapshot_verdict(snapshot, ["sharing-census"]) == "inconclusive"
+
+
 def test_missing_terminal_evidence_is_partial():
     required = ["sharing-census"]
     assert snapshot_verdict(load("sealed_snapshot.json"),
@@ -964,7 +1282,8 @@ def test_all_fixtures_validate_against_schemas():
     policy_schema = load_schema("policy-v0.1.0.schema.json")
     sealed_names = ("sealed_snapshot.json", "duplicate_evidence.json",
                     "cross_epoch_evidence.json", "missing_terminal.json",
-                    "foreign_session.json")
+                    "foreign_session.json", "sealed_with_bounce.json",
+                    "source_scope.json")
     for name in sealed_names:
         snapshot = load(name)
         jsonschema.validate(snapshot["session"], session_schema)
