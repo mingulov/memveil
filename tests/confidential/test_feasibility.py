@@ -5,8 +5,9 @@
 Checks the sibling ``feasibility.json`` against the frozen exposure
 catalog: exact per-source/per-cell coverage, catalog vocabulary,
 per-row evidence contracts, verdict/reason consistency, and the
-no-claims guard. The guard rejects any platform milestone id and any
-non-negated admission wording anywhere in the matrix.
+no-claims guard. The guard rejects any platform milestone id, any
+non-negated admission wording anywhere in the matrix, and any PASS
+proof state in the row proof columns or the top-level proof_status.
 
 Runs two ways: ``python3 -m pytest test_feasibility.py`` for the
 regression suite, or ``python3 test_feasibility.py [matrix catalog]``
@@ -128,6 +129,11 @@ def validate(matrix_path, catalog_path):
                                   % (label, column, value))
             elif not value:
                 errors.append("%s: empty %s" % (label, column))
+        for column in ("verifier_acceptance", "real_semantics"):
+            value = row.get(column)
+            if isinstance(value, str) and value.strip().lower() == "pass":
+                errors.append("%s: %s claims PASS without proof"
+                              % (label, column))
         evidence = row.get("evidence")
         if not evidence:
             errors.append("%s: empty evidence" % label)
@@ -159,6 +165,13 @@ def validate(matrix_path, catalog_path):
         if extra:
             errors.append("unexpected %d row(s), first %s/%s"
                           % (len(extra), extra[0][0], extra[0][1]))
+
+    proof_status = matrix.get("proof_status")
+    if isinstance(proof_status, dict):
+        for key, value in proof_status.items():
+            if isinstance(value, str) and value.strip().lower() == "pass":
+                errors.append("proof_status %r claims PASS without proof"
+                              % (key,))
 
     blob = json.dumps(matrix, sort_keys=True).lower()
     for milestone in MILESTONE_IDS:
@@ -245,6 +258,31 @@ def check_reason_red(tmpdir):
     assert any("needs reason" in error for error in errors), errors
 
 
+def check_proof_columns_red(tmpdir):
+    def plant(matrix):
+        matrix["rows"][0].update(verifier_acceptance="PASS",
+                                 real_semantics="PASS")
+    path = _mutated(tmpdir, "mut-proof-cols.json", plant)
+    errors = validate(path, CATALOG_PATH)
+    assert any("claims PASS" in error for error in errors), errors
+
+
+def check_proof_single_column_red(tmpdir, column):
+    def plant(matrix):
+        matrix["rows"][0][column] = "PASS"
+    path = _mutated(tmpdir, "mut-%s.json" % column, plant)
+    errors = validate(path, CATALOG_PATH)
+    assert any("claims PASS" in error for error in errors), errors
+
+
+def check_proof_status_red(tmpdir):
+    def plant(matrix):
+        matrix["proof_status"] = dict.fromkeys(matrix["proof_status"], "PASS")
+    path = _mutated(tmpdir, "mut-proof-status.json", plant)
+    errors = validate(path, CATALOG_PATH)
+    assert any("proof_status" in error for error in errors), errors
+
+
 def run_self_checks():
     failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -257,6 +295,13 @@ def run_self_checks():
             ("negation-ok", lambda: check_negation_ok(tmpdir)),
             ("coverage-red", lambda: check_coverage_red(tmpdir)),
             ("reason-red", lambda: check_reason_red(tmpdir)),
+            ("proof-columns-red",
+             lambda: check_proof_columns_red(tmpdir)),
+            ("proof-each-column-red",
+             lambda: [check_proof_single_column_red(tmpdir, column)
+                      for column in ("verifier_acceptance",
+                                     "real_semantics")]),
+            ("proof-status-red", lambda: check_proof_status_red(tmpdir)),
         ]
         for label, scenario in scenarios:
             try:
@@ -312,6 +357,19 @@ def test_dropped_row_breaks_coverage(tmp_path):
 
 def test_verdict_reason_mismatch_rejected(tmp_path):
     check_reason_red(str(tmp_path))
+
+
+def test_proof_columns_reject_pass(tmp_path):
+    check_proof_columns_red(str(tmp_path))
+
+
+@_parametrize("column", ["verifier_acceptance", "real_semantics"])
+def test_each_proof_column_rejects_pass(tmp_path, column):
+    check_proof_single_column_red(str(tmp_path), column)
+
+
+def test_proof_status_rejects_pass(tmp_path):
+    check_proof_status_red(str(tmp_path))
 
 
 if __name__ == "__main__":

@@ -194,7 +194,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
         {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
-        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_map_phys/dma_alloc/dma_alloc_pages/dma_free/dma_free_pages coherent-DMA tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_alloc/dma_free coherent alloc/free, dma_alloc_pages/dma_free_pages non-coherent page alloc/free, and dma_map_phys physical-mapping tracepoints"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "coherent memory is not synonymous with host-shared; path admission per operation"],
@@ -213,7 +213,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
         {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
-        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_map_phys/dma_alloc/dma_alloc_pages/dma_free/dma_free_pages coherent-DMA tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_alloc/dma_free coherent alloc/free, dma_alloc_pages/dma_free_pages non-coherent page alloc/free, and dma_map_phys physical-mapping tracepoints"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "SNP evidence never qualifies TDX"],
@@ -232,7 +232,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
         {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
-        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_map_phys/dma_alloc/dma_alloc_pages/dma_free/dma_free_pages coherent-DMA tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_alloc/dma_free coherent alloc/free, dma_alloc_pages/dma_free_pages non-coherent page alloc/free, and dma_map_phys physical-mapping tracepoints"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "VMBus-backed devices need the vmbus-channels source alongside"],
