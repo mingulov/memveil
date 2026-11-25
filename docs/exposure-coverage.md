@@ -105,6 +105,17 @@ carries its typed reason and no numeric delta, and one
 refused metric never hides the comparable unaffected
 metrics beside it.
 
+Before any row runs, both captures validate; an invalid
+input refuses the whole comparison with no rows and no
+repaired or guessed result. The left capture validates
+first, then the right; within a capture, in order:
+
+| Order | Reason | Meaning |
+| --- | --- | --- |
+| V1 | `duplicate-metric` | A metric id repeats on one side |
+| V2 | `invalid-window` | The window ends before it starts |
+| V3 | `invalid-value` | A known value carries a reason, or an unknown value lacks one |
+
 Checks run in order; the first failure names the reason:
 
 | Order | Reason | Meaning |

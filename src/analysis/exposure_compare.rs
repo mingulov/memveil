@@ -14,7 +14,9 @@
 //! journal events can never be netted into baseline state.
 //! Captures admitted under different semantic profiles
 //! refuse on every metric; profile equality is a check,
-//! not a caller precondition.
+//! not a caller precondition. Malformed captures refuse
+//! the whole comparison with [`InputRefusal`] before any
+//! row runs, so there is never a repaired or guessed row.
 
 use std::collections::BTreeMap;
 
@@ -95,6 +97,14 @@ impl Quality {
     }
 }
 
+/// Whole-input refusal: the captures cannot be compared
+/// at all, so no rows are produced. Callers map this to a
+/// rejected-input exit with no repaired or guessed result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputRefusal {
+    pub reason: String,
+}
+
 /// One compared metric: compatibility verdict plus, only for
 /// compatible metrics, an exact delta.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +155,11 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 
 /// Compare every metric unioned from both captures.
 ///
+/// Both captures validate first: the left capture, then the
+/// right, each for a repeated metric id, a backward window,
+/// then value/reason pairing. An invalid input refuses the
+/// whole comparison with [`InputRefusal`] and no rows.
+///
 /// Row order is stable: left-capture order first, then metrics
 /// seen only on the right. The first failing compatibility
 /// check names the reason, in this order: metric presence,
@@ -152,16 +167,44 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 /// workload, per-side source, source meaning availability,
 /// source meaning, clock domain, window, census completeness,
 /// then value availability for the delta itself.
-pub fn compare_captures(left: &Capture, right: &Capture) -> Vec<Comparison> {
+pub fn compare_captures(left: &Capture, right: &Capture) -> Result<Vec<Comparison>, InputRefusal> {
+    validate_capture(left)?;
+    validate_capture(right)?;
     let mut ids: Vec<&str> = Vec::new();
     for metric in left.metrics.iter().chain(right.metrics.iter()) {
         if !ids.contains(&metric.metric_id.as_str()) {
             ids.push(metric.metric_id.as_str());
         }
     }
-    ids.into_iter()
+    Ok(ids
+        .into_iter()
         .map(|id| compare_metric(left, right, id))
-        .collect()
+        .collect())
+}
+
+fn refuse_input(reason: &str) -> InputRefusal {
+    InputRefusal {
+        reason: reason.to_string(),
+    }
+}
+
+fn validate_capture(capture: &Capture) -> Result<(), InputRefusal> {
+    let mut seen: Vec<&str> = Vec::new();
+    for metric in capture.metrics.iter() {
+        if seen.contains(&metric.metric_id.as_str()) {
+            return Err(refuse_input("duplicate-metric"));
+        }
+        seen.push(metric.metric_id.as_str());
+    }
+    if capture.window_start > capture.window_end {
+        return Err(refuse_input("invalid-window"));
+    }
+    for metric in capture.metrics.iter() {
+        if metric.value.is_some() == metric.value_reason.is_some() {
+            return Err(refuse_input("invalid-value"));
+        }
+    }
+    Ok(())
 }
 
 fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Comparison {

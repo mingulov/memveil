@@ -187,7 +187,7 @@ fn workload_change_refuses_all_metrics() {
     right.evidence_id = "cap-right-001".to_string();
     right.workload = "io-batch".to_string();
     right.metrics[0].value = Some(12288);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -241,7 +241,7 @@ fn epoch_reset_refuses_all_metrics() {
     right.evidence_id = "cap-right-002".to_string();
     right.epoch = 42;
     right.metrics[0].value = Some(8192);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![refused_row(
@@ -284,7 +284,7 @@ fn device_binding_change_refuses_all_metrics() {
     right.evidence_id = "cap-right-003".to_string();
     right.platform_cell = "tdx-guest-02".to_string();
     right.metrics[0].value = Some(8192);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![refused_row(
@@ -341,7 +341,7 @@ fn meaning_change_refuses_only_its_source() {
         .insert("census-direct-map".to_string(), "meaning-2".to_string());
     right.metrics[0].value = Some(8192);
     right.metrics[1].value = Some(6);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -395,7 +395,7 @@ fn unequal_window_refuses_all_metrics() {
     right.evidence_id = "cap-right-005".to_string();
     right.window_end = 3000;
     right.metrics[0].value = Some(12288);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![refused_row(
@@ -438,7 +438,7 @@ fn clock_change_refuses_all_metrics() {
     right.evidence_id = "cap-right-006".to_string();
     right.clock_domain = "guest_boottime_elapsed".to_string();
     right.metrics[0].value = Some(8192);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![refused_row(
@@ -494,7 +494,7 @@ fn partial_census_keeps_unaffected_metrics() {
     right.metrics[0].census_derived = true;
     right.metrics[0].value = Some(12288);
     right.metrics[1].value = Some(5);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -548,7 +548,7 @@ fn legacy_side_refuses_all_metrics() {
     right.evidence_id = "cap-right-008".to_string();
     right.legacy = false;
     right.metrics[0].value = Some(8192);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![refused_row(
@@ -612,7 +612,7 @@ fn equal_captures_yield_exact_deltas() {
     right.metrics[0].value = Some(18446744073709551100);
     right.metrics[1].value = Some(5);
     right.metrics[2].value_reason = Some("source-unavailable".to_string());
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -711,7 +711,7 @@ fn missing_unit_and_scope_shapes_refuse() {
             m.scope = "guest-driver-virtio".to_string();
         }
     }
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -781,7 +781,7 @@ fn overflowing_delta_stays_compatible_without_value() {
     let mut right = left.clone();
     right.evidence_id = "cap-right-011".to_string();
     right.metrics[0].value = Some(u64::MAX);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![compatible_row(
@@ -836,7 +836,7 @@ fn profile_change_refuses_all_metrics() {
     right.profile_id = "linux-x86_64-7.0-hardened".to_string();
     right.metrics[0].value = Some(12288);
     right.metrics[1].value = Some(5);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -901,7 +901,7 @@ fn source_divergence_refuses_only_its_metric() {
     right.evidence_id = "cap-right-014".to_string();
     right.metrics[0].source_id = "queue-ledger".to_string();
     right.metrics[1].value = Some(6);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -965,7 +965,7 @@ fn unknown_meaning_on_both_sides_refuses() {
     let mut right = left.clone();
     right.evidence_id = "cap-right-015".to_string();
     right.metrics[1].value = Some(6);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(
         rows,
         vec![
@@ -989,6 +989,313 @@ fn unknown_meaning_on_both_sides_refuses() {
             ),
         ]
     );
+}
+
+// case: duplicate-metric
+#[test]
+fn repeated_metric_id_refuses_input() {
+    let left = capture(
+        "cap-left-017",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(1),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+            metric(
+                "shared-bytes",
+                Some(1000),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+        ],
+    );
+    let right = capture(
+        "cap-right-017",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(9),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "duplicate-metric");
+}
+
+// case: invalid-window
+#[test]
+fn backward_window_refuses_input() {
+    let left = capture(
+        "cap-left-018",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        3000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(1),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let right = capture(
+        "cap-right-018",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(9),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-window");
+}
+
+// case: invalid-value
+#[test]
+fn unknown_value_without_reason_refuses_input() {
+    let left = capture(
+        "cap-left-019",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            None,
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let right = capture(
+        "cap-right-019",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(9),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-value");
+}
+
+#[test]
+fn known_value_with_reason_refuses_input() {
+    let left = capture(
+        "cap-left-020",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(1),
+            Some("source-unavailable"),
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-020".to_string();
+    right.metrics[0].value_reason = None;
+    right.metrics[0].value = Some(9);
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-value");
+}
+
+#[test]
+fn input_validation_order_is_documented() {
+    // A repeated id beats a backward window on the same
+    // capture, and the left capture validates first.
+    let both_bad = capture(
+        "cap-left-021",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        3000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(1),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+            metric(
+                "shared-bytes",
+                Some(2),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+        ],
+    );
+    let clean = capture(
+        "cap-right-021",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(9),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let refusal = compare_captures(&both_bad, &clean).unwrap_err();
+    assert_eq!(refusal.reason, "duplicate-metric");
+    // The left capture validates first even when the right
+    // side fails an earlier within-capture check.
+    let left_value_bad = capture(
+        "cap-left-022",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            None,
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            false,
+        )],
+    );
+    let right_dup = capture(
+        "cap-right-022",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(9),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+            metric(
+                "shared-bytes",
+                Some(10),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+        ],
+    );
+    let refusal = compare_captures(&left_value_bad, &right_dup).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-value");
 }
 
 #[test]
@@ -1021,7 +1328,7 @@ fn predicate_order_is_deterministic() {
     right.epoch = 42;
     right.workload = "io-batch".to_string();
     right.metrics[0].value = Some(2);
-    let rows = compare_captures(&left, &right);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].compatibility, "incompatible");
     assert_eq!(rows[0].reason, "epoch-mismatch");

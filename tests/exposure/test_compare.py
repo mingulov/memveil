@@ -14,8 +14,8 @@ Covered families: equal-profile/different-workload,
 different-epoch/device binding, source meaning change,
 unequal window/clock, partial census, legacy input, plus
 profile mismatch, per-side source mismatch, unknown
-source meaning, a fully compatible golden and
-metric-shape edges.
+source meaning, refused invalid inputs, a fully
+compatible golden and metric-shape edges.
 """
 
 import json
@@ -68,6 +68,11 @@ FAMILIES = {
     "metric shape": [
         "metric_shape.json",
     ],
+    "invalid input": [
+        "duplicate_metric.json",
+        "invalid_window.json",
+        "invalid_value.json",
+    ],
 }
 
 # Reason codes the compatibility table documents. The word
@@ -92,6 +97,9 @@ REASONS = (
     "partial-census",
     "value-unknown",
     "delta-overflow",
+    "duplicate-metric",
+    "invalid-window",
+    "invalid-value",
 )
 
 # Conclusion language that must never appear: a smaller
@@ -120,6 +128,29 @@ def metric_by_id(capture, metric_id):
     for metric in capture["metrics"]:
         if metric["metric_id"] == metric_id:
             return metric
+    return None
+
+
+def validate_capture(capture):
+    """Independent input validation over one capture.
+
+    Order within a capture: repeated metric id, backward
+    window, then value/reason pairing. Returns the refusal
+    reason, or None when the capture validates. Callers
+    validate the left capture before the right.
+    """
+    seen = set()
+    for metric in capture["metrics"]:
+        if metric["metric_id"] in seen:
+            return "duplicate-metric"
+        seen.add(metric["metric_id"])
+    if (int(capture["window"]["start"])
+            > int(capture["window"]["end"])):
+        return "invalid-window"
+    for metric in capture["metrics"]:
+        if ((metric["value"] is not None)
+                == (metric.get("value_reason") is not None)):
+            return "invalid-value"
     return None
 
 
@@ -213,6 +244,19 @@ def test_fixture_expectations_match_oracle():
         fixture = load_fixture(name)
         left = fixture["left"]
         right = fixture["right"]
+        if "refused" in fixture:
+            refusal = (validate_capture(left)
+                       or validate_capture(right))
+            assert refusal == fixture["refused"], \
+                "%s: want refusal %s got %r" % (
+                    name, fixture["refused"], refusal)
+            assert "expected" not in fixture, \
+                "%s: refused input carries rows" % name
+            continue
+        assert validate_capture(left) is None, \
+            "%s: left capture invalid" % name
+        assert validate_capture(right) is None, \
+            "%s: right capture invalid" % name
         seen = set()
         for row in fixture["expected"]:
             metric_id = row["metric_id"]
@@ -265,7 +309,10 @@ def test_fixture_expectations_match_oracle():
 
 def test_incompatible_rows_carry_no_numeric_delta():
     for name in all_fixtures():
-        for row in load_fixture(name)["expected"]:
+        fixture = load_fixture(name)
+        if "refused" in fixture:
+            continue
+        for row in fixture["expected"]:
             if row["compatibility"] in ("incompatible", "unavailable"):
                 assert "delta" not in row, \
                     "%s/%s: numeric delta on %s" % (
@@ -281,7 +328,10 @@ def test_expected_rows_match_catalog_fields():
               catalog["records"]["ComparisonResult"]["fields"]}
     fields |= {"delta_reason"}
     for name in all_fixtures():
-        for row in load_fixture(name)["expected"]:
+        fixture = load_fixture(name)
+        if "refused" in fixture:
+            continue
+        for row in fixture["expected"]:
             assert set(row) <= fields, \
                 "%s/%s: unknown fields %s" % (
                     name, row["metric_id"],
@@ -295,6 +345,8 @@ def test_expected_rows_match_catalog_fields():
 def test_journal_events_are_never_netted():
     for name in all_fixtures():
         fixture = load_fixture(name)
+        if "refused" in fixture:
+            continue
         journals = []
         for side in ("left", "right"):
             journals.extend(
