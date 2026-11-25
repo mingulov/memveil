@@ -1,0 +1,17 @@
+{
+  "policy": "ok-boundary.policy.json",
+  "input": "input-boundary-ok.input.json",
+  "results": [
+    {
+      "rule_id": "queues-released",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "conforms",
+      "evidence_ids": [],
+      "missing_sources": [],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'queues-released': 1 objects reach 'released'; next: re-evaluate on the next capture"
+    }
+  ],
+  "strict_exit": 0
+}

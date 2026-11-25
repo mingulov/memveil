@@ -1,0 +1,10 @@
+{
+  "scope_id": "virtio-queue-lifetimes",
+  "capture_id": "cap-1",
+  "finalized": true,
+  "available_sources": ["dma-virtio-paths"],
+  "facts": [],
+  "objects": [
+    {"object_token": "tok-1", "generation": "1", "capture_id": "cap-1", "object_class": "queue", "origin_source": "dma-virtio-paths", "lifecycle_status": "released"}
+  ]
+}

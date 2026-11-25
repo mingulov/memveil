@@ -1,0 +1,17 @@
+{
+  "policy": "ok-closed.policy.json",
+  "input": "input-inconclusive-peer.input.json",
+  "results": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "inconclusive",
+      "evidence_ids": ["ev-2"],
+      "missing_sources": [],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'no-unexpected-queue': cannot resolve: unknown peer_class 'future-peer' (evidence [ev-2]); next: re-run with complete observation or narrow the rule to frozen labels"
+    }
+  ],
+  "strict_exit": 4
+}

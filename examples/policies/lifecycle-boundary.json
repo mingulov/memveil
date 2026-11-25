@@ -1,0 +1,22 @@
+{
+  "schema": "policy",
+  "schema_version": "0.1.0",
+  "policy_id": "lifecycle-boundary-example",
+  "subject_scope": "virtio-queue-lifetimes",
+  "applies_to": {"platform": "ordinary-linux", "profile": "synthetic-offline"},
+  "required_sources": ["dma-virtio-paths"],
+  "clock": "guest_monotonic_active",
+  "role_bindings": {},
+  "rules": [
+    {
+      "rule_id": "queues-released",
+      "selector": {"object_class": "queue", "source_id": "dma-virtio-paths"},
+      "permitted": "allowlisted-only",
+      "limit": {"window": "capture", "max": "0"},
+      "obligation": {"status": "released"}
+    }
+  ],
+  "exceptions": [],
+  "prerequisites": {"platform_cell": "ordinary-linux", "workload": "synthetic offline bundle with queue lifetime records"},
+  "expected_findings": ["A queue still live at a finalized capture is a violation.", "Released queues conform.", "An unfinalized capture is inconclusive, never teardown."]
+}

@@ -1,0 +1,12 @@
+{
+  "scope_id": "virtio-queue-lifetimes",
+  "capture_id": "cap-1",
+  "finalized": true,
+  "available_sources": ["dma-virtio-paths"],
+  "facts": [
+    {"evidence_id": "ev-1", "capture_id": "cap-1", "source_id": "dma-virtio-paths", "capability": "dma-paths", "semantics": "request", "peer_class": "host-device", "clock_domain": "guest_monotonic_active"},
+    {"evidence_id": "ev-2", "capture_id": "cap-1", "source_id": "dma-virtio-paths", "capability": "dma-paths", "semantics": "request", "peer_class": "host-device", "clock_domain": "guest_monotonic_active"},
+    {"evidence_id": "ev-3", "capture_id": "cap-1", "source_id": "dma-virtio-paths", "capability": "dma-paths", "semantics": "request", "peer_class": "host-device", "clock_domain": "guest_monotonic_active"}
+  ],
+  "objects": []
+}

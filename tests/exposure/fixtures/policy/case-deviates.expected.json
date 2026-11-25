@@ -1,0 +1,17 @@
+{
+  "policy": "ok-closed.policy.json",
+  "input": "input-deviates.input.json",
+  "results": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "deviates_known",
+      "evidence_ids": ["ev-1"],
+      "missing_sources": [],
+      "exceptions_applied": ["no-unexpected-queue:admitted-device-path"],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'no-unexpected-queue': 1 covered operations under exceptions [no-unexpected-queue:admitted-device-path]; next: confirm the exceptions still reflect the authored allowlist"
+    }
+  ],
+  "strict_exit": 0
+}

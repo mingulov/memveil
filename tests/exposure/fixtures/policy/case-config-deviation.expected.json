@@ -1,0 +1,17 @@
+{
+  "policy": "ok-config.policy.json",
+  "input": "input-config-deviation.input.json",
+  "results": [
+    {
+      "rule_id": "no-unexpected-config",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "violates",
+      "evidence_ids": ["ev-cfg-1"],
+      "missing_sources": [],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'no-unexpected-config': 1 unexpected operations exceed max 0 (evidence [ev-cfg-1]); next: compare the listed evidence against the authored allowlist"
+    }
+  ],
+  "strict_exit": 5
+}

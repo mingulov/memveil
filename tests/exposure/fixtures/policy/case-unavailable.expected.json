@@ -1,0 +1,17 @@
+{
+  "policy": "ok-closed.policy.json",
+  "input": "input-unavailable.input.json",
+  "results": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "unavailable",
+      "evidence_ids": [],
+      "missing_sources": ["dma-virtio-paths"],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'no-unexpected-queue': required sources absent: [dma-virtio-paths]; next: re-run with the required collection admitted"
+    }
+  ],
+  "strict_exit": 4
+}

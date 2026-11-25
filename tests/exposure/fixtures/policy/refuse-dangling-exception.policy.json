@@ -1,0 +1,22 @@
+{
+  "schema": "policy",
+  "schema_version": "0.1.0",
+  "policy_id": "dangling-exc",
+  "subject_scope": "virtio-queue-lifetimes",
+  "applies_to": {"platform": "ordinary-linux", "profile": "synthetic-offline"},
+  "required_sources": ["dma-virtio-paths"],
+  "clock": "guest_monotonic_active",
+  "role_bindings": {},
+  "rules": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "selector": {"source_id": "dma-virtio-paths", "semantics": "request"},
+      "permitted": "allowlisted-only",
+      "limit": {"window": "capture", "max": "0"},
+      "obligation": null
+    }
+  ],
+  "exceptions": [
+    {"exception_id": "dangling", "rule_id": "no-such-rule", "field": "peer_class", "values": ["host-device"], "reason": "names a missing rule"}
+  ]
+}

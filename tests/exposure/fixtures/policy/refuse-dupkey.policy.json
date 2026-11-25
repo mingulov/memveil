@@ -1,0 +1,21 @@
+{
+  "schema": "policy",
+  "schema_version": "0.1.0",
+  "policy_id": "closed-scope",
+  "policy_id": "duplicate-key",
+  "subject_scope": "virtio-queue-lifetimes",
+  "applies_to": {"platform": "ordinary-linux", "profile": "synthetic-offline"},
+  "required_sources": ["dma-virtio-paths"],
+  "clock": "guest_monotonic_active",
+  "role_bindings": {},
+  "rules": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "selector": {"source_id": "dma-virtio-paths", "semantics": "request"},
+      "permitted": "allowlisted-only",
+      "limit": {"window": "capture", "max": "0"},
+      "obligation": null
+    }
+  ],
+  "exceptions": []
+}

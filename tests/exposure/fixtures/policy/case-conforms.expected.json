@@ -1,0 +1,17 @@
+{
+  "policy": "ok-closed.policy.json",
+  "input": "input-conforms.input.json",
+  "results": [
+    {
+      "rule_id": "no-unexpected-queue",
+      "scope_id": "virtio-queue-lifetimes",
+      "result": "conforms",
+      "evidence_ids": [],
+      "missing_sources": [],
+      "exceptions_applied": [],
+      "clock_domain": "guest_monotonic_active",
+      "reason": "rule 'no-unexpected-queue': 0 of 0 records matched, none unexpected; next: re-evaluate on the next capture"
+    }
+  ],
+  "strict_exit": 0
+}

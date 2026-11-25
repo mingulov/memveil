@@ -1,0 +1,22 @@
+{
+  "schema": "policy",
+  "schema_version": "0.1.0",
+  "policy_id": "config-deviation-example",
+  "subject_scope": "virtio-queue-lifetimes",
+  "applies_to": {"platform": "ordinary-linux", "profile": "synthetic-offline"},
+  "required_sources": ["egress-controls"],
+  "clock": "guest_monotonic_active",
+  "role_bindings": {},
+  "rules": [
+    {
+      "rule_id": "no-unexpected-config",
+      "selector": {"source_id": "egress-controls", "semantics": "state"},
+      "permitted": "allowlisted-only",
+      "limit": {"window": "capture", "max": "0"},
+      "obligation": null
+    }
+  ],
+  "exceptions": [],
+  "prerequisites": {"platform_cell": "ordinary-linux", "workload": "synthetic offline bundle with configuration state records"},
+  "expected_findings": ["A configuration state record outside the authored constraints is a violation.", "The constraints are authored independently and never widen from observation."]
+}
