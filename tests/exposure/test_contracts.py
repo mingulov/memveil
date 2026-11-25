@@ -465,6 +465,60 @@ def test_comparison_delta_follows_compatibility():
     check(bad_absent, False)
 
 
+POLICY_MAX_BYTES = 1048576
+POLICY_MAX_RULES = 1024
+POLICY_MAX_EXCEPTIONS_PER_RULE = 64
+
+
+def check_policy_bounds(policy, raw):
+    """Enforce the published policy-file bounds on bytes and counts.
+
+    Shapes stay with the schema; the loader refuses oversize files,
+    an empty or overfull rule list, and any rule carrying more than
+    64 exceptions.
+    """
+    if len(raw) > POLICY_MAX_BYTES:
+        raise ValueError("policy file exceeds 1 MiB")
+    rules = policy["rules"]
+    if not 1 <= len(rules) <= POLICY_MAX_RULES:
+        raise ValueError("rule count out of bounds")
+    if not policy["required_sources"]:
+        raise ValueError("required sources must not be empty")
+    per_rule = {}
+    for entry in policy["exceptions"]:
+        handle = entry["rule_id"]
+        per_rule[handle] = per_rule.get(handle, 0) + 1
+    for handle in sorted(per_rule):
+        if per_rule[handle] > POLICY_MAX_EXCEPTIONS_PER_RULE:
+            raise ValueError("rule %r exceeds 64 exceptions" % handle)
+    return (len(rules), len(policy["exceptions"]))
+
+
+def test_policy_bounds_enforced():
+    with open(os.path.join(FIX, "policy_valid.json"), "rb") as handle:
+        raw = handle.read()
+    policy = json.loads(raw.decode("utf-8"))
+    assert check_policy_bounds(policy, raw) == (1, 0)
+    with pytest.raises(ValueError):
+        check_policy_bounds(policy, b"x" * (POLICY_MAX_BYTES + 1))
+    empty = json.loads(json.dumps(policy))
+    empty["rules"] = []
+    with pytest.raises(ValueError):
+        check_policy_bounds(empty, b"{}")
+    flood = json.loads(json.dumps(policy))
+    flood["exceptions"] = [{"rule_id": "r", "constraint": "c",
+                            "reason": "w"} for _ in range(65)]
+    with pytest.raises(ValueError):
+        check_policy_bounds(flood, b"{}")
+    capped = json.loads(json.dumps(policy))
+    capped["exceptions"] = [{"rule_id": "r", "constraint": "c",
+                             "reason": "w"} for _ in range(64)]
+    assert check_policy_bounds(capped, b"{}") == (1, 64)
+    schema = load_schema("policy-v0.1.0.schema.json")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(empty, schema)
+
+
 def test_report_records_shape():
     report = load("report_valid.json")
     assert report["schema_version"] == "0.3.0"

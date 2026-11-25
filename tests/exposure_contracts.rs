@@ -16,7 +16,8 @@ mod exposure_records;
 mod exposure_quality;
 
 use exposure::{
-    BaselineSample, ComparisonResult, CoverageSource, ExposureFact, ExposureObject, PolicyResult,
+    BaselineSample, ComparisonResult, CoverageSource, ExposureFact, ExposureObject,
+    POLICY_MAX_BYTES, POLICY_MAX_EXCEPTIONS_PER_RULE, POLICY_MAX_RULES, PolicyResult,
     is_exposure_version,
 };
 use exposure_quality::RuleOutcome;
@@ -249,6 +250,23 @@ fn tampered_bytes_fail_the_seal() {
     assert_ne!(tampered, SEALED);
     let report = verify_sealed_snapshot(&tampered).expect("tampered parses");
     assert!(!report.verified, "edited bytes must fail the seal");
+}
+
+#[test]
+fn policy_file_bounds_match_published_limits() {
+    assert_eq!(
+        exposure_records::POLICY_FILE_MAX_BYTES,
+        POLICY_MAX_BYTES
+    );
+    assert_eq!(exposure_records::POLICY_FILE_MAX_RULES, POLICY_MAX_RULES);
+    assert_eq!(
+        exposure_records::POLICY_FILE_MAX_EXCEPTIONS_PER_RULE,
+        POLICY_MAX_EXCEPTIONS_PER_RULE
+    );
+    let policy = include_str!("exposure/fixtures/contracts/policy_valid.json");
+    let summary = exposure_records::parse_policy_file(policy).unwrap();
+    assert_eq!(summary.rules, 1);
+    assert_eq!(summary.exceptions, 0);
 }
 
 #[test]

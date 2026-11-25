@@ -1472,6 +1472,90 @@ pub fn snapshot_terminal_status(text: &str) -> Result<String, SealError> {
     Ok(status.clone())
 }
 
+/// Policy file size cap in bytes.
+///
+/// Mirrors the published policy limits; the integration test pins
+/// these values against the owning record definitions.
+pub const POLICY_FILE_MAX_BYTES: usize = 1_048_576;
+/// Rules per policy file.
+pub const POLICY_FILE_MAX_RULES: usize = 1024;
+/// Exceptions per rule.
+pub const POLICY_FILE_MAX_EXCEPTIONS_PER_RULE: usize = 64;
+
+/// One loaded policy file's bounded counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicySummary {
+    /// Rules carried by the file.
+    pub rules: usize,
+    /// Exceptions carried by the file.
+    pub exceptions: usize,
+}
+
+/// Load one authored policy file's bytes and enforce its bounds.
+///
+/// The size cap is checked before parsing. Rules number 1 through
+/// 1024, required sources are never empty, and no rule carries more
+/// than 64 exceptions. Shapes stay with the policy schema; only the
+/// counts and the byte budget are enforced here.
+pub fn parse_policy_file(text: &str) -> Result<PolicySummary, RecordError> {
+    if text.len() > POLICY_FILE_MAX_BYTES {
+        return Err(RecordError::new("policy", "too large"));
+    }
+    let value = parse_value(text)?;
+    let JsonValue::Object(top) = &value else {
+        return Err(RecordError::new("policy", "expected object"));
+    };
+    let Some(JsonValue::Str(schema)) = find_field(top, "schema") else {
+        return Err(RecordError::new("schema", "expected string"));
+    };
+    if schema != "policy" {
+        return Err(RecordError::new("schema", "unsupported file"));
+    }
+    let Some(JsonValue::Str(version)) = find_field(top, "schema_version") else {
+        return Err(RecordError::new("schema_version", "expected string"));
+    };
+    if version != "0.1.0" {
+        return Err(RecordError::new("schema_version", "unsupported version"));
+    }
+    let Some(JsonValue::Array(sources)) = find_field(top, "required_sources") else {
+        return Err(RecordError::new("required_sources", "expected array"));
+    };
+    if sources.is_empty() {
+        return Err(RecordError::new("required_sources", "empty scope"));
+    }
+    let Some(JsonValue::Array(rules)) = find_field(top, "rules") else {
+        return Err(RecordError::new("rules", "expected array"));
+    };
+    if rules.is_empty() || rules.len() > POLICY_FILE_MAX_RULES {
+        return Err(RecordError::new("rules", "rule count out of bounds"));
+    }
+    let Some(JsonValue::Array(exceptions)) = find_field(top, "exceptions") else {
+        return Err(RecordError::new("exceptions", "expected array"));
+    };
+    let mut per_rule: Vec<(&str, usize)> = Vec::new();
+    for entry in exceptions {
+        let JsonValue::Object(fields) = entry else {
+            return Err(RecordError::new("exceptions", "expected object entries"));
+        };
+        let Some(JsonValue::Str(handle)) = find_field(fields, "rule_id") else {
+            return Err(RecordError::new("exceptions", "expected rule handle"));
+        };
+        match per_rule.iter_mut().find(|(seen, _)| *seen == handle) {
+            Some((_, count)) => *count += 1,
+            None => per_rule.push((handle, 1)),
+        }
+    }
+    for (_, count) in &per_rule {
+        if *count > POLICY_FILE_MAX_EXCEPTIONS_PER_RULE {
+            return Err(RecordError::new("exceptions", "too many exceptions"));
+        }
+    }
+    Ok(PolicySummary {
+        rules: rules.len(),
+        exceptions: exceptions.len(),
+    })
+}
+
 /// Re-render a parsed integrity object for the seal parser.
 fn render_ordered_for_seal(
     fields: &[(String, JsonValue)],
@@ -1837,6 +1921,51 @@ mod tests {
         assert_eq!(seal.kinds.len(), 10);
         let bogus = legacy.replacen("\"gap\":\"0\"", "\"gap\":\"0\",\"bogus\":\"0\"", 1);
         assert!(parse_integrity_seal(&bogus).is_err());
+    }
+
+    fn policy_doc(rules: &str, exceptions: &str) -> String {
+    format!(
+        "{{\"schema\":\"policy\",\"schema_version\":\"0.1.0\",\"policy_id\":\"p\",\
+        \"subject_scope\":\"s\",\"applies_to\":{{\"platform\":\"ordinary-linux\",\
+        \"profile\":\"p\"}},\"required_sources\":[\"sharing-census\"],\
+        \"clock\":\"guest_monotonic_active\",\"role_bindings\":{{}},\
+        \"rules\":[{rules}],\"exceptions\":[{exceptions}]}}"
+    )
+    }
+
+    #[test]
+    fn policy_loader_enforces_bounds() {
+        let valid = include_str!("../../tests/exposure/fixtures/contracts/policy_valid.json");
+        let summary = parse_policy_file(valid).unwrap();
+        assert_eq!(summary.rules, 1);
+        assert_eq!(summary.exceptions, 0);
+
+        let big = " ".repeat(POLICY_FILE_MAX_BYTES + 1);
+        let err = parse_policy_file(&big).unwrap_err();
+        assert_eq!(err.what, "policy");
+
+        let rule = "{\"rule_id\":\"r\"}";
+        let exception = "{\"rule_id\":\"r\",\"constraint\":\"c\",\"reason\":\"w\"}";
+        let err = parse_policy_file(&policy_doc("", "")).unwrap_err();
+        assert_eq!(err.what, "rules");
+        let many_rules = vec![rule; POLICY_FILE_MAX_RULES + 1].join(",");
+        let err = parse_policy_file(&policy_doc(&many_rules, "")).unwrap_err();
+        assert_eq!(err.what, "rules");
+        let many_exceptions =
+            vec![exception; POLICY_FILE_MAX_EXCEPTIONS_PER_RULE + 1].join(",");
+        let err = parse_policy_file(&policy_doc(rule, &many_exceptions)).unwrap_err();
+        assert_eq!(err.what, "exceptions");
+        let capped = vec![exception; POLICY_FILE_MAX_EXCEPTIONS_PER_RULE].join(",");
+        let summary = parse_policy_file(&policy_doc(rule, &capped)).unwrap();
+        assert_eq!(summary.rules, 1);
+        assert_eq!(summary.exceptions, POLICY_FILE_MAX_EXCEPTIONS_PER_RULE);
+
+        let no_sources = policy_doc(rule, "").replacen("[\"sharing-census\"]", "[]", 1);
+        let err = parse_policy_file(&no_sources).unwrap_err();
+        assert_eq!(err.what, "required_sources");
+
+        let wrong_version = policy_doc(rule, "").replacen("\"0.1.0\"", "\"9.9.9\"", 1);
+        assert!(parse_policy_file(&wrong_version).is_err());
     }
 
     #[test]
