@@ -57,6 +57,9 @@ const PARTIAL_BOGUS_QUALITY: &str =
     include_str!("exposure/fixtures/contracts/partial_bogus_quality.json");
 const OVERFLOW_RETURN_CODE: &str =
     include_str!("exposure/fixtures/contracts/overflow_return_code.json");
+const MULTI_USABLE_SOURCES: &str =
+    include_str!("exposure/fixtures/contracts/multi_usable_sources.json");
+const MIXED_SOURCES: &str = include_str!("exposure/fixtures/contracts/mixed_sources.json");
 
 fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
     facts
@@ -353,6 +356,23 @@ fn overflow_return_code_cannot_verify() {
     assert!(!report.verified, "return_code past i64 cannot verify");
     let outcome = seal_verdict(OVERFLOW_RETURN_CODE);
     assert_eq!(outcome, RuleOutcome::Inconclusive);
+    assert_ne!(outcome, RuleOutcome::Satisfied);
+}
+
+#[test]
+fn multi_usable_sources_satisfy() {
+    let report = verify_sealed_snapshot(MULTI_USABLE_SOURCES).expect("control parses");
+    assert!(report.verified, "disjoint usable rows verify");
+    let outcome = seal_verdict(MULTI_USABLE_SOURCES);
+    assert_eq!(outcome, RuleOutcome::Satisfied);
+}
+
+#[test]
+fn mixed_coverage_sources_are_incomplete() {
+    let report = verify_sealed_snapshot(MIXED_SOURCES).expect("tainted parses");
+    assert!(report.verified, "disjoint mixed rows verify");
+    let outcome = seal_verdict(MIXED_SOURCES);
+    assert_eq!(outcome, RuleOutcome::Incomplete);
     assert_ne!(outcome, RuleOutcome::Satisfied);
 }
 

@@ -38,6 +38,17 @@ FROZEN_PEER = ("none-observed", "host-device", "device-or-subsystem",
 FROZEN_PHASE = ("boot", "pre_attach", "observed")
 FROZEN_STATUS = ("available", "partial", "unavailable",
                  "not_applicable", "disabled")
+FROZEN_SUBJECT = ("guest-kernel-memory-management", "guest-direct-map",
+                  "guest-kernel-allocator", "guest-driver-virtio",
+                  "guest-driver-dma", "guest-kernel-cc-platform",
+                  "guest-kernel-vmbus", "guest-configuration",
+                  "capture-evidence")
+FROZEN_CELL = ("ordinary-linux", "sev-snp", "tdx-standalone",
+               "hyper-v")
+FROZEN_REASON = ("adapter-unimplemented", "no-safe-source",
+                 "lease-pending", "access-denied", "hook-absent",
+                 "cell-unselected", "quarantined",
+                 "not-applicable-platform")
 FROZEN_CLOCK = ("guest_monotonic_active", "guest_boottime_elapsed",
                 "external_trusted_interval")
 FROZEN_NAMESPACE = ("guest_virtual", "guest_physical", "session_token",
@@ -1010,13 +1021,50 @@ def source_quality_usable(quality):
                for channel in QUALITY_CHANNELS)
 
 
+def source_row_valid(entry):
+    """True when a coverage row passes the full model validation.
+
+    Mirrors ``CoverageSource::validate`` check for check: every
+    required leaf present, a catalog source with its owning
+    capability, an opaque profile, a frozen subject, cell,
+    namespace, phase, status and reason, an ordered canonical
+    window, and a quality block of exactly the five exposure
+    channels. Anything else fails closed: the row carries no
+    usable evidence.
+    """
+    try:
+        for field in COVERAGE_SOURCE_REQUIRED:
+            assert field in entry, \
+                "coverage source field %s" % field
+        assert entry["source_id"] in SOURCE_CAPABILITIES, \
+            "unknown source"
+        check_source_capability(entry)
+        check_opaque_id(entry["profile_id"], "profile_id")
+        assert entry["subject_id"] in FROZEN_SUBJECT, "subject"
+        assert entry["platform_cell"] in FROZEN_CELL, "cell"
+        assert entry["address_namespace"] in FROZEN_NAMESPACE, \
+            "namespace"
+        assert entry["phase"] in FROZEN_PHASE, "phase"
+        assert entry["status"] in FROZEN_STATUS, "status"
+        assert entry["reason"] in FROZEN_REASON, "reason"
+        window = entry["window"]
+        start = check_u64(window["start_ns"], "window.start_ns")
+        end = check_u64(window["end_ns"], "window.end_ns")
+        assert start <= end, "window start past end"
+        check_quality(entry["quality"], "source quality")
+    except (AssertionError, KeyError, TypeError):
+        return False
+    return True
+
+
 def source_evidence_state(entry):
     """Complete, incomplete, or absent for one required source entry.
 
-    An available source carries usable evidence only when its
-    quality block validates with a usable channel; without one the
-    availability claim stays unconfirmed. A partial source carries
-    usable evidence only when at least one quality channel stays
+    An available source carries usable evidence only when the row
+    validates fully and its quality block validates with a usable
+    channel; without either the availability claim stays
+    unconfirmed. A partial source carries usable evidence only
+    when the row validates and at least one quality channel stays
     usable; a partial source with no usable channel is incomplete
     evidence, never satisfaction. Anything else (a missing entry,
     an unavailable, disabled, not-applicable or unknown status) is
@@ -1025,12 +1073,35 @@ def source_evidence_state(entry):
     if entry is None:
         return "absent"
     status = entry.get("status")
-    usable = source_quality_usable(entry.get("quality"))
+    usable = source_row_valid(entry) \
+        and source_quality_usable(entry.get("quality"))
     if status == "available":
         return "complete" if usable else "absent"
     if status != "partial":
         return "absent"
     return "complete" if usable else "incomplete"
+
+
+def combined_source_state(entries, source):
+    """Worst-first evidence state across every row for one source.
+
+    Every coverage row carrying the source id classifies on its
+    own; the rows combine worst-first, so a denied or incomplete
+    row dominates usable ones and satisfaction needs every row
+    usable, identically in every row order. A source with no row
+    is absent. Mirrors the Rust evidence combination exactly: no
+    first-match or last-match divergence.
+    """
+    states = [source_evidence_state(entry) for entry in entries
+              if isinstance(entry, dict)
+              and entry.get("source_id") == source]
+    if not states:
+        return "absent"
+    if "absent" in states:
+        return "absent"
+    if "incomplete" in states:
+        return "incomplete"
+    return "complete"
 
 
 def rule_satisfied(snapshot, required_sources):
@@ -1048,10 +1119,9 @@ def rule_satisfied(snapshot, required_sources):
     terminal = session["quality"]["terminal"]
     if terminal["status"] != "complete_for_scope":
         return False
-    by_source = {entry["source_id"]: entry
-                 for entry in session["exposure"]["sources"]}
+    sources = session["exposure"]["sources"]
     for source in required_sources:
-        if source_evidence_state(by_source.get(source)) != "complete":
+        if combined_source_state(sources, source) != "complete":
             return False
     facts = facts_from_lines(snapshot)
     if not facts:
@@ -1077,9 +1147,8 @@ def evidence_incomplete(snapshot, required_sources):
         return False
     if not seal_verified(snapshot):
         return False
-    by_source = {entry["source_id"]: entry
-                 for entry in snapshot["session"]["exposure"]["sources"]}
-    states = [source_evidence_state(by_source.get(source))
+    sources = snapshot["session"]["exposure"]["sources"]
+    states = [combined_source_state(sources, source)
               for source in required_sources]
     return "absent" not in states and "incomplete" in states
 
@@ -2434,6 +2503,8 @@ def test_available_source_requires_valid_quality():
     tainted = json.loads(json.dumps(load("sealed_snapshot.json")))
     tainted["session"]["exposure"]["sources"][0]["quality"]["detail"] = \
         {"status": "partial", "loss_count": "not-a-count"}
+    assert set(tainted["session"]["exposure"]["sources"][0]["quality"]) \
+        == set(QUALITY_CHANNELS), "bad loss keeps the channel keys"
     assert not rule_satisfied(tainted, required), \
         "invalid loss count never supplies usability"
     assert snapshot_verdict(tainted, required) == "inconclusive"
@@ -2456,6 +2527,8 @@ def test_partial_source_with_only_bogus_quality_is_incomplete():
         tainted["session"]["exposure"]["sources"][0])
     denied["quality"]["detail"] = {"status": "partial",
                                    "loss_count": "not-a-count"}
+    assert set(denied["quality"]) == set(QUALITY_CHANNELS), \
+        "bad loss keeps the channel keys"
     tainted["session"]["exposure"]["sources"][0] = denied
     assert seal_verified(tainted)
     assert snapshot_verdict(tainted, required) == "incomplete", \
@@ -2472,6 +2545,8 @@ def test_partial_source_with_only_bogus_quality_is_incomplete():
     entry.update(status="partial", reason="access-denied")
     entry["quality"]["aggregate"] = {"status": "partial",
                                      "loss_count": "not-a-count"}
+    assert set(entry["quality"]) == set(QUALITY_CHANNELS), \
+        "bad loss keeps the channel keys"
     assert snapshot_verdict(mixed_loss, required) == "incomplete", \
         "one invalid loss fails the whole quality block"
     usable = json.loads(json.dumps(load("sealed_snapshot.json")))
@@ -2551,6 +2626,86 @@ def test_legacy_return_codes_bounded_to_i64():
             assert seal_verified(control), \
                 "%s return_code %r must verify" % (kind, value)
             assert snapshot_verdict(control, required) == "satisfied"
+
+
+def test_multi_row_sources_combine_worst_first():
+    required = ["sharing-census"]
+    for axis in ("window", "subject", "phase"):
+        for label, denied_first in (("available-first", False),
+                                    ("denied-first", True)):
+            snapshot = json.loads(json.dumps(load("sealed_snapshot.json")))
+            rows = snapshot["session"]["exposure"]["sources"]
+            available = rows[0]
+            denied = denied_source_entry(available)
+            if axis == "window":
+                available["window"]["end_ns"] = "2000000000"
+                denied["window"]["start_ns"] = "2000000000"
+            elif axis == "subject":
+                denied["subject_id"] = "guest-kernel-memory-management"
+            else:
+                denied["phase"] = "observed"
+            rows[:] = [denied, available] if denied_first \
+                else [available, denied]
+            jsonschema.validate(
+                snapshot["session"],
+                load_schema("session-v0.3.0.schema.json"))
+            assert seal_verified(snapshot), \
+                "%s %s distinct rows must verify" % (axis, label)
+            assert snapshot_verdict(snapshot, required) == "incomplete", \
+                "%s %s: the denied row dominates" % (axis, label)
+    usable = load("multi_usable_sources.json")
+    jsonschema.validate(usable["session"],
+                        load_schema("session-v0.3.0.schema.json"))
+    assert seal_verified(usable), "disjoint usable rows verify"
+    assert snapshot_verdict(usable, required) == "satisfied", \
+        "every row usable still satisfies"
+    mixed = load("mixed_sources.json")
+    jsonschema.validate(mixed["session"],
+                        load_schema("session-v0.3.0.schema.json"))
+    assert seal_verified(mixed), "disjoint mixed rows verify"
+    assert snapshot_verdict(mixed, required) == "incomplete"
+    absent_mix = json.loads(json.dumps(load("sealed_snapshot.json")))
+    rows = absent_mix["session"]["exposure"]["sources"]
+    other = denied_source_entry(rows[0])
+    other.update(status="unavailable", reason="no-safe-source")
+    other["window"] = {"start_ns": "4000000000",
+                       "end_ns": "5000000000"}
+    rows.append(other)
+    assert seal_verified(absent_mix)
+    assert snapshot_verdict(absent_mix, required) == "inconclusive"
+    rows.reverse()
+    assert seal_verified(absent_mix)
+    assert snapshot_verdict(absent_mix, required) == "inconclusive", \
+        "an unavailable row dominates in either order"
+
+
+def test_invalid_source_metadata_cannot_satisfy():
+    required = ["sharing-census"]
+    for case in ("missing-key", "reversed-window", "wrong-capability"):
+        tainted = json.loads(json.dumps(load("sealed_snapshot.json")))
+        source = tainted["session"]["exposure"]["sources"][0]
+        if case == "missing-key":
+            del source["subject_id"]
+        elif case == "reversed-window":
+            source["window"] = {"start_ns": "2000000000",
+                                "end_ns": "1000000000"}
+        else:
+            source["capability"] = "host-interfaces"
+        assert seal_verified(tainted), \
+            "%s keeps the byte seal" % case
+        assert not rule_satisfied(tainted, required), \
+            "%s never satisfies" % case
+        assert snapshot_verdict(tainted, required) == "inconclusive"
+        assert source_evidence_state(source) == "absent"
+    tainted = json.loads(json.dumps(load("sealed_snapshot.json")))
+    denied = denied_source_entry(
+        tainted["session"]["exposure"]["sources"][0])
+    denied["window"] = {"start_ns": "2000000000",
+                        "end_ns": "1000000000"}
+    tainted["session"]["exposure"]["sources"][0] = denied
+    assert seal_verified(tainted)
+    assert snapshot_verdict(tainted, required) == "incomplete", \
+        "invalid metadata never supplies usability"
 
 
 if __name__ == "__main__":

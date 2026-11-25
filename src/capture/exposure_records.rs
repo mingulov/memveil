@@ -2720,14 +2720,21 @@ pub struct RequiredSourceEvidence {
 /// Read one required source's status and quality usability.
 ///
 /// The session exposure sources must exist; a missing source id
-/// reads as absent rather than erroring. Quality usability is
-/// validated: the block keeps exactly the five exposure channels
-/// with frozen statuses and null-or-canonical losses, and at least
-/// one channel reports a usable status. An unreadable or invalid
-/// block counts as unusable, failing closed toward an incomplete
-/// verdict rather than satisfaction. Duplicate coverage never
-/// reaches this reader under a verified seal: the seal gate
-/// refuses repeated identities first.
+/// reads as absent rather than erroring. Every row carrying the
+/// source id validates fully against the model: catalog
+/// membership, capability pairing, identifier shapes, window
+/// order, and a quality block of exactly the five exposure
+/// channels with frozen statuses and null-or-canonical losses. A
+/// row carries usable evidence only when it validates and at
+/// least one channel reports a usable status; anything else
+/// counts as unusable, failing closed rather than satisfying.
+/// Rows for one source combine worst-first: a denied or
+/// incomplete row dominates usable ones, and satisfaction needs
+/// every row usable, identically in every row order, so
+/// conflicting availability never resolves by position. A single
+/// row reads exactly its own status and usability. Duplicate
+/// coverage never reaches this reader under a verified seal: the
+/// seal gate refuses repeated identities first.
 pub fn snapshot_source_evidence(
     text: &str,
     source_id: &str,
@@ -2750,6 +2757,7 @@ pub fn snapshot_source_evidence(
         status: String::new(),
         quality_usable: false,
     };
+    let mut worst: Option<(u8, String, bool)> = None;
     for entry in sources {
         let JsonValue::Object(fields) = entry else {
             continue;
@@ -2763,56 +2771,101 @@ pub fn snapshot_source_evidence(
         let Some(JsonValue::Str(status)) = find_field(fields, "status") else {
             return Err(SealError::new("status", "expected string"));
         };
-        return Ok(RequiredSourceEvidence {
-            present: true,
-            status: status.clone(),
-            quality_usable: source_quality_usable(fields),
-        });
+        let usable = coverage_usable(fields);
+        let candidate = (evidence_rank(status, usable), status.clone(), usable);
+        if worst.as_ref().is_none_or(|current| candidate < *current) {
+            worst = Some(candidate);
+        }
     }
-    Ok(absent)
+    match worst {
+        Some((_, status, usable)) => Ok(RequiredSourceEvidence {
+            present: true,
+            status,
+            quality_usable: usable,
+        }),
+        None => Ok(absent),
+    }
 }
 
-/// Known exposure quality channels in canonical order.
-const QUALITY_CHANNELS: [&str; 5] = ["detail", "aggregate", "identity", "baseline", "terminal"];
-
-/// True when a coverage entry keeps a validated usable quality channel.
+/// Build one [`exposure_shapes::CoverageSource`] from a coverage entry.
 ///
-/// The block keeps exactly the five exposure channels, each an
-/// object with exactly a frozen status and a null-or-canonical
-/// loss count; one unknown channel or invalid loss fails the whole
-/// block, never just that channel. Usability then follows the
-/// channel rule shared with the verdict gate: a settled or partial
-/// channel carries evidence, anything else does not. Unreadable
-/// blocks count as unusable.
-fn source_quality_usable(entry: &[(String, JsonValue)]) -> bool {
-    let Some(JsonValue::Object(quality)) = find_field(entry, "quality") else {
+/// Returns `None` for any shape the model cannot take: a missing
+/// or mistyped leaf, a window that is not two canonical counts,
+/// or a quality block that is not exactly the five exposure
+/// channels with exactly a status and a loss count each. Callers
+/// fail closed rather than guessing a value.
+fn coverage_from_entry(fields: &[(String, JsonValue)]) -> Option<exposure_shapes::CoverageSource> {
+    let Some(JsonValue::Object(window)) = find_field(fields, "window") else {
+        return None;
+    };
+    let start_ns = sealed_u64(window, "start_ns")?;
+    let end_ns = sealed_u64(window, "end_ns")?;
+    let Some(JsonValue::Object(quality)) = find_field(fields, "quality") else {
+        return None;
+    };
+    if !exact_keys(quality, &exposure_shapes::CHANNELS) {
+        return None;
+    }
+    for (_, node) in quality {
+        let JsonValue::Object(leaves) = node else {
+            return None;
+        };
+        if !exact_keys(leaves, &["status", "loss_count"]) {
+            return None;
+        }
+    }
+    Some(exposure_shapes::CoverageSource {
+        source_id: sealed_str(fields, "source_id")?.to_string(),
+        capability: sealed_str(fields, "capability")?.to_string(),
+        profile_id: sealed_str(fields, "profile_id")?.to_string(),
+        subject_id: sealed_str(fields, "subject_id")?.to_string(),
+        platform_cell: sealed_str(fields, "platform_cell")?.to_string(),
+        address_namespace: sealed_str(fields, "address_namespace")?.to_string(),
+        phase: sealed_str(fields, "phase")?.to_string(),
+        status: sealed_str(fields, "status")?.to_string(),
+        reason: sealed_str(fields, "reason")?.to_string(),
+        window_start_ns: start_ns,
+        window_end_ns: end_ns,
+        quality: sealed_quality(fields)?,
+    })
+}
+
+/// True when a coverage entry validates with a usable quality channel.
+///
+/// The entry builds a [`exposure_shapes::CoverageSource`] passing
+/// the model validator — catalog membership, capability pairing,
+/// identifier shapes, window order, and channel statuses — and at
+/// least one channel reports a usable status. Anything else counts
+/// as unusable, failing closed rather than satisfying. Membership
+/// reuses the model validator's frozen tables, never a copy.
+fn coverage_usable(fields: &[(String, JsonValue)]) -> bool {
+    let Some(coverage) = coverage_from_entry(fields) else {
         return false;
     };
-    if quality.len() != QUALITY_CHANNELS.len() {
+    if coverage.validate().is_err() {
         return false;
     }
-    let mut usable = false;
-    for name in QUALITY_CHANNELS {
-        let Some(JsonValue::Object(channel)) = find_field(quality, name) else {
-            return false;
-        };
-        if channel.len() != 2 {
-            return false;
-        }
-        match find_field(channel, "status") {
-            Some(JsonValue::Str(text)) if text == "complete_for_scope" || text == "partial" => {
-                usable = true;
-            }
-            Some(JsonValue::Str(text)) if text == "unavailable" => {}
-            _ => return false,
-        }
-        match find_field(channel, "loss_count") {
-            Some(JsonValue::Null) => {}
-            Some(JsonValue::Str(text)) if is_canonical_u64(text) => {}
-            _ => return false,
-        }
+    coverage
+        .quality
+        .iter()
+        .any(|channel| channel.status == "complete_for_scope" || channel.status == "partial")
+}
+
+/// Worst-first rank for one matching row: absent 0, incomplete 1, complete 2.
+///
+/// Mirrors the verdict gate's row mapping: an available row carries
+/// usable evidence only with a usable channel, a partial row
+/// without one is incomplete evidence, anything else is absent.
+/// The verdict combines every matching row worst-first, so
+/// conflicting rows never resolve by position.
+fn evidence_rank(status: &str, usable: bool) -> u8 {
+    if status == "available" {
+        if usable { 2 } else { 0 }
+    } else if status == "partial" {
+        if usable { 2 } else { 1 }
+    } else {
+        0
     }
-    usable
 }
 
 /// Policy file size cap in bytes.
@@ -4619,6 +4672,24 @@ mod tests {
         )
     }
 
+    /// One raw coverage row with valid metadata and the given status.
+    ///
+    /// Catalog capability, opaque profile, frozen subject, cell,
+    /// namespace, phase and reason, and an ordered window ride
+    /// along, so usability failures pin the quality block rather
+    /// than the metadata.
+    fn full_source_entry(status: &str, quality: &str) -> String {
+        format!(
+            "{{\"source_id\":\"sharing-census\",\"capability\":\"census\",\
+            \"profile_id\":\"synthetic-census-1\",\"subject_id\":\"guest-direct-map\",\
+            \"platform_cell\":\"ordinary-linux\",\"address_namespace\":\"guest_physical\",\
+            \"phase\":\"pre_attach\",\"status\":\"{status}\",\
+            \"reason\":\"adapter-unimplemented\",\
+            \"window\":{{\"start_ns\":\"1000000000\",\"end_ns\":\"4000000000\"}},\
+            \"quality\":{quality}}}"
+        )
+    }
+
     /// One raw quality channel carrying the given status and loss.
     fn probe_channel(status: &str, loss: &str) -> String {
         format!("{{\"status\":\"{status}\",\"loss_count\":{loss}}}")
@@ -4658,19 +4729,22 @@ mod tests {
         );
         let bogus_loss = settled_quality().replacen(
             "\"detail\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"}",
-            "\"Detail\":{\"status\":\"partial\",\"loss_count\":\"not-a-count\"}",
+            "\"detail\":{\"status\":\"partial\",\"loss_count\":\"not-a-count\"}",
             1,
         );
         assert_ne!(bogus_loss, settled_quality());
+        assert!(
+            bogus_loss
+                .contains("\"detail\":{\"status\":\"partial\",\"loss_count\":\"not-a-count\"}"),
+            "bad loss corrupts the value with the channel key intact"
+        );
         for (label, status, quality, usable) in [
             ("settled available", "available", usable.as_str(), true),
             ("denied partial", "partial", none.as_str(), false),
             ("bogus channel", "partial", bogus_channel.as_str(), false),
             ("bogus loss", "partial", bogus_loss.as_str(), false),
         ] {
-            let entry = format!(
-                "{{\"source_id\":\"sharing-census\",\"status\":\"{status}\",\"quality\":{quality}}}"
-            );
+            let entry = full_source_entry(status, quality);
             let evidence = snapshot_source_evidence(&evidence_snapshot(&entry), "sharing-census")
                 .expect("snapshot carries sources");
             assert!(evidence.present, "{label} source stays present");
@@ -4685,6 +4759,194 @@ mod tests {
             !evidence.quality_usable,
             "available source without quality stays unusable"
         );
+    }
+
+    #[test]
+    fn source_evidence_combines_coverage_rows_worst_first() {
+        let settled = || probe_quality_all("complete_for_scope", FieldValue::UInt(0));
+        let denied = || probe_quality_all("unavailable", FieldValue::Null);
+        let available_row =
+            |subject: &'static str, phase: &'static str, start_ns: u64, end_ns: u64| {
+                probe_coverage_identity(
+                    "available",
+                    settled(),
+                    subject,
+                    phase,
+                    start_ns,
+                    end_ns,
+                    "adapter-unimplemented",
+                )
+            };
+        let denied_row =
+            |subject: &'static str, phase: &'static str, start_ns: u64, end_ns: u64| {
+                probe_coverage_identity(
+                    "partial",
+                    denied(),
+                    subject,
+                    phase,
+                    start_ns,
+                    end_ns,
+                    "access-denied",
+                )
+            };
+        // One usable row plus one denied row over disjoint
+        // coverage: the denied row dominates in either order,
+        // and both orders read identical evidence.
+        for axis in ["window", "subject", "phase"] {
+            let (first, second) = match axis {
+                "window" => (
+                    available_row(
+                        "guest-direct-map",
+                        "pre_attach",
+                        1_000_000_000,
+                        2_000_000_000,
+                    ),
+                    denied_row(
+                        "guest-direct-map",
+                        "pre_attach",
+                        2_000_000_000,
+                        4_000_000_000,
+                    ),
+                ),
+                "subject" => (
+                    available_row(
+                        "guest-direct-map",
+                        "pre_attach",
+                        1_000_000_000,
+                        4_000_000_000,
+                    ),
+                    denied_row(
+                        "guest-kernel-memory-management",
+                        "pre_attach",
+                        1_000_000_000,
+                        4_000_000_000,
+                    ),
+                ),
+                _ => (
+                    available_row(
+                        "guest-direct-map",
+                        "pre_attach",
+                        1_000_000_000,
+                        4_000_000_000,
+                    ),
+                    denied_row("guest-direct-map", "observed", 1_000_000_000, 4_000_000_000),
+                ),
+            };
+            let forward = snapshot_source_evidence(
+                &source_snapshot(vec![first.clone(), second.clone()]),
+                "sharing-census",
+            )
+            .expect("snapshot carries sources");
+            let backward =
+                snapshot_source_evidence(&source_snapshot(vec![second, first]), "sharing-census")
+                    .expect("snapshot carries sources");
+            assert_eq!(forward, backward, "{axis} rows combine order-free");
+            assert!(forward.present, "{axis} source stays present");
+            assert_eq!(forward.status, "partial", "{axis} denied row dominates");
+            assert!(!forward.quality_usable, "{axis} denied row dominates");
+        }
+        // Every row usable still combines usable in either order.
+        let usable = available_row(
+            "guest-direct-map",
+            "pre_attach",
+            1_000_000_000,
+            2_000_000_000,
+        );
+        let usable_other = available_row(
+            "guest-direct-map",
+            "pre_attach",
+            2_000_000_000,
+            4_000_000_000,
+        );
+        for (label, rows) in [
+            (
+                "available-first",
+                vec![usable.clone(), usable_other.clone()],
+            ),
+            ("available-second", vec![usable_other, usable]),
+        ] {
+            let evidence = snapshot_source_evidence(&source_snapshot(rows), "sharing-census")
+                .expect("snapshot carries sources");
+            assert!(evidence.present, "{label} source stays present");
+            assert_eq!(evidence.status, "available", "{label} stays usable");
+            assert!(evidence.quality_usable, "{label} stays usable");
+        }
+        // An unavailable row dominates a usable row in either order.
+        let unavailable = probe_coverage_identity(
+            "unavailable",
+            denied(),
+            "guest-direct-map",
+            "pre_attach",
+            4_000_000_000,
+            5_000_000_000,
+            "no-safe-source",
+        );
+        let usable = available_row(
+            "guest-direct-map",
+            "pre_attach",
+            1_000_000_000,
+            4_000_000_000,
+        );
+        let forward = snapshot_source_evidence(
+            &source_snapshot(vec![usable.clone(), unavailable.clone()]),
+            "sharing-census",
+        )
+        .expect("snapshot carries sources");
+        let backward = snapshot_source_evidence(
+            &source_snapshot(vec![unavailable, usable]),
+            "sharing-census",
+        )
+        .expect("snapshot carries sources");
+        assert_eq!(forward, backward, "unavailable rows combine order-free");
+        assert_eq!(forward.status, "unavailable");
+        assert!(!forward.quality_usable);
+    }
+
+    #[test]
+    fn source_evidence_refuses_invalid_coverage_rows() {
+        let entry = full_source_entry("available", &settled_quality());
+        let missing = entry.replacen(",\"subject_id\":\"guest-direct-map\"", "", 1);
+        assert_ne!(missing, entry);
+        assert!(!missing.contains("subject_id"));
+        let reversed = entry.replacen(
+            "\"start_ns\":\"1000000000\",\"end_ns\":\"4000000000\"",
+            "\"start_ns\":\"4000000000\",\"end_ns\":\"1000000000\"",
+            1,
+        );
+        assert_ne!(reversed, entry);
+        let miscapped = entry.replacen(
+            "\"capability\":\"census\"",
+            "\"capability\":\"host-interfaces\"",
+            1,
+        );
+        assert_ne!(miscapped, entry);
+        for (label, mutated) in [
+            ("missing subject", missing.as_str()),
+            ("reversed window", reversed.as_str()),
+            ("wrong capability", miscapped.as_str()),
+        ] {
+            let evidence = snapshot_source_evidence(&evidence_snapshot(mutated), "sharing-census")
+                .expect("snapshot carries sources");
+            assert!(evidence.present, "{label} source stays present");
+            assert_eq!(
+                evidence.status, "available",
+                "{label} status stays verbatim"
+            );
+            assert!(
+                !evidence.quality_usable,
+                "{label} invalid metadata never supplies usability"
+            );
+        }
+        // A partial row with invalid metadata stays unusable too.
+        let denied = full_source_entry("partial", &denied_quality()).replacen(
+            "\"start_ns\":\"1000000000\",\"end_ns\":\"4000000000\"",
+            "\"start_ns\":\"4000000000\",\"end_ns\":\"1000000000\"",
+            1,
+        );
+        let evidence = snapshot_source_evidence(&evidence_snapshot(&denied), "sharing-census")
+            .expect("snapshot carries sources");
+        assert_eq!(evidence.status, "partial");
+        assert!(!evidence.quality_usable);
     }
 
     #[test]
@@ -5172,13 +5434,57 @@ mod tests {
     }
 
     /// One coverage-source entry carrying the given status and quality.
+    ///
+    /// The row is fully valid: catalog capability, opaque profile,
+    /// frozen subject, cell, namespace, phase and reason, and an
+    /// ordered window, so usability failures pin the quality block
+    /// rather than the metadata.
     fn probe_coverage_source(
         status: &'static str,
         quality: FieldValue<'static>,
     ) -> FieldValue<'static> {
+        probe_coverage_identity(
+            status,
+            quality,
+            "guest-direct-map",
+            "pre_attach",
+            1_000_000_000,
+            4_000_000_000,
+            "adapter-unimplemented",
+        )
+    }
+
+    /// One coverage-source entry with the given status, quality and identity.
+    ///
+    /// The subject, phase, window and reason vary across rows of one
+    /// source; every other leaf stays catalog-valid.
+    #[allow(clippy::too_many_arguments)]
+    fn probe_coverage_identity(
+        status: &'static str,
+        quality: FieldValue<'static>,
+        subject: &'static str,
+        phase: &'static str,
+        window_start_ns: u64,
+        window_end_ns: u64,
+        reason: &'static str,
+    ) -> FieldValue<'static> {
         FieldValue::Object(vec![
             ("source_id", FieldValue::Text("sharing-census")),
+            ("capability", FieldValue::Text("census")),
+            ("profile_id", FieldValue::Text("synthetic-census-1")),
+            ("subject_id", FieldValue::Text(subject)),
+            ("platform_cell", FieldValue::Text("ordinary-linux")),
+            ("address_namespace", FieldValue::Text("guest_physical")),
+            ("phase", FieldValue::Text(phase)),
             ("status", FieldValue::Text(status)),
+            ("reason", FieldValue::Text(reason)),
+            (
+                "window",
+                FieldValue::Object(vec![
+                    ("start_ns", FieldValue::UInt(window_start_ns)),
+                    ("end_ns", FieldValue::UInt(window_end_ns)),
+                ]),
+            ),
             ("quality", quality),
         ])
     }
