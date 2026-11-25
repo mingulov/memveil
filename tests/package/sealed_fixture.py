@@ -69,6 +69,14 @@ SHAPED_EXTRA_FILES = {
     b"synthetic example\n",
     "examples/lifecycle-copy/fail-phase.log":
     b"synthetic example\n",
+    "examples/policies/README.md":
+    b"synthetic example\n",
+    "examples/policies/closed-scope.json":
+    b"synthetic example\n",
+    "examples/policies/config-deviation.json":
+    b"synthetic example\n",
+    "examples/policies/lifecycle-boundary.json":
+    b"synthetic example\n",
     "LICENSES/GPL-2.0-or-later.txt":
     b"synthetic license\n",
     "LICENSES/GPL-2.0.txt":
@@ -327,7 +335,7 @@ def _shape_bundle(fix, dest):
         path.write_bytes(data)
         files[rel] = _sha_bytes(data)
     # The workshop's demo example has no FHS destination in
-    # the real packagers (they stage only the two worked
+    # the real packagers (they stage only the three worked
     # examples), so it leaves the shaped closure.
     demo = bundle / "examples" / "demo" / "fixture.txt"
     demo.unlink()

@@ -90,8 +90,9 @@ per inventory scan, with census inside one second on
 its admitted reference cell.
 
 Session, event and report 0.3.0 plus standalone policy
-0.1.0 are reserved for this milestone; no schema files
-ship yet and current readers refuse them. See
+0.1.0 are reserved for this milestone; their schema files
+ship for contract review and offline validation only,
+and current readers refuse them. See
 [format compatibility](format-compatibility.md) for the
 reservation table.
 
