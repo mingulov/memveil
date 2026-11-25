@@ -150,6 +150,24 @@ pub fn parse_decimal_u64(text: &str) -> Result<u64, ReadError> {
         .map_err(|_| ReadError::new("bad-integer", format!("integer {text:?} overflows u64")))
 }
 
+/// Width in bytes of the UTF-8 sequence starting
+/// with `lead`, or `None` for a stray continuation
+/// byte. Overlong forms and out-of-range leads are
+/// rejected; the caller validates the sliced bytes.
+fn utf8_char_width(lead: u8) -> Option<usize> {
+    if lead < 0x80 {
+        Some(1)
+    } else if (0xC2..=0xDF).contains(&lead) {
+        Some(2)
+    } else if (0xE0..=0xEF).contains(&lead) {
+        Some(3)
+    } else if (0xF0..=0xF4).contains(&lead) {
+        Some(4)
+    } else {
+        None
+    }
+}
+
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -345,12 +363,22 @@ impl<'a> Parser<'a> {
                 },
                 0x00..=0x1F => return Err(self.fail("control byte in string")),
                 _ => {
-                    let rest = &self.bytes[self.pos - 1..];
-                    let text =
-                        std::str::from_utf8(rest).map_err(|_| self.fail("bad UTF-8 in string"))?;
+                    // The buffer is valid UTF-8 (`parse_json`
+                    // takes `&str`), so decode exactly one
+                    // scalar value instead of re-validating the
+                    // whole tail on every character.
+                    let start = self.pos - 1;
+                    let width = utf8_char_width(byte)
+                        .ok_or_else(|| self.fail("bad UTF-8 in string"))?;
+                    let end = start + width;
+                    if end > self.bytes.len() {
+                        return Err(self.fail("bad UTF-8 in string"));
+                    }
+                    let text = std::str::from_utf8(&self.bytes[start..end])
+                        .map_err(|_| self.fail("bad UTF-8 in string"))?;
                     let ch = text.chars().next().ok_or_else(|| self.fail("bad UTF-8"))?;
                     out.push(ch);
-                    self.pos += ch.len_utf8() - 1;
+                    self.pos = end;
                 }
             }
         }

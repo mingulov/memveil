@@ -914,6 +914,27 @@ fn json_parser_handles_values_and_escapes() {
 }
 
 #[test]
+fn large_non_ascii_document_parses_promptly() {
+    let document = format!("[\"{}\"]", "é".repeat(200_000));
+    assert!(document.len() < 1024 * 1024, "document fits the size cap");
+    let start = std::time::Instant::now();
+    let value = parse_json(&document).expect("large document parses");
+    let elapsed = start.elapsed();
+    let Json::Arr(items) = value else {
+        panic!("want array");
+    };
+    assert_eq!(items.len(), 1);
+    let Json::Str(text) = &items[0] else {
+        panic!("want string");
+    };
+    assert_eq!(text.chars().count(), 200_000);
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "parse took {elapsed:?}, want milliseconds"
+    );
+}
+
+#[test]
 fn reader_refuses_residual_bad_shapes() {
     let top_extra = CLOSED_POLICY.replace(r#""exceptions": ["#, r#""mystery": 1, "exceptions": ["#);
     assert_eq!(refuse_code(&top_extra), "unknown-field");
