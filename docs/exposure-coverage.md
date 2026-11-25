@@ -94,3 +94,100 @@ Session, event and report 0.3.0 plus standalone policy
 ship yet and current readers refuse them. See
 [format compatibility](format-compatibility.md) for the
 reservation table.
+
+## Capture comparison compatibility
+
+Two persisted captures compare metric by metric. Each
+metric first passes the compatibility predicate below;
+only a compatible metric gets an exact delta (right
+minus left, in the shared unit). A refused metric
+carries its typed reason and no numeric delta, and one
+refused metric never hides the comparable unaffected
+metrics beside it.
+
+Before any row runs, both captures validate; an invalid
+input refuses the whole comparison with no rows and no
+repaired or guessed result. The left capture validates
+first, then the right; within a capture, in order:
+
+| Order | Reason | Meaning |
+| --- | --- | --- |
+| V1 | `duplicate-metric` | A metric id repeats on one side |
+| V2 | `invalid-window` | The window ends before it starts |
+| V3 | `invalid-value` | A known value carries a reason, or an unknown value lacks one; a blank reason counts as lacking one, and a non-blank reason with a control character is malformed |
+| V4 | `invalid-meaning` | A non-blank source meaning carries a control character |
+| V5 | `invalid-clock` | A non-blank clock domain carries a control character |
+
+A blank string is invalid everywhere it carries
+meaning: blank means empty or ASCII-whitespace-only
+(space, tab, line feed, carriage return, vertical
+tab, form feed), identically in the comparator and
+its independent oracle. A blank string counts as
+missing where its content is interpreted: a blank
+source meaning, clock domain or unit is unknown,
+never equal to another blank and never a change or
+a mismatch; a blank value reason explains nothing,
+so the capture refuses as `invalid-value`. Units
+compare only when both sides name the frozen
+catalog vocabulary (`bytes`, `unknown`); any other
+unit label refuses its metric as `unit-unknown`
+with no delta and records the result unit as
+`unknown`, never the invalid input label. A
+one-sided metric keeps reason `metric-missing` but
+records `unknown` when its present-side unit falls
+outside the vocabulary.
+
+A control character (U+0000-U+001F or U+007F-U+009F)
+in a meaning, clock label or reason is malformed
+input and refuses the whole comparison: meanings as
+`invalid-meaning`, clocks as `invalid-clock`, reasons
+as `invalid-value`. Blank is checked first, so ASCII
+whitespace stays missing rather than malformed.
+Malformed clocks also refuse at parse once the
+capture reader lands; the comparator never repairs
+or guesses one.
+
+Checks run in order; the first failure names the reason:
+
+| Order | Reason | Meaning |
+| --- | --- | --- |
+| 1 | `metric-missing` | Metric absent on one side; reported `unavailable`, recording the present side's unit when it names the frozen vocabulary and `unknown` otherwise |
+| 2 | `unit-unknown` | A side names a unit outside the frozen `bytes`/`unknown` vocabulary; a blank unit counts as no unit and the row records `unknown` |
+| 3 | `unit-mismatch` | Units differ; no delta across units |
+| 4 | `scope-mismatch` | Scopes differ; scan scopes stay distinct |
+| 5 | `legacy-input` | One side predates integrity metadata |
+| 6 | `epoch-mismatch` | Epochs differ; counters restarted |
+| 7 | `device-binding-mismatch` | Bound devices differ |
+| 8 | `profile-mismatch` | Profiles differ; every metric refuses |
+| 9 | `workload-mismatch` | Workloads differ under an equal profile |
+| 10 | `source-mismatch` | The metric names different sources per side |
+| 11 | `source-meaning-unknown` | A side records no meaning for the source; a blank meaning counts as no meaning |
+| 12 | `source-meaning-change` | The metric's source changed meaning |
+| 13 | `clock-unknown` | A side records no clock domain; a blank clock is unknown, never shared |
+| 14 | `clock-mismatch` | Clock domains differ |
+| 15 | `window-mismatch` | Window bounds differ |
+| 16 | `partial-census` | Census-derived on either side with a bounded scan on either side |
+| 17 | `compatible` | Predicate passed; delta rules below apply |
+
+Compatible rows carry `delta` except when a side is
+unknown (`value-unknown`, null delta with reason) or
+the difference overflows the signed range
+(`delta-overflow`, null delta with reason).
+
+Row quality derives from the row itself across the five
+channels (detail, aggregate, identity, baseline,
+terminal). Only a row with an exact delta reports
+`complete`; unknown and refused rows never do:
+
+| Row | Quality on every channel |
+| --- | --- |
+| Exact delta | `complete` |
+| Compatible with null delta | `unknown` |
+| `incompatible` | `refused` |
+| `unavailable` | `refused`, except identity is `unknown` |
+
+Incomplete journal events never enter a delta: the
+comparator reads finalized metric values only. A
+comparison whose requested metrics include refused rows
+exits 4 with per-metric reasons; counts stay counts and
+never become verdicts about the guest.
