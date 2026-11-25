@@ -27,10 +27,14 @@ FIX = os.path.join(TESTS, "exposure", "fixtures", "contracts")
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
 HEX64RE = re.compile(r"[0-9a-f]{64}")
+OPAQUE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
 FROZEN_SEMANTICS = ("request", "result", "inventory", "lifecycle",
                     "state", "native_rejection")
+FROZEN_PEER = ("none-observed", "host-device", "device-or-subsystem",
+               "device", "host-hypervisor", "host-tdx-module",
+               "host-or-paravisor")
 FROZEN_PHASE = ("boot", "pre_attach", "observed")
 FROZEN_STATUS = ("available", "partial", "unavailable",
                  "not_applicable", "disabled")
@@ -101,11 +105,21 @@ def check_u64(value, where):
     return number
 
 
+def check_opaque_id(value, where):
+    assert isinstance(value, str), "%s must be a string" % where
+    assert OPAQUE_RE.fullmatch(value), \
+        "%s not an opaque id: %r" % (where, value)
+
+
 def check_quality(quality, where):
     assert set(quality.keys()) == set(QUALITY_CHANNELS), \
         "%s channels" % where
     for channel in QUALITY_CHANNELS:
         node = quality[channel]
+        assert isinstance(node, dict), \
+            "%s.%s must be an object" % (where, channel)
+        assert set(node.keys()) == {"status", "loss_count"}, \
+            "%s.%s leaves" % (where, channel)
         assert node["status"] in ("complete_for_scope", "partial",
                                   "unavailable"), \
             "%s.%s status" % (where, channel)
@@ -175,10 +189,10 @@ def check_maybe_pairing(fact, base, where):
         assert reasoned, "%s null needs %s" % (base, reason_key)
     else:
         assert isinstance(value, str), "%s must be a string" % where
+        check_opaque_id(value, where)
         assert not reasoned, "%s strays beside a value" % reason_key
     if reasoned:
-        assert isinstance(fact[reason_key], str), \
-            "%s must be a string" % reason_key
+        check_opaque_id(fact[reason_key], reason_key)
 
 
 def fact_fields_valid(fact):
@@ -186,9 +200,10 @@ def fact_fields_valid(fact):
 
     Mirrors the event schema and the Rust snapshot path: the
     required keys are present, nothing unknown rides along, u64
-    leaves are canonical, closed labels stay in their frozen
-    sets, quality channels are well-formed, and each nullable
-    leaf pairs with its reason key exactly when null.
+    leaves are canonical, identifiers are bounded, closed labels
+    stay in their frozen sets, the observed interval orders
+    start before end, quality channels are well-formed, and each
+    nullable leaf pairs with its reason key exactly when null.
     """
     try:
         if not isinstance(fact, dict):
@@ -198,14 +213,28 @@ def fact_fields_valid(fact):
             return False
         for field in EXPOSURE_FACT_REQUIRED:
             assert field in fact, "missing fact field %s" % field
+        check_opaque_id(fact["evidence_id"], "evidence_id")
         if fact["source_id"] not in SOURCE_CAPABILITIES:
             return False
         check_u64(fact["epoch"], "epoch")
+        check_opaque_id(fact["operation_id"], "operation_id")
+        check_opaque_id(fact["kind"], "kind")
+        check_opaque_id(fact["direction"], "direction")
         check_u64(fact["generation"], "generation")
         check_u64(fact["offset"], "offset")
         check_u64(fact["length_bytes"], "length_bytes")
-        assert fact["semantics"] in FROZEN_SEMANTICS
+        check_opaque_id(fact["caller_class"], "caller_class")
+        assert fact["peer_class"] in FROZEN_PEER, "unknown peer class"
         assert fact["clock_domain"] in FROZEN_CLOCK
+        interval = fact["observed_interval"]
+        assert isinstance(interval, dict), "interval must be an object"
+        assert set(interval.keys()) == {"start", "end", "uncertainty"}, \
+            "interval leaves"
+        start = check_u64(interval["start"], "interval.start")
+        end = check_u64(interval["end"], "interval.end")
+        check_u64(interval["uncertainty"], "interval.uncertainty")
+        assert start <= end, "interval start past end"
+        assert fact["semantics"] in FROZEN_SEMANTICS
         check_quality(fact["quality"], "fact quality")
         check_maybe_pairing(fact, "parent_operation_id", "parent")
         check_maybe_pairing(fact, "object_token", "object token")
@@ -219,9 +248,71 @@ def fact_fields_valid(fact):
             assert I64MIN <= native <= I64MAX, "native range"
             assert not reasoned, "native reason strays beside a value"
         if reasoned:
-            assert isinstance(fact["native_result_reason"], str), \
-                "native reason type"
+            check_opaque_id(fact["native_result_reason"],
+                            "native_result_reason")
     except (AssertionError, KeyError, TypeError):
+        return False
+    return True
+
+
+ENVELOPE_FIELDS = ("schema_version", "session_id", "seq", "ts_ns",
+                   "kind", "source", "data")
+SOURCE_FIELDS = ("hook", "backend", "profile_id", "measurement",
+                 "correlation")
+
+
+def fact_envelope_valid(event):
+    """True when an exposure-fact line keeps its canonical envelope.
+
+    Mirrors the Rust normalizer's envelope checks: the seven
+    envelope keys are present with nothing unknown, the version
+    is the exposure contract, the timestamp is a canonical u64,
+    and the source carries its five string leaves. Sequence and
+    session checks stay with the seal loop, as in Rust.
+    """
+    try:
+        if not isinstance(event, dict):
+            return False
+        if set(event.keys()) != set(ENVELOPE_FIELDS):
+            return False
+        if event["schema_version"] != "0.3.0":
+            return False
+        if not isinstance(event["session_id"], str):
+            return False
+        check_u64(event["ts_ns"], "ts_ns")
+        source = event["source"]
+        if not isinstance(source, dict):
+            return False
+        if set(source.keys()) != set(SOURCE_FIELDS):
+            return False
+        for field in SOURCE_FIELDS:
+            if not isinstance(source[field], str):
+                return False
+    except (AssertionError, KeyError, TypeError):
+        return False
+    return True
+
+
+def non_fact_fields_valid(event):
+    """True when a non-fact line keeps its envelope payload shape.
+
+    Every event line carries an object ``data`` payload; a marker's
+    payload holds exactly its bounded ``text`` annotation, mirroring
+    the event schema and the Rust snapshot path.
+    """
+    try:
+        if not isinstance(event, dict):
+            return False
+        data = event.get("data")
+        if not isinstance(data, dict):
+            return False
+        if event.get("kind") == "marker":
+            if set(data.keys()) != {"text"}:
+                return False
+            text = data["text"]
+            if not isinstance(text, str) or not 1 <= len(text) <= 256:
+                return False
+    except (AttributeError, TypeError):
         return False
     return True
 
@@ -277,9 +368,10 @@ def seal_verified(snapshot):
     line ends in a newline, carries its position as its sequence
     number, and belongs to the snapshot's own session; one entry
     holds exactly one physical line under the reader's 64 KiB
-    bound. Framing violations raise. A foreign-session line or an
-    exposure fact whose remaining fields fail validation verifies
-    false, like a containment break: neither can support a verdict.
+    bound. Framing violations raise. A foreign-session line, an
+    exposure fact whose envelope or fields fail validation, or a
+    non-fact line whose payload loses its shape verifies false,
+    like a containment break: none can support a verdict.
     """
     expected_session = snapshot["session"].get("session_id")
     for position, line in enumerate(snapshot["event_lines"]):
@@ -290,12 +382,18 @@ def seal_verified(snapshot):
         if len(line.encode("utf-8")) > SNAPSHOT_MAX_LINE_BYTES:
             raise ValueError("line %d too large" % position)
         event = json.loads(line)
+        if not isinstance(event, dict):
+            return False
         if event.get("seq") != str(position):
             raise ValueError("line %d sequence mismatch" % position)
         if event.get("session_id") != expected_session:
             return False
-        if event.get("kind") == "exposure_fact" \
-                and not fact_fields_valid(event.get("data")):
+        if event.get("kind") == "exposure_fact":
+            if not fact_envelope_valid(event):
+                return False
+            if not fact_fields_valid(event.get("data")):
+                return False
+        elif not non_fact_fields_valid(event):
             return False
     capture = snapshot["session"]["capture"]
     if "integrity" not in capture:
@@ -349,7 +447,11 @@ def cross_epoch_error(facts):
 
 
 def rule_satisfied(snapshot, required_sources):
-    """A rule is satisfied only by sealed, settled, complete evidence."""
+    """A rule is satisfied only by sealed, settled, covering evidence.
+
+    Usable metadata alone never satisfies: every required source
+    needs at least one sealed fact whose ``source_id`` equals it.
+    """
     if not required_sources:
         return False
     if not seal_verified(snapshot):
@@ -367,6 +469,9 @@ def rule_satisfied(snapshot, required_sources):
     facts = facts_from_lines(snapshot)
     if not facts:
         return False
+    for source in required_sources:
+        if not any(fact["source_id"] == source for fact in facts):
+            return False
     # The seal already gates containment; these stay as a second layer.
     if duplicate_evidence_error(facts) is not None:
         return False
@@ -567,6 +672,162 @@ def test_every_frozen_fact_enum_verifies():
         mutated = resealed_mutation(relabel("clock_domain", clock))
         assert seal_verified(mutated), \
             "frozen clock domain %r must verify" % clock
+
+
+def test_every_frozen_peer_and_source_verifies():
+    def relabel(field, value):
+        def apply(event):
+            event["data"][field] = value
+        return apply
+
+    for peer in FROZEN_PEER:
+        mutated = resealed_mutation(relabel("peer_class", peer))
+        assert seal_verified(mutated), \
+            "frozen peer class %r must verify" % peer
+    for source in SOURCE_CAPABILITIES:
+        mutated = resealed_mutation(relabel("source_id", source))
+        assert seal_verified(mutated), \
+            "catalog source %r must verify" % source
+
+
+def test_unknown_peer_and_reversed_interval_cannot_satisfy_rule():
+    def bad_peer(event):
+        event["data"]["peer_class"] = "unknown-peer"
+
+    def reversed_interval(event):
+        event["data"]["observed_interval"]["start"] = "2000000000"
+
+    for mutator, label in ((bad_peer, "peer class"),
+                           (reversed_interval, "interval order")):
+        mutated = resealed_mutation(mutator)
+        assert not seal_verified(mutated), \
+            "unknown %s must fail the seal" % label
+        assert not rule_satisfied(mutated, ["sharing-census"]), \
+            "unknown-%s evidence never satisfies" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def test_unknown_source_quality_and_stray_reason_cannot_satisfy():
+    def bad_source(event):
+        event["data"]["source_id"] = "unknown-source"
+
+    def bad_quality(event):
+        event["data"]["quality"]["detail"]["status"] = "unknown-quality"
+
+    def stray_reason(event):
+        event["data"]["parent_operation_id_reason"] = "unknown-parent"
+
+    for mutator, label in ((bad_source, "source"),
+                           (bad_quality, "quality status"),
+                           (stray_reason, "stray reason")):
+        mutated = resealed_mutation(mutator)
+        assert not seal_verified(mutated), \
+            "unknown %s must fail the seal" % label
+        assert not rule_satisfied(mutated, ["sharing-census"]), \
+            "unknown-%s evidence never satisfies" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def test_fact_identifier_and_interval_shapes_cannot_satisfy():
+    def empty_id(event):
+        event["data"]["evidence_id"] = ""
+
+    def null_interval(event):
+        event["data"]["observed_interval"] = None
+
+    def native_without_reason(event):
+        event["data"]["native_result"] = None
+
+    for mutator, label in ((empty_id, "evidence id"),
+                           (null_interval, "interval shape"),
+                           (native_without_reason, "native reason")):
+        mutated = resealed_mutation(mutator)
+        assert not seal_verified(mutated), \
+            "malformed %s must fail the seal" % label
+        assert not rule_satisfied(mutated, ["sharing-census"]), \
+            "malformed-%s evidence never satisfies" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def test_fact_envelope_must_keep_its_canonical_shape():
+    def bad_version(event):
+        event["schema_version"] = "0.1.1"
+
+    def bad_timestamp(event):
+        event["ts_ns"] = "01"
+
+    def bad_source(event):
+        del event["source"]["correlation"]
+
+    for mutator, label in ((bad_version, "schema version"),
+                           (bad_timestamp, "timestamp"),
+                           (bad_source, "source")):
+        mutated = resealed_mutation(mutator)
+        assert not seal_verified(mutated), \
+            "malformed %s must fail the seal" % label
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def resealed_marker(payload):
+    """The sealed snapshot with the marker payload replaced.
+
+    A payload of ``None`` drops ``data`` entirely; the seal is
+    recomputed so only the shape gate can refuse.
+    """
+    snapshot = json.loads(json.dumps(load("sealed_snapshot.json")))
+    lines = snapshot["event_lines"]
+    for index, line in enumerate(lines):
+        event = json.loads(line)
+        if event["kind"] != "marker":
+            continue
+        if payload is None:
+            del event["data"]
+        else:
+            event["data"] = payload
+        lines[index] = json.dumps(event, separators=(",", ":")) + "\n"
+    raw = "".join(lines).encode("utf-8")
+    snapshot["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    return snapshot
+
+
+def test_malformed_marker_payloads_cannot_verify():
+    assert seal_verified(resealed_marker({"text": "census sealed"})), \
+        "valid marker must verify"
+    assert seal_verified(resealed_marker({"text": "x" * 256})), \
+        "bounded marker must verify"
+    payloads = (None, "nope", {}, {"text": ""}, {"text": "x" * 257},
+                {"text": "census sealed", "extra": "nope"})
+    for payload in payloads:
+        mutated = resealed_marker(payload)
+        assert not seal_verified(mutated), \
+            "malformed marker %r must fail the seal" % (payload,)
+        assert snapshot_verdict(mutated, ["sharing-census"]) == \
+            "inconclusive"
+
+
+def test_rule_needs_facts_from_each_required_source():
+    snapshot = json.loads(json.dumps(load("sealed_snapshot.json")))
+    lines = snapshot["event_lines"]
+    for index, line in enumerate(lines):
+        event = json.loads(line)
+        if event["kind"] == "exposure_fact":
+            event["data"]["source_id"] = "egress-controls"
+            lines[index] = json.dumps(event, separators=(",", ":")) + "\n"
+    raw = "".join(lines).encode("utf-8")
+    snapshot["session"]["capture"]["integrity"].update(
+        events_bytes=str(len(raw)),
+        events_sha256=hashlib.sha256(raw).hexdigest())
+    assert seal_verified(snapshot), \
+        "well-formed foreign facts still seal"
+    assert not rule_satisfied(snapshot, ["sharing-census"]), \
+        "facts from another source never satisfy"
+    assert snapshot_verdict(snapshot, ["sharing-census"]) == "inconclusive"
 
 
 def test_missing_terminal_evidence_is_partial():

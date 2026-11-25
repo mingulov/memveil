@@ -188,6 +188,35 @@ fn unknown_fact_enums_cannot_verify() {
 }
 
 #[test]
+fn required_sources_need_matching_sealed_facts() {
+    let owned = sealed_evidence_keys(SEALED).expect("control replays");
+    let sources: Vec<&str> = owned.iter().map(|key| key.source_id.as_str()).collect();
+    assert!(sources.iter().all(|source| *source == "sharing-census"));
+    let terminal = snapshot_terminal_status(SEALED).expect("control carries terminal");
+    let outcome = exposure_quality::rule_outcome_with_facts(
+        true,
+        &terminal,
+        &[("sharing-census", "available", true)],
+        &sources,
+    );
+    assert_eq!(outcome, RuleOutcome::Satisfied);
+
+    for (name, facts) in [
+        ("undeclared-only", vec!["egress-controls"]),
+        ("no facts", vec![]),
+    ] {
+        let outcome = exposure_quality::rule_outcome_with_facts(
+            true,
+            "complete_for_scope",
+            &[("sharing-census", "available", true)],
+            &facts,
+        );
+        assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} never satisfies");
+        assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
+    }
+}
+
+#[test]
 fn missing_terminal_evidence_is_partial() {
     let settled = verify_sealed_snapshot(SEALED).expect("positive control seals");
     let terminal = snapshot_terminal_status(SEALED).expect("control carries terminal");

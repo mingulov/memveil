@@ -1357,26 +1357,185 @@ fn fact_identity(text: &str) -> Option<SealedEvidenceKey> {
     })
 }
 
-/// True when a fact line's closed enum labels stay in their frozen sets.
+/// True when one fact line validates completely at the seal boundary.
 ///
-/// Well-typed-but-unknown `semantics` or `clock_domain` values fail
-/// the seal exactly like a malformed field: the seal verifies false
-/// rather than admitting them as verdict evidence. Membership reuses
-/// the model validator's frozen tables, never a copy.
-fn fact_enums_valid(text: &str) -> bool {
+/// The whole line must normalize (canonical envelope, field order,
+/// scalar types and canonical numerics) and its data must build an
+/// [`exposure_shapes::ExposureFact`] passing the model validator:
+/// peer-class and source membership, interval order, quality-channel
+/// statuses, maybe/reason pairing, closed enum sets and identifier
+/// shapes. Well-typed-but-unknown labels fail the seal exactly like
+/// a malformed field: the seal verifies false rather than admitting
+/// them as verdict evidence. Membership reuses the model validator's
+/// frozen tables, never a copy.
+fn fact_sealed_valid(text: &str) -> bool {
+    if normalize_record(text).is_err() {
+        return false;
+    }
     let Ok(JsonValue::Object(fields)) = parse_value(text) else {
         return false;
     };
     let Some(JsonValue::Object(data)) = find_field(&fields, "data") else {
         return false;
     };
-    let (Some(JsonValue::Str(semantics)), Some(JsonValue::Str(clock))) = (
-        find_field(data, "semantics"),
-        find_field(data, "clock_domain"),
-    ) else {
+    fact_from_data(data).is_some_and(|fact| fact.validate().is_ok())
+}
+
+fn sealed_str<'v>(data: &'v [(String, JsonValue)], key: &str) -> Option<&'v str> {
+    match find_field(data, key) {
+        Some(JsonValue::Str(text)) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn sealed_u64(data: &[(String, JsonValue)], key: &str) -> Option<u64> {
+    let text = sealed_str(data, key)?;
+    if !is_canonical_u64(text) {
+        return None;
+    }
+    text.parse::<u64>().ok()
+}
+
+/// One maybe/absent leaf with its typed reason, or `None` when mistyped.
+fn sealed_maybe(
+    data: &[(String, JsonValue)],
+    base: &str,
+) -> Option<exposure_shapes::Maybe<String>> {
+    let reason_key = format!("{base}_reason");
+    let reason = match find_field(data, reason_key.as_str()) {
+        None => String::new(),
+        Some(JsonValue::Str(text)) => text.clone(),
+        Some(_) => return None,
+    };
+    match find_field(data, base) {
+        None => Some(exposure_shapes::Maybe {
+            present: false,
+            value: None,
+            reason,
+        }),
+        Some(JsonValue::Str(text)) => Some(exposure_shapes::Maybe {
+            present: true,
+            value: Some(text.clone()),
+            reason,
+        }),
+        Some(JsonValue::Null) => Some(exposure_shapes::Maybe {
+            present: true,
+            value: None,
+            reason,
+        }),
+        Some(_) => None,
+    }
+}
+
+fn sealed_interval(data: &[(String, JsonValue)]) -> Option<(u64, u64, u64)> {
+    let Some(JsonValue::Object(leaves)) = find_field(data, "observed_interval") else {
+        return None;
+    };
+    Some((
+        sealed_u64(leaves, "start")?,
+        sealed_u64(leaves, "end")?,
+        sealed_u64(leaves, "uncertainty")?,
+    ))
+}
+
+fn sealed_native(data: &[(String, JsonValue)]) -> Option<(Option<i64>, String)> {
+    let reason = match find_field(data, "native_result_reason") {
+        None => String::new(),
+        Some(JsonValue::Str(text)) => text.clone(),
+        Some(_) => return None,
+    };
+    let value = match find_field(data, "native_result") {
+        // Bare integers parsed as i64 already; the re-parse only
+        // converts the validated text and fails closed on drift.
+        Some(JsonValue::Num(text)) => Some(text.parse::<i64>().ok()?),
+        Some(JsonValue::Null) => None,
+        _ => return None,
+    };
+    Some((value, reason))
+}
+
+fn sealed_quality(data: &[(String, JsonValue)]) -> Option<exposure_shapes::Quality> {
+    let Some(JsonValue::Object(channels)) = find_field(data, "quality") else {
+        return None;
+    };
+    let mut built: Vec<exposure_shapes::ChannelQuality> = Vec::with_capacity(5);
+    for channel in exposure_shapes::CHANNELS {
+        let node = find_field(channels, channel)?;
+        let JsonValue::Object(leaves) = node else {
+            return None;
+        };
+        let Some(JsonValue::Str(status)) = find_field(leaves, "status") else {
+            return None;
+        };
+        let loss = match find_field(leaves, "loss_count") {
+            Some(JsonValue::Null) => None,
+            Some(JsonValue::Str(text)) if is_canonical_u64(text) => Some(text.parse::<u64>().ok()?),
+            _ => return None,
+        };
+        built.push(exposure_shapes::ChannelQuality {
+            status: status.clone(),
+            loss,
+        });
+    }
+    built.try_into().ok()
+}
+
+/// Build one [`exposure_shapes::ExposureFact`] from sealed line data.
+///
+/// Returns `None` for any shape the normalizer passed but the model
+/// cannot take; callers fail closed rather than guessing a value.
+fn fact_from_data(data: &[(String, JsonValue)]) -> Option<exposure_shapes::ExposureFact> {
+    let (observed_start, observed_end, observed_uncertainty) = sealed_interval(data)?;
+    let (native_result, native_result_reason) = sealed_native(data)?;
+    Some(exposure_shapes::ExposureFact {
+        evidence_id: sealed_str(data, "evidence_id")?.to_string(),
+        source_id: sealed_str(data, "source_id")?.to_string(),
+        epoch: sealed_u64(data, "epoch")?,
+        operation_id: sealed_str(data, "operation_id")?.to_string(),
+        parent_operation_id: sealed_maybe(data, "parent_operation_id")?,
+        kind: sealed_str(data, "kind")?.to_string(),
+        direction: sealed_str(data, "direction")?.to_string(),
+        object_token: sealed_maybe(data, "object_token")?,
+        generation: sealed_u64(data, "generation")?,
+        offset: sealed_u64(data, "offset")?,
+        length_bytes: sealed_u64(data, "length_bytes")?,
+        native_result,
+        native_result_reason,
+        caller_class: sealed_str(data, "caller_class")?.to_string(),
+        peer_class: sealed_str(data, "peer_class")?.to_string(),
+        clock_domain: sealed_str(data, "clock_domain")?.to_string(),
+        observed_start,
+        observed_end,
+        observed_uncertainty,
+        semantics: sealed_str(data, "semantics")?.to_string(),
+        quality: sealed_quality(data)?,
+    })
+}
+
+/// True when a non-fact line keeps its envelope payload shape.
+///
+/// Every event line carries an object `data` payload, so a dropped
+/// or mistyped payload fails the seal rather than verifying. A
+/// marker's payload holds exactly its bounded `text` annotation,
+/// mirroring the event schema; other legacy kinds keep their
+/// per-kind payloads with the capture reader.
+fn non_fact_shape_valid(kind: &str, text: &str) -> bool {
+    let Ok(JsonValue::Object(fields)) = parse_value(text) else {
         return false;
     };
-    exposure_shapes::is_semantics(semantics) && exposure_shapes::is_clock_domain(clock)
+    let Some(JsonValue::Object(data)) = find_field(&fields, "data") else {
+        return false;
+    };
+    if kind != "marker" {
+        return true;
+    }
+    if data.len() != 1 {
+        return false;
+    }
+    let Some(JsonValue::Str(annotation)) = find_field(data, "text") else {
+        return false;
+    };
+    !annotation.is_empty() && annotation.chars().count() <= 256
 }
 
 /// Seal verification outcome over a snapshot's literal bytes.
@@ -1431,8 +1590,9 @@ fn line_session(line: &str) -> Option<String> {
 /// 64 KiB bound. Malformed snapshot framing is an error; a
 /// well-formed snapshot whose bytes, counts or kind census differ
 /// from the commitment, whose lines stray from the session, whose
-/// fact fields fail validation, or whose fact identities break
-/// containment, verifies false. An absent integrity object verifies
+/// fact data fails model validation, whose non-fact payloads lose
+/// their shape, or whose fact identities break containment,
+/// verifies false. An absent integrity object verifies
 /// false, while a present non-object or an unknown integrity field
 /// is an error: no unsealed sidecar can supply policy evidence.
 pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
@@ -1486,16 +1646,16 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
                 }
                 if kind == EXPOSURE_FACT_KIND {
                     // Identity alone never admits a fact: the whole
-                    // line must normalize, so every remaining fact
-                    // field keeps its canonical shape and type, and
-                    // the closed enum labels must stay in their
-                    // frozen sets, like the oracle's field check.
+                    // line must normalize and its data must pass the
+                    // model validator, like the oracle's field check.
                     match fact_identity(text) {
-                        Some(key) if normalize_record(text).is_ok() && fact_enums_valid(text) => {
+                        Some(key) if fact_sealed_valid(text) => {
                             fact_keys.push(key);
                         }
                         _ => contained_ok = false,
                     }
+                } else if !non_fact_shape_valid(&kind, text) {
+                    lines_ok = false;
                 }
                 kinds.push(kind);
             }
@@ -2420,12 +2580,14 @@ mod tests {
         ])
     }
 
-    /// One sealed single-fact snapshot carrying the given enum labels.
-    ///
-    /// The fact line renders through the canonical encoder and the
-    /// seal commits to the literal bytes, so only the enum gate can
-    /// refuse: any other refusal would be a builder bug.
-    fn sealed_fact_snapshot(semantics: &str, clock_domain: &str) -> String {
+    /// Session handle shared by every probe snapshot line.
+    const PROBE_SESSION: &str = "sealed-probe-1";
+
+    /// Canonical fact-data fields; tests mutate single leaves from these.
+    type FactData = Vec<(&'static str, FieldValue<'static>)>;
+
+    /// One valid fact-data field list carrying the given enum labels.
+    fn default_fact_data(semantics: &'static str, clock_domain: &'static str) -> FactData {
         let quality = FieldValue::Object(vec![
             ("detail", settled_channel()),
             ("aggregate", settled_channel()),
@@ -2433,7 +2595,7 @@ mod tests {
             ("baseline", settled_channel()),
             ("terminal", settled_channel()),
         ]);
-        let data = FieldValue::Object(vec![
+        vec![
             ("evidence_id", FieldValue::Text("ev-1")),
             ("source_id", FieldValue::Text("sharing-census")),
             ("epoch", FieldValue::UInt(7)),
@@ -2457,46 +2619,176 @@ mod tests {
             ),
             ("semantics", FieldValue::Text(semantics)),
             ("quality", quality),
-        ]);
-        let line = render_canonical(&[
-            ("schema_version", FieldValue::Text("0.3.0")),
-            ("session_id", FieldValue::Text("sealed-enum-1")),
-            ("seq", FieldValue::UInt(0)),
-            ("ts_ns", FieldValue::UInt(1_100_000_000)),
-            ("kind", FieldValue::Text(EXPOSURE_FACT_KIND)),
-            (
-                "source",
+        ]
+    }
+
+    /// Replace one known fact-data field in place.
+    fn set_field(data: &mut FactData, key: &str, value: FieldValue<'static>) {
+        let slot = data
+            .iter_mut()
+            .find(|(seen, _)| *seen == key)
+            .expect("known fact field");
+        slot.1 = value;
+    }
+
+    /// Settled quality with one channel reporting the given status.
+    fn quality_with_status(channel: &'static str, status: &'static str) -> FieldValue<'static> {
+        let mut channels: Vec<(&'static str, FieldValue<'static>)> = Vec::new();
+        for name in ["detail", "aggregate", "identity", "baseline", "terminal"] {
+            let state = if name == channel {
+                status
+            } else {
+                "complete_for_scope"
+            };
+            channels.push((
+                name,
                 FieldValue::Object(vec![
-                    ("hook", FieldValue::Text("synthetic:exposure")),
-                    ("backend", FieldValue::Text("synthetic")),
-                    ("profile_id", FieldValue::Text("synthetic-census-1")),
-                    ("measurement", FieldValue::Text("observed")),
-                    ("correlation", FieldValue::Text("direct")),
+                    ("status", FieldValue::Text(state)),
+                    ("loss_count", FieldValue::UInt(0)),
                 ]),
-            ),
-            ("data", data),
+            ));
+        }
+        FieldValue::Object(channels)
+    }
+
+    fn probe_source() -> FieldValue<'static> {
+        FieldValue::Object(vec![
+            ("hook", FieldValue::Text("synthetic:exposure")),
+            ("backend", FieldValue::Text("synthetic")),
+            ("profile_id", FieldValue::Text("synthetic-census-1")),
+            ("measurement", FieldValue::Text("observed")),
+            ("correlation", FieldValue::Text("direct")),
         ])
-        .unwrap();
-        let literal = format!("{line}\n");
-        let entry = literal
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n");
+    }
+
+    /// One canonical fact line at the given sequence position.
+    fn fact_line(seq: u64, data: FactData) -> String {
+        render_canonical(&[
+            ("schema_version", FieldValue::Text("0.3.0")),
+            ("session_id", FieldValue::Text(PROBE_SESSION)),
+            ("seq", FieldValue::UInt(seq)),
+            ("ts_ns", FieldValue::UInt(1_100_000_000 + seq)),
+            ("kind", FieldValue::Text(EXPOSURE_FACT_KIND)),
+            ("source", probe_source()),
+            ("data", FieldValue::Object(data)),
+        ])
+        .unwrap()
+    }
+
+    /// One canonical marker line; `None` drops the payload entirely.
+    fn marker_line(seq: u64, data: Option<FieldValue<'_>>) -> String {
+        let mut fields: Vec<(&str, FieldValue)> = vec![
+            ("schema_version", FieldValue::Text("0.3.0")),
+            ("session_id", FieldValue::Text(PROBE_SESSION)),
+            ("seq", FieldValue::UInt(seq)),
+            ("ts_ns", FieldValue::UInt(1_300_000_000)),
+            ("kind", FieldValue::Text("marker")),
+            ("source", probe_source()),
+        ];
+        if let Some(payload) = data {
+            fields.push(("data", payload));
+        }
+        render_canonical(&fields).unwrap()
+    }
+
+    /// One sealed snapshot carrying exactly the given literal lines.
+    ///
+    /// Each line renders through the canonical encoder and the seal
+    /// commits to the literal bytes, so only the shape gates can
+    /// refuse: any other refusal would be a builder bug.
+    fn sealed_lines_snapshot(lines: &[String], facts: u64, markers: u64) -> String {
+        assert!(!lines.is_empty(), "probe snapshot carries lines");
+        let literal: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let entries: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                format!("{line}\n")
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+            })
+            .collect();
         let bytes = literal.len();
         let digest = sha256_hex(literal.as_bytes());
-        let kinds = "\"bounce_attempt\":\"0\",\"map_result\":\"0\",\"unmap\":\"0\",\"copy\":\"0\",\
+        let count = lines.len() as u64;
+        let kinds = format!(
+            "\"bounce_attempt\":\"0\",\"map_result\":\"0\",\"unmap\":\"0\",\"copy\":\"0\",\
             \"sync_request\":\"0\",\"transition_result\":\"0\",\"pool_sample\":\"0\",\"gap\":\"0\",\
-            \"marker\":\"0\",\"counter_snapshot\":\"0\",\"exposure_fact\":\"1\"";
-        let integrity = format!(
-            "{{\"algorithm\":\"sha256\",\"events_bytes\":\"{bytes}\",\"line_count\":\"1\",\
-            \"first_seq\":\"0\",\"last_seq\":\"0\",\"events_sha256\":\"{digest}\",\
-            \"kinds\":{{{kinds}}}}}"
+            \"marker\":\"{markers}\",\"counter_snapshot\":\"0\",\"exposure_fact\":\"{facts}\""
         );
+        let integrity = format!(
+            "{{\"algorithm\":\"sha256\",\"events_bytes\":\"{bytes}\",\"line_count\":\"{count}\",\
+            \"first_seq\":\"0\",\"last_seq\":\"{}\",\"events_sha256\":\"{digest}\",\
+            \"kinds\":{{{kinds}}}}}",
+            count - 1
+        );
+        let rendered = entries
+            .iter()
+            .map(|entry| format!("\"{entry}\""))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "{{\"session\":{{\"session_id\":\"sealed-enum-1\",\
+            "{{\"session\":{{\"session_id\":\"{PROBE_SESSION}\",\
             \"capture\":{{\"integrity\":{integrity}}}}},\
-            \"event_lines\":[\"{entry}\"]}}"
+            \"event_lines\":[{rendered}]}}"
         )
+    }
+
+    /// One sealed single-fact snapshot carrying the given enum labels.
+    fn sealed_fact_snapshot(semantics: &'static str, clock_domain: &'static str) -> String {
+        let line = fact_line(0, default_fact_data(semantics, clock_domain));
+        sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0)
+    }
+
+    /// One sealed single-fact snapshot with mutated fact data.
+    fn sealed_mutated_fact(mutate: fn(&mut FactData)) -> String {
+        let mut data = default_fact_data("inventory", "guest_monotonic_active");
+        mutate(&mut data);
+        let line = fact_line(0, data);
+        sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0)
+    }
+
+    fn break_peer_class(data: &mut FactData) {
+        set_field(data, "peer_class", FieldValue::Text("unknown-peer"));
+    }
+
+    fn break_interval_order(data: &mut FactData) {
+        set_field(
+            data,
+            "observed_interval",
+            FieldValue::Object(vec![
+                ("start", FieldValue::UInt(2_000_000_000)),
+                ("end", FieldValue::UInt(1_000_000_100)),
+                ("uncertainty", FieldValue::UInt(50)),
+            ]),
+        );
+    }
+
+    fn break_source(data: &mut FactData) {
+        set_field(data, "source_id", FieldValue::Text("unknown-source"));
+    }
+
+    fn break_quality_status(data: &mut FactData) {
+        set_field(
+            data,
+            "quality",
+            quality_with_status("detail", "unknown-quality"),
+        );
+    }
+
+    fn break_stray_parent_reason(data: &mut FactData) {
+        data.push((
+            "parent_operation_id_reason",
+            FieldValue::Text("unknown-parent"),
+        ));
+    }
+
+    fn break_native_reason(data: &mut FactData) {
+        set_field(data, "native_result", FieldValue::Null);
+    }
+
+    fn break_evidence_id(data: &mut FactData) {
+        set_field(data, "evidence_id", FieldValue::Text(""));
     }
 
     #[test]
@@ -2520,6 +2812,100 @@ mod tests {
             let snapshot = sealed_fact_snapshot("inventory", clock);
             let report = verify_sealed_snapshot(&snapshot).expect("control parses");
             assert!(report.verified, "frozen clock domain {clock} must verify");
+        }
+    }
+
+    #[test]
+    fn seal_refuses_invalid_fact_fields() {
+        for (name, mutate) in [
+            ("peer class", break_peer_class as fn(&mut FactData)),
+            ("interval order", break_interval_order as fn(&mut FactData)),
+            ("source", break_source as fn(&mut FactData)),
+            ("quality status", break_quality_status as fn(&mut FactData)),
+            (
+                "stray parent reason",
+                break_stray_parent_reason as fn(&mut FactData),
+            ),
+            ("native reason", break_native_reason as fn(&mut FactData)),
+            ("evidence id", break_evidence_id as fn(&mut FactData)),
+        ] {
+            let snapshot = sealed_mutated_fact(mutate);
+            let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
+            assert!(!report.verified, "{name} cannot verify");
+        }
+    }
+
+    #[test]
+    fn seal_accepts_every_frozen_peer_class_source_and_status() {
+        for peer in exposure_shapes::PEER_CLASSES {
+            let mut data = default_fact_data("inventory", "guest_monotonic_active");
+            set_field(&mut data, "peer_class", FieldValue::Text(peer));
+            let line = fact_line(0, data);
+            let snapshot = sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0);
+            let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+            assert!(report.verified, "frozen peer class {peer} must verify");
+        }
+        for source in exposure_shapes::EXPOSURE_SOURCES {
+            let mut data = default_fact_data("inventory", "guest_monotonic_active");
+            set_field(&mut data, "source_id", FieldValue::Text(source));
+            let line = fact_line(0, data);
+            let snapshot = sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0);
+            let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+            assert!(report.verified, "catalog source {source} must verify");
+        }
+        for status in exposure_shapes::QUALITY_STATUSES {
+            let mut data = default_fact_data("inventory", "guest_monotonic_active");
+            set_field(&mut data, "quality", quality_with_status("detail", status));
+            let line = fact_line(0, data);
+            let snapshot = sealed_lines_snapshot(std::slice::from_ref(&line), 1, 0);
+            let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+            assert!(report.verified, "quality status {status} must verify");
+        }
+    }
+
+    #[test]
+    fn seal_refuses_malformed_non_fact_lines() {
+        let marker = FieldValue::Object(vec![("text", FieldValue::Text("census sealed"))]);
+        let control = vec![
+            fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+            marker_line(1, Some(marker)),
+        ];
+        let report =
+            verify_sealed_snapshot(&sealed_lines_snapshot(&control, 1, 1)).expect("control parses");
+        assert!(report.verified, "valid marker must verify");
+
+        let overlong = "x".repeat(257);
+        let payloads: Vec<(&str, Option<FieldValue>)> = vec![
+            ("missing payload", None),
+            ("mistyped payload", Some(FieldValue::Text("nope"))),
+            ("keyless payload", Some(FieldValue::Object(vec![]))),
+            (
+                "empty annotation",
+                Some(FieldValue::Object(vec![("text", FieldValue::Text(""))])),
+            ),
+            (
+                "overlong annotation",
+                Some(FieldValue::Object(vec![(
+                    "text",
+                    FieldValue::Text(&overlong),
+                )])),
+            ),
+            (
+                "extra payload key",
+                Some(FieldValue::Object(vec![
+                    ("text", FieldValue::Text("census sealed")),
+                    ("extra", FieldValue::Text("nope")),
+                ])),
+            ),
+        ];
+        for (name, payload) in payloads {
+            let lines = vec![
+                fact_line(0, default_fact_data("inventory", "guest_monotonic_active")),
+                marker_line(1, payload),
+            ];
+            let report = verify_sealed_snapshot(&sealed_lines_snapshot(&lines, 1, 1))
+                .expect("tainted parses");
+            assert!(!report.verified, "marker with {name} cannot verify");
         }
     }
 }

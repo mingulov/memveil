@@ -86,6 +86,10 @@ fn source_usable(status: &str) -> bool {
 /// An unsettled terminal channel yields
 /// [`RuleOutcome::Partial`]; anything else is
 /// [`RuleOutcome::Inconclusive`]. Unknown statuses fail closed.
+/// Callers reach this gate only with caller-verified inputs; the
+/// composed seal-to-verdict path is
+/// [`rule_outcome_with_facts`], which additionally requires sealed
+/// facts from each required source.
 pub fn rule_outcome(
     sealed: bool,
     terminal_status: &str,
@@ -102,6 +106,36 @@ pub fn rule_outcome(
         RuleOutcome::Satisfied
     } else if !settled {
         RuleOutcome::Partial
+    } else {
+        RuleOutcome::Inconclusive
+    }
+}
+
+/// Evaluate one rule over sealed evidence with replayed fact coverage.
+///
+/// `required` carries one `(source_id, status, present)` triple per
+/// required source, as in [`rule_outcome`]; `fact_sources` carries one
+/// `source_id` per fact replayed from the sealed lines. The outcome is
+/// [`RuleOutcome::Satisfied`] only when the metadata gate passes and
+/// every required source contributed at least one fact whose
+/// `source_id` equals it: usable metadata alone never satisfies, and
+/// facts from other catalog sources never satisfy a required source.
+/// Anything weaker keeps the metadata gate's weaker outcome.
+pub fn rule_outcome_with_facts(
+    sealed: bool,
+    terminal_status: &str,
+    required: &[(&str, &str, bool)],
+    fact_sources: &[&str],
+) -> RuleOutcome {
+    let outcome = rule_outcome(sealed, terminal_status, required);
+    if outcome != RuleOutcome::Satisfied {
+        return outcome;
+    }
+    let covered = required
+        .iter()
+        .all(|(source, _, _)| fact_sources.contains(source));
+    if covered {
+        RuleOutcome::Satisfied
     } else {
         RuleOutcome::Inconclusive
     }
@@ -153,6 +187,34 @@ mod tests {
         assert_eq!(
             rule_outcome(true, COMPLETE, &empty),
             RuleOutcome::Inconclusive
+        );
+    }
+
+    #[test]
+    fn rule_outcomes_need_facts_from_each_required_source() {
+        let full = [("sharing-census", "available", true)];
+        assert_eq!(
+            rule_outcome_with_facts(true, COMPLETE, &full, &["sharing-census"]),
+            RuleOutcome::Satisfied
+        );
+        // Facts from another catalog source never satisfy.
+        assert_eq!(
+            rule_outcome_with_facts(true, COMPLETE, &full, &["egress-controls"]),
+            RuleOutcome::Inconclusive
+        );
+        // No facts never satisfy, even over usable metadata.
+        assert_eq!(
+            rule_outcome_with_facts(true, COMPLETE, &full, &[]),
+            RuleOutcome::Inconclusive
+        );
+        // Weaker metadata outcomes pass through unchanged.
+        assert_eq!(
+            rule_outcome_with_facts(false, COMPLETE, &full, &["sharing-census"]),
+            RuleOutcome::Inconclusive
+        );
+        assert_eq!(
+            rule_outcome_with_facts(true, PARTIAL, &full, &["sharing-census"]),
+            RuleOutcome::Partial
         );
     }
 
