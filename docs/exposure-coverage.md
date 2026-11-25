@@ -130,6 +130,18 @@ unknown (`value-unknown`, null delta with reason) or
 the difference overflows the signed range
 (`delta-overflow`, null delta with reason).
 
+Row quality derives from the row itself across the five
+channels (detail, aggregate, identity, baseline,
+terminal). Only a row with an exact delta reports
+`complete`; unknown and refused rows never do:
+
+| Row | Quality on every channel |
+| --- | --- |
+| Exact delta | `complete` |
+| Compatible with null delta | `unknown` |
+| `incompatible` | `refused` |
+| `unavailable` | `refused`, except identity is `unknown` |
+
 Incomplete journal events never enter a delta: the
 comparator reads finalized metric values only. A
 comparison whose requested metrics include refused rows

@@ -72,6 +72,10 @@ fn standard_meanings() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+fn channel(value: &str) -> String {
+    value.to_string()
+}
+
 fn compatible_row(
     metric: &str,
     left: &str,
@@ -81,6 +85,13 @@ fn compatible_row(
     unit: &str,
     scope: &str,
 ) -> Comparison {
+    // Only an exact delta claims complete quality; a null
+    // delta reports unknown on every channel.
+    let level = if delta.is_some() {
+        "complete"
+    } else {
+        "unknown"
+    };
     Comparison {
         metric_id: metric.to_string(),
         compatibility: "compatible".to_string(),
@@ -91,7 +102,13 @@ fn compatible_row(
         delta_reason: delta_reason.map(str::to_string),
         unit: unit.to_string(),
         scope: scope.to_string(),
-        quality: Quality::complete(),
+        quality: Quality {
+            detail: channel(level),
+            aggregate: channel(level),
+            identity: channel(level),
+            baseline: channel(level),
+            terminal: channel(level),
+        },
     }
 }
 
@@ -104,6 +121,13 @@ fn refused_row(
     unit: &str,
     scope: &str,
 ) -> Comparison {
+    // Refused rows never claim complete quality. A missing
+    // metric additionally reports unknown identity.
+    let identity = if compatibility == "unavailable" {
+        "unknown"
+    } else {
+        "refused"
+    };
     Comparison {
         metric_id: metric.to_string(),
         compatibility: compatibility.to_string(),
@@ -114,7 +138,13 @@ fn refused_row(
         delta_reason: None,
         unit: unit.to_string(),
         scope: scope.to_string(),
-        quality: Quality::complete(),
+        quality: Quality {
+            detail: channel("refused"),
+            aggregate: channel("refused"),
+            identity: channel(identity),
+            baseline: channel("refused"),
+            terminal: channel("refused"),
+        },
     }
 }
 

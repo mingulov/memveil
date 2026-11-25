@@ -64,12 +64,33 @@ pub struct Quality {
 impl Quality {
     /// Quality for a fully determined comparison row.
     pub fn complete() -> Self {
+        Self::level("complete", "complete")
+    }
+
+    /// Quality for a compatible row with a null delta: no
+    /// channel claims completeness for unknown data.
+    fn unknown() -> Self {
+        Self::level("unknown", "unknown")
+    }
+
+    /// Quality for a refused row: the comparison never ran.
+    fn refused() -> Self {
+        Self::level("refused", "refused")
+    }
+
+    /// Quality for a row whose metric is missing on one
+    /// side: identity is unknown, the rest refused.
+    fn unavailable() -> Self {
+        Self::level("refused", "unknown")
+    }
+
+    fn level(other: &str, identity: &str) -> Self {
         Self {
-            detail: "complete".to_string(),
-            aggregate: "complete".to_string(),
-            identity: "complete".to_string(),
-            baseline: "complete".to_string(),
-            terminal: "complete".to_string(),
+            detail: other.to_string(),
+            aggregate: other.to_string(),
+            identity: identity.to_string(),
+            baseline: other.to_string(),
+            terminal: other.to_string(),
         }
     }
 }
@@ -99,6 +120,11 @@ fn refused(
     unit: &str,
     scope: &str,
 ) -> Comparison {
+    let quality = if compatibility == "unavailable" {
+        Quality::unavailable()
+    } else {
+        Quality::refused()
+    };
     Comparison {
         metric_id: metric_id.to_string(),
         compatibility: compatibility.to_string(),
@@ -109,7 +135,7 @@ fn refused(
         delta_reason: None,
         unit: unit.to_string(),
         scope: scope.to_string(),
-        quality: Quality::complete(),
+        quality,
     }
 }
 
@@ -311,11 +337,16 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             delta_reason: Some("value-unknown".to_string()),
             unit: left_metric.unit.clone(),
             scope: left_metric.scope.clone(),
-            quality: Quality::complete(),
+            quality: Quality::unknown(),
         };
     };
     let wide = (right_value as i128) - (left_value as i128);
     let delta = i64::try_from(wide).ok();
+    let quality = if delta.is_some() {
+        Quality::complete()
+    } else {
+        Quality::unknown()
+    };
     Comparison {
         metric_id: metric_id.to_string(),
         compatibility: "compatible".to_string(),
@@ -330,6 +361,6 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
         },
         unit: left_metric.unit.clone(),
         scope: left_metric.scope.clone(),
-        quality: Quality::complete(),
+        quality,
     }
 }

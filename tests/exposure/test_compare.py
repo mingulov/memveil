@@ -178,6 +178,28 @@ def expect_row(case, left, right, metric_id):
     return ("compatible", "compatible", ("delta", delta))
 
 
+def expect_quality(compatibility, delta):
+    """Independent quality oracle: quality derives from the row.
+
+    Only a row with an exact delta claims complete quality.
+    Compatible rows with a null delta report unknown on all
+    five channels; refused rows report refused, except an
+    unavailable row reports unknown identity.
+    """
+    if compatibility == "incompatible":
+        channels = ("refused",) * 5
+    elif compatibility == "unavailable":
+        channels = ("refused", "refused", "unknown", "refused", "refused")
+    elif delta[0] == "null":
+        channels = ("unknown",) * 5
+    else:
+        channels = ("complete",) * 5
+    detail, aggregate, identity, baseline, terminal = channels
+    return {"detail": detail, "aggregate": aggregate,
+            "identity": identity, "baseline": baseline,
+            "terminal": terminal}
+
+
 def test_all_families_present():
     for family, files in FAMILIES.items():
         for name in files:
@@ -229,6 +251,10 @@ def test_fixture_expectations_match_oracle():
                     name, metric_id)
             assert row["scope"] == anchor["scope"], \
                 "%s/%s: scope follows the present side" % (
+                    name, metric_id)
+            assert row["quality"] == expect_quality(
+                compatibility, delta), \
+                "%s/%s: quality derives from the row" % (
                     name, metric_id)
         ids = {m["metric_id"] for m in left["metrics"]}
         ids |= {m["metric_id"] for m in right["metrics"]}
