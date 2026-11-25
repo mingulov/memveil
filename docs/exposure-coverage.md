@@ -122,7 +122,7 @@ Checks run in order; the first failure names the reason:
 | 11 | `source-meaning-change` | The metric's source changed meaning |
 | 12 | `clock-mismatch` | Clock domains differ |
 | 13 | `window-mismatch` | Window bounds differ |
-| 14 | `partial-census` | Census-derived metric with a bounded scan |
+| 14 | `partial-census` | Census-derived on either side with a bounded scan on either side |
 | 15 | `compatible` | Predicate passed; delta rules below apply |
 
 Compatible rows carry `delta` except when a side is

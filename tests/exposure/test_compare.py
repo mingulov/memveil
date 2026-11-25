@@ -167,7 +167,8 @@ def expect_row(case, left, right, metric_id):
     if (left["window"]["start"] != right["window"]["start"]
             or left["window"]["end"] != right["window"]["end"]):
         return ("incompatible", "window-mismatch", "absent")
-    if (left_metric.get("census_derived", False)
+    if ((left_metric.get("census_derived", False)
+            or right_metric.get("census_derived", False))
             and (left.get("census_bounded", False)
                  or right.get("census_bounded", False))):
         return ("incompatible", "partial-census", "absent")

@@ -435,7 +435,7 @@ fn partial_census_keeps_unaffected_metrics() {
         1000,
         2000,
         "guest_monotonic_active",
-        true,
+        false,
         false,
         vec![
             metric(
@@ -445,7 +445,7 @@ fn partial_census_keeps_unaffected_metrics() {
                 "bytes",
                 "guest-direct-map",
                 "census-direct-map",
-                true,
+                false,
             ),
             metric(
                 "queue-count",
@@ -460,7 +460,8 @@ fn partial_census_keeps_unaffected_metrics() {
     );
     let mut right = left.clone();
     right.evidence_id = "cap-right-007".to_string();
-    right.census_bounded = false;
+    right.census_bounded = true;
+    right.metrics[0].census_derived = true;
     right.metrics[0].value = Some(12288);
     right.metrics[1].value = Some(5);
     let rows = compare_captures(&left, &right);

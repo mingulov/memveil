@@ -287,7 +287,9 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             &left_metric.scope,
         );
     }
-    if left_metric.census_derived && (left.census_bounded || right.census_bounded) {
+    if (left_metric.census_derived || right_metric.census_derived)
+        && (left.census_bounded || right.census_bounded)
+    {
         return refused(
             metric_id,
             "incompatible",
