@@ -10,11 +10,11 @@
 //! keep a bounded shape check only. Semantic admission of those labels
 //! happens at freeze time, never by guessing in an adapter.
 //!
-//! The module is self-contained on purpose: it compiles both as
-//! `model::exposure` once integration adds that declaration and through
-//! a path include in the lane's own integration test. It takes no live
-//! input and performs no I/O; parsing and transport stay with the
-//! owning reader and writer.
+//! The module is self-contained on purpose: it declares no parent
+//! items, so it compiles both under its public module path and
+//! through a direct path include in tests. It takes no live input
+//! and performs no I/O; parsing and transport stay with the owning
+//! reader and writer.
 
 /// Session contract version carrying exposure records.
 pub const EXPOSURE_SESSION_VERSION: &str = "0.3.0";

@@ -6,7 +6,7 @@ Offline checks over ``fixtures/contracts/quality_matrix.json``: the
 five quality channels evaluate independently, an unobserved loss
 never collapses to a measured zero, and the evaluation itself is a
 pure function of persisted bytes with no live dependency and no
-hidden sidecars. The Rust lane modules implement the same contract;
+hidden sidecars. The Rust modules implement the same contract;
 this file is their independent oracle.
 """
 

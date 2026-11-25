@@ -9,10 +9,10 @@
 //! under the same digest. No unsealed sidecar can supply policy
 //! evidence: replay consumes the sealed lines only.
 //!
-//! The module is self-contained on purpose: it compiles both as
-//! `capture::exposure_records` once integration adds that declaration
-//! and through a path include in the lane's own integration test. It
-//! takes no live input and performs no I/O. Lexical scalar checks that
+//! The module is self-contained on purpose: it declares no parent
+//! items, so it compiles both under its public module path and
+//! through a direct path include in tests. It takes no live input
+//! and performs no I/O. Lexical scalar checks that
 //! need reader context stay with the owning reader; the normalizer
 //! canonicalizes structure, field order and string quoting, carries
 //! signed integers as written, and refuses bare integers for u64
@@ -1474,7 +1474,7 @@ pub fn snapshot_terminal_status(text: &str) -> Result<String, SealError> {
 
 /// Policy file size cap in bytes.
 ///
-/// Mirrors the published policy limits; the integration test pins
+/// Mirrors the published policy limits; the contract test pins
 /// these values against the owning record definitions.
 pub const POLICY_FILE_MAX_BYTES: usize = 1_048_576;
 /// Rules per policy file.

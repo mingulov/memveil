@@ -8,7 +8,7 @@ library code over persisted bytes: facts replay only from
 the sealed event lines, an unsealed snapshot can never
 satisfy a rule, duplicate evidence and mixed epochs are
 rejected, and a snapshot without terminal evidence stays
-partial. The Rust lane modules implement the same contract;
+partial. The Rust modules implement the same contract;
 this file is their independent oracle.
 """
 

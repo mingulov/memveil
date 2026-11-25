@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Sealed exposure records and source quality: lane integration tests.
+//! Sealed exposure records and source quality: contract tests.
 //!
-//! The three lane modules compile here through explicit path includes;
-//! integration wires them as `model::exposure`,
-//! `capture::exposure_records` and `analysis::exposure_quality` with no
-//! edits to the lane files themselves.
+//! The three modules compile here through explicit path includes;
+//! the crate root wires them as `model::exposure`,
+//! `capture::exposure_records` and `analysis::exposure_quality` with
+//! no edits to the module files themselves.
 
 #[path = "../src/model/exposure.rs"]
 mod exposure;

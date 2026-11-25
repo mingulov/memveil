@@ -7,11 +7,11 @@
 //! A rule is satisfied only by sealed, settled evidence over present,
 //! usable required sources; anything weaker fails closed.
 //!
-//! The module is self-contained on purpose: it compiles both as
-//! `analysis::exposure_quality` once integration adds that declaration
-//! and through a path include in the lane's own integration test. It
-//! takes no live input and performs no I/O; offline replay consumes
-//! persisted records only.
+//! The module is self-contained on purpose: it declares no parent
+//! items, so it compiles both under its public module path and
+//! through a direct path include in tests. It takes no live input
+//! and performs no I/O; offline replay consumes persisted records
+//! only.
 
 use std::fmt;
 
