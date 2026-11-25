@@ -373,6 +373,40 @@ def test_all_fixtures_validate_against_schemas():
     jsonschema.validate(load("policy_valid.json"), policy_schema)
 
 
+def test_comparison_delta_follows_compatibility():
+    schema = load_schema("report-v0.3.0.schema.json")
+
+    def check(comparison, valid):
+        report = load("report_valid.json")
+        report["comparisons"] = [comparison]
+        if valid:
+            jsonschema.validate(report, schema)
+        else:
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(report, schema)
+
+    base = load("report_valid.json")["comparisons"][0]
+    check(dict(base), True)
+    null_delta = dict(base)
+    null_delta["delta"] = None
+    null_delta["delta_reason"] = "uncomputable"
+    check(null_delta, True)
+    incompatible = dict(base)
+    incompatible["compatibility"] = "incompatible"
+    del incompatible["delta"]
+    check(incompatible, True)
+    bad_null = dict(incompatible)
+    bad_null["delta"] = None
+    bad_null["delta_reason"] = "uncomputable"
+    check(bad_null, False)
+    bad_valued = dict(incompatible)
+    bad_valued["delta"] = 3
+    check(bad_valued, False)
+    bad_absent = dict(base)
+    del bad_absent["delta"]
+    check(bad_absent, False)
+
+
 def test_report_records_shape():
     report = load("report_valid.json")
     assert report["schema_version"] == "0.3.0"

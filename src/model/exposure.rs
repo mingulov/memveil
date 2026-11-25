@@ -941,6 +941,9 @@ impl ComparisonResult {
         if !self.delta.present && self.compatibility == "compatible" {
             return Err(ExposureError::new("delta", "absent for compatible metric"));
         }
+        if self.delta.present && self.compatibility == "incompatible" {
+            return Err(ExposureError::new("delta", "delta for incompatible metric"));
+        }
         if self.delta.value.is_some() && self.compatibility != "compatible" {
             return Err(ExposureError::new("delta", "delta for incompatible metric"));
         }
@@ -1162,7 +1165,14 @@ mod tests {
             reason: String::new(),
         };
         assert!(good.validate().is_err());
+        good.delta = Maybe {
+            present: true,
+            value: None,
+            reason: "uncomputable".to_string(),
+        };
+        assert!(good.validate().is_err());
         good.compatibility = "compatible".to_string();
+        good.validate().unwrap();
         good.delta = Maybe {
             present: false,
             value: None,

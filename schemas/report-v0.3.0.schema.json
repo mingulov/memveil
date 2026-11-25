@@ -949,6 +949,61 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "required": [
+              "compatibility"
+            ],
+            "properties": {
+              "compatibility": {
+                "const": "incompatible"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "delta"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "compatibility"
+            ],
+            "properties": {
+              "compatibility": {
+                "const": "compatible"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "delta"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "delta"
+            ],
+            "properties": {
+              "delta": {
+                "type": "integer"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "compatibility": {
+                "const": "compatible"
+              }
+            }
+          }
         }
       ]
     }
