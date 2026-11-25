@@ -728,6 +728,9 @@ TRICKY_STRINGS = (
     ("   ", "blank"),
     ("\t", "blank"),
     ("\n", "blank"),
+    ("\r", "blank"),
+    ("\x0b", "blank"),
+    ("\x0c", "blank"),
     ("\x00", "malformed"),
     ("\x1c", "malformed"),
     ("\x1f", "malformed"),
@@ -839,5 +842,6 @@ def test_rust_suite_covers_tricky_string_battery():
     for escape in (r'"\u{0}"', r'"\u{1c}"', r'"\u{1f}"',
                    r'"\u{7f}"', r'"\u{9f}"', r'"\u{a0}"',
                    r'"\u{200b}"', r'"\u{feff}"', r'"\t"',
-                   r'"\n"', r'"a\x00b"'):
+                   r'"\n"', r'"\r"', r'"\x0b"',
+                   r'"\x0c"', r'"a\x00b"'):
         assert escape in suite, "rust battery lacks %s" % escape
