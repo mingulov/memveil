@@ -2,11 +2,12 @@
 //! Generic iterator transport: open/read/close ownership over a byte fd.
 //!
 //! [`FdIterator`] owns one readable fd (a kernel text source, a pipe, or a
-//! plain file) and moves bytes through a bounded loop: short reads resume,
-//! `EINTR` retries, `EAGAIN` yields to the caller, EOF sticks, and a total
-//! visit bound plus an optional deadline cut the scan short with an
-//! explicit outcome instead of silent truncation. Cancel refuses further
-//! reads; close is idempotent; drop closes exactly once.
+//! plain file) and moves bytes through a bounded loop: a short read hands
+//! the partial span back for the caller to resume, `EINTR` retries,
+//! `EAGAIN` yields to the caller, EOF sticks, and a total visit bound plus
+//! an optional deadline cut the scan short with an explicit outcome
+//! instead of silent truncation. Cancel refuses further reads; close is
+//! idempotent; drop closes exactly once.
 //!
 //! The module is transport only: it knows bytes, fds, and bounds, and
 //! nothing about the payload carried above it. It depends on std plus
@@ -177,10 +178,16 @@ impl FdIterator {
 
     /// Move up to `want` more bytes into `out`.
     ///
-    /// Short reads resume inside the call; `EINTR` retries; `EAGAIN`
-    /// returns at once ([`IterOutcome::WouldBlock`] when nothing moved,
-    /// [`IterOutcome::More`] with the partial span otherwise) so the
-    /// caller rests instead of spinning.
+    /// A short read returns at once with [`IterOutcome::More`] and the
+    /// partial span, so a call on a blocking fd never sleeps holding
+    /// bytes it already moved; call again to resume. `EINTR` retries;
+    /// `EAGAIN` returns at once ([`IterOutcome::WouldBlock`] when nothing
+    /// moved, [`IterOutcome::More`] with the partial span otherwise) so
+    /// the caller rests instead of spinning.
+    ///
+    /// On `Err`, bytes appended earlier in the same call stay in `out`
+    /// and count in [`FdIterator::visited`]; the handle stays usable
+    /// and the next call reads again.
     pub fn read_into(
         &mut self,
         out: &mut Vec<u8>,
@@ -240,6 +247,16 @@ impl FdIterator {
                     out.extend_from_slice(&chunk[..got]);
                     self.visited = self.visited.saturating_add(got as u64);
                     moved += got;
+                    if got < ask {
+                        // Short read: the source has nothing more ready
+                        // now. Hand the partial span back instead of
+                        // sleeping in another read(2) holding it; the
+                        // caller resumes with the next call.
+                        return Ok(IterRead {
+                            outcome: IterOutcome::More,
+                            bytes: moved,
+                        });
+                    }
                 }
                 READ_EOF => {
                     self.eof = true;

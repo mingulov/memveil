@@ -27,7 +27,7 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     FD_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("fd lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Live open fds of this process, counted via `/proc/self/fd`.
@@ -56,6 +56,15 @@ fn shim_pipe() -> (RawFd, RawFd) {
     // SAFETY: live owned read end; F_SETFL touches flags only.
     let rc = unsafe { libc::fcntl(ends[0], libc::F_SETFL, libc::O_NONBLOCK) };
     assert_eq!(rc, 0, "read end goes nonblocking");
+    (ends[0], ends[1])
+}
+
+/// One pipe with the read end left blocking (both ends close-on-exec).
+fn blocking_shim_pipe() -> (RawFd, RawFd) {
+    let mut ends = [0 as libc::c_int; 2];
+    // SAFETY: `ends` outlives the call; both fds are owned on success.
+    let rc = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2 builds the shim");
     (ends[0], ends[1])
 }
 
@@ -114,10 +123,56 @@ fn short_read_returns_partial_and_resumes() {
     let second = it
         .read_into(&mut out, 10, &mut fixed_clock(0))
         .expect("resume read");
-    assert_eq!(second.outcome, IterOutcome::Eof);
+    assert_eq!(second.outcome, IterOutcome::More);
     assert_eq!(second.bytes, 2);
     assert_eq!(out, b"abcde");
     assert_eq!(it.visited(), 5);
+    let tail = it
+        .read_into(&mut out, 10, &mut fixed_clock(0))
+        .expect("eof after resume");
+    assert_eq!(tail.outcome, IterOutcome::Eof);
+    assert_eq!(tail.bytes, 0);
+}
+
+#[test]
+fn blocking_pipe_with_writer_open_returns_partial_without_sleeping() {
+    let _guard = lock();
+    let (read_end, write_end) = blocking_shim_pipe();
+    write_all(write_end, b"abc");
+
+    // The read runs off-thread so a regressed blocking sleep fails
+    // this case with a timeout instead of hanging the whole suite.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut it = FdIterator::from_fd(read_end);
+        it.set_deadline_ns(Some(u64::MAX));
+        let mut out = Vec::new();
+        let res = it.read_into(&mut out, 10, &mut fixed_clock(0));
+        let _ = tx.send((it, res, out));
+    });
+    let (mut it, res, mut out) = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("blocking pipe read returns without sleeping");
+    let first = res.expect("partial read");
+    assert_eq!(first.outcome, IterOutcome::More);
+    assert_eq!(first.bytes, 3);
+    assert_eq!(out, b"abc");
+    assert_eq!(it.visited(), 3);
+
+    write_all(write_end, b"de");
+    close_fd(write_end);
+    let second = it
+        .read_into(&mut out, 10, &mut fixed_clock(0))
+        .expect("resume read");
+    assert_eq!(second.outcome, IterOutcome::More);
+    assert_eq!(second.bytes, 2);
+    assert_eq!(out, b"abcde");
+    assert_eq!(it.visited(), 5);
+    let tail = it
+        .read_into(&mut out, 10, &mut fixed_clock(0))
+        .expect("eof after resume");
+    assert_eq!(tail.outcome, IterOutcome::Eof);
+    assert_eq!(tail.bytes, 0);
 }
 
 #[test]
@@ -176,6 +231,7 @@ fn deadline_aborts_with_partial_not_silent_truncation() {
     assert!(out.len() < body.len(), "the bound cut the scan short");
     assert_eq!(it.visited() as usize, out.len());
     assert!(out.iter().all(|b| *b == 0x5A));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -195,6 +251,53 @@ fn deadline_at_entry_aborts_before_any_read() {
     assert!(out.is_empty());
     assert_eq!(it.visited(), 0);
     close_fd(write_end);
+}
+
+#[test]
+fn failed_read_keeps_the_earlier_span_in_out_and_visited() {
+    let _guard = lock();
+    let dir = scratch("errspan");
+    let path = dir.join("big.bin");
+    let body = vec![0xA5u8; 200_000];
+    std::fs::write(&path, &body).expect("shim body");
+    let mut it = FdIterator::open(&path, false).expect("shim open");
+    // A live deadline makes the loop sample the clock before every read.
+    it.set_deadline_ns(Some(u64::MAX));
+    let raw = it.raw_fd();
+    let mut out = Vec::new();
+
+    let mut samples = 0u32;
+    let err = it
+        .read_into(&mut out, 200_000, &mut || {
+            samples += 1;
+            if samples == 2 {
+                // SAFETY: live owned fd; closed exactly once here and the
+                // handle is forgotten below so no second close runs.
+                let rc = unsafe { libc::close(raw) };
+                assert_eq!(rc, 0, "shim severs the fd");
+            }
+            0
+        })
+        .expect_err("severed read fails");
+    assert_eq!(err.code, ITER_IO);
+    assert!(
+        err.message.contains(&format!("(errno {})", libc::EBADF)),
+        "diagnostic carries errno, got {}",
+        err.message
+    );
+    assert_eq!(out.len(), 65_536);
+    assert_eq!(it.visited(), 65_536);
+    assert!(out.iter().all(|b| *b == 0xA5));
+
+    let retry = it
+        .read_into(&mut out, 8, &mut fixed_clock(0))
+        .expect_err("handle stays usable");
+    assert_eq!(retry.code, ITER_IO);
+    assert_eq!(out.len(), 65_536);
+    assert_eq!(it.visited(), 65_536);
+
+    std::mem::forget(it);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -246,8 +349,14 @@ fn eagain_yields_without_busy_loop() {
     let woke = it
         .read_into(&mut out, 16, &mut fixed_clock(0))
         .expect("woken read");
+    assert_eq!(woke.outcome, IterOutcome::More);
     assert_eq!(woke.bytes, 5);
     assert_eq!(out, b"later");
+    let tail = it
+        .read_into(&mut out, 16, &mut fixed_clock(0))
+        .expect("eof after wake");
+    assert_eq!(tail.outcome, IterOutcome::Eof);
+    assert_eq!(tail.bytes, 0);
 }
 
 #[test]
@@ -333,8 +442,15 @@ fn open_reads_a_path_and_sets_cloexec() {
     let read = it
         .read_into(&mut out, 16, &mut fixed_clock(0))
         .expect("file read");
-    assert_eq!(read.outcome, IterOutcome::Eof);
+    assert_eq!(read.outcome, IterOutcome::More);
+    assert_eq!(read.bytes, 5);
     assert_eq!(out, b"hello");
+    let tail = it
+        .read_into(&mut out, 16, &mut fixed_clock(0))
+        .expect("file eof");
+    assert_eq!(tail.outcome, IterOutcome::Eof);
+    assert_eq!(tail.bytes, 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -344,10 +460,11 @@ fn open_missing_path_reports_io() {
     let err = FdIterator::open(&dir.join("absent.txt"), false).expect_err("missing refuses");
     assert_eq!(err.code, ITER_IO);
     assert!(
-        err.message.contains("2"),
+        err.message.contains(&format!("(errno {})", libc::ENOENT)),
         "diagnostic carries errno, got {}",
         err.message
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
