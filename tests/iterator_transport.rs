@@ -70,13 +70,20 @@ fn blocking_shim_pipe() -> (RawFd, RawFd) {
     // SAFETY: `ends` outlives the call; both fds are owned on success.
     let rc = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
     assert_eq!(rc, 0, "pipe2 builds the shim");
-    // SAFETY: live owned pipe end; F_SETPIPE_SZ only retunes capacity
-    // and reports the new size (or -1 on error).
-    let rc = unsafe { libc::fcntl(ends[1], libc::F_SETPIPE_SZ, 1_048_576) };
-    assert!(
-        rc >= 65_536,
-        "pipe grows past one full chunk (got {rc} bytes)"
-    );
+    // SAFETY: live owned pipe end; F_GETPIPE_SZ only reads capacity
+    // and reports the size (or -1 on error).
+    let current = unsafe { libc::fcntl(ends[1], libc::F_GETPIPE_SZ) };
+    // Only request growth when the default buffer cannot hold one full
+    // chunk: a filter denying growth must not fail a pipe that already
+    // suffices.
+    let sz = if current < 65_536 {
+        // SAFETY: live owned pipe end; F_SETPIPE_SZ only retunes capacity
+        // and reports the new size (or -1 on error).
+        unsafe { libc::fcntl(ends[1], libc::F_SETPIPE_SZ, 1_048_576) }
+    } else {
+        current
+    };
+    assert!(sz >= 65_536, "pipe holds one full chunk (got {sz} bytes)");
     (ends[0], ends[1])
 }
 
