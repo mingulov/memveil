@@ -173,6 +173,47 @@ fn blocking_pipe_with_writer_open_returns_partial_without_sleeping() {
         .expect("eof after resume");
     assert_eq!(tail.outcome, IterOutcome::Eof);
     assert_eq!(tail.bytes, 0);
+
+    // Full-chunk-plus-one-byte: exactly one 64 KiB chunk is queued and
+    // one more byte is wanted with the writer held open, so a second
+    // read(2) would sleep instead of returning short or EOF. The call
+    // must hand the full chunk back at once instead of sleeping on it.
+    let (read_end, write_end) = blocking_shim_pipe();
+    write_all(write_end, &[0x58u8; 65_536]);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut it = FdIterator::from_fd(read_end);
+        it.set_deadline_ns(Some(u64::MAX));
+        let mut out = Vec::new();
+        let res = it.read_into(&mut out, 65_537, &mut fixed_clock(0));
+        let _ = tx.send((it, res, out));
+    });
+    let (mut it, res, mut out) = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("full-chunk blocking pipe read returns without sleeping");
+    let chunk = res.expect("chunk read");
+    assert_eq!(chunk.outcome, IterOutcome::More);
+    assert_eq!(chunk.bytes, 65_536);
+    assert_eq!(out.len(), 65_536);
+    assert!(out.iter().all(|b| *b == 0x58));
+    assert_eq!(it.visited(), 65_536);
+
+    write_all(write_end, b"Z");
+    close_fd(write_end);
+    let second = it
+        .read_into(&mut out, 1, &mut fixed_clock(0))
+        .expect("resume read");
+    assert_eq!(second.outcome, IterOutcome::More);
+    assert_eq!(second.bytes, 1);
+    assert_eq!(out.len(), 65_537);
+    assert_eq!(out[65_536], b'Z');
+    assert_eq!(it.visited(), 65_537);
+    let tail = it
+        .read_into(&mut out, 1, &mut fixed_clock(0))
+        .expect("eof after resume");
+    assert_eq!(tail.outcome, IterOutcome::Eof);
+    assert_eq!(tail.bytes, 0);
 }
 
 #[test]
@@ -219,14 +260,23 @@ fn deadline_aborts_with_partial_not_silent_truncation() {
     it.set_deadline_ns(Some(250));
     let mut out = Vec::new();
 
+    // Chunk-granular handoff: each call moves at most one 64 KiB chunk,
+    // so the scan resumes until a between-chunks deadline sample trips.
     let mut now = 0u64;
-    let read = it
-        .read_into(&mut out, 200_000, &mut || {
-            now += 100;
-            now
-        })
-        .expect("deadline read");
-    assert_eq!(read.outcome, IterOutcome::Deadline);
+    let mut outcome = IterOutcome::More;
+    let mut calls = 0u32;
+    while outcome == IterOutcome::More {
+        calls += 1;
+        assert!(calls <= 10, "deadline trips promptly");
+        let read = it
+            .read_into(&mut out, 200_000, &mut || {
+                now += 100;
+                now
+            })
+            .expect("deadline read");
+        outcome = read.outcome;
+    }
+    assert_eq!(outcome, IterOutcome::Deadline);
     assert!(!out.is_empty(), "partial bytes survive the abort");
     assert!(out.len() < body.len(), "the bound cut the scan short");
     assert_eq!(it.visited() as usize, out.len());
@@ -261,13 +311,15 @@ fn failed_read_keeps_the_earlier_span_in_out_and_visited() {
     let body = vec![0xA5u8; 200_000];
     std::fs::write(&path, &body).expect("shim body");
     let mut it = FdIterator::open(&path, false).expect("shim open");
-    // A live deadline makes the loop sample the clock before every read.
+    // A live deadline makes the loop sample the clock between chunks.
     it.set_deadline_ns(Some(u64::MAX));
     let raw = it.raw_fd();
     let mut out = Vec::new();
 
+    // The first call moves one full chunk and hands it back; the sever
+    // lands on its post-chunk bound sample, so the resumed call fails.
     let mut samples = 0u32;
-    let err = it
+    let first = it
         .read_into(&mut out, 200_000, &mut || {
             samples += 1;
             if samples == 2 {
@@ -278,6 +330,11 @@ fn failed_read_keeps_the_earlier_span_in_out_and_visited() {
             }
             0
         })
+        .expect("first chunk lands before the sever");
+    assert_eq!(first.outcome, IterOutcome::More);
+    assert_eq!(first.bytes, 65_536);
+    let err = it
+        .read_into(&mut out, 200_000, &mut fixed_clock(0))
         .expect_err("severed read fails");
     assert_eq!(err.code, ITER_IO);
     assert!(

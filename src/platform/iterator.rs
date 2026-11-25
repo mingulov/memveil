@@ -2,8 +2,8 @@
 //! Generic iterator transport: open/read/close ownership over a byte fd.
 //!
 //! [`FdIterator`] owns one readable fd (a kernel text source, a pipe, or a
-//! plain file) and moves bytes through a bounded loop: a short read hands
-//! the partial span back for the caller to resume, `EINTR` retries,
+//! plain file) and moves bytes one bounded chunk per call: every chunk
+//! hands its span back for the caller to resume, `EINTR` retries,
 //! `EAGAIN` yields to the caller, EOF sticks, and a total visit bound plus
 //! an optional deadline cut the scan short with an explicit outcome
 //! instead of silent truncation. Cancel refuses further reads; close is
@@ -171,19 +171,27 @@ impl FdIterator {
     /// Cut the scan once the caller clock reaches `deadline` (`None` lifts).
     ///
     /// The clock must report monotonic nanoseconds; the loop samples it
-    /// before every `read(2)` and aborts with the partial span intact.
+    /// between chunks — before each `read(2)` and after each full chunk
+    /// while `want` is still unsatisfied — and aborts with the partial
+    /// span intact. A blocking chunk read already issued sleeps until
+    /// bytes arrive or the source ends: with zero bytes ready it can
+    /// sleep past the deadline, so the deadline limits how much the
+    /// scan moves, not how long one idle blocking read may sleep.
     pub fn set_deadline_ns(&mut self, deadline: Option<u64>) {
         self.deadline_ns = deadline;
     }
 
     /// Move up to `want` more bytes into `out`.
     ///
-    /// A short read returns at once with [`IterOutcome::More`] and the
-    /// partial span, so a call on a blocking fd never sleeps holding
-    /// bytes it already moved; call again to resume. `EINTR` retries;
-    /// `EAGAIN` returns at once ([`IterOutcome::WouldBlock`] when nothing
-    /// moved, [`IterOutcome::More`] with the partial span otherwise) so
-    /// the caller rests instead of spinning.
+    /// Each call moves at most one 64 KiB chunk: after every chunk the
+    /// call returns at once with [`IterOutcome::More`] and the partial
+    /// span unless `want` is fully satisfied, the stream ended, the
+    /// source failed, or a visit/deadline bound fired, so a call on a
+    /// blocking fd never sleeps holding bytes it already moved; call
+    /// again to resume. `EINTR` retries; `EAGAIN` returns at once
+    /// ([`IterOutcome::WouldBlock`] when nothing moved,
+    /// [`IterOutcome::More`] with the partial span otherwise) so the
+    /// caller rests instead of spinning.
     ///
     /// On `Err`, bytes appended earlier in the same call stay in `out`
     /// and count in [`FdIterator::visited`]; the handle stays usable
@@ -247,6 +255,12 @@ impl FdIterator {
                     out.extend_from_slice(&chunk[..got]);
                     self.visited = self.visited.saturating_add(got as u64);
                     moved += got;
+                    if moved >= want {
+                        return Ok(IterRead {
+                            outcome: IterOutcome::More,
+                            bytes: moved,
+                        });
+                    }
                     if got < ask {
                         // Short read: the source has nothing more ready
                         // now. Hand the partial span back instead of
@@ -257,6 +271,29 @@ impl FdIterator {
                             bytes: moved,
                         });
                     }
+                    // Full chunk with `want` still unsatisfied: a second
+                    // read(2) could sleep on a blocking fd while holding
+                    // this span, so re-check only the terminal bounds and
+                    // hand the span back; the caller resumes with the
+                    // next call.
+                    if self.visited >= self.max_visit {
+                        return Ok(IterRead {
+                            outcome: IterOutcome::VisitBound,
+                            bytes: moved,
+                        });
+                    }
+                    if let Some(limit) = self.deadline_ns
+                        && clock() >= limit
+                    {
+                        return Ok(IterRead {
+                            outcome: IterOutcome::Deadline,
+                            bytes: moved,
+                        });
+                    }
+                    return Ok(IterRead {
+                        outcome: IterOutcome::More,
+                        bytes: moved,
+                    });
                 }
                 READ_EOF => {
                     self.eof = true;
