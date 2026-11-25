@@ -50,6 +50,13 @@ const LEGACY_SEALED: &str = include_str!("exposure/fixtures/contracts/legacy_sea
 const INCOMPLETE_SOURCE: &str = include_str!("exposure/fixtures/contracts/incomplete_source.json");
 const BAD_GAP: &str = include_str!("exposure/fixtures/contracts/bad_gap_payload.json");
 const EMPTY_HOOK: &str = include_str!("exposure/fixtures/contracts/empty_hook.json");
+const DUPLICATE_SOURCES: &str = include_str!("exposure/fixtures/contracts/duplicate_sources.json");
+const AVAILABLE_NO_QUALITY: &str =
+    include_str!("exposure/fixtures/contracts/available_no_quality.json");
+const PARTIAL_BOGUS_QUALITY: &str =
+    include_str!("exposure/fixtures/contracts/partial_bogus_quality.json");
+const OVERFLOW_RETURN_CODE: &str =
+    include_str!("exposure/fixtures/contracts/overflow_return_code.json");
 
 fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
     facts
@@ -310,6 +317,42 @@ fn incomplete_source_evidence_is_incomplete() {
     assert!(report.verified, "incomplete evidence still seals");
     let outcome = seal_verdict(INCOMPLETE_SOURCE);
     assert_eq!(outcome, RuleOutcome::Incomplete);
+    assert_ne!(outcome, RuleOutcome::Satisfied);
+}
+
+#[test]
+fn duplicate_coverage_sources_refused_deterministically() {
+    let report = verify_sealed_snapshot(DUPLICATE_SOURCES).expect("tainted parses");
+    assert!(!report.verified, "duplicate sources cannot verify");
+    let outcome = seal_verdict(DUPLICATE_SOURCES);
+    assert_eq!(outcome, RuleOutcome::Inconclusive);
+    assert_ne!(outcome, RuleOutcome::Satisfied);
+}
+
+#[test]
+fn available_source_without_quality_cannot_satisfy() {
+    let report = verify_sealed_snapshot(AVAILABLE_NO_QUALITY).expect("tainted parses");
+    assert!(report.verified, "session shape stays outside the seal");
+    let outcome = seal_verdict(AVAILABLE_NO_QUALITY);
+    assert_eq!(outcome, RuleOutcome::Inconclusive);
+    assert_ne!(outcome, RuleOutcome::Satisfied);
+}
+
+#[test]
+fn partial_bogus_quality_is_incomplete() {
+    let report = verify_sealed_snapshot(PARTIAL_BOGUS_QUALITY).expect("tainted parses");
+    assert!(report.verified, "bogus quality still seals");
+    let outcome = seal_verdict(PARTIAL_BOGUS_QUALITY);
+    assert_eq!(outcome, RuleOutcome::Incomplete);
+    assert_ne!(outcome, RuleOutcome::Satisfied);
+}
+
+#[test]
+fn overflow_return_code_cannot_verify() {
+    let report = verify_sealed_snapshot(OVERFLOW_RETURN_CODE).expect("tainted parses");
+    assert!(!report.verified, "return_code past i64 cannot verify");
+    let outcome = seal_verdict(OVERFLOW_RETURN_CODE);
+    assert_eq!(outcome, RuleOutcome::Inconclusive);
     assert_ne!(outcome, RuleOutcome::Satisfied);
 }
 

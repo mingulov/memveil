@@ -2374,12 +2374,90 @@ fn line_session(line: &str) -> Option<String> {
     }
 }
 
+/// One coverage identity for the duplicate-source gate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CoverageKey {
+    /// Catalog source entry.
+    source: Option<String>,
+    /// Observed subject.
+    subject: Option<String>,
+    /// Collection phase.
+    phase: Option<String>,
+    /// Window start in nanoseconds.
+    window_start: Option<String>,
+    /// Window end in nanoseconds.
+    window_end: Option<String>,
+}
+
+/// Read one coverage entry's (source, subject, phase, window) identity.
+///
+/// Missing or mistyped leaves decode as `None`, so two entries that
+/// both omit a leaf still collide: an unkeyed entry never slips
+/// past the gate by being malformed.
+fn coverage_key(entry: &JsonValue) -> Option<CoverageKey> {
+    let JsonValue::Object(fields) = entry else {
+        return None;
+    };
+    let leaf = |key: &str| match find_field(fields, key) {
+        Some(JsonValue::Str(text)) => Some(text.clone()),
+        _ => None,
+    };
+    let (window_start, window_end) = match find_field(fields, "window") {
+        Some(JsonValue::Object(window)) => (
+            match find_field(window, "start_ns") {
+                Some(JsonValue::Str(text)) => Some(text.clone()),
+                _ => None,
+            },
+            match find_field(window, "end_ns") {
+                Some(JsonValue::Str(text)) => Some(text.clone()),
+                _ => None,
+            },
+        ),
+        _ => (None, None),
+    };
+    Some(CoverageKey {
+        source: leaf("source_id"),
+        subject: leaf("subject_id"),
+        phase: leaf("phase"),
+        window_start,
+        window_end,
+    })
+}
+
+/// True when the session repeats one coverage identity.
+///
+/// Sessions without an exposure sources array carry no coverage
+/// and keep verifying; only a repeated (source, subject, phase,
+/// window) refuses, deterministically on every ordering, so
+/// conflicting availability never resolves by position.
+fn duplicate_coverage(session: &[(String, JsonValue)]) -> bool {
+    let Some(JsonValue::Object(exposure)) = find_field(session, "exposure") else {
+        return false;
+    };
+    let Some(JsonValue::Array(sources)) = find_field(exposure, "sources") else {
+        return false;
+    };
+    let mut seen: HashSet<CoverageKey> = HashSet::with_capacity(sources.len());
+    for entry in sources {
+        let Some(key) = coverage_key(entry) else {
+            continue;
+        };
+        if !seen.insert(key) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Verify one sealed snapshot: a session object plus its literal lines.
 ///
 /// The snapshot carries `session` with `capture.integrity` and
 /// `event_lines` holding the literal line bytes as JSON strings.
 /// The session version selects the exposure or legacy line
-/// contract; an unknown contract verifies false. Every line ends
+/// contract; an unknown contract verifies false. Coverage entries
+/// repeat no (source, subject, phase, window) identity: a repeated
+/// identity verifies false on every ordering, so conflicting
+/// availability never resolves by position. Every line ends
 /// in a newline, carries its position as its sequence number, and
 /// belongs to the snapshot's own session; one entry holds exactly
 /// one physical line under the reader's 64 KiB bound. Malformed
@@ -2415,7 +2493,7 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     let mut literal: Vec<u8> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
     let mut fact_keys: Vec<SealedEvidenceKey> = Vec::new();
-    let mut lines_ok = contract.is_some();
+    let mut lines_ok = contract.is_some() && !duplicate_coverage(session);
     let mut contained_ok = true;
     for (position, line) in lines.iter().enumerate() {
         let JsonValue::Str(text) = line else {
@@ -2643,9 +2721,13 @@ pub struct RequiredSourceEvidence {
 ///
 /// The session exposure sources must exist; a missing source id
 /// reads as absent rather than erroring. Quality usability is
-/// emergent: any channel reporting a usable status counts, and an
-/// unreadable quality block counts as unusable, failing closed
-/// toward an incomplete verdict rather than satisfaction.
+/// validated: the block keeps exactly the five exposure channels
+/// with frozen statuses and null-or-canonical losses, and at least
+/// one channel reports a usable status. An unreadable or invalid
+/// block counts as unusable, failing closed toward an incomplete
+/// verdict rather than satisfaction. Duplicate coverage never
+/// reaches this reader under a verified seal: the seal gate
+/// refuses repeated identities first.
 pub fn snapshot_source_evidence(
     text: &str,
     source_id: &str,
@@ -2690,25 +2772,47 @@ pub fn snapshot_source_evidence(
     Ok(absent)
 }
 
-/// True when a coverage entry keeps a usable quality channel.
+/// Known exposure quality channels in canonical order.
+const QUALITY_CHANNELS: [&str; 5] = ["detail", "aggregate", "identity", "baseline", "terminal"];
+
+/// True when a coverage entry keeps a validated usable quality channel.
 ///
-/// Usability follows the channel rule shared with the verdict
-/// gate: a settled or partial channel carries evidence, anything
-/// else does not. Unreadable channels count as unusable.
+/// The block keeps exactly the five exposure channels, each an
+/// object with exactly a frozen status and a null-or-canonical
+/// loss count; one unknown channel or invalid loss fails the whole
+/// block, never just that channel. Usability then follows the
+/// channel rule shared with the verdict gate: a settled or partial
+/// channel carries evidence, anything else does not. Unreadable
+/// blocks count as unusable.
 fn source_quality_usable(entry: &[(String, JsonValue)]) -> bool {
     let Some(JsonValue::Object(quality)) = find_field(entry, "quality") else {
         return false;
     };
-    for (_, node) in quality {
-        let JsonValue::Object(channel) = node else {
-            continue;
+    if quality.len() != QUALITY_CHANNELS.len() {
+        return false;
+    }
+    let mut usable = false;
+    for name in QUALITY_CHANNELS {
+        let Some(JsonValue::Object(channel)) = find_field(quality, name) else {
+            return false;
         };
-        if matches!(find_field(channel, "status"), Some(JsonValue::Str(text)) if text == "complete_for_scope" || text == "partial")
-        {
-            return true;
+        if channel.len() != 2 {
+            return false;
+        }
+        match find_field(channel, "status") {
+            Some(JsonValue::Str(text)) if text == "complete_for_scope" || text == "partial" => {
+                usable = true;
+            }
+            Some(JsonValue::Str(text)) if text == "unavailable" => {}
+            _ => return false,
+        }
+        match find_field(channel, "loss_count") {
+            Some(JsonValue::Null) => {}
+            Some(JsonValue::Str(text)) if is_canonical_u64(text) => {}
+            _ => return false,
         }
     }
-    false
+    usable
 }
 
 /// Policy file size cap in bytes.
@@ -4415,6 +4519,172 @@ mod tests {
             let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
             assert!(!report.verified, "bogus {kind} cannot verify");
         }
+    }
+
+    #[test]
+    fn seal_bounds_legacy_return_codes_to_i64() {
+        for kind in ["map_result", "transition_result"] {
+            for bound in [i64::MAX, i64::MIN] {
+                let payload = if kind == "map_result" {
+                    map_payload()
+                } else {
+                    transition_payload()
+                };
+                let line = versioned_line(0, "0.3.0", kind, probe_source(), payload, None)
+                    .replacen("\"return_code\":0", &format!("\"return_code\":{bound}"), 1);
+                let snapshot = sealed_kind_snapshot(std::slice::from_ref(&line), &[(kind, 1)]);
+                let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+                assert!(report.verified, "{kind} return_code {bound} must verify");
+            }
+            for overflow in ["9223372036854775808", "-9223372036854775809"] {
+                let payload = if kind == "map_result" {
+                    map_payload()
+                } else {
+                    transition_payload()
+                };
+                let line = versioned_line(0, "0.3.0", kind, probe_source(), payload, None)
+                    .replacen(
+                        "\"return_code\":0",
+                        &format!("\"return_code\":{overflow}"),
+                        1,
+                    );
+                let snapshot = sealed_kind_snapshot(std::slice::from_ref(&line), &[(kind, 1)]);
+                let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
+                assert!(
+                    !report.verified,
+                    "{kind} return_code {overflow} cannot verify"
+                );
+            }
+        }
+    }
+
+    /// One probe coverage entry carrying the given status.
+    ///
+    /// Only the duplicate-key leaves ride along: source, subject,
+    /// phase, and window identify coverage, never the status.
+    fn probe_source_entry(status: &str) -> String {
+        format!(
+            "{{\"source_id\":\"sharing-census\",\"subject_id\":\"guest-direct-map\",\
+            \"phase\":\"pre_attach\",\
+            \"window\":{{\"start_ns\":\"1000000000\",\"end_ns\":\"4000000000\"}},\
+            \"status\":\"{status}\"}}"
+        )
+    }
+
+    /// One sealed probe snapshot carrying the given raw sources array.
+    fn snapshot_with_sources(sources: &str) -> String {
+        let marker = FieldValue::Object(vec![("text", FieldValue::Text("census sealed"))]);
+        let line = marker_line(0, Some(marker));
+        let snapshot = sealed_kind_snapshot(std::slice::from_ref(&line), &[("marker", 1)]);
+        snapshot.replacen(
+            "\"capture\":{",
+            &format!("\"exposure\":{{\"sources\":[{sources}]}},\"capture\":{{"),
+            1,
+        )
+    }
+
+    #[test]
+    fn seal_refuses_duplicate_coverage_sources() {
+        let available = probe_source_entry("available");
+        let denied = probe_source_entry("partial");
+        for (label, sources) in [
+            ("denied-first", format!("{denied},{available}")),
+            ("available-first", format!("{available},{denied}")),
+            ("identical twins", format!("{available},{available}")),
+        ] {
+            let snapshot = snapshot_with_sources(&sources);
+            let report = verify_sealed_snapshot(&snapshot).expect("tainted parses");
+            assert!(!report.verified, "{label} duplicate sources cannot verify");
+        }
+        // One differing key leaf is disjoint coverage, not a
+        // duplicate: the seal keeps verifying.
+        let splits = [
+            available.replace("\"guest-direct-map\"", "\"guest-kernel-memory-management\""),
+            available.replace("\"pre_attach\"", "\"observed\""),
+            available.replace("\"end_ns\":\"4000000000\"", "\"end_ns\":\"5000000000\""),
+            available.replace("\"sharing-census\"", "\"egress-controls\""),
+        ];
+        for (index, other) in splits.iter().enumerate() {
+            assert_ne!(other, &available);
+            let snapshot = snapshot_with_sources(&format!("{available},{other}"));
+            let report = verify_sealed_snapshot(&snapshot).expect("control parses");
+            assert!(report.verified, "split coverage {index} must verify");
+        }
+    }
+
+    /// One snapshot text carrying a single raw coverage entry.
+    fn evidence_snapshot(entry: &str) -> String {
+        format!(
+            "{{\"session\":{{\"session_id\":\"probe\",\"exposure\":{{\"sources\":[{entry}]}}}}}}"
+        )
+    }
+
+    /// One raw quality channel carrying the given status and loss.
+    fn probe_channel(status: &str, loss: &str) -> String {
+        format!("{{\"status\":\"{status}\",\"loss_count\":{loss}}}")
+    }
+
+    /// One raw quality block with every channel settled and measured.
+    fn settled_quality() -> String {
+        let channels: Vec<String> = ["detail", "aggregate", "identity", "baseline", "terminal"]
+            .iter()
+            .map(|name| {
+                format!(
+                    "\"{name}\":{}",
+                    probe_channel("complete_for_scope", "\"0\"")
+                )
+            })
+            .collect();
+        format!("{{{}}}", channels.join(","))
+    }
+
+    /// One raw quality block with every channel unavailable.
+    fn denied_quality() -> String {
+        let channels: Vec<String> = ["detail", "aggregate", "identity", "baseline", "terminal"]
+            .iter()
+            .map(|name| format!("\"{name}\":{}", probe_channel("unavailable", "null")))
+            .collect();
+        format!("{{{}}}", channels.join(","))
+    }
+
+    #[test]
+    fn source_evidence_validates_quality_blocks() {
+        let usable = settled_quality();
+        let none = denied_quality();
+        let bogus_channel = format!(
+            "{},\"made-up\":{}}}",
+            none.strip_suffix('}').expect("quality object closes"),
+            probe_channel("complete_for_scope", "\"0\"")
+        );
+        let bogus_loss = settled_quality().replacen(
+            "\"detail\":{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"}",
+            "\"Detail\":{\"status\":\"partial\",\"loss_count\":\"not-a-count\"}",
+            1,
+        );
+        assert_ne!(bogus_loss, settled_quality());
+        for (label, status, quality, usable) in [
+            ("settled available", "available", usable.as_str(), true),
+            ("denied partial", "partial", none.as_str(), false),
+            ("bogus channel", "partial", bogus_channel.as_str(), false),
+            ("bogus loss", "partial", bogus_loss.as_str(), false),
+        ] {
+            let entry = format!(
+                "{{\"source_id\":\"sharing-census\",\"status\":\"{status}\",\"quality\":{quality}}}"
+            );
+            let evidence = snapshot_source_evidence(&evidence_snapshot(&entry), "sharing-census")
+                .expect("snapshot carries sources");
+            assert!(evidence.present, "{label} source stays present");
+            assert_eq!(evidence.status, status);
+            assert_eq!(evidence.quality_usable, usable, "{label} usability");
+        }
+        let bare = "{\"source_id\":\"sharing-census\",\"status\":\"available\"}";
+        let evidence = snapshot_source_evidence(&evidence_snapshot(bare), "sharing-census")
+            .expect("snapshot carries sources");
+        assert!(evidence.present);
+        assert!(
+            !evidence.quality_usable,
+            "available source without quality stays unusable"
+        );
     }
 
     #[test]

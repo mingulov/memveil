@@ -318,8 +318,14 @@ def is_opaque_text(value):
 
 
 def is_bare_int(value):
-    """True for a bare JSON integer, never a boolean."""
-    return isinstance(value, int) and not isinstance(value, bool)
+    """True for a bare JSON integer within i64 range, never a boolean.
+
+    Mirrors the Rust parser, which canonicalizes bare integers to
+    i64 text: anything past the range never parses there, so it
+    refuses here too.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) \
+        and I64MIN <= value <= I64MAX
 
 
 def is_sized_text(value, limit):
@@ -840,6 +846,42 @@ def integrity_self_consistent(integrity):
         assert int(integrity["events_bytes"]) >= lines, "bytes cover lines"
 
 
+def coverage_key(entry):
+    """The (source, subject, phase, window) identity of a coverage entry.
+
+    Missing or mistyped leaves decode as None, so two entries that
+    both omit a leaf still collide: an unkeyed entry never slips
+    past the duplicate gate by being malformed.
+    """
+    if not isinstance(entry, dict):
+        return None
+    window = entry.get("window")
+    if isinstance(window, dict):
+        start = window.get("start_ns")
+        end = window.get("end_ns")
+    else:
+        start = end = None
+
+    def leaf(value):
+        return value if isinstance(value, str) else None
+
+    return (leaf(entry.get("source_id")), leaf(entry.get("subject_id")),
+            leaf(entry.get("phase")), leaf(start), leaf(end))
+
+
+def duplicate_coverage_error(sources):
+    """The first repeated coverage identity, or None when unique."""
+    seen = set()
+    for entry in sources:
+        key = coverage_key(entry)
+        if key is None:
+            continue
+        if key in seen:
+            return "duplicate coverage %r" % (key,)
+        seen.add(key)
+    return None
+
+
 def seal_verified(snapshot):
     """True only when the committed seal matches the literal bytes.
 
@@ -850,7 +892,10 @@ def seal_verified(snapshot):
     whose fact identities break containment, verifies false. The
     session carries its string session id even when the stream is
     empty, and its version selects the exposure or legacy line
-    contract; an unknown contract verifies false. Every line parses
+    contract; an unknown contract verifies false. Coverage entries
+    repeat no (source, subject, phase, window) identity: a repeated
+    identity verifies false on every ordering, so conflicting
+    availability never resolves by position. Every line parses
     without duplicated keys, ends in a newline, carries its
     position as its sequence number, and belongs to the snapshot's
     own session; one entry holds exactly one physical line under
@@ -890,6 +935,11 @@ def seal_verified(snapshot):
             if not fact_fields_valid(event.get("data")):
                 return False
         elif not non_fact_fields_valid(event, contract):
+            return False
+    exposure = snapshot["session"].get("exposure")
+    if isinstance(exposure, dict) \
+            and isinstance(exposure.get("sources"), list):
+        if duplicate_coverage_error(exposure["sources"]) is not None:
             return False
     capture = snapshot["session"]["capture"]
     if "integrity" not in capture:
@@ -942,30 +992,45 @@ def cross_epoch_error(facts):
     return None
 
 
+def source_quality_usable(quality):
+    """True when a coverage quality block validates with usable evidence.
+
+    The block keeps exactly the five exposure channels, each with a
+    frozen status and a null-or-canonical loss count; one unknown
+    channel or invalid loss fails the whole block, never just that
+    channel. Usability then follows the channel rule: a settled or
+    partial channel carries evidence, anything else does not.
+    """
+    try:
+        check_quality(quality, "source quality")
+    except (AssertionError, KeyError, TypeError):
+        return False
+    return any(quality[channel]["status"] in ("complete_for_scope",
+                                              "partial")
+               for channel in QUALITY_CHANNELS)
+
+
 def source_evidence_state(entry):
     """Complete, incomplete, or absent for one required source entry.
 
-    An available source carries usable evidence. A partial source
-    does only when at least one quality channel stays usable; a
-    partial source with no usable channel is incomplete evidence,
-    never satisfaction. Anything else (a missing entry, an
-    unavailable, disabled, not-applicable or unknown status) is
+    An available source carries usable evidence only when its
+    quality block validates with a usable channel; without one the
+    availability claim stays unconfirmed. A partial source carries
+    usable evidence only when at least one quality channel stays
+    usable; a partial source with no usable channel is incomplete
+    evidence, never satisfaction. Anything else (a missing entry,
+    an unavailable, disabled, not-applicable or unknown status) is
     absent, and stays inconclusive.
     """
     if entry is None:
         return "absent"
     status = entry.get("status")
+    usable = source_quality_usable(entry.get("quality"))
     if status == "available":
-        return "complete"
+        return "complete" if usable else "absent"
     if status != "partial":
         return "absent"
-    quality = entry.get("quality")
-    if isinstance(quality, dict):
-        for node in quality.values():
-            if isinstance(node, dict) and node.get("status") in (
-                    "complete_for_scope", "partial"):
-                return "complete"
-    return "incomplete"
+    return "complete" if usable else "incomplete"
 
 
 def rule_satisfied(snapshot, required_sources):
@@ -2331,6 +2396,161 @@ def test_report_records_shape():
             assert field in entry, "comparison field %s" % field
         assert entry["compatibility"] in FROZEN_COMPATIBILITY
         check_quality(entry["quality"], "comparison quality")
+
+
+def denied_source_entry(source):
+    """A partial access-denied copy of a coverage source entry."""
+    denied = json.loads(json.dumps(source))
+    denied.update(status="partial", reason="access-denied")
+    for channel in denied["quality"].values():
+        channel.update(status="unavailable", loss_count=None)
+    return denied
+
+
+def test_available_source_requires_valid_quality():
+    required = ["sharing-census"]
+    assert snapshot_verdict(load("sealed_snapshot.json"),
+                            required) == "satisfied"
+    persisted = load("available_no_quality.json")
+    assert seal_verified(persisted), \
+        "the seal covers event lines, not session shape"
+    assert not rule_satisfied(persisted, required), \
+        "available evidence without quality never satisfies"
+    assert snapshot_verdict(persisted, required) == "inconclusive"
+    assert source_evidence_state(
+        persisted["session"]["exposure"]["sources"][0]) == "absent"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(persisted["session"],
+                            load_schema("session-v0.3.0.schema.json"))
+    tainted = json.loads(json.dumps(load("sealed_snapshot.json")))
+    quality = tainted["session"]["exposure"]["sources"][0]["quality"]
+    quality["made-up"] = {"status": "complete_for_scope",
+                          "loss_count": "0"}
+    assert not rule_satisfied(tainted, required), \
+        "unknown quality channel never supplies usability"
+    assert snapshot_verdict(tainted, required) == "inconclusive"
+    assert source_evidence_state(
+        tainted["session"]["exposure"]["sources"][0]) == "absent"
+    tainted = json.loads(json.dumps(load("sealed_snapshot.json")))
+    tainted["session"]["exposure"]["sources"][0]["quality"]["detail"] = \
+        {"status": "partial", "loss_count": "not-a-count"}
+    assert not rule_satisfied(tainted, required), \
+        "invalid loss count never supplies usability"
+    assert snapshot_verdict(tainted, required) == "inconclusive"
+
+
+def test_partial_source_with_only_bogus_quality_is_incomplete():
+    required = ["sharing-census"]
+    persisted = load("partial_bogus_quality.json")
+    assert seal_verified(persisted), "bogus quality still seals"
+    assert not rule_satisfied(persisted, required), \
+        "bogus quality never satisfies"
+    assert snapshot_verdict(persisted, required) == "incomplete"
+    assert source_evidence_state(
+        persisted["session"]["exposure"]["sources"][0]) == "incomplete"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(persisted["session"],
+                            load_schema("session-v0.3.0.schema.json"))
+    tainted = json.loads(json.dumps(load("sealed_snapshot.json")))
+    denied = denied_source_entry(
+        tainted["session"]["exposure"]["sources"][0])
+    denied["quality"]["detail"] = {"status": "partial",
+                                   "loss_count": "not-a-count"}
+    tainted["session"]["exposure"]["sources"][0] = denied
+    assert seal_verified(tainted)
+    assert snapshot_verdict(tainted, required) == "incomplete", \
+        "invalid loss never supplies usability"
+    mixed = json.loads(json.dumps(load("sealed_snapshot.json")))
+    entry = mixed["session"]["exposure"]["sources"][0]
+    entry.update(status="partial", reason="access-denied")
+    entry["quality"]["made-up"] = {"status": "complete_for_scope",
+                                   "loss_count": "0"}
+    assert snapshot_verdict(mixed, required) == "incomplete", \
+        "one unknown channel fails the whole quality block"
+    mixed_loss = json.loads(json.dumps(load("sealed_snapshot.json")))
+    entry = mixed_loss["session"]["exposure"]["sources"][0]
+    entry.update(status="partial", reason="access-denied")
+    entry["quality"]["aggregate"] = {"status": "partial",
+                                     "loss_count": "not-a-count"}
+    assert snapshot_verdict(mixed_loss, required) == "incomplete", \
+        "one invalid loss fails the whole quality block"
+    usable = json.loads(json.dumps(load("sealed_snapshot.json")))
+    usable["session"]["exposure"]["sources"][0].update(
+        status="partial", reason="access-denied")
+    assert snapshot_verdict(usable, required) == "satisfied", \
+        "partial source with valid usable quality still satisfies"
+
+
+def test_duplicate_coverage_sources_refused():
+    required = ["sharing-census"]
+    persisted = load("duplicate_sources.json")
+    jsonschema.validate(persisted["session"],
+                        load_schema("session-v0.3.0.schema.json"))
+    assert not seal_verified(persisted), \
+        "denied-first duplicate sources must fail the seal"
+    assert snapshot_verdict(persisted, required) == "inconclusive"
+    flipped = json.loads(json.dumps(load("sealed_snapshot.json")))
+    sources = flipped["session"]["exposure"]["sources"]
+    sources.append(denied_source_entry(sources[0]))
+    assert not seal_verified(flipped), \
+        "available-first duplicate sources must fail the seal"
+    assert snapshot_verdict(flipped, required) == "inconclusive"
+    twins = json.loads(json.dumps(load("sealed_snapshot.json")))
+    sources = twins["session"]["exposure"]["sources"]
+    sources.append(json.loads(json.dumps(sources[0])))
+    assert not seal_verified(twins), \
+        "identical duplicate sources must fail the seal"
+    assert snapshot_verdict(twins, required) == "inconclusive"
+    split_window = json.loads(json.dumps(load("sealed_snapshot.json")))
+    sources = split_window["session"]["exposure"]["sources"]
+    other = denied_source_entry(sources[0])
+    other["window"] = {"start_ns": "4000000000", "end_ns": "5000000000"}
+    sources.append(other)
+    jsonschema.validate(split_window["session"],
+                        load_schema("session-v0.3.0.schema.json"))
+    assert seal_verified(split_window), \
+        "same source over disjoint windows is not a duplicate"
+    split_subject = json.loads(json.dumps(load("sealed_snapshot.json")))
+    sources = split_subject["session"]["exposure"]["sources"]
+    other = denied_source_entry(sources[0])
+    other["subject_id"] = "guest-kernel-memory-management"
+    sources.append(other)
+    jsonschema.validate(split_subject["session"],
+                        load_schema("session-v0.3.0.schema.json"))
+    assert seal_verified(split_subject), \
+        "same source over disjoint subjects is not a duplicate"
+
+
+def test_legacy_return_codes_bounded_to_i64():
+    required = ["sharing-census"]
+    persisted = load("overflow_return_code.json")
+    jsonschema.validate(json.loads(persisted["event_lines"][2]),
+                        load_schema("event-v0.3.0.schema.json"))
+    assert not seal_verified(persisted), \
+        "map return_code past i64 must fail the seal"
+    assert snapshot_verdict(persisted, required) == "inconclusive"
+    kinds = {
+        "map_result": {"operation_id": "op-1", "success": False,
+                       "mapping_id": None, "mapped_bytes": None,
+                       "wire_generation": None, "wire_identity": None},
+        "transition_result": {"region_id": "r-1",
+                              "requested_state": "shared",
+                              "success": False, "offset": "0",
+                              "length": "4096"},
+    }
+    for kind, base in kinds.items():
+        for value in (2**63, -(2**63) - 1):
+            data = dict(base, return_code=value)
+            mutated = resealed_kind_event(kind, data)
+            assert not seal_verified(mutated), \
+                "%s return_code %r must fail the seal" % (kind, value)
+            assert snapshot_verdict(mutated, required) == "inconclusive"
+        for value in (2**63 - 1, -(2**63)):
+            data = dict(base, return_code=value)
+            control = resealed_kind_event(kind, data)
+            assert seal_verified(control), \
+                "%s return_code %r must verify" % (kind, value)
+            assert snapshot_verdict(control, required) == "satisfied"
 
 
 if __name__ == "__main__":

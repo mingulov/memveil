@@ -83,14 +83,16 @@ enum SourceState {
     Complete,
     /// Present but partial with no usable quality channel.
     Incomplete,
-    /// Missing, unusable-status, or unknown.
+    /// Missing, unusable-status, unconfirmed-available, or unknown.
     Absent,
 }
 
 /// Classify one required source's evidence.
 ///
-/// An available source carries usable evidence. A partial source
-/// does only when at least one quality channel stays usable; a
+/// An available source carries usable evidence only when its
+/// quality block validates with a usable channel; without one the
+/// availability claim stays unconfirmed. A partial source does
+/// only when at least one quality channel stays usable; a
 /// partial source with no usable channel is incomplete evidence.
 /// Anything else (a missing entry, an unavailable, disabled,
 /// not-applicable or unknown status) is absent.
@@ -99,7 +101,11 @@ fn source_state(status: &str, present: bool, quality_usable: bool) -> SourceStat
         return SourceState::Absent;
     }
     if status == "available" {
-        return SourceState::Complete;
+        return if quality_usable {
+            SourceState::Complete
+        } else {
+            SourceState::Absent
+        };
     }
     if status == "partial" {
         return if quality_usable {
@@ -277,6 +283,29 @@ mod tests {
         assert_eq!(
             rule_outcome_with_facts(true, PARTIAL, &full, &["sharing-census"]),
             RuleOutcome::Partial
+        );
+    }
+
+    #[test]
+    fn available_source_needs_usable_quality() {
+        let covering = ["sharing-census"];
+        // An available source with validated usable quality still
+        // satisfies.
+        let usable = [("sharing-census", "available", true, true)];
+        assert_eq!(
+            rule_outcome_with_facts(true, COMPLETE, &usable, &covering),
+            RuleOutcome::Satisfied
+        );
+        // An available source without usable quality never
+        // satisfies: the availability claim stays unconfirmed.
+        let unusable = [("sharing-census", "available", true, false)];
+        assert_eq!(
+            rule_outcome_with_facts(true, COMPLETE, &unusable, &covering),
+            RuleOutcome::Inconclusive
+        );
+        assert_ne!(
+            rule_outcome_with_facts(true, COMPLETE, &unusable, &covering),
+            RuleOutcome::Satisfied
         );
     }
 
