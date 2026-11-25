@@ -797,6 +797,93 @@ fn missing_unit_and_scope_shapes_refuse() {
     );
 }
 
+// case: metric-missing-unknown-unit
+#[test]
+fn one_sided_metrics_with_invalid_units_record_unknown() {
+    let left = capture(
+        "cap-left-033",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        vec![
+            ("census-direct-map", "meaning-1"),
+            ("queue-ledger", "meaning-1"),
+            ("tally-ledger", "meaning-1"),
+        ],
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "left-blank",
+                Some(3),
+                None,
+                "",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            ),
+            metric(
+                "heap-retained",
+                Some(7),
+                None,
+                "bytes",
+                "guest-kernel-allocator",
+                "tally-ledger",
+                false,
+            ),
+        ],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-033".to_string();
+    right.metrics.retain(|m| m.metric_id != "left-blank");
+    right.metrics[0].value = Some(9);
+    right.metrics.push(metric(
+        "right-counts",
+        Some(5),
+        None,
+        "counts",
+        "guest-driver-virtio",
+        "queue-ledger",
+        false,
+    ));
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+    assert_eq!(
+        rows,
+        vec![
+            refused_row(
+                "left-blank",
+                "unavailable",
+                "metric-missing",
+                "cap-left-033",
+                "cap-right-033",
+                "unknown",
+                "guest-direct-map",
+            ),
+            compatible_row(
+                "heap-retained",
+                "cap-left-033",
+                "cap-right-033",
+                Some(2),
+                None,
+                "bytes",
+                "guest-kernel-allocator",
+            ),
+            refused_row(
+                "right-counts",
+                "unavailable",
+                "metric-missing",
+                "cap-left-033",
+                "cap-right-033",
+                "unknown",
+                "guest-driver-virtio",
+            ),
+        ]
+    );
+}
+
 // case: unit-unknown
 #[test]
 fn blank_and_unlisted_units_refuse_their_metrics() {
@@ -2267,4 +2354,63 @@ fn tricky_string_battery_matches_oracle() {
             "guest-direct-map",
         )]
     );
+}
+
+#[test]
+fn metric_missing_with_invalid_unit_records_unknown() {
+    // A one-sided metric with a unit outside the frozen
+    // vocabulary records the catalog unknown unit, never
+    // the invalid present-side label. The row stays
+    // unavailable with reason metric-missing: absence
+    // still preempts the unit-unknown check.
+    let pair = |present_unit: &str, on_left: bool| {
+        let mut left = capture(
+            "cap-left-032",
+            "idle-snapshot",
+            41,
+            "snp-guest-01",
+            standard_meanings(),
+            1000,
+            2000,
+            "guest_monotonic_active",
+            false,
+            false,
+            vec![metric(
+                "one-sided",
+                Some(1),
+                None,
+                present_unit,
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            )],
+        );
+        let mut right = left.clone();
+        right.evidence_id = "cap-right-032".to_string();
+        if on_left {
+            right.metrics.clear();
+        } else {
+            left.metrics.clear();
+        }
+        (left, right)
+    };
+    for present_unit in ["", "   ", "counts"] {
+        for on_left in [true, false] {
+            let (left, right) = pair(present_unit, on_left);
+            let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+            assert_eq!(
+                rows,
+                vec![refused_row(
+                    "one-sided",
+                    "unavailable",
+                    "metric-missing",
+                    "cap-left-032",
+                    "cap-right-032",
+                    "unknown",
+                    "guest-direct-map",
+                )],
+                "present unit {present_unit:?} on_left={on_left}"
+            );
+        }
+    }
 }

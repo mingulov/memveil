@@ -170,7 +170,10 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 /// vocabulary (`bytes`, `unknown`) — a blank unit
 /// included — likewise refuses its row as `unit-unknown`
 /// with no delta and records the result unit as
-/// `unknown`. A non-blank string with a control
+/// `unknown`. A one-sided metric keeps reason
+/// `metric-missing` but records `unknown` when its
+/// present-side unit falls outside the vocabulary.
+/// A non-blank string with a control
 /// character is malformed input: meanings refuse as
 /// `invalid-meaning`, clocks as `invalid-clock`, reasons as
 /// `invalid-value`. An invalid input refuses the whole
@@ -272,13 +275,24 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
     let right_metric = find_metric(right, metric_id);
     let (Some(left_metric), Some(right_metric)) = (left_metric, right_metric) else {
         let shape = left_metric.or(right_metric).expect("union member");
+        // The refusal never copies an invalid present-side
+        // label: a one-sided metric with a unit outside
+        // the frozen vocabulary records the catalog
+        // unknown unit. Absence still preempts the
+        // unit-unknown check, so the reason stays
+        // metric-missing.
+        let unit = if is_known_unit(&shape.unit) {
+            shape.unit.as_str()
+        } else {
+            "unknown"
+        };
         return refused(
             metric_id,
             "unavailable",
             "metric-missing",
             left,
             right,
-            &shape.unit,
+            unit,
             &shape.scope,
         );
     };

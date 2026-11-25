@@ -74,6 +74,7 @@ FAMILIES = {
     "metric shape": [
         "metric_shape.json",
         "unit_unknown.json",
+        "metric_missing_unknown_unit.json",
     ],
     "invalid input": [
         "duplicate_metric.json",
@@ -235,12 +236,18 @@ def expect_unit(left, right, metric_id, reason):
 
     A unit-unknown refusal never copies the invalid
     input label; it records the catalog unknown unit.
-    Every other row carries the present side's unit.
+    A metric-missing row carries the present side's
+    unit only when it names the frozen vocabulary,
+    else unknown. Every other row carries the present
+    side's unit.
     """
     if reason == "unit-unknown":
         return "unknown"
     anchor = metric_by_id(left, metric_id) \
         or metric_by_id(right, metric_id)
+    if (reason == "metric-missing"
+            and anchor["unit"] not in KNOWN_UNITS):
+        return "unknown"
     return anchor["unit"]
 
 
@@ -945,3 +952,27 @@ def test_unit_unknown_rows_record_unknown_unit():
                 assert row["unit"] == "unknown", \
                     "%s/%s: unit-unknown row keeps %r" % (
                         name, row["metric_id"], row["unit"])
+
+
+def test_metric_missing_with_invalid_unit_records_unknown():
+    # A one-sided metric with a unit outside the frozen
+    # vocabulary records the catalog unknown unit, never
+    # the invalid present-side label. The row stays
+    # unavailable with reason metric-missing: absence
+    # still preempts the unit-unknown check.
+    for present_unit in ("", "   ", "counts"):
+        for on_left in (True, False):
+            left, right = base_pair()
+            if on_left:
+                right["metrics"] = []
+                left["metrics"][0]["unit"] = present_unit
+            else:
+                left["metrics"] = []
+                right["metrics"][0]["unit"] = present_unit
+            assert validate_capture(left) is None
+            assert validate_capture(right) is None
+            assert expect_row("one-sided", left, right, "x") == (
+                "unavailable", "metric-missing", "absent")
+            assert expect_unit(
+                left, right, "x", "metric-missing") == "unknown", \
+                (present_unit, on_left)
