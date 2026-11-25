@@ -14,9 +14,9 @@
 //! through a direct path include in tests. It takes no live input
 //! and performs no I/O. Lexical scalar checks that
 //! need reader context stay with the owning reader; the normalizer
-//! canonicalizes structure, field order and string quoting, carries
-//! signed integers as written, and refuses bare integers for u64
-//! leaves and anything without a canonical order.
+//! canonicalizes structure, field order and string quoting. Every
+//! leaf takes exactly its canonical JSON type, arrays hold strings
+//! only, and anything without a canonical order is refused.
 
 use std::fmt;
 
@@ -39,6 +39,13 @@ pub const EXPOSURE_FACT_KIND: &str = "exposure_fact";
 
 /// Digest of the empty event stream.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// Snapshot event-line bound in bytes, content plus terminator.
+///
+/// Matches the capture reader's line bound exactly: one snapshot
+/// entry carries exactly one physical line under the same 64 KiB
+/// budget the reader enforces while staging lines.
+pub const SNAPSHOT_MAX_LINE_BYTES: usize = 65536;
 
 /// The seven integrity keys in seal order; nothing else is admitted.
 const INTEGRITY_KEYS: [&str; 7] = [
@@ -243,6 +250,26 @@ const NULLABLE_KEYS: [&str; 5] = [
     "native_result",
     "delta",
     "loss_count",
+];
+
+/// Field leaves carrying bare signed integers.
+const I64_LEAVES: [&str; 2] = ["native_result", "delta"];
+
+/// Field leaves carrying bare booleans.
+const BOOL_LEAVES: [&str; 5] = [
+    "bounded",
+    "alias_unknown",
+    "reuse_unknown",
+    "loss_unknown",
+    "events_missed",
+];
+
+/// Fields carrying arrays of strings; every other array is refused.
+const STRING_ARRAY_KEYS: [&str; 4] = [
+    "evidence_ids",
+    "missing_sources",
+    "exceptions_applied",
+    "state_evidence",
 ];
 
 /// Field leaves carrying canonical u64 decimal strings.
@@ -740,8 +767,12 @@ fn check_keys(
 fn render_scalar(key: &str, value: &JsonValue, out: &mut Vec<u8>) -> Result<(), RecordError> {
     match value {
         JsonValue::Str(text) => {
-            if U64_LEAVES.contains(&key) && !is_canonical_u64(text) {
-                return Err(RecordError::new(key, "non-canonical u64"));
+            if U64_LEAVES.contains(&key) {
+                if !is_canonical_u64(text) {
+                    return Err(RecordError::new(key, "non-canonical u64"));
+                }
+            } else if I64_LEAVES.contains(&key) || BOOL_LEAVES.contains(&key) {
+                return Err(RecordError::new(key, "unexpected string"));
             }
             quote_into(out, text);
             Ok(())
@@ -750,14 +781,23 @@ fn render_scalar(key: &str, value: &JsonValue, out: &mut Vec<u8>) -> Result<(), 
             if U64_LEAVES.contains(&key) {
                 return Err(RecordError::new(key, "non-canonical u64"));
             }
+            if !I64_LEAVES.contains(&key) {
+                return Err(RecordError::new(key, "unexpected number"));
+            }
             out.extend_from_slice(number.as_bytes());
             Ok(())
         }
         JsonValue::Bool(true) => {
+            if !BOOL_LEAVES.contains(&key) {
+                return Err(RecordError::new(key, "unexpected boolean"));
+            }
             out.extend_from_slice(b"true");
             Ok(())
         }
         JsonValue::Bool(false) => {
+            if !BOOL_LEAVES.contains(&key) {
+                return Err(RecordError::new(key, "unexpected boolean"));
+            }
             out.extend_from_slice(b"false");
             Ok(())
         }
@@ -783,13 +823,7 @@ fn render_array(key: &str, items: &[JsonValue], out: &mut Vec<u8>) -> Result<(),
         }
         match item {
             JsonValue::Str(text) => quote_into(out, text),
-            JsonValue::Num(number) => out.extend_from_slice(number.as_bytes()),
-            JsonValue::Bool(true) => out.extend_from_slice(b"true"),
-            JsonValue::Bool(false) => out.extend_from_slice(b"false"),
-            JsonValue::Null => out.extend_from_slice(b"null"),
-            JsonValue::Array(_) | JsonValue::Object(_) => {
-                return Err(RecordError::new(key, "nested composite"));
-            }
+            _ => return Err(RecordError::new(key, "unexpected array item")),
         }
     }
     out.push(b']');
@@ -884,7 +918,10 @@ fn render_field(key: &str, value: &JsonValue, out: &mut Vec<u8>) -> Result<(), R
         "source" => render_shaped_object(key, value, &SOURCE_FIELDS, out),
         "counts" => render_counts(key, value, out),
         _ => match value {
-            JsonValue::Array(items) => render_array(key, items, out),
+            JsonValue::Array(items) if STRING_ARRAY_KEYS.contains(&key) => {
+                render_array(key, items, out)
+            }
+            JsonValue::Array(_) => Err(RecordError::new(key, "unexpected composite")),
             JsonValue::Object(_) => Err(RecordError::new(key, "no canonical order")),
             _ => render_scalar(key, value, out),
         },
@@ -1262,10 +1299,49 @@ pub fn parse_integrity_seal(text: &str) -> Result<IntegritySeal, SealError> {
     })
 }
 
+/// Identity of one exposure-fact line, when well-formed.
+///
+/// Returns `None` for lines without a usable evidence identity;
+/// callers fail closed rather than dropping evidence silently.
+fn fact_identity(text: &str) -> Option<SealedEvidenceKey> {
+    let value = parse_value(text).ok()?;
+    let JsonValue::Object(fields) = &value else {
+        return None;
+    };
+    let JsonValue::Str(kind) = find_field(fields, "kind")? else {
+        return None;
+    };
+    if kind != EXPOSURE_FACT_KIND {
+        return None;
+    }
+    let JsonValue::Object(data) = find_field(fields, "data")? else {
+        return None;
+    };
+    let JsonValue::Str(evidence_id) = find_field(data, "evidence_id")? else {
+        return None;
+    };
+    let JsonValue::Str(source_id) = find_field(data, "source_id")? else {
+        return None;
+    };
+    let JsonValue::Str(epoch) = find_field(data, "epoch")? else {
+        return None;
+    };
+    if !is_canonical_u64(epoch) {
+        return None;
+    }
+    let epoch = epoch.parse::<u64>().ok()?;
+    Some(SealedEvidenceKey {
+        evidence_id: evidence_id.clone(),
+        source_id: source_id.clone(),
+        epoch,
+    })
+}
+
 /// Seal verification outcome over a snapshot's literal bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealReport {
-    /// True only when the committed seal matches the literal bytes.
+    /// True only when the committed seal matches the literal bytes
+    /// and the sealed evidence holds containment.
     pub verified: bool,
     /// Committed stream bytes; zero when unsealed.
     pub bytes: u64,
@@ -1296,12 +1372,13 @@ fn line_identity(line: &str) -> Option<(String, Option<u64>)> {
 /// The snapshot carries `session` with `capture.integrity` and
 /// `event_lines` holding the literal line bytes as JSON strings.
 /// Every line ends in a newline and carries its position as its
-/// sequence number. Malformed snapshot framing is an error; a
-/// well-formed snapshot
-/// whose bytes, counts or kind census differ from the commitment
-/// verifies false. An absent integrity object verifies false, while
-/// a present non-object or an unknown integrity field is an error:
-/// no unsealed sidecar can supply policy evidence.
+/// sequence number; one entry holds exactly one physical line under
+/// the reader's 64 KiB bound. Malformed snapshot framing is an
+/// error; a well-formed snapshot whose bytes, counts or kind census
+/// differ from the commitment, or whose fact identities break
+/// containment, verifies false. An absent integrity object verifies
+/// false, while a present non-object or an unknown integrity field
+/// is an error: no unsealed sidecar can supply policy evidence.
 pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     let value = parse_value(text).map_err(|err| SealError::new(err.what, err.message))?;
     let JsonValue::Object(top) = &value else {
@@ -1320,7 +1397,9 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     };
     let mut literal: Vec<u8> = Vec::new();
     let mut kinds: Vec<String> = Vec::new();
+    let mut fact_keys: Vec<SealedEvidenceKey> = Vec::new();
     let mut lines_ok = true;
+    let mut contained_ok = true;
     for (position, line) in lines.iter().enumerate() {
         let JsonValue::Str(text) = line else {
             return Err(SealError::new("event_lines", "expected string lines"));
@@ -1328,9 +1407,25 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
         if !text.ends_with('\n') {
             return Err(SealError::new("event_lines", "missing trailing newline"));
         }
+        // One entry is one physical line: split on the terminator
+        // exactly like the capture reader and refuse stragglers.
+        if text.split('\n').count() != 2 {
+            return Err(SealError::new("event_lines", "extra newline"));
+        }
+        if text.len() > SNAPSHOT_MAX_LINE_BYTES {
+            return Err(SealError::new("event_lines", "line too large"));
+        }
         literal.extend_from_slice(text.as_bytes());
         match line_identity(text) {
-            Some((kind, Some(seq))) if seq == position as u64 => kinds.push(kind),
+            Some((kind, Some(seq))) if seq == position as u64 => {
+                if kind == EXPOSURE_FACT_KIND {
+                    match fact_identity(text) {
+                        Some(key) => fact_keys.push(key),
+                        None => contained_ok = false,
+                    }
+                }
+                kinds.push(kind);
+            }
             Some(_) => {
                 return Err(SealError::new("event_lines", "sequence mismatch"));
             }
@@ -1357,6 +1452,21 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
         String::from_utf8(rendered).map_err(|_| SealError::new("integrity", "invalid text"))?;
     let seal = parse_integrity_seal(&seal_text)?;
     if !lines_ok {
+        return Ok(SealReport {
+            verified: false,
+            bytes: seal.bytes,
+            lines: seal.lines,
+        });
+    }
+    let borrowed: Vec<EvidenceKey<'_>> = fact_keys
+        .iter()
+        .map(|key| EvidenceKey {
+            evidence_id: key.evidence_id.as_str(),
+            source_id: key.source_id.as_str(),
+            epoch: key.epoch,
+        })
+        .collect();
+    if !contained_ok || check_evidence_keys(&borrowed).is_err() {
         return Ok(SealReport {
             verified: false,
             bytes: seal.bytes,
@@ -1789,6 +1899,107 @@ mod tests {
         let err = normalize_record(nested.trim_end()).unwrap_err();
         assert_eq!(err.what, "uncertainty");
         assert_eq!(err.message, "non-canonical u64");
+    }
+
+    #[test]
+    fn normalize_refuses_non_canonical_scalar_types() {
+        let canonical =
+            include_str!("../../tests/exposure/fixtures/contracts/replay_canonical.json");
+        assert!(normalize_record(canonical.trim_end()).is_ok());
+        let cases = [
+            ("\"epoch\":\"7\"", "\"epoch\":true", "epoch"),
+            ("\"epoch\":\"7\"", "\"epoch\":[7]", "epoch"),
+            ("\"epoch\":\"7\"", "\"epoch\":null", "epoch"),
+            (
+                "\"evidence_id\":\"ev-9\"",
+                "\"evidence_id\":7",
+                "evidence_id",
+            ),
+            (
+                "\"evidence_id\":\"ev-9\"",
+                "\"evidence_id\":true",
+                "evidence_id",
+            ),
+            (
+                "\"native_result\":0",
+                "\"native_result\":\"0\"",
+                "native_result",
+            ),
+            (
+                "\"native_result\":0",
+                "\"native_result\":[0]",
+                "native_result",
+            ),
+            (
+                "\"uncertainty\":\"50\"",
+                "\"uncertainty\":false",
+                "uncertainty",
+            ),
+        ];
+        for (from, to, what) in cases {
+            let bad = canonical.replacen(from, to, 1);
+            assert_ne!(bad, canonical, "mutation {to}");
+            let err = normalize_record(bad.trim_end()).unwrap_err();
+            assert_eq!(err.what, what, "mutation {to}");
+        }
+        let policy = render_canonical(&[
+            ("rule_id", FieldValue::Text("no-unexpected-queue")),
+            ("scope_id", FieldValue::Text("virtio-queues")),
+            ("result", FieldValue::Text("conforms")),
+            (
+                "evidence_ids",
+                FieldValue::Array(vec![FieldValue::Text("ev-1")]),
+            ),
+            ("missing_sources", FieldValue::Array(vec![])),
+            ("exceptions_applied", FieldValue::Array(vec![])),
+            ("clock_domain", FieldValue::Text("guest_monotonic_active")),
+            ("reason", FieldValue::Text("quiet ledger.")),
+        ])
+        .unwrap();
+        assert_eq!(normalize_record(&policy).unwrap(), policy);
+        for to in [
+            "\"evidence_ids\":[7]",
+            "\"evidence_ids\":[null]",
+            "\"evidence_ids\":[\"ev-1\",[\"ev-2\"]]",
+        ] {
+            let bad = policy.replacen("\"evidence_ids\":[\"ev-1\"]", to, 1);
+            assert_ne!(bad, policy, "mutation {to}");
+            let err = normalize_record(&bad).unwrap_err();
+            assert_eq!(err.what, "evidence_ids", "mutation {to}");
+        }
+    }
+
+    #[test]
+    fn normalize_keeps_boolean_and_object_shapes() {
+        let channel = "{\"status\":\"complete_for_scope\",\"loss_count\":\"0\"}";
+        let quality = format!(
+            "{{\"detail\":{channel},\"aggregate\":{channel},\"identity\":{channel},\
+            \"baseline\":{channel},\"terminal\":{channel}}}"
+        );
+        let sample = format!(
+            "{{\"sample_id\":\"sample-1\",\"source_id\":\"sharing-census\",\
+            \"start_time\":\"1\",\"end_time\":\"2\",\"scope\":\"direct-map\",\
+            \"counts\":{{\"apple\":\"1\"}},\"units\":\"bytes\",\"visited\":\"4\",\
+            \"returned\":\"2\",\"bounded\":false,\"atomicity\":\"interval\",\
+            \"quality\":{quality}}}"
+        );
+        assert_eq!(normalize_record(&sample).unwrap(), sample);
+        let bad_sample = sample.replacen("\"bounded\":false", "\"bounded\":\"false\"", 1);
+        assert_ne!(bad_sample, sample);
+        let err = normalize_record(&bad_sample).unwrap_err();
+        assert_eq!(err.what, "bounded");
+        let object = "{\"object_token\":\"tok-1\",\"generation\":\"1\",\
+            \"object_class\":\"buffer\",\"namespace\":\"session_token\",\
+            \"origin_source\":\"heap-dmabuf-objects\",\"lifecycle_status\":\"live\",\
+            \"state\":\"shared\",\"state_evidence\":[\"ev-1\"],\
+            \"expected_boundary\":{\"boundary_type\":\"revert_boundary\",\
+            \"reference\":\"release\"},\"uncertainty\":{\"alias_unknown\":false,\
+            \"reuse_unknown\":false,\"loss_unknown\":false,\"events_missed\":false}}";
+        assert_eq!(normalize_record(object).unwrap(), object);
+        let bad_object = object.replacen("\"alias_unknown\":false", "\"alias_unknown\":\"no\"", 1);
+        assert_ne!(bad_object, object);
+        let err = normalize_record(&bad_object).unwrap_err();
+        assert_eq!(err.what, "alias_unknown");
     }
 
     #[test]

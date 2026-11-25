@@ -57,6 +57,25 @@ SEAL_KINDS = ("bounce_attempt", "map_result", "unmap", "copy",
               "sync_request", "transition_result", "pool_sample",
               "gap", "marker", "counter_snapshot", "exposure_fact")
 
+# Snapshot event-line bound in bytes, content plus terminator. Matches
+# the capture reader's line bound exactly: one snapshot entry carries
+# exactly one physical line under the same 64 KiB budget.
+SNAPSHOT_MAX_LINE_BYTES = 65536
+
+# Each catalog source with its owning capability.
+SOURCE_CAPABILITIES = {
+    "sharing-census": "census",
+    "object-lineage": "object-lifetimes",
+    "dma-virtio-paths": "dma-paths",
+    "heap-dmabuf-objects": "shared-buffers",
+    "ghcb-exceptions": "host-interfaces",
+    "tdx-conversions": "host-interfaces",
+    "tdx-ve-metadata": "host-interfaces",
+    "vmbus-channels": "host-interfaces",
+    "mapping-inventory-scan": "mapping-inventory",
+    "egress-controls": "exposure-context",
+}
+
 COVERAGE_SOURCE_REQUIRED = ("source_id", "capability", "profile_id",
                             "subject_id", "platform_cell",
                             "address_namespace", "phase", "status",
@@ -101,6 +120,20 @@ def check_session_quality(quality):
     assert quality["terminal"]["status"] in ("complete_for_scope",
                                              "partial", "unavailable",
                                              "not_applicable")
+
+
+def check_source_capability(entry):
+    """The source's capability must be its catalog owner."""
+    assert entry["source_id"] in SOURCE_CAPABILITIES, "unknown source"
+    assert SOURCE_CAPABILITIES[entry["source_id"]] == entry["capability"], \
+        "source mismatch"
+
+
+def check_missing_sources(entry):
+    """Missing sources name catalog entries, never free slugs."""
+    for source in entry["missing_sources"]:
+        assert source in SOURCE_CAPABILITIES, \
+            "unknown missing source %r" % source
 
 
 def facts_from_lines(snapshot):
@@ -149,13 +182,19 @@ def seal_verified(snapshot):
 
     An absent integrity object verifies false; a present non-object
     or an unknown integrity field or kind raises, mirroring the Rust
-    snapshot path. A well-formed seal that mismatches the bytes
-    verifies false. Every line ends in a newline and carries its
-    position as its sequence number; violations raise.
+    snapshot path. A well-formed seal that mismatches the bytes, or
+    whose fact identities break containment, verifies false. Every
+    line ends in a newline and carries its position as its sequence
+    number; one entry holds exactly one physical line under the
+    reader's 64 KiB bound. Framing violations raise.
     """
     for position, line in enumerate(snapshot["event_lines"]):
         if not line.endswith("\n"):
             raise ValueError("line %d lacks trailing newline" % position)
+        if len(line.split("\n")) != 2:
+            raise ValueError("line %d holds extra newline" % position)
+        if len(line.encode("utf-8")) > SNAPSHOT_MAX_LINE_BYTES:
+            raise ValueError("line %d too large" % position)
         if json.loads(line).get("seq") != str(position):
             raise ValueError("line %d sequence mismatch" % position)
     capture = snapshot["session"]["capture"]
@@ -182,7 +221,10 @@ def seal_verified(snapshot):
     for kind, value in integrity["kinds"].items():
         if census.get(kind, 0) != int(value):
             return False
-    return True
+    facts = facts_from_lines(snapshot)
+    if duplicate_evidence_error(facts) is not None:
+        return False
+    return cross_epoch_error(facts) is None
 
 
 def duplicate_evidence_error(facts):
@@ -225,6 +267,7 @@ def rule_satisfied(snapshot, required_sources):
     facts = facts_from_lines(snapshot)
     if not facts:
         return False
+    # The seal already gates containment; these stay as a second layer.
     if duplicate_evidence_error(facts) is not None:
         return False
     return cross_epoch_error(facts) is None
@@ -268,6 +311,10 @@ def test_duplicate_source_and_cross_epoch_evidence_rejected():
                               ["sharing-census"])
     assert not rule_satisfied(load("cross_epoch_evidence.json"),
                               ["sharing-census"])
+    assert not seal_verified(load("duplicate_evidence.json")), \
+        "duplicate evidence cannot verify"
+    assert not seal_verified(load("cross_epoch_evidence.json")), \
+        "mixed epochs cannot verify"
 
 
 def test_snapshot_path_refuses_unknown_and_non_object_integrity():
@@ -300,6 +347,24 @@ def test_snapshot_lines_carry_position_and_trailing_newline():
     stripped["event_lines"][0] = stripped["event_lines"][0].rstrip("\n")
     with pytest.raises(ValueError):
         seal_verified(stripped)
+
+
+def test_snapshot_lines_split_and_bound_physical_lines():
+    sealed = load("sealed_snapshot.json")
+    split = json.loads(json.dumps(sealed))
+    split["event_lines"][0] = split["event_lines"][0] + "\n"
+    with pytest.raises(ValueError):
+        seal_verified(split)
+    entry = sealed["event_lines"][0]
+    pad = SNAPSHOT_MAX_LINE_BYTES - len(entry.encode("utf-8"))
+    assert pad > 0, "fixture entry fits the bound"
+    oversize = json.loads(json.dumps(sealed))
+    oversize["event_lines"][0] = " " * (pad + 1) + entry
+    with pytest.raises(ValueError):
+        seal_verified(oversize)
+    capped = json.loads(json.dumps(sealed))
+    capped["event_lines"][0] = " " * pad + entry
+    assert not seal_verified(capped), "edited bytes must fail the seal"
 
 
 def test_missing_terminal_evidence_is_partial():
@@ -360,6 +425,7 @@ def test_fixture_records_match_frozen_shapes():
     for entry in session["exposure"]["sources"]:
         for field in COVERAGE_SOURCE_REQUIRED:
             assert field in entry, "coverage source field %s" % field
+        check_source_capability(entry)
         assert entry["phase"] in FROZEN_PHASE
         assert entry["status"] in FROZEN_STATUS
         assert entry["address_namespace"] in FROZEN_NAMESPACE
@@ -383,6 +449,25 @@ def test_fixture_records_match_frozen_shapes():
         reason = fact.get("native_result_reason")
         assert (native is None) == (reason is not None), \
             "null native result needs a typed reason"
+
+
+def test_coverage_pairing_and_missing_sources_follow_catalog():
+    snapshot = load("sealed_snapshot.json")
+    for entry in snapshot["session"]["exposure"]["sources"]:
+        check_source_capability(entry)
+    mixed = json.loads(json.dumps(snapshot))
+    mixed["session"]["exposure"]["sources"][0]["capability"] = \
+        "host-interfaces"
+    with pytest.raises(AssertionError):
+        check_source_capability(
+            mixed["session"]["exposure"]["sources"][0])
+    report = load("report_valid.json")
+    for entry in report["policy_results"]:
+        check_missing_sources(entry)
+    unknown = json.loads(json.dumps(report))
+    unknown["policy_results"][0]["missing_sources"] = ["unknown-source"]
+    with pytest.raises(AssertionError):
+        check_missing_sources(unknown["policy_results"][0])
 
 
 def test_policy_file_shape():
@@ -465,6 +550,61 @@ def test_comparison_delta_follows_compatibility():
     check(bad_absent, False)
 
 
+def test_stray_reason_without_value_refused():
+    schema = load_schema("event-v0.3.0.schema.json")
+    for key in ("parent_operation_id", "object_token"):
+        event = json.loads(load("sealed_snapshot.json")["event_lines"][0])
+        event["data"].pop(key, None)
+        event["data"][key + "_reason"] = "unknown"
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(event, schema)
+        paired = json.loads(load("sealed_snapshot.json")["event_lines"][0])
+        paired["data"][key] = None
+        paired["data"][key + "_reason"] = "unknown"
+        jsonschema.validate(paired, schema)
+    report_schema = load_schema("report-v0.3.0.schema.json")
+    report = load("report_valid.json")
+    comparison = report["comparisons"][0]
+    comparison.update(compatibility="incompatible",
+                      delta_reason="unknown")
+    del comparison["delta"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(report, report_schema)
+
+
+def test_signed_fields_bounded_to_i64():
+    schema = load_schema("event-v0.3.0.schema.json")
+
+    def check_event(value, valid):
+        event = json.loads(load("sealed_snapshot.json")["event_lines"][0])
+        event["data"]["native_result"] = value
+        if valid:
+            jsonschema.validate(event, schema)
+        else:
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(event, schema)
+
+    check_event(2**63 - 1, True)
+    check_event(-(2**63), True)
+    check_event(2**63, False)
+    check_event(-(2**63) - 1, False)
+    report_schema = load_schema("report-v0.3.0.schema.json")
+
+    def check_delta(value, valid):
+        report = load("report_valid.json")
+        report["comparisons"][0]["delta"] = value
+        if valid:
+            jsonschema.validate(report, report_schema)
+        else:
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(report, report_schema)
+
+    check_delta(2**63 - 1, True)
+    check_delta(-(2**63), True)
+    check_delta(2**63, False)
+    check_delta(-(2**63) - 1, False)
+
+
 POLICY_MAX_BYTES = 1048576
 POLICY_MAX_RULES = 1024
 POLICY_MAX_EXCEPTIONS_PER_RULE = 64
@@ -529,6 +669,7 @@ def test_report_records_shape():
                       "clock_domain", "reason"):
             assert field in entry, "policy result field %s" % field
         assert entry["result"] in FROZEN_POLICY_RESULT
+        check_missing_sources(entry)
         assert entry["clock_domain"] in FROZEN_CLOCK
     assert report["comparisons"], "report carries comparisons"
     for entry in report["comparisons"]:

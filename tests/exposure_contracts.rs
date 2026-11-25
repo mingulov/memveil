@@ -109,19 +109,25 @@ fn duplicate_source_and_cross_epoch_evidence_rejected() {
     assert!(!owned.is_empty(), "control carries fact identities");
     check_evidence_keys(&borrowed(&owned)).unwrap();
 
-    let report = verify_sealed_snapshot(DUPLICATE).expect("duplicate seals");
-    assert!(report.verified);
-    let owned = sealed_evidence_keys(DUPLICATE).expect("duplicate replays");
-    assert!(owned.len() >= 2, "duplicate carries two identities");
-    let err = check_evidence_keys(&borrowed(&owned)).unwrap_err();
-    assert_eq!(err.what, "evidence_id");
-
-    let report = verify_sealed_snapshot(CROSS_EPOCH).expect("mixed epochs seal");
-    assert!(report.verified);
-    let owned = sealed_evidence_keys(CROSS_EPOCH).expect("mixed epochs replay");
-    assert!(owned.len() >= 2, "mixed epochs carry two identities");
-    let err = check_evidence_keys(&borrowed(&owned)).unwrap_err();
-    assert_eq!(err.what, "source_id");
+    for (name, snapshot, what) in [
+        ("duplicate", DUPLICATE, "evidence_id"),
+        ("mixed epochs", CROSS_EPOCH, "source_id"),
+    ] {
+        let report = verify_sealed_snapshot(snapshot).expect("tainted parses");
+        assert!(!report.verified, "{name} evidence cannot verify");
+        let terminal = snapshot_terminal_status(snapshot).expect("tainted carries terminal");
+        let outcome = exposure_quality::rule_outcome(
+            report.verified,
+            &terminal,
+            &[("sharing-census", "available", true)],
+        );
+        assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
+        assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
+        let owned = sealed_evidence_keys(snapshot).expect("tainted replays");
+        assert!(owned.len() >= 2, "{name} carries two identities");
+        let err = check_evidence_keys(&borrowed(&owned)).unwrap_err();
+        assert_eq!(err.what, what);
+    }
 }
 
 #[test]
@@ -239,6 +245,71 @@ fn snapshot_lines_carry_position_and_trailing_newline() {
     let err = verify_sealed_snapshot(&stripped).unwrap_err();
     assert_eq!(err.what, "event_lines");
     assert_eq!(err.message, "missing trailing newline");
+}
+
+/// Byte offset just past the opening quote of the first event line.
+fn first_entry_open(snapshot: &str) -> usize {
+    let anchor = snapshot.find("\"event_lines\"").expect("event_lines key");
+    let rest = &snapshot[anchor..];
+    let bracket = rest.find('[').expect("event_lines array");
+    let quote = rest[bracket..].find('"').expect("first entry") + bracket;
+    anchor + quote + 1
+}
+
+/// Decoded byte length of the first event line entry.
+fn first_entry_len(snapshot: &str) -> usize {
+    let raw = snapshot.as_bytes();
+    let mut pos = first_entry_open(snapshot);
+    let mut len = 0;
+    loop {
+        let byte = raw[pos];
+        if byte == b'\\' {
+            assert_ne!(raw[pos + 1], b'u', "no unicode escapes in fixtures");
+            pos += 2;
+            len += 1;
+            continue;
+        }
+        if byte == b'"' {
+            break;
+        }
+        pos += 1;
+        len += 1;
+    }
+    len
+}
+
+/// Insert `pad` spaces at the start of the first event line entry.
+fn pad_first_entry(snapshot: &str, pad: usize) -> String {
+    let at = first_entry_open(snapshot);
+    let mut out = String::with_capacity(snapshot.len() + pad);
+    out.push_str(&snapshot[..at]);
+    out.push_str(&" ".repeat(pad));
+    out.push_str(&snapshot[at..]);
+    out
+}
+
+#[test]
+fn snapshot_path_splits_and_bounds_physical_lines() {
+    assert_eq!(
+        exposure_records::SNAPSHOT_MAX_LINE_BYTES,
+        65536,
+        "snapshot line bound matches the capture reader"
+    );
+    let split = SEALED.replacen("\\n\"", "\\n\\n\"", 1);
+    assert_ne!(split, SEALED);
+    let err = verify_sealed_snapshot(&split).unwrap_err();
+    assert_eq!(err.what, "event_lines");
+    assert_eq!(err.message, "extra newline");
+
+    let entry_len = first_entry_len(SEALED);
+    assert!(entry_len < 65536, "fixture entry fits the bound");
+    let capped = pad_first_entry(SEALED, 65536 - entry_len);
+    let report = verify_sealed_snapshot(&capped).expect("capped line parses");
+    assert!(!report.verified, "edited bytes must fail the seal");
+    let oversize = pad_first_entry(SEALED, 65536 - entry_len + 1);
+    let err = verify_sealed_snapshot(&oversize).unwrap_err();
+    assert_eq!(err.what, "event_lines");
+    assert_eq!(err.message, "line too large");
 }
 
 #[test]

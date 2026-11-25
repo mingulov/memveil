@@ -148,6 +148,28 @@ pub const EXPOSURE_CAPABILITIES: [&str; 7] = [
     "mapping-inventory",
     "exposure-context",
 ];
+/// Each catalog source with its owning capability.
+pub const SOURCE_CAPABILITIES: [(&str, &str); 10] = [
+    ("sharing-census", "census"),
+    ("object-lineage", "object-lifetimes"),
+    ("dma-virtio-paths", "dma-paths"),
+    ("heap-dmabuf-objects", "shared-buffers"),
+    ("ghcb-exceptions", "host-interfaces"),
+    ("tdx-conversions", "host-interfaces"),
+    ("tdx-ve-metadata", "host-interfaces"),
+    ("vmbus-channels", "host-interfaces"),
+    ("mapping-inventory-scan", "mapping-inventory"),
+    ("egress-controls", "exposure-context"),
+];
+
+/// Owning capability for a catalog source, or `None` when unknown.
+pub fn source_capability(source_id: &str) -> Option<&'static str> {
+    SOURCE_CAPABILITIES
+        .iter()
+        .find(|(source, _)| *source == source_id)
+        .map(|(_, capability)| *capability)
+}
+
 /// Planned exposure source identifiers.
 pub const EXPOSURE_SOURCES: [&str; 10] = [
     "sharing-census",
@@ -383,7 +405,13 @@ pub struct Maybe<T> {
 
 impl<T> Maybe<T> {
     /// Check the present/null/reason shape; value checks stay with the caller.
+    ///
+    /// An absent field carries neither a value nor a reason: a reason
+    /// always accompanies a present null, never an absent key.
     pub fn validate_shape(&self, field: &str) -> Result<(), ExposureError> {
+        if !self.present && self.value.is_some() {
+            return Err(ExposureError::new(field, "absent value"));
+        }
         let null = self.present && self.value.is_none();
         if null != !self.reason.is_empty() {
             return Err(ExposureError::new(field, "reason shape"));
@@ -491,7 +519,7 @@ impl CoverageSource {
             platform_cell: "ordinary-linux".to_string(),
             address_namespace: "guest_physical".to_string(),
             phase: "pre_attach".to_string(),
-            status: "available".to_string(),
+            status: "unavailable".to_string(),
             reason: "adapter-unimplemented".to_string(),
             window_start_ns: 1_000_000_000,
             window_end_ns: 2_000_000_000,
@@ -503,6 +531,9 @@ impl CoverageSource {
     pub fn validate(&self) -> Result<(), ExposureError> {
         check_closed("source_id", &self.source_id, &EXPOSURE_SOURCES)?;
         check_closed("capability", &self.capability, &EXPOSURE_CAPABILITIES)?;
+        if source_capability(&self.source_id) != Some(self.capability.as_str()) {
+            return Err(ExposureError::new("capability", "source mismatch"));
+        }
         check_id("profile_id", &self.profile_id)?;
         check_closed("subject_id", &self.subject_id, &SUBJECT_CLASSES)?;
         check_closed("platform_cell", &self.platform_cell, &PLATFORM_CELLS)?;
@@ -870,9 +901,7 @@ impl PolicyResult {
             check_id("evidence_ids", handle)?;
         }
         for source in &self.missing_sources {
-            if !is_slug(source) {
-                return Err(ExposureError::new("missing_sources", "invalid source"));
-            }
+            check_closed("missing_sources", source, &EXPOSURE_SOURCES)?;
         }
         for handle in &self.exceptions_applied {
             check_id("exceptions_applied", handle)?;
@@ -1119,6 +1148,42 @@ mod tests {
             reason: "withheld".to_string(),
         };
         assert!(absent_reason.validate_shape("field").is_err());
+        let absent_valued: Maybe<String> = Maybe {
+            present: false,
+            value: Some("v".to_string()),
+            reason: String::new(),
+        };
+        assert!(absent_valued.validate_shape("field").is_err());
+    }
+
+    #[test]
+    fn source_capability_pairs_follow_catalog() {
+        let example = CoverageSource::example();
+        assert_eq!(example.status, "unavailable");
+        assert_eq!(example.reason, "adapter-unimplemented");
+        example.validate().unwrap();
+        for (source, capability) in SOURCE_CAPABILITIES {
+            assert!(is_exposure_source(source));
+            assert!(is_exposure_capability(capability));
+            assert_eq!(source_capability(source), Some(capability));
+            let mut owned = CoverageSource::example();
+            owned.source_id = source.to_string();
+            owned.capability = capability.to_string();
+            owned.validate().unwrap();
+        }
+        assert_eq!(source_capability("unknown-source"), None);
+        let mut mixed = CoverageSource::example();
+        mixed.capability = "host-interfaces".to_string();
+        assert!(mixed.validate().is_err());
+    }
+
+    #[test]
+    fn missing_sources_name_catalog_entries() {
+        let mut result = PolicyResult::example();
+        result.missing_sources = vec!["sharing-census".to_string()];
+        result.validate().unwrap();
+        result.missing_sources = vec!["unknown-source".to_string()];
+        assert!(result.validate().is_err());
     }
 
     #[test]
