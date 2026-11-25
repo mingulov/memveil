@@ -68,8 +68,8 @@ A missing final session can be recovered with `--allow-partial` from an owned, l
   [exposure coverage](exposure-coverage.md); standalone policy 0.1.0 is
   reserved for the authored policy files in
   [exposure policy](exposure-policy.md). The reserved exposure versions are
-  not accepted or produced and have no schema files yet. No schema number
-  may be reused.
+  not accepted or produced; their schema files ship for contract review
+  and offline validation only. No schema number may be reused.
 
 The [integrity and recovery contract](capture-integrity.md) specifies the
 required fields, literal-byte verification, quality demotion, durable

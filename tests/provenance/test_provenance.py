@@ -199,6 +199,17 @@ SCHEMA_FAMILIES = (
 # Shipped schema pins (cutover: carried verbatim from the retired
 # toolchain lock's product contracts; product, schema, and
 # toolchain versions stay independent by policy, not by format).
+# Reserved schema versions: files may ship for contract review and
+# offline validation while current readers still refuse them. A reserved
+# pin without its file, or a file matching no current/retained/reserved
+# pin, fails exactly like any other schema drift.
+RESERVED_SCHEMAS = {
+    "session": ["0.3.0"],
+    "event": ["0.3.0"],
+    "report": ["0.3.0"],
+    "policy": ["0.1.0"],
+}
+
 SCHEMA_CONTRACTS = {
     "schema_version": "0.1.4",
     "event_schema_version": "0.1.2",
@@ -217,11 +228,11 @@ SCHEMA_CONTRACTS = {
 def schema_file_status(basenames, contracts):
     """(bad, missing, inconsistent) for schema files against the pins.
 
-    bad: files matching no pinned (current or retained) version
-    for their own family, including unknown families.
-    missing: pinned current or retained versions with no file.
-    inconsistent: retained pins that are malformed or repeat an
-    already pinned version.
+    bad: files matching no pinned (current, retained or reserved)
+    version for their own family, including unknown families.
+    missing: pinned current, retained or reserved versions with no
+    file. inconsistent: retained or reserved pins that are malformed
+    or repeat an already pinned version.
     """
     current = contracts["schema_version"]
     present = set(basenames)
@@ -245,6 +256,25 @@ def schema_file_status(basenames, contracts):
             else:
                 pinned.add(entry)
         pinned_by_prefix[prefix] = pinned
+    for family, versions in sorted(RESERVED_SCHEMAS.items()):
+        prefix = "%s-v" % family
+        pinned = pinned_by_prefix.setdefault(prefix, set())
+        if not isinstance(versions, list):
+            inconsistent.append(
+                "RESERVED_SCHEMAS[%s]: not a list" % family)
+            continue
+        for entry in versions:
+            if not isinstance(entry, str) or not entry:
+                inconsistent.append(
+                    "RESERVED_SCHEMAS[%s]: %r not a version"
+                    % (family, entry))
+            elif entry in pinned:
+                inconsistent.append(
+                    "RESERVED_SCHEMAS[%s]: %s repeats a pin"
+                    % (family, entry))
+            else:
+                pinned.add(entry)
+    for prefix, pinned in sorted(pinned_by_prefix.items()):
         for version in sorted(pinned):
             name = "%s%s.schema.json" % (prefix, version)
             if name not in present:
@@ -314,6 +344,15 @@ def run_selftest():
     _, _, inconsistent = schema_file_status(real, malformed)
     check("retained-malformed-fails", len(inconsistent) == 1,
           "; ".join(inconsistent))
+    bad, _, _ = schema_file_status(
+        real + ["policy-v9.9.9.schema.json"], contracts)
+    check("reserved-other-version-fails",
+          bad == ["policy-v9.9.9.schema.json"], "; ".join(bad))
+    dropped = "session-v0.3.0.schema.json"
+    _, missing, _ = schema_file_status(
+        [base for base in real if base != dropped], contracts)
+    check("missing-reserved-fails", missing == [dropped],
+          "; ".join(missing))
     return results
 
 

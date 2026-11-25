@@ -5,16 +5,17 @@
 //! runs against pipes, a scratch regular file, or a pure disposition
 //! function; no live kernel read happens here.
 //!
-//! Compile boundary: the module under test is included via `#[path]`
+//! Compile boundary: the module under test resolves through the wired library.
 //! and must stay dependency-free (std plus libc only, no `crate::`
 //! use). The `transport_holds_no_product_items` case enforces that
 //! boundary by scanning the module text for forbidden tokens.
 
-#[path = "../src/platform/iterator.rs"]
-mod iterator;
-
-use iterator::{FdIterator, READ_DELIVER, READ_EOF, READ_FAIL, READ_RETRY, READ_YIELD};
-use iterator::{ITER_CANCELLED, ITER_CLOSED, ITER_IO, IterError, IterOutcome, classify_read};
+use memveil::platform::iterator::{
+    FdIterator, READ_DELIVER, READ_EOF, READ_FAIL, READ_RETRY, READ_YIELD,
+};
+use memveil::platform::iterator::{
+    ITER_CANCELLED, ITER_CLOSED, ITER_IO, IterError, IterOutcome, classify_read,
+};
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

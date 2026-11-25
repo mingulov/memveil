@@ -18,7 +18,7 @@ from pathlib import Path
 
 MANIFEST_FORMAT = "exposure-fixture-manifest/0.1.0"
 CASE_FORMAT = "exposure-fixture-case/0.1.0"
-CATALOG_VERSION = "0.1.0"
+CATALOG_VERSION = "0.1.1"
 
 # Lifecycle states shared with the frozen capability catalog.
 LIFECYCLE_STATUSES = ("created", "live", "released", "quarantined", "unknown")

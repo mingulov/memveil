@@ -27,8 +27,9 @@ request/results from region state. Session/event/report 0.3.0 are reserved
 for the exposure records in
 [exposure coverage](../docs/exposure-coverage.md), and standalone policy
 0.1.0 for the authored policy files in
-[exposure policy](../docs/exposure-policy.md). The reserved versions have no
-schema files yet and current readers refuse them.
+[exposure policy](../docs/exposure-policy.md). The reserved exposure
+schema files ship for contract review and offline validation only;
+current readers refuse them.
 
 Events 0.1.2 adds true-only copy `pool_private` and
 `offset_past_allocation` markers. Session 0.1.2 adds optional correlation

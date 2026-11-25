@@ -129,3 +129,18 @@ config and kernel source identities, matching headers and tool locks.
 A host-header build does not qualify the guest module. bpftrace shares the
 conversion hooks with collection, so agreement has a shared-hook blind spot.
 Transport PASS never proves a confidential transition or real guest admission.
+
+# Test-only exposure oracle module
+
+`memveil_exposure_oracle.c` is an independent native oracle for the
+exposure fixture ledgers: owned share/restore cycles, a persistent
+virtio-style queue, and quarantine accounting, each load carrying a
+unique nonzero epoch. It refuses to load without
+`mv_exposure_oracle_arm=1`, binds no real hardware, never reads or
+writes payloads, and never logs addresses or kernel internals. The
+product never consumes its ledger.
+
+A stub-harness suite (`test_exposure_oracle.py`) pins the
+failure-order semantics without a kernel: restore and exit-path
+conversions stay gated on proven region state. Real KDIR build, load
+and guest behavior need a lease and stay unproven until then.

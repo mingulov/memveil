@@ -84,6 +84,21 @@ fn tarball_layout() {
             );
         }
     }
+    for name in [
+        "README.md",
+        "closed-scope.json",
+        "config-deviation.json",
+        "lifecycle-boundary.json",
+    ] {
+        assert!(
+            set.bundle
+                .join("examples")
+                .join("policies")
+                .join(name)
+                .is_file(),
+            "bundle lacks examples/policies/{name}"
+        );
+    }
     // Known deltas: no bridge, no conda/pixi runtime, no Mojo texts.
     let mut bridge = Vec::new();
     let mut stack = vec![set.bundle.clone()];

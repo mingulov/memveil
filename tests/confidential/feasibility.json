@@ -1,6 +1,6 @@
 {
   "feasibility_version": "0.1.0",
-  "catalog_version": "0.1.0",
+  "catalog_version": "0.1.1",
   "scope_note": "Read-only kernel-source survey against the frozen exposure catalog. No live proof, no attachment, no VM access, no lease requested or used. No platform milestone is claimed: every proof leg is BLOCKED and every platform milestone is NOT_RUN.",
   "cells_required": ["sev-snp", "tdx-standalone", "hyper-v"],
   "verdict_enum": ["feasible-unproven", "blocked-no-lease", "no-safe-source", "not-applicable"],

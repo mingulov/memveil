@@ -5,6 +5,7 @@
 pub mod common;
 pub mod encode;
 pub mod event;
+pub mod exposure;
 pub mod identity;
 pub mod integrity;
 pub mod metric;

@@ -318,7 +318,7 @@ def test_model_lists_match_catalog():
     """Transcribed frozen lists cannot drift from the catalog."""
     with open(MODEL, encoding="utf-8") as handle:
         text = handle.read()
-    assert catalog()["exposure_catalog_version"] == "0.1.0"
+    assert catalog()["exposure_catalog_version"] == "0.1.1"
     assert sorted(rust_string_list(text, "KNOWN_SEMANTICS")) == \
         sorted(catalog_vocab("semantics"))
     assert sorted(rust_string_list(text, "KNOWN_PEER_CLASSES")) == \

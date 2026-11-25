@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline authored-policy checks: reader bounds plus rule evaluation.
 //!
-//! The two lane modules compile here through explicit path
-//! includes, so no shared `mod.rs` changes. The controller
-//! wires them into the library at integration; the module
-//! headers record the handoff.
+//! The two modules resolve through the wired library.
 //!
 //! Behavior contract (frozen public text:
 //! `docs/exposure-policy.md` plus the exposure catalog
@@ -15,13 +12,12 @@
 //! gap visible; cross-capture opaque-id equality is
 //! refused.
 
-#[path = "../src/analysis/exposure_policy.rs"]
-mod exposure_policy;
-#[path = "../src/platform/policy_reader.rs"]
-mod policy_reader;
-
-use exposure_policy::{EvalInput, Fact, Object, PolicyResult, evaluate, strict_exit};
-use policy_reader::{Json, parse_decimal_u64, parse_json, parse_policy_text, read_policy_file};
+use memveil::analysis::exposure_policy::{
+    EvalInput, Fact, Object, PolicyResult, evaluate, strict_exit,
+};
+use memveil::platform::policy_reader::{
+    Json, parse_decimal_u64, parse_json, parse_policy_text, read_policy_file,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 

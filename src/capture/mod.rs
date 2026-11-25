@@ -3,6 +3,7 @@
 
 pub mod collector;
 pub mod correlation;
+pub mod exposure_records;
 pub mod kernel;
 pub mod lifecycle;
 pub mod live;

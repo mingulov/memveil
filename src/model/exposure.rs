@@ -25,7 +25,7 @@ pub const EXPOSURE_REPORT_VERSION: &str = "0.3.0";
 /// Standalone authored-policy contract version.
 pub const EXPOSURE_POLICY_VERSION: &str = "0.1.0";
 /// Frozen exposure catalog version these shapes follow.
-pub const EXPOSURE_CATALOG_VERSION: &str = "0.1.0";
+pub const EXPOSURE_CATALOG_VERSION: &str = "0.1.1";
 
 /// True for the session/event/report versions carrying exposure records.
 pub fn is_exposure_version(version: &str) -> bool {
@@ -1035,7 +1035,7 @@ mod tests {
         assert_eq!(EXPOSURE_EVENT_VERSION, "0.3.0");
         assert_eq!(EXPOSURE_REPORT_VERSION, "0.3.0");
         assert_eq!(EXPOSURE_POLICY_VERSION, "0.1.0");
-        assert_eq!(EXPOSURE_CATALOG_VERSION, "0.1.0");
+        assert_eq!(EXPOSURE_CATALOG_VERSION, "0.1.1");
         assert_eq!(MAX_OBJECTS, 65_536);
         assert_eq!(MAX_EDGES, 262_144);
         assert_eq!(MAX_VISITED, 1_048_576);

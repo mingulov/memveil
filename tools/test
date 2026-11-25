@@ -7,7 +7,9 @@
 # Implemented suites: schemas, reports, profiles, doctor, record,
 # qualify, confidential-hooks, confidential-ranges,
 # confidential-inventory, confidential-real,
-# confidential-late-attach, top, oracle-ledger, vm-oracle,
+# confidential-late-attach, exposure-oracle, exposure-contracts,
+# exposure-quality, exposure-policy, exposure-compare, iterator,
+# top, oracle-ledger, vm-oracle,
 # profile-semantics, vm-lifecycle, vm-copy, vm-real-io,
 # vm-topwalk, vm-kernels, vm-scenarios, vm-stop,
 # vm-saturation, vm-cleanup, vm-attempts, quality,
@@ -1256,6 +1258,40 @@ EOF
 
 
 
+suite_exposure_oracle() {
+    # Stub-harness leg always runs; the KDIR .ko build leg
+    # needs MEMVEIL_KDIR and a lease, else it skips loudly.
+    python3 -m pytest "$ROOT/tests/kernel/test_exposure_oracle.py" -q || return 1
+    if [ -z "${MEMVEIL_KDIR:-}" ]; then
+        echo "exposure-oracle: SKIP KDIR leg: needs MEMVEIL_KDIR" >&2
+        return 0
+    fi
+    make -C "${MEMVEIL_KDIR}" M="$ROOT/tests/kernel" modules || return 1
+}
+
+suite_exposure_contracts() {
+    python3 -m pytest "$ROOT/tests/exposure/test_contracts.py" -q || return 1
+    fast_cargo test --locked --test exposure_contracts
+}
+
+suite_exposure_quality() {
+    python3 -m pytest "$ROOT/tests/exposure/test_quality.py" -q
+}
+
+suite_exposure_policy() {
+    python3 -m pytest "$ROOT/tests/exposure/test_policy.py" -q || return 1
+    fast_cargo test --locked --test exposure_policy
+}
+
+suite_exposure_compare() {
+    python3 -m pytest "$ROOT/tests/exposure/test_exposure_compare.py" -q || return 1
+    fast_cargo test --locked --test exposure_compare
+}
+
+suite_iterator() {
+    fast_cargo test --locked --test iterator_transport
+}
+
 suite_confidential_hooks() {
     python3 "$ROOT/tests/confidential/test_conversion_hooks.py"
 }
@@ -2309,6 +2345,24 @@ case "$1" in
         ;;
     confidential-late-attach)
         suite_confidential_late_attach
+        ;;
+    exposure-oracle)
+        suite_exposure_oracle
+        ;;
+    exposure-contracts)
+        suite_exposure_contracts
+        ;;
+    exposure-quality)
+        suite_exposure_quality
+        ;;
+    exposure-policy)
+        suite_exposure_policy
+        ;;
+    exposure-compare)
+        suite_exposure_compare
+        ;;
+    iterator)
+        suite_iterator
         ;;
     top)
         suite_top

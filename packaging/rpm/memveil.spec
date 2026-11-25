@@ -140,6 +140,8 @@ cp -rp "$B/examples/real-capture" \
     "%{buildroot}/usr/share/memveil/docs/examples/real-capture"
 cp -rp "$B/examples/lifecycle-copy" \
     "%{buildroot}/usr/share/memveil/docs/examples/lifecycle-copy"
+cp -rp "$B/examples/policies" \
+    "%{buildroot}/usr/share/memveil/docs/examples/policies"
 mkdir -p "%{buildroot}/usr/share/doc/memveil"
 cat > "%{buildroot}/usr/share/doc/memveil/copyright" <<'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/

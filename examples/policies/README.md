@@ -2,7 +2,8 @@
 # Authored policy examples
 
 Three small `policy-v0.1.0` documents showing the shape
-defined in [authored sharing policy](../../docs/exposure-policy.md):
+defined in the authored sharing policy manual
+(`docs/exposure-policy.md`):
 a closed scope with one bounded exception, a queue
 lifetime boundary, and an independently authored
 configuration rule. Each file carries its own

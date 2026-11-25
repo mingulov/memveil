@@ -8,6 +8,9 @@
 pub mod attempts;
 pub mod diagnostics;
 pub mod engine;
+pub mod exposure_compare;
+pub mod exposure_policy;
+pub mod exposure_quality;
 pub mod mappings;
 pub mod metrics;
 pub mod pools;

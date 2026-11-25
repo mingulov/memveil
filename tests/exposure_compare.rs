@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Offline exposure comparison: per-metric compatibility plus exact deltas.
 //!
-//! The comparator stays standalone (no shared module wiring)
-//! so this suite includes it directly. Each test mirrors one
+//! The comparator resolves through the wired library. Each test mirrors one
 //! golden fixture under tests/exposure/fixtures/compare/ and
 //! names its case id; the Python golden suite checks that
 //! coupling so the two sides cannot drift apart.
 
-#[path = "../src/analysis/exposure_compare.rs"]
-mod exposure_compare;
-
-use exposure_compare::{Capture, Comparison, Metric, Quality, compare_captures};
+use memveil::analysis::exposure_compare::{Capture, Comparison, Metric, Quality, compare_captures};
 
 fn metric(
     id: &str,
@@ -2138,7 +2134,7 @@ fn predicate_order_holds_across_new_checks() {
 #[test]
 fn tricky_string_battery_matches_oracle() {
     // Tricky-string battery in the same order as
-    // TRICKY_STRINGS in tests/exposure/test_compare.py:
+    // TRICKY_STRINGS in tests/exposure/test_exposure_compare.py:
     // blank is empty or ASCII-whitespace-only, malformed
     // is non-blank with a control character, content is
     // anything else. Both suites must agree on every row.

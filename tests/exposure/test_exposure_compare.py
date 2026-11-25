@@ -491,7 +491,9 @@ def test_rust_suite_covers_every_fixture():
         case = load_fixture(name)["case"]
         assert case in suite, \
             "rust suite never mentions case %s" % case
-    assert "exposure_compare.rs" in suite
+    assert "exposure_compare.rs" in suite \
+        or "memveil::analysis::exposure_compare" in suite, \
+        "rust suite never binds the comparator"
 
 
 # Per-metric refusal reasons in predicate order. The

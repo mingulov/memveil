@@ -29,6 +29,8 @@ Layout of ``dist/memveil-<version>/``::
     examples/real-capture/ sanitized real capture (worked example)
     examples/lifecycle-copy/ recorded three-channel capture
                            (worked example with oracle logs)
+    examples/policies/     authored policy files (worked examples
+                           for the offline policy evaluator)
     LICENSE, LICENSES/   MemVeil's own license texts
     licenses/              GCC runtime texts for the shipped lib
     licenses/crates/       per-crate notice files staged from
@@ -1997,6 +1999,14 @@ def main(argv):
                     fail("missing %s" % src)
             shutil.copytree(example,
                             os.path.join(staged, "examples", leaf))
+        policies = os.path.join(root, "examples", "policies")
+        if not os.path.isfile(os.path.join(policies, "README.md")):
+            fail("missing %s" % os.path.join(policies, "README.md"))
+        if not [name for name in sorted(os.listdir(policies))
+                if name.endswith(".json")]:
+            fail("no policy files under %s" % policies)
+        shutil.copytree(policies,
+                        os.path.join(staged, "examples", "policies"))
 
         # License texts: MemVeil's own plus the GCC runtime texts
         # for the shipped lib. A missing text fails the package.

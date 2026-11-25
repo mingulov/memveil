@@ -27,14 +27,11 @@
 //!   compare only through the capture they arrive with.
 //!
 //! The frozen label lists below transcribe catalog
-//! `exposure_catalog_version 0.1.0`; the Python artifact
+//! `exposure_catalog_version 0.1.1`; the Python artifact
 //! suite pins them against `profiles/exposure/catalog.json`
 //! so drift fails loudly.
 //!
-//! Integration wiring: this file is intentionally
-//! dependency-free (`std` only). The lane test includes it
-//! via `#[path]`; the controller moves it under `analysis/`
-//! and points `platform/policy_reader.rs` at its new home.
+//! This file is intentionally dependency-free (`std` only).
 
 /// Policy file schema marker.
 pub const POLICY_SCHEMA: &str = "policy";

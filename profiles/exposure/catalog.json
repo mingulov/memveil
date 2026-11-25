@@ -1,5 +1,5 @@
 {
-  "exposure_catalog_version": "0.1.0",
+  "exposure_catalog_version": "0.1.1",
   "status": "frozen-planning",
   "frozen_against": {
     "product": "0.2.0",
@@ -288,7 +288,7 @@
       "kinds": {"rule": "Freezes from admitted sources during adapter implementation; unknown kinds refuse. Never invented by adapters."},
       "object_states": {"rule": "Freezes from admitted sources during adapter implementation; the identity producer owns the values."},
       "scopes": {"rule": "Freezes from admitted sources during adapter implementation; scan and comparison scopes stay distinct."},
-      "null_reasons": {"rule": "Freezes with the 0.3.0 schemas; reason codes are closed enums."},
+      "null_reasons": {"rule": "Freezes with the 0.3.0 schemas; reason codes are a closed slug set."},
       "directions": {"rule": "Freezes from admitted sources during adapter implementation; CPU-copy direction stays a separate dimension."},
       "caller_classes": {"rule": "Freezes from admitted sources during adapter implementation; sanitized classes only, never raw addresses."},
       "counters": {"rule": "Freezes from admitted sources during adapter implementation; each counter names its scope and epoch."}
@@ -398,10 +398,10 @@
   },
   "quality_dimensions": ["detail", "aggregate", "identity", "baseline", "terminal"],
   "schema_reservations": [
-    {"family": "session", "version": "0.3.0", "carries": "exposure records", "schema_file": false, "accepted": false, "produced": false},
-    {"family": "event", "version": "0.3.0", "carries": "exposure records", "schema_file": false, "accepted": false, "produced": false},
-    {"family": "report", "version": "0.3.0", "carries": "exposure records", "schema_file": false, "accepted": false, "produced": false},
-    {"family": "policy", "version": "0.1.0", "carries": "authored policy files (standalone)", "schema_file": false, "accepted": false, "produced": false}
+    {"family": "session", "version": "0.3.0", "carries": "exposure records", "schema_file": true, "accepted": false, "produced": false},
+    {"family": "event", "version": "0.3.0", "carries": "exposure records", "schema_file": true, "accepted": false, "produced": false},
+    {"family": "report", "version": "0.3.0", "carries": "exposure records", "schema_file": true, "accepted": false, "produced": false},
+    {"family": "policy", "version": "0.1.0", "carries": "authored policy files (standalone)", "schema_file": true, "accepted": false, "produced": false}
   ],
   "exit_table": [
     {"condition": "Invalid capture, invalid policy/schema, unsafe output or comparison inputs", "exit": 2, "result": "No repaired or guessed result."},

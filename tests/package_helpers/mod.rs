@@ -45,7 +45,7 @@ pub const BPF_OBJECTS: [&str; 3] = [
 /// mirrors, and format-only files. The single source both the .deb
 /// and the .rpm fixed-set gates consume, so the two formats cannot
 /// drift (the .rpm maps each entry to its /-rooted form).
-pub const FHS_FIXED_FILES: [&str; 30] = [
+pub const FHS_FIXED_FILES: [&str; 34] = [
     "usr/bin/memveil",
     "usr/lib/memveil/libgcc_s.so.1",
     "usr/lib/memveil/swiotlb_attempt.bpf.o",
@@ -67,6 +67,10 @@ pub const FHS_FIXED_FILES: [&str; 30] = [
     "usr/share/memveil/docs/examples/lifecycle-copy/session.json",
     "usr/share/memveil/docs/examples/lifecycle-copy/oracle-phase.log",
     "usr/share/memveil/docs/examples/lifecycle-copy/fail-phase.log",
+    "usr/share/memveil/docs/examples/policies/README.md",
+    "usr/share/memveil/docs/examples/policies/closed-scope.json",
+    "usr/share/memveil/docs/examples/policies/config-deviation.json",
+    "usr/share/memveil/docs/examples/policies/lifecycle-boundary.json",
     "usr/share/man/man1/memveil.1",
     "usr/share/man/man1/memveil-record.1",
     "usr/share/man/man1/memveil-report.1",

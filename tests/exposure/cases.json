@@ -1,6 +1,6 @@
 {
   "format": "exposure-fixture-manifest/0.1.0",
-  "catalog_version": "0.1.0",
+  "catalog_version": "0.1.1",
   "note": "Independently authored fixture expectations for lease-free self-tests. Page counts and event order come from each case control flow. Nothing here is derived from collector output, and fixtures never feed observations into the collector.",
   "spec_scenarios": [
     {"id": "spec-01", "title": "Healthy persistent sharing across sustained I/O with zero new conversions", "cases": ["persistent-queue-traffic", "conversion-request-result", "bounced-and-direct-paths"]},

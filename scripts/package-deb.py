@@ -18,8 +18,9 @@ code resolves with zero flags or environment::
                                     is a packaging error
     usr/share/memveil/profiles/     manifest plus shipped profiles
     usr/share/memveil/docs/         the full manuals tree plus the worked
-                                    examples (docs/examples/real-capture
-                                    and docs/examples/lifecycle-copy)
+                                    examples (docs/examples/real-capture,
+                                    docs/examples/lifecycle-copy, and
+                                    docs/examples/policies)
     usr/share/doc/memveil/          copyright stub plus every license and
                                     notice text the bundle redistributes,
                                     plus the generated changelog.Debian.gz
@@ -681,7 +682,7 @@ def main(argv):
                 dest = os.path.join(docdir, rel)
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 shutil.copy2(src, dest)
-        for leaf in ("real-capture", "lifecycle-copy"):
+        for leaf in ("real-capture", "lifecycle-copy", "policies"):
             shutil.copytree(os.path.join(bundle, "examples", leaf),
                             os.path.join(docdir, "examples", leaf))
         with open(os.path.join(licdir, "copyright"), "w") as handle:

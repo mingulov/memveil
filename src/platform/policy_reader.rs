@@ -16,13 +16,7 @@
 //! small enough for a strict purpose-built reader with
 //! duplicate-key detection and a nesting cap.
 //!
-//! Integration wiring: the lane test includes this file via
-//! `#[path]`, so the model import below resolves through
-//! the test crate root. When the controller moves this file
-//! under `platform/`, point the import at the wired model
-//! home (for example `crate::analysis::exposure_policy`).
-
-use crate::exposure_policy::{
+use crate::analysis::exposure_policy::{
     Exception, KNOWN_CLOCK_DOMAINS, KNOWN_LIFECYCLE_STATUSES, Obligation, POLICY_SCHEMA,
     POLICY_SCHEMA_VERSION, Policy, Prerequisites, Rule,
 };
