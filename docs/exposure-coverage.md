@@ -115,12 +115,15 @@ Checks run in order; the first failure names the reason:
 | 4 | `legacy-input` | One side predates integrity metadata |
 | 5 | `epoch-mismatch` | Epochs differ; counters restarted |
 | 6 | `device-binding-mismatch` | Bound devices differ |
-| 7 | `workload-mismatch` | Workloads differ under an equal profile |
-| 8 | `source-meaning-change` | The metric's source changed meaning |
-| 9 | `clock-mismatch` | Clock domains differ |
-| 10 | `window-mismatch` | Window bounds differ |
-| 11 | `partial-census` | Census-derived metric with a bounded scan |
-| 12 | `compatible` | Predicate passed; delta rules below apply |
+| 7 | `profile-mismatch` | Profiles differ; every metric refuses |
+| 8 | `workload-mismatch` | Workloads differ under an equal profile |
+| 9 | `source-mismatch` | The metric names different sources per side |
+| 10 | `source-meaning-unknown` | A side records no meaning for the source |
+| 11 | `source-meaning-change` | The metric's source changed meaning |
+| 12 | `clock-mismatch` | Clock domains differ |
+| 13 | `window-mismatch` | Window bounds differ |
+| 14 | `partial-census` | Census-derived metric with a bounded scan |
+| 15 | `compatible` | Predicate passed; delta rules below apply |
 
 Compatible rows carry `delta` except when a side is
 unknown (`value-unknown`, null delta with reason) or

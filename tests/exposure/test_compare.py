@@ -12,8 +12,10 @@ independently of the implementation.
 
 Covered families: equal-profile/different-workload,
 different-epoch/device binding, source meaning change,
-unequal window/clock, partial census, legacy input, plus a
-fully compatible golden and metric-shape edges.
+unequal window/clock, partial census, legacy input, plus
+profile mismatch, per-side source mismatch, unknown
+source meaning, a fully compatible golden and
+metric-shape edges.
 """
 
 import json
@@ -40,6 +42,15 @@ FAMILIES = {
     ],
     "source meaning change": [
         "source_meaning_change.json",
+    ],
+    "profile mismatch": [
+        "profile_mismatch.json",
+    ],
+    "source mismatch": [
+        "source_mismatch.json",
+    ],
+    "unknown source meaning": [
+        "source_meaning_unknown.json",
     ],
     "unequal window/clock": [
         "unequal_window.json",
@@ -71,7 +82,10 @@ REASONS = (
     "legacy-input",
     "epoch-mismatch",
     "device-binding-mismatch",
+    "profile-mismatch",
     "workload-mismatch",
+    "source-mismatch",
+    "source-meaning-unknown",
     "source-meaning-change",
     "clock-mismatch",
     "window-mismatch",
@@ -135,11 +149,17 @@ def expect_row(case, left, right, metric_id):
         return ("incompatible", "epoch-mismatch", "absent")
     if left["platform_cell"] != right["platform_cell"]:
         return ("incompatible", "device-binding-mismatch", "absent")
+    if left["profile_id"] != right["profile_id"]:
+        return ("incompatible", "profile-mismatch", "absent")
     if left["workload"] != right["workload"]:
         return ("incompatible", "workload-mismatch", "absent")
-    source = left_metric["source_id"]
-    if (left["source_meanings"].get(source)
-            != right["source_meanings"].get(source)):
+    if left_metric["source_id"] != right_metric["source_id"]:
+        return ("incompatible", "source-mismatch", "absent")
+    left_meaning = left["source_meanings"].get(left_metric["source_id"])
+    right_meaning = right["source_meanings"].get(right_metric["source_id"])
+    if left_meaning is None or right_meaning is None:
+        return ("incompatible", "source-meaning-unknown", "absent")
+    if left_meaning != right_meaning:
         return ("incompatible", "source-meaning-change", "absent")
     if (left["window"]["clock_domain"]
             != right["window"]["clock_domain"]):

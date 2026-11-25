@@ -12,8 +12,9 @@
 //! The input carries no journal channel by construction: the
 //! comparator only sees finalized metric values, so incomplete
 //! journal events can never be netted into baseline state.
-//! Callers only compare captures admitted under one semantic
-//! profile; profile equality is a precondition, not a check.
+//! Captures admitted under different semantic profiles
+//! refuse on every metric; profile equality is a check,
+//! not a caller precondition.
 
 use std::collections::BTreeMap;
 
@@ -121,7 +122,8 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 /// Row order is stable: left-capture order first, then metrics
 /// seen only on the right. The first failing compatibility
 /// check names the reason, in this order: metric presence,
-/// unit, scope, legacy input, epoch, device binding, workload,
+/// unit, scope, legacy input, epoch, device binding, profile,
+/// workload, per-side source, source meaning availability,
 /// source meaning, clock domain, window, census completeness,
 /// then value availability for the delta itself.
 pub fn compare_captures(left: &Capture, right: &Capture) -> Vec<Comparison> {
@@ -206,6 +208,17 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             &left_metric.scope,
         );
     }
+    if left.profile_id != right.profile_id {
+        return refused(
+            metric_id,
+            "incompatible",
+            "profile-mismatch",
+            left,
+            right,
+            &left_metric.unit,
+            &left_metric.scope,
+        );
+    }
     if left.workload != right.workload {
         return refused(
             metric_id,
@@ -217,8 +230,31 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             &left_metric.scope,
         );
     }
-    let meaning = left.source_meanings.get(&left_metric.source_id);
-    if meaning != right.source_meanings.get(&left_metric.source_id) {
+    if left_metric.source_id != right_metric.source_id {
+        return refused(
+            metric_id,
+            "incompatible",
+            "source-mismatch",
+            left,
+            right,
+            &left_metric.unit,
+            &left_metric.scope,
+        );
+    }
+    let left_meaning = left.source_meanings.get(&left_metric.source_id);
+    let right_meaning = right.source_meanings.get(&right_metric.source_id);
+    if left_meaning.is_none() || right_meaning.is_none() {
+        return refused(
+            metric_id,
+            "incompatible",
+            "source-meaning-unknown",
+            left,
+            right,
+            &left_metric.unit,
+            &left_metric.scope,
+        );
+    }
+    if left_meaning != right_meaning {
         return refused(
             metric_id,
             "incompatible",

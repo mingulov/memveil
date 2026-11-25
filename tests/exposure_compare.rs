@@ -765,6 +765,201 @@ fn overflowing_delta_stays_compatible_without_value() {
     );
 }
 
+// case: profile-mismatch
+#[test]
+fn profile_change_refuses_all_metrics() {
+    let left = capture(
+        "cap-left-013",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(8192),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                true,
+            ),
+            metric(
+                "queue-count",
+                Some(4),
+                None,
+                "bytes",
+                "guest-driver-virtio",
+                "queue-ledger",
+                false,
+            ),
+        ],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-013".to_string();
+    right.profile_id = "linux-x86_64-7.0-hardened".to_string();
+    right.metrics[0].value = Some(12288);
+    right.metrics[1].value = Some(5);
+    let rows = compare_captures(&left, &right);
+    assert_eq!(
+        rows,
+        vec![
+            refused_row(
+                "shared-bytes",
+                "incompatible",
+                "profile-mismatch",
+                "cap-left-013",
+                "cap-right-013",
+                "bytes",
+                "guest-direct-map",
+            ),
+            refused_row(
+                "queue-count",
+                "incompatible",
+                "profile-mismatch",
+                "cap-left-013",
+                "cap-right-013",
+                "bytes",
+                "guest-driver-virtio",
+            ),
+        ]
+    );
+}
+
+// case: source-mismatch
+#[test]
+fn source_divergence_refuses_only_its_metric() {
+    let left = capture(
+        "cap-left-014",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(8192),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                true,
+            ),
+            metric(
+                "queue-count",
+                Some(4),
+                None,
+                "bytes",
+                "guest-driver-virtio",
+                "queue-ledger",
+                false,
+            ),
+        ],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-014".to_string();
+    right.metrics[0].source_id = "queue-ledger".to_string();
+    right.metrics[1].value = Some(6);
+    let rows = compare_captures(&left, &right);
+    assert_eq!(
+        rows,
+        vec![
+            refused_row(
+                "shared-bytes",
+                "incompatible",
+                "source-mismatch",
+                "cap-left-014",
+                "cap-right-014",
+                "bytes",
+                "guest-direct-map",
+            ),
+            compatible_row(
+                "queue-count",
+                "cap-left-014",
+                "cap-right-014",
+                Some(2),
+                None,
+                "bytes",
+                "guest-driver-virtio",
+            ),
+        ]
+    );
+}
+
+// case: source-meaning-unknown
+#[test]
+fn unknown_meaning_on_both_sides_refuses() {
+    let left = capture(
+        "cap-left-015",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(8192),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "unmapped-source",
+                true,
+            ),
+            metric(
+                "queue-count",
+                Some(4),
+                None,
+                "bytes",
+                "guest-driver-virtio",
+                "queue-ledger",
+                false,
+            ),
+        ],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-015".to_string();
+    right.metrics[1].value = Some(6);
+    let rows = compare_captures(&left, &right);
+    assert_eq!(
+        rows,
+        vec![
+            refused_row(
+                "shared-bytes",
+                "incompatible",
+                "source-meaning-unknown",
+                "cap-left-015",
+                "cap-right-015",
+                "bytes",
+                "guest-direct-map",
+            ),
+            compatible_row(
+                "queue-count",
+                "cap-left-015",
+                "cap-right-015",
+                Some(2),
+                None,
+                "bytes",
+                "guest-driver-virtio",
+            ),
+        ]
+    );
+}
+
 #[test]
 fn predicate_order_is_deterministic() {
     // Epoch and workload both differ: the earlier epoch
