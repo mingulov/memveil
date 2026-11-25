@@ -60,6 +60,10 @@ const OVERFLOW_RETURN_CODE: &str =
 const MULTI_USABLE_SOURCES: &str =
     include_str!("exposure/fixtures/contracts/multi_usable_sources.json");
 const MIXED_SOURCES: &str = include_str!("exposure/fixtures/contracts/mixed_sources.json");
+const COVERAGE_EXTRA_FIELD: &str =
+    include_str!("exposure/fixtures/contracts/coverage_extra_field.json");
+const COVERAGE_EXTRA_WINDOW_FIELD: &str =
+    include_str!("exposure/fixtures/contracts/coverage_extra_window_field.json");
 
 fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
     facts
@@ -374,6 +378,31 @@ fn mixed_coverage_sources_are_incomplete() {
     let outcome = seal_verdict(MIXED_SOURCES);
     assert_eq!(outcome, RuleOutcome::Incomplete);
     assert_ne!(outcome, RuleOutcome::Satisfied);
+}
+
+#[test]
+fn unknown_coverage_fields_cannot_satisfy() {
+    let control = verify_sealed_snapshot(SEALED).expect("positive control seals");
+    assert!(control.verified);
+    assert_eq!(seal_verdict(SEALED), RuleOutcome::Satisfied);
+    for (name, snapshot) in [
+        ("extra row field", COVERAGE_EXTRA_FIELD),
+        ("extra window field", COVERAGE_EXTRA_WINDOW_FIELD),
+    ] {
+        let report = verify_sealed_snapshot(snapshot).expect("tainted parses");
+        assert!(report.verified, "{name} keeps the byte seal");
+        let evidence =
+            snapshot_source_evidence(snapshot, "sharing-census").expect("snapshot carries sources");
+        assert!(evidence.present, "{name} source stays present");
+        assert_eq!(evidence.status, "available");
+        assert!(
+            !evidence.quality_usable,
+            "{name} unknown key never supplies usability"
+        );
+        let outcome = seal_verdict(snapshot);
+        assert_eq!(outcome, RuleOutcome::Inconclusive, "{name} verdict");
+        assert_ne!(outcome, RuleOutcome::Satisfied, "{name} never satisfies");
+    }
 }
 
 #[test]

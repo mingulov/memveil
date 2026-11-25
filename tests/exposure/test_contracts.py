@@ -1024,18 +1024,19 @@ def source_quality_usable(quality):
 def source_row_valid(entry):
     """True when a coverage row passes the full model validation.
 
-    Mirrors ``CoverageSource::validate`` check for check: every
-    required leaf present, a catalog source with its owning
-    capability, an opaque profile, a frozen subject, cell,
-    namespace, phase, status and reason, an ordered canonical
-    window, and a quality block of exactly the five exposure
-    channels. Anything else fails closed: the row carries no
-    usable evidence.
+    Mirrors ``CoverageSource::validate`` check for check: exactly
+    the eleven coverage leaves with nothing unknown, a catalog
+    source with its owning capability, an opaque profile, a frozen
+    subject, cell, namespace, phase, status and reason, an ordered
+    canonical window of exactly start and end, and a quality block
+    of exactly the five exposure channels. Anything else fails
+    closed: the row carries no usable evidence.
     """
     try:
-        for field in COVERAGE_SOURCE_REQUIRED:
-            assert field in entry, \
-                "coverage source field %s" % field
+        if not isinstance(entry, dict):
+            return False
+        assert set(entry.keys()) == set(COVERAGE_SOURCE_REQUIRED), \
+            "coverage source shape"
         assert entry["source_id"] in SOURCE_CAPABILITIES, \
             "unknown source"
         check_source_capability(entry)
@@ -1048,6 +1049,9 @@ def source_row_valid(entry):
         assert entry["status"] in FROZEN_STATUS, "status"
         assert entry["reason"] in FROZEN_REASON, "reason"
         window = entry["window"]
+        assert isinstance(window, dict), "window must be an object"
+        assert set(window.keys()) == {"start_ns", "end_ns"}, \
+            "window leaves"
         start = check_u64(window["start_ns"], "window.start_ns")
         end = check_u64(window["end_ns"], "window.end_ns")
         assert start <= end, "window start past end"
@@ -2706,6 +2710,49 @@ def test_invalid_source_metadata_cannot_satisfy():
     assert seal_verified(tainted)
     assert snapshot_verdict(tainted, required) == "incomplete", \
         "invalid metadata never supplies usability"
+
+
+def test_unknown_coverage_fields_cannot_satisfy():
+    required = ["sharing-census"]
+    control = load("sealed_snapshot.json")
+    assert source_row_valid(
+        control["session"]["exposure"]["sources"][0]), \
+        "positive control row stays valid"
+    assert snapshot_verdict(control, required) == "satisfied"
+    for case in ("extra-row-field", "extra-window-field"):
+        tainted = json.loads(json.dumps(load("sealed_snapshot.json")))
+        source = tainted["session"]["exposure"]["sources"][0]
+        if case == "extra-row-field":
+            source["unexpected"] = "synthetic"
+        else:
+            source["window"]["unexpected"] = "synthetic"
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(tainted["session"],
+                                load_schema("session-v0.3.0.schema.json"))
+        assert not source_row_valid(source), \
+            "%s row must refuse the unknown key" % case
+        assert seal_verified(tainted), \
+            "%s keeps the byte seal" % case
+        assert not rule_satisfied(tainted, required), \
+            "%s never satisfies" % case
+        assert snapshot_verdict(tainted, required) == "inconclusive"
+        assert source_evidence_state(source) == "absent"
+    for name in ("coverage_extra_field.json",
+                 "coverage_extra_window_field.json"):
+        persisted = load(name)
+        assert seal_verified(persisted), \
+            "%s keeps the byte seal" % name
+        assert not source_row_valid(
+            persisted["session"]["exposure"]["sources"][0]), \
+            "%s persisted row must refuse" % name
+        assert not rule_satisfied(persisted, required), \
+            "%s never satisfies" % name
+        assert snapshot_verdict(persisted, required) == "inconclusive"
+        assert source_evidence_state(
+            persisted["session"]["exposure"]["sources"][0]) == "absent"
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(persisted["session"],
+                                load_schema("session-v0.3.0.schema.json"))
 
 
 if __name__ == "__main__":

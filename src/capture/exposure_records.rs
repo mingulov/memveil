@@ -2789,15 +2789,22 @@ pub fn snapshot_source_evidence(
 
 /// Build one [`exposure_shapes::CoverageSource`] from a coverage entry.
 ///
-/// Returns `None` for any shape the model cannot take: a missing
-/// or mistyped leaf, a window that is not two canonical counts,
-/// or a quality block that is not exactly the five exposure
-/// channels with exactly a status and a loss count each. Callers
-/// fail closed rather than guessing a value.
+/// Returns `None` for any shape the model cannot take: a row
+/// that is not exactly the eleven coverage leaves, a window
+/// that is not exactly two canonical counts, a missing or
+/// mistyped leaf, or a quality block that is not exactly the
+/// five exposure channels with exactly a status and a loss
+/// count each. Callers fail closed rather than guessing a value.
 fn coverage_from_entry(fields: &[(String, JsonValue)]) -> Option<exposure_shapes::CoverageSource> {
+    if !exact_keys(fields, &COVERAGE_SOURCE_FIELDS) {
+        return None;
+    }
     let Some(JsonValue::Object(window)) = find_field(fields, "window") else {
         return None;
     };
+    if !exact_keys(window, &WINDOW_FIELDS) {
+        return None;
+    }
     let start_ns = sealed_u64(window, "start_ns")?;
     let end_ns = sealed_u64(window, "end_ns")?;
     let Some(JsonValue::Object(quality)) = find_field(fields, "quality") else {
@@ -4947,6 +4954,43 @@ mod tests {
             .expect("snapshot carries sources");
         assert_eq!(evidence.status, "partial");
         assert!(!evidence.quality_usable);
+    }
+
+    #[test]
+    fn source_evidence_refuses_unknown_coverage_fields() {
+        let control = full_source_entry("available", &settled_quality());
+        let evidence = snapshot_source_evidence(&evidence_snapshot(&control), "sharing-census")
+            .expect("snapshot carries sources");
+        assert!(evidence.present);
+        assert_eq!(evidence.status, "available");
+        assert!(evidence.quality_usable, "positive control stays usable");
+        let extra_row = format!(
+            "{},\"unexpected\":\"synthetic\"}}",
+            control.strip_suffix('}').expect("entry object closes")
+        );
+        assert_ne!(extra_row, control);
+        let extra_window = control.replacen(
+            "\"end_ns\":\"4000000000\"",
+            "\"end_ns\":\"4000000000\",\"unexpected\":\"synthetic\"",
+            1,
+        );
+        assert_ne!(extra_window, control);
+        for (label, mutated) in [
+            ("extra row field", extra_row.as_str()),
+            ("extra window field", extra_window.as_str()),
+        ] {
+            let evidence = snapshot_source_evidence(&evidence_snapshot(mutated), "sharing-census")
+                .expect("snapshot carries sources");
+            assert!(evidence.present, "{label} source stays present");
+            assert_eq!(
+                evidence.status, "available",
+                "{label} status stays verbatim"
+            );
+            assert!(
+                !evidence.quality_usable,
+                "{label} unknown key never supplies usability"
+            );
+        }
     }
 
     #[test]
