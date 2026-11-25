@@ -888,7 +888,14 @@
           "$ref": "#/$defs/opaque_id"
         },
         "delta": {
-          "type": "integer"
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "delta_reason": {
           "$ref": "#/$defs/opaque_id"
@@ -909,6 +916,9 @@
       "allOf": [
         {
           "if": {
+            "required": [
+              "delta"
+            ],
             "properties": {
               "delta": {
                 "type": "null"
@@ -923,6 +933,9 @@
         },
         {
           "if": {
+            "required": [
+              "delta_reason"
+            ],
             "properties": {
               "delta_reason": {
                 "type": "string"

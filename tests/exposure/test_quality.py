@@ -87,8 +87,11 @@ def test_offline_evaluation_is_deterministic_and_sidecar_free():
                          if line.startswith(("import ", "from ")))
         assert imports, "%s has no imports to audit" % name
         for statement in imports:
+            # jsonschema is an offline document validator, not a live
+            # dependency; everything else stays standard library.
             assert statement.split()[1].split(".")[0] in \
-                ("hashlib", "json", "os", "re", "pytest"), statement
+                ("hashlib", "json", "jsonschema", "os", "re",
+                 "pytest"), statement
 
 
 if __name__ == "__main__":

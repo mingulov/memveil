@@ -17,6 +17,7 @@ import json
 import os
 import re
 
+import jsonschema
 import pytest
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -342,6 +343,34 @@ def test_policy_file_shape():
             assert field in rule, "rule field %s" % field
         assert 1 <= len(rule["rule_id"]) <= 64
     assert len(policy["exceptions"]) == 0
+
+
+def load_schema(name):
+    with open(os.path.join(REPO, "schemas", name),
+              encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def test_all_fixtures_validate_against_schemas():
+    session_schema = load_schema("session-v0.3.0.schema.json")
+    event_schema = load_schema("event-v0.3.0.schema.json")
+    report_schema = load_schema("report-v0.3.0.schema.json")
+    policy_schema = load_schema("policy-v0.1.0.schema.json")
+    sealed_names = ("sealed_snapshot.json", "duplicate_evidence.json",
+                    "cross_epoch_evidence.json", "missing_terminal.json")
+    for name in sealed_names:
+        snapshot = load(name)
+        jsonschema.validate(snapshot["session"], session_schema)
+        assert snapshot["event_lines"], "%s carries lines" % name
+        for line in snapshot["event_lines"]:
+            jsonschema.validate(json.loads(line), event_schema)
+    unsealed = load("unsealed_snapshot.json")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(unsealed["session"], session_schema)
+    for line in unsealed["event_lines"]:
+        jsonschema.validate(json.loads(line), event_schema)
+    jsonschema.validate(load("report_valid.json"), report_schema)
+    jsonschema.validate(load("policy_valid.json"), policy_schema)
 
 
 def test_report_records_shape():
