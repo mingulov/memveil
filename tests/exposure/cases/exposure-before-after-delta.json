@@ -4,18 +4,28 @@
   "scenario": "before-after-delta",
   "family": "comparison",
   "namespace": "not_applicable",
-  "notes": "A compatible pair produces per-metric deltas while an incompatible pair refuses per metric with a reason and no numeric delta.",
+  "notes": "A compatible pair produces per-metric deltas while an incompatible pair refuses per metric with a reason and no numeric delta; rule evaluation agrees under reordered application, conflicting rules refuse without a delta, and an empty scope refuses without a delta.",
   "control_flow": [
     {"ordinal": "1", "operation": "op-bad-identity-1", "object": "obj-bad-left-1", "pages": "2", "native_result": 0, "action": "check-pair-compatibility"},
     {"ordinal": "2", "operation": "op-bad-delta-2", "object": "obj-bad-right-1", "pages": "2", "native_result": 0, "action": "compute-per-metric-delta"},
-    {"ordinal": "3", "operation": "op-bad-refuse-3", "object": "none", "pages": "1", "native_result": -22, "action": "refuse-incompatible-metric"}
+    {"ordinal": "3", "operation": "op-bad-refuse-3", "object": "none", "pages": "1", "native_result": -22, "action": "refuse-incompatible-metric"},
+    {"ordinal": "4", "operation": "op-bad-rule-apply-4", "object": "obj-bad-rule-1", "pages": "1", "native_result": 0, "action": "apply-rule-in-order"},
+    {"ordinal": "5", "operation": "op-bad-rule-apply-5", "object": "obj-bad-rule-2", "pages": "1", "native_result": 0, "action": "apply-rule-in-order"},
+    {"ordinal": "6", "operation": "op-bad-rule-reorder-6", "object": "obj-bad-rule-2", "pages": "1", "native_result": 0, "action": "reapply-rule-reordered"},
+    {"ordinal": "7", "operation": "op-bad-rule-reorder-7", "object": "obj-bad-rule-1", "pages": "1", "native_result": 0, "action": "reapply-rule-reordered"},
+    {"ordinal": "8", "operation": "op-bad-conflict-8", "object": "none", "pages": "1", "native_result": -22, "action": "refuse-conflicting-rules-without-delta"},
+    {"ordinal": "9", "operation": "op-bad-scope-9", "object": "none", "pages": "1", "native_result": -22, "action": "refuse-empty-scope-without-delta"}
   ],
   "before_ledger": [
-    {"object_token": "obj-bad-left-1", "generation": "1", "pages": "2", "status": "live"}
+    {"object_token": "obj-bad-left-1", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-bad-rule-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-bad-rule-2", "generation": "1", "pages": "1", "status": "live"}
   ],
   "after_ledger": [
     {"object_token": "obj-bad-left-1", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-bad-rule-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-bad-rule-2", "generation": "1", "pages": "1", "status": "live"},
     {"object_token": "obj-bad-right-1", "generation": "1", "pages": "2", "status": "live"}
   ],
-  "expectation": {"conserved": ["obj-bad-left-1"], "transitioned": [], "added": ["obj-bad-right-1"], "removed": []}
+  "expectation": {"conserved": ["obj-bad-left-1", "obj-bad-rule-1", "obj-bad-rule-2"], "transitioned": [], "added": ["obj-bad-right-1"], "removed": []}
 }
