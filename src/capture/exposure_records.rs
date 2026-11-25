@@ -14,8 +14,9 @@
 //! and through a path include in the lane's own integration test. It
 //! takes no live input and performs no I/O. Lexical scalar checks that
 //! need reader context stay with the owning reader; the normalizer
-//! canonicalizes structure, field order, string quoting and integer
-//! shapes, and refuses anything without a canonical order.
+//! canonicalizes structure, field order and string quoting, carries
+//! signed integers as written, and refuses bare integers for u64
+//! leaves and anything without a canonical order.
 
 use std::fmt;
 
@@ -735,6 +736,9 @@ fn render_scalar(key: &str, value: &JsonValue, out: &mut Vec<u8>) -> Result<(), 
             Ok(())
         }
         JsonValue::Num(number) => {
+            if U64_LEAVES.contains(&key) {
+                return Err(RecordError::new(key, "non-canonical u64"));
+            }
             out.extend_from_slice(number.as_bytes());
             Ok(())
         }
@@ -1583,6 +1587,23 @@ mod tests {
         assert!(normalize_record(&bad_u64).is_err());
         let missing = canonical.replacen("\"semantics\":\"inventory\",", "", 1);
         assert!(normalize_record(&missing).is_err());
+    }
+
+    #[test]
+    fn normalize_refuses_bare_integer_u64() {
+        let canonical =
+            include_str!("../../tests/exposure/fixtures/contracts/replay_canonical.json");
+        assert!(normalize_record(canonical.trim_end()).is_ok());
+        let bare = canonical.replacen("\"epoch\":\"7\"", "\"epoch\":7", 1);
+        assert_ne!(bare, canonical);
+        let err = normalize_record(bare.trim_end()).unwrap_err();
+        assert_eq!(err.what, "epoch");
+        assert_eq!(err.message, "non-canonical u64");
+        let nested = canonical.replacen("\"uncertainty\":\"50\"", "\"uncertainty\":50", 1);
+        assert_ne!(nested, canonical);
+        let err = normalize_record(nested.trim_end()).unwrap_err();
+        assert_eq!(err.what, "uncertainty");
+        assert_eq!(err.message, "non-canonical u64");
     }
 
     #[test]
