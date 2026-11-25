@@ -23,7 +23,9 @@ use std::collections::BTreeMap;
 /// One observed metric inside a persisted capture.
 ///
 /// `value` is `None` exactly when the metric is unknown; then
-/// `value_reason` names why. Unknown is never zero.
+/// `value_reason` names why with a non-blank reason.
+/// Unknown is never zero, and a blank reason explains
+/// nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Metric {
     pub metric_id: String,
@@ -157,8 +159,13 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 ///
 /// Both captures validate first: the left capture, then the
 /// right, each for a repeated metric id, a backward window,
-/// then value/reason pairing. An invalid input refuses the
-/// whole comparison with [`InputRefusal`] and no rows.
+/// then value/reason pairing. A blank string is invalid
+/// everywhere it carries meaning: empty or whitespace-only
+/// counts as missing where its content is interpreted, so
+/// a blank reason refuses as `invalid-value` and a blank
+/// source meaning refuses its row as unknown. An invalid
+/// input refuses the whole comparison with [`InputRefusal`]
+/// and no rows.
 ///
 /// Row order is stable: left-capture order first, then metrics
 /// seen only on the right. The first failing compatibility
@@ -188,6 +195,12 @@ fn refuse_input(reason: &str) -> InputRefusal {
     }
 }
 
+/// A meaning-carrying string counts as missing when it is
+/// empty or whitespace-only.
+fn is_blank(value: &str) -> bool {
+    value.trim().is_empty()
+}
+
 fn validate_capture(capture: &Capture) -> Result<(), InputRefusal> {
     let mut seen: Vec<&str> = Vec::new();
     for metric in capture.metrics.iter() {
@@ -200,8 +213,10 @@ fn validate_capture(capture: &Capture) -> Result<(), InputRefusal> {
         return Err(refuse_input("invalid-window"));
     }
     for metric in capture.metrics.iter() {
-        if metric.value.is_some() == metric.value_reason.is_some() {
-            return Err(refuse_input("invalid-value"));
+        match (metric.value, metric.value_reason.as_deref()) {
+            (Some(_), None) => {}
+            (None, Some(reason)) if !is_blank(reason) => {}
+            _ => return Err(refuse_input("invalid-value")),
         }
     }
     Ok(())
@@ -310,9 +325,15 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             &left_metric.scope,
         );
     }
-    let left_meaning = left.source_meanings.get(&left_metric.source_id);
-    let right_meaning = right.source_meanings.get(&right_metric.source_id);
-    if left_meaning.is_none() || right_meaning.is_none() {
+    let left_meaning = left
+        .source_meanings
+        .get(&left_metric.source_id)
+        .map(String::as_str);
+    let right_meaning = right
+        .source_meanings
+        .get(&right_metric.source_id)
+        .map(String::as_str);
+    if left_meaning.is_none_or(is_blank) || right_meaning.is_none_or(is_blank) {
         return refused(
             metric_id,
             "incompatible",

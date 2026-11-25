@@ -991,6 +991,97 @@ fn unknown_meaning_on_both_sides_refuses() {
     );
 }
 
+// case: source-meaning-blank
+#[test]
+fn blank_meanings_refuse_their_metrics() {
+    let left = capture(
+        "cap-left-025",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        vec![
+            ("census-direct-map", ""),
+            ("queue-ledger", "meaning-1"),
+            ("tally-ledger", "meaning-1"),
+        ],
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(1),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                true,
+            ),
+            metric(
+                "queue-count",
+                Some(4),
+                None,
+                "bytes",
+                "guest-driver-virtio",
+                "queue-ledger",
+                false,
+            ),
+            metric(
+                "heap-retained",
+                Some(7),
+                None,
+                "bytes",
+                "guest-kernel-allocator",
+                "tally-ledger",
+                false,
+            ),
+        ],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-025".to_string();
+    right
+        .source_meanings
+        .insert("queue-ledger".to_string(), "   ".to_string());
+    right.metrics[0].value = Some(9);
+    right.metrics[1].value = Some(6);
+    right.metrics[2].value = Some(9);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+    assert_eq!(
+        rows,
+        vec![
+            refused_row(
+                "shared-bytes",
+                "incompatible",
+                "source-meaning-unknown",
+                "cap-left-025",
+                "cap-right-025",
+                "bytes",
+                "guest-direct-map",
+            ),
+            refused_row(
+                "queue-count",
+                "incompatible",
+                "source-meaning-unknown",
+                "cap-left-025",
+                "cap-right-025",
+                "bytes",
+                "guest-driver-virtio",
+            ),
+            compatible_row(
+                "heap-retained",
+                "cap-left-025",
+                "cap-right-025",
+                Some(2),
+                None,
+                "bytes",
+                "guest-kernel-allocator",
+            ),
+        ]
+    );
+}
+
 // case: duplicate-metric
 #[test]
 fn repeated_metric_id_refuses_input() {
@@ -1178,6 +1269,57 @@ fn known_value_with_reason_refuses_input() {
     right.metrics[0].value = Some(9);
     let refusal = compare_captures(&left, &right).unwrap_err();
     assert_eq!(refusal.reason, "invalid-value");
+}
+
+// case: invalid-value-blank-reason
+#[test]
+fn blank_reason_with_unknown_value_refuses_input() {
+    for blank in ["", "   "] {
+        let left = capture(
+            "cap-left-026",
+            "idle-snapshot",
+            41,
+            "snp-guest-01",
+            standard_meanings(),
+            1000,
+            2000,
+            "guest_monotonic_active",
+            false,
+            false,
+            vec![metric(
+                "shared-bytes",
+                None,
+                Some(blank),
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            )],
+        );
+        let right = capture(
+            "cap-right-026",
+            "idle-snapshot",
+            41,
+            "snp-guest-01",
+            standard_meanings(),
+            1000,
+            2000,
+            "guest_monotonic_active",
+            false,
+            false,
+            vec![metric(
+                "shared-bytes",
+                Some(9),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            )],
+        );
+        let refusal = compare_captures(&left, &right).unwrap_err();
+        assert_eq!(refusal.reason, "invalid-value", "blank {blank:?}");
+    }
 }
 
 #[test]
@@ -1460,4 +1602,28 @@ fn predicate_order_holds_across_new_checks() {
     right.census_bounded = true;
     right.metrics[0].census_derived = true;
     assert_eq!(reason_of(&right), "window-mismatch");
+    // A missing meaning beats a changed meaning: the
+    // one-sided omission reports unknown, never change.
+    let mut unknown_left = left.clone();
+    unknown_left.source_meanings.remove("census-direct-map");
+    let mut changed_right = left.clone();
+    changed_right
+        .source_meanings
+        .insert("census-direct-map".to_string(), "meaning-2".to_string());
+    let rows = compare_captures(&unknown_left, &changed_right).expect("valid comparison inputs");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].compatibility, "incompatible");
+    assert_eq!(rows[0].reason, "source-meaning-unknown");
+    assert_eq!(rows[0].delta, None);
+    // A blank meaning beats a changed meaning for the
+    // same reason: blank records no meaning.
+    let mut blank_left = left.clone();
+    blank_left
+        .source_meanings
+        .insert("census-direct-map".to_string(), String::new());
+    let rows = compare_captures(&blank_left, &changed_right).expect("valid comparison inputs");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].compatibility, "incompatible");
+    assert_eq!(rows[0].reason, "source-meaning-unknown");
+    assert_eq!(rows[0].delta, None);
 }

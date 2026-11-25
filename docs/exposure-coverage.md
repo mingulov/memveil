@@ -114,7 +114,15 @@ first, then the right; within a capture, in order:
 | --- | --- | --- |
 | V1 | `duplicate-metric` | A metric id repeats on one side |
 | V2 | `invalid-window` | The window ends before it starts |
-| V3 | `invalid-value` | A known value carries a reason, or an unknown value lacks one |
+| V3 | `invalid-value` | A known value carries a reason, or an unknown value lacks one; a blank reason counts as lacking one |
+
+A blank string is invalid everywhere it carries
+meaning: a string expected to be non-empty that is
+empty or whitespace-only counts as missing where its
+content is interpreted. A blank source meaning is
+unknown, never equal to another blank and never a
+change; a blank value reason explains nothing, so
+the capture refuses as `invalid-value`.
 
 Checks run in order; the first failure names the reason:
 
@@ -129,7 +137,7 @@ Checks run in order; the first failure names the reason:
 | 7 | `profile-mismatch` | Profiles differ; every metric refuses |
 | 8 | `workload-mismatch` | Workloads differ under an equal profile |
 | 9 | `source-mismatch` | The metric names different sources per side |
-| 10 | `source-meaning-unknown` | A side records no meaning for the source |
+| 10 | `source-meaning-unknown` | A side records no meaning for the source; a blank meaning counts as no meaning |
 | 11 | `source-meaning-change` | The metric's source changed meaning |
 | 12 | `clock-mismatch` | Clock domains differ |
 | 13 | `window-mismatch` | Window bounds differ |

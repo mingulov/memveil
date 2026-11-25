@@ -52,6 +52,7 @@ FAMILIES = {
     ],
     "unknown source meaning": [
         "source_meaning_unknown.json",
+        "source_meaning_blank.json",
     ],
     "delta overflow": [
         "delta_overflow.json",
@@ -76,6 +77,7 @@ FAMILIES = {
         "duplicate_metric.json",
         "invalid_window.json",
         "invalid_value.json",
+        "invalid_value_blank_reason.json",
     ],
 }
 
@@ -135,13 +137,21 @@ def metric_by_id(capture, metric_id):
     return None
 
 
+def is_blank(value):
+    """A meaning-carrying string counts as missing when it
+    is empty or whitespace-only."""
+    return value.strip() == ""
+
+
 def validate_capture(capture):
     """Independent input validation over one capture.
 
     Order within a capture: repeated metric id, backward
-    window, then value/reason pairing. Returns the refusal
-    reason, or None when the capture validates. Callers
-    validate the left capture before the right.
+    window, then value/reason pairing. A blank reason
+    (empty or whitespace-only) counts as missing, so a
+    null value with a blank reason refuses. Returns the
+    refusal reason, or None when the capture validates.
+    Callers validate the left capture before the right.
     """
     seen = set()
     for metric in capture["metrics"]:
@@ -152,8 +162,12 @@ def validate_capture(capture):
             > int(capture["window"]["end"])):
         return "invalid-window"
     for metric in capture["metrics"]:
-        if ((metric["value"] is not None)
-                == (metric.get("value_reason") is not None)):
+        value = metric["value"]
+        reason = metric.get("value_reason")
+        if value is not None:
+            if reason is not None:
+                return "invalid-value"
+        elif reason is None or is_blank(reason):
             return "invalid-value"
     return None
 
@@ -192,7 +206,8 @@ def expect_row(case, left, right, metric_id):
         return ("incompatible", "source-mismatch", "absent")
     left_meaning = left["source_meanings"].get(left_metric["source_id"])
     right_meaning = right["source_meanings"].get(right_metric["source_id"])
-    if left_meaning is None or right_meaning is None:
+    if (left_meaning is None or is_blank(left_meaning)
+            or right_meaning is None or is_blank(right_meaning)):
         return ("incompatible", "source-meaning-unknown", "absent")
     if left_meaning != right_meaning:
         return ("incompatible", "source-meaning-change", "absent")
@@ -501,9 +516,6 @@ def test_checks_run_in_documented_order():
         later = CHECK_ORDER[index + 1]
         if earlier == "metric-missing":
             continue  # absence preempts every check; see below
-        if (earlier, later) == ("source-meaning-unknown",
-                                "source-meaning-change"):
-            continue  # mutually exclusive by construction
         left, right = base_pair()
         break_check(earlier, left, right)
         break_check(later, left, right)
@@ -556,3 +568,59 @@ def test_docs_table_follows_check_order():
     codes = re.findall(r"^\|\s*\d+\s*\|\s*`([^`]+)`",
                        section, re.MULTILINE)
     assert tuple(codes) == CHECK_ORDER + ("compatible",), codes
+
+
+def test_blank_meanings_are_unknown():
+    # A blank meaning records no meaning: empty or
+    # whitespace-only on either side, or both, refuses
+    # the metric as unknown with no delta. Two blanks
+    # are not equal; blank against changed is unknown,
+    # never a change.
+    cases = [
+        ("", ""),
+        ("", "meaning-1"),
+        ("meaning-1", ""),
+        ("   ", "meaning-1"),
+        ("meaning-1", "   "),
+        ("", "meaning-2"),
+    ]
+    for left_blank, right_blank in cases:
+        left, right = base_pair()
+        left["source_meanings"]["census-direct-map"] = left_blank
+        right["source_meanings"]["census-direct-map"] = right_blank
+        assert validate_capture(left) is None
+        assert validate_capture(right) is None
+        assert expect_row("blank", left, right, "x") == (
+            "incompatible", "source-meaning-unknown", "absent"), \
+            (left_blank, right_blank)
+
+
+def test_one_sided_omission_is_unknown():
+    # A meaning missing on exactly one side cannot prove
+    # comparability: unknown wins over change.
+    left, right = base_pair()
+    del right["source_meanings"]["census-direct-map"]
+    assert expect_row("omission", left, right, "x") == (
+        "incompatible", "source-meaning-unknown", "absent")
+    left, right = base_pair()
+    del left["source_meanings"]["census-direct-map"]
+    right["source_meanings"]["census-direct-map"] = "meaning-2"
+    assert expect_row("omission", left, right, "x") == (
+        "incompatible", "source-meaning-unknown", "absent")
+
+
+def test_blank_value_reason_refuses_input():
+    # A null value with a blank reason explains nothing:
+    # the capture refuses as invalid-value. A known value
+    # carrying any reason, blank or not, also refuses.
+    left, _right = base_pair()
+    left["metrics"][0]["value"] = None
+    left["metrics"][0]["value_reason"] = ""
+    assert validate_capture(left) == "invalid-value"
+    left, _right = base_pair()
+    left["metrics"][0]["value"] = None
+    left["metrics"][0]["value_reason"] = "   "
+    assert validate_capture(left) == "invalid-value"
+    left, _right = base_pair()
+    left["metrics"][0]["value_reason"] = ""
+    assert validate_capture(left) == "invalid-value"
