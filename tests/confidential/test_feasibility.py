@@ -65,6 +65,8 @@ NEGATION_TOKENS = frozenset(("no", "not", "never", "without"))
 
 ANNOTATED_PROOF = "PASS (verified on target)"
 
+HYPHEN_PROOF_CLAIMS = ("PASS-live-fixture", "verified-on-target")
+
 
 def _load(path):
     with open(path, "r", encoding="utf-8") as handle:
@@ -78,21 +80,30 @@ def _word_tokens(value):
 def _claims_proof(value):
     """True when a proof value asserts proof without a negation marker.
 
-    Tokenize on non-letters except hyphens (case-insensitive), so a
-    hyphenated form such as ``non-pass`` stays one token: RED if any
-    token is a bare proof-claim word unless an exact negation token
-    (``no``, ``not``, ``never``, ``without``) is present as a full
-    token. A bare ``un``/``non`` token, or an ``un``/``non`` prefix on
-    some other word (``under``, ``unit``), is not a negation marker:
-    only the prefix attached to the claim word itself (``unproven``,
-    ``non-pass``, ``unverified``) counts as negated, and such forms
-    are single tokens outside the claim set. Hence ``under verified
-    conditions`` REDs while ``unproven`` stays GREEN.
+    Tokenize on non-letters except hyphens (case-insensitive), then
+    split each hyphenated compound into parts for claim detection:
+    RED if any part is a bare proof-claim word, unless (a) an exact
+    negation token (``no``, ``not``, ``never``, ``without``) appears
+    anywhere in the value as a full token or compound part, or (b)
+    ``un``/``non`` immediately precedes the claim part within its own
+    compound. Hence ``PASS-live-fixture`` and ``verified-on-target``
+    RED, while ``non-pass``, ``un-proven``, and ``unproven`` stay
+    GREEN. A bare ``un``/``non`` token, or an ``un``/``non`` prefix on
+    some other word (``under``, ``unit``), is not a negation marker,
+    so ``under verified conditions`` still REDs.
     """
-    tokens = _word_tokens(value)
-    if not any(token in PROOF_CLAIM_TOKENS for token in tokens):
+    compounds = [token.split("-") for token in _word_tokens(value)]
+    if any(part in NEGATION_TOKENS
+           for parts in compounds for part in parts):
         return False
-    return not any(token in NEGATION_TOKENS for token in tokens)
+    for parts in compounds:
+        for index, part in enumerate(parts):
+            if part not in PROOF_CLAIM_TOKENS:
+                continue
+            if index and parts[index - 1] in ("un", "non"):
+                continue
+            return True
+    return False
 
 
 def validate(matrix_path, catalog_path):
@@ -372,6 +383,27 @@ def check_proof_prefix_negated_ok(tmpdir):
     assert validate(path, CATALOG_PATH) == []
 
 
+def check_proof_hyphen_claim_red(tmpdir, group, claim):
+    def plant(matrix):
+        if group == "row":
+            matrix["rows"][0]["real_semantics"] = claim
+        else:
+            matrix["proof_status"]["platform_milestones"] = claim
+    path = _mutated(tmpdir, "mut-hyphen-%s.json" % group, plant)
+    errors = validate(path, CATALOG_PATH)
+    assert any("claims PASS" in error for error in errors), errors
+
+
+def check_proof_hyphen_negated_ok(tmpdir):
+    def plant(matrix):
+        matrix["rows"][0]["real_semantics"] = "non-pass for this cell"
+        matrix["rows"][1]["verifier_acceptance"] = "un-proven on any target"
+        matrix["proof_status"]["platform_milestones"] = (
+            "non-pass for every target")
+    path = _mutated(tmpdir, "hyphen-negated-proof.json", plant)
+    assert validate(path, CATALOG_PATH) == []
+
+
 def run_self_checks():
     failed = 0
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -404,6 +436,12 @@ def run_self_checks():
                       for group in ("row", "proof_status")]),
             ("proof-prefix-negated-ok",
              lambda: check_proof_prefix_negated_ok(tmpdir)),
+            ("proof-hyphen-claims-red",
+             lambda: [check_proof_hyphen_claim_red(tmpdir, group, claim)
+                      for group in ("row", "proof_status")
+                      for claim in HYPHEN_PROOF_CLAIMS]),
+            ("proof-hyphen-negated-ok",
+             lambda: check_proof_hyphen_negated_ok(tmpdir)),
         ]
         for label, scenario in scenarios:
             try:
@@ -496,6 +534,16 @@ def test_under_verified_conditions_rejected(tmp_path, group):
 
 def test_prefix_negated_proof_accepted(tmp_path):
     check_proof_prefix_negated_ok(str(tmp_path))
+
+
+@_parametrize("group", ["row", "proof_status"])
+@_parametrize("claim", list(HYPHEN_PROOF_CLAIMS))
+def test_hyphenated_proof_claim_rejected(tmp_path, group, claim):
+    check_proof_hyphen_claim_red(str(tmp_path), group, claim)
+
+
+def test_hyphenated_prefix_negated_proof_accepted(tmp_path):
+    check_proof_hyphen_negated_ok(str(tmp_path))
 
 
 if __name__ == "__main__":
