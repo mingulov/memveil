@@ -268,6 +268,132 @@ class ScenarioTests(unittest.TestCase):
                             "conversion-request-result")
 
 
+class DistinguishingContentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = load_manifest_once()
+        cls.files = {entry["id"]: EXPOSURE_DIR / entry["file"]
+                     for entry in cls.manifest["cases"]}
+        cls.cases = {case_id: load_case(path) for case_id, path in cls.files.items()}
+        cls.specs = {entry["id"]: entry["cases"]
+                     for entry in cls.manifest["spec_scenarios"]}
+
+    def spec_cases(self, spec):
+        return [(case_id, self.cases[case_id]) for case_id in self.specs[spec]]
+
+    def test_spec_03_models_quarantine_and_incomplete_cleanup(self):
+        quarantined, incomplete = [], []
+        for case_id, case in self.spec_cases("spec-03"):
+            after = {entry["object_token"]: entry for entry in case["after_ledger"]}
+            failed = {step["object"] for step in case["control_flow"]
+                      if step["native_result"] != 0}
+            quarantined += [(case_id, token) for token, entry in after.items()
+                            if entry["status"] == "quarantined" and token in failed]
+            incomplete += [(case_id, token) for token in failed
+                           if token != "none" and after.get(token, {}).get("status") == "live"]
+        self.assertTrue(quarantined,
+                        "spec-03 needs an object quarantined after failed restoration")
+        self.assertTrue(incomplete,
+                        "spec-03 needs an object retained live after a failed cleanup step")
+
+    def test_spec_04_models_concurrent_object_reuse(self):
+        reused = []
+        for case_id, case in self.spec_cases("spec-04"):
+            before = {entry["object_token"]: entry for entry in case["before_ledger"]}
+            after = {entry["object_token"]: entry for entry in case["after_ledger"]}
+            reused += [(case_id, token) for token in before
+                       if token in after
+                       and before[token]["generation"] != after[token]["generation"]]
+        self.assertTrue(reused, "spec-04 needs a token reused under a new generation")
+
+    def test_spec_06_pairs_equal_metadata_with_different_protection(self):
+        case = self.cases["mapping-dax-inventory"]
+        after = case["after_ledger"]
+        pairs = []
+        for index, left in enumerate(after):
+            for right in after[index + 1:]:
+                if (left["pages"] == right["pages"]
+                        and left["generation"] == right["generation"]
+                        and left["status"] != right["status"]):
+                    pairs.append((left["object_token"], right["object_token"]))
+        self.assertTrue(pairs, "spec-06 needs a pair with equal pages and generation "
+                               "but different protection outcomes")
+        for step in case["control_flow"]:
+            self.assertNotIn("payload", step["action"])
+
+    def test_spec_08_pairs_traces_with_and_without_modeled_host_read(self):
+        case = self.cases["egress-control-facts"]
+        modeled = [step for step in case["control_flow"]
+                   if "model-host-read" in step["action"]]
+        self.assertTrue(modeled, "spec-08 needs a modeled host-read step")
+        self.assertTrue(all(step["object"] == "none" for step in modeled),
+                        "the modeled host read itself observes no object")
+        after = {entry["object_token"]: entry for entry in case["after_ledger"]}
+        pairs = 0
+        for token, entry in after.items():
+            if not token.endswith("-1"):
+                continue
+            sibling = token[:-1] + "2"
+            self.assertIn(sibling, after,
+                          f"spec-08 needs a with/without host-read pair for {token}")
+            twin = dict(after[sibling])
+            want = dict(entry)
+            del twin["object_token"], want["object_token"]
+            self.assertEqual(twin, want,
+                             f"paired traces must stay indistinguishable for {token}")
+            pairs += 1
+        self.assertGreater(pairs, 0, "spec-08 needs at least one with/without pair")
+
+    def test_spec_10_models_reordered_rules_conflicts_and_empty_scope(self):
+        case = self.cases["before-after-delta"]
+        steps = case["control_flow"]
+        applies = [step["object"] for step in steps
+                   if step["action"] == "apply-rule-in-order"]
+        reordered = [step["object"] for step in steps
+                     if step["action"] == "reapply-rule-reordered"]
+        self.assertGreaterEqual(len(applies), 2, "spec-10 needs ordered rule steps")
+        self.assertEqual(reordered, list(reversed(applies)),
+                         "spec-10 needs the same rules reapplied in reverse order")
+        before = {entry["object_token"]: entry for entry in case["before_ledger"]}
+        after = {entry["object_token"]: entry for entry in case["after_ledger"]}
+        for token in applies:
+            self.assertEqual(before[token], after[token],
+                             "reordered rule evaluation must agree with ordered evaluation")
+        conflicts = [step for step in steps if "conflict" in step["action"]]
+        self.assertTrue(conflicts, "spec-10 needs a conflicting-rules step")
+        scopes = [step for step in steps if "empty-scope" in step["action"]]
+        self.assertTrue(scopes, "spec-10 needs an empty-scope step")
+        for step in conflicts + scopes:
+            self.assertEqual(step["object"], "none", "refused rules record no object")
+            self.assertNotEqual(step["native_result"], 0,
+                                "refused rules carry a failure result")
+
+    def test_spec_10_rejects_malicious_rule_and_scope_strings(self):
+        operations = ["rule-%p", "op-0xdead", "../scope", "scope;drop",
+                      "rule %n", "RULE-1", ""]
+        actions = ["apply-%p", "read-0x1234", "pfn=7-leak", ""]
+        for case_id in self.specs["spec-10"]:
+            path = self.files[case_id]
+            for operation in operations:
+                with self.subTest(case=case_id, field="operation", value=operation):
+                    tmp = mutate(path, lambda data, value=operation:
+                                 data["control_flow"][0].update(operation=value))
+                    try:
+                        with self.assertRaises(FixtureError):
+                            load_case(tmp)
+                    finally:
+                        Path(tmp).unlink()
+            for action in actions:
+                with self.subTest(case=case_id, field="action", value=action):
+                    tmp = mutate(path, lambda data, value=action:
+                                 data["control_flow"][0].update(action=value))
+                    try:
+                        with self.assertRaises(FixtureError):
+                            load_case(tmp)
+                    finally:
+                        Path(tmp).unlink()
+
+
 class PrivacyTests(unittest.TestCase):
     def test_no_address_like_content_in_fixtures(self):
         files = [EXPOSURE_DIR / "cases.json"]
