@@ -1,0 +1,22 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "operator-walkthrough",
+  "family": "usefulness",
+  "namespace": "not_applicable",
+  "notes": "Healthy, seeded-unexpected, boot and pre-attach, incomplete and metadata-indistinguishable cases each render with a next action and no false violations.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-opw-healthy-1", "object": "obj-opw-healthy-1", "pages": "1", "native_result": 0, "action": "render-healthy-with-next-action"},
+    {"ordinal": "2", "operation": "op-opw-seeded-2", "object": "obj-opw-seeded-1", "pages": "1", "native_result": 0, "action": "explain-seeded-finding"},
+    {"ordinal": "3", "operation": "op-opw-incomplete-3", "object": "obj-opw-healthy-1", "pages": "1", "native_result": 0, "action": "render-incomplete-as-partial"},
+    {"ordinal": "4", "operation": "op-opw-quiet-4", "object": "obj-opw-seeded-1", "pages": "1", "native_result": 0, "action": "confirm-no-false-violation"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-opw-healthy-1", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-opw-healthy-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-opw-seeded-1", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "expectation": {"conserved": ["obj-opw-healthy-1"], "transitioned": [], "added": ["obj-opw-seeded-1"], "removed": []}
+}

@@ -1,0 +1,27 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "shared-heap-retention",
+  "family": "shared buffers",
+  "namespace": "session_token",
+  "notes": "One shared-origin allocation releases cleanly; a second keeps a live reference after a failed release (incomplete cleanup, retained live); a third fails restoration and is safely quarantined instead of freed.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-shr-attach-1", "object": "obj-shr-heap-1", "pages": "3", "native_result": 0, "action": "attach-first-reference"},
+    {"ordinal": "2", "operation": "op-shr-use-2", "object": "obj-shr-heap-1", "pages": "3", "native_result": 0, "action": "retain-second-reference"},
+    {"ordinal": "3", "operation": "op-shr-release-3", "object": "obj-shr-heap-1", "pages": "3", "native_result": 0, "action": "release-all-references"},
+    {"ordinal": "4", "operation": "op-shr-partial-4", "object": "obj-shr-heap-2", "pages": "2", "native_result": -5, "action": "attempt-release-with-live-reference"},
+    {"ordinal": "5", "operation": "op-shr-restore-5", "object": "obj-shr-heap-3", "pages": "2", "native_result": -5, "action": "record-failed-restoration"},
+    {"ordinal": "6", "operation": "op-shr-quarantine-6", "object": "obj-shr-heap-3", "pages": "2", "native_result": 0, "action": "quarantine-unproved-pages"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-shr-heap-1", "generation": "1", "pages": "3", "status": "live"},
+    {"object_token": "obj-shr-heap-2", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-shr-heap-3", "generation": "1", "pages": "2", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-shr-heap-1", "generation": "1", "pages": "3", "status": "released"},
+    {"object_token": "obj-shr-heap-2", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-shr-heap-3", "generation": "1", "pages": "2", "status": "quarantined"}
+  ],
+  "expectation": {"conserved": ["obj-shr-heap-2"], "transitioned": ["obj-shr-heap-1", "obj-shr-heap-3"], "added": [], "removed": []}
+}

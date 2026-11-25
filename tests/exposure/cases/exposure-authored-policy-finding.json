@@ -1,0 +1,25 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "authored-policy-finding",
+  "family": "policy",
+  "namespace": "not_applicable",
+  "notes": "An unexpected covered operation trips an authored rule; a proved violation, an independently established deviation and an inconclusive-on-unknown case are also shown.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-apf-trip-1", "object": "obj-apf-ev-1", "pages": "1", "native_result": 0, "action": "trip-authored-rule"},
+    {"ordinal": "2", "operation": "op-apf-violate-2", "object": "obj-apf-ev-2", "pages": "1", "native_result": 0, "action": "prove-lifecycle-violation"},
+    {"ordinal": "3", "operation": "op-apf-deviate-3", "object": "obj-apf-ev-3", "pages": "1", "native_result": 0, "action": "establish-known-deviation"},
+    {"ordinal": "4", "operation": "op-apf-unknown-4", "object": "none", "pages": "1", "native_result": 0, "action": "admit-inconclusive-on-unknown"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-apf-ev-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-apf-ev-2", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-apf-ev-3", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-apf-ev-1", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-apf-ev-2", "generation": "1", "pages": "1", "status": "live"},
+    {"object_token": "obj-apf-ev-3", "generation": "1", "pages": "1", "status": "live"}
+  ],
+  "expectation": {"conserved": ["obj-apf-ev-1", "obj-apf-ev-2", "obj-apf-ev-3"], "transitioned": [], "added": [], "removed": []}
+}

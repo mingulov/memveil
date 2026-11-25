@@ -1,0 +1,22 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "bounced-and-direct-paths",
+  "family": "operation DMA paths",
+  "namespace": "guest_physical",
+  "notes": "Bounced and admitted non-bounced shared-path segments each complete with outer completion agreement; missing bounce events never imply direct private DMA.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-bdp-bounce-1", "object": "obj-bdp-seg-1", "pages": "2", "native_result": 0, "action": "complete-bounced-segment"},
+    {"ordinal": "2", "operation": "op-bdp-direct-2", "object": "obj-bdp-seg-2", "pages": "2", "native_result": 0, "action": "complete-admitted-direct-segment"},
+    {"ordinal": "3", "operation": "op-bdp-outer-3", "object": "obj-bdp-seg-1", "pages": "2", "native_result": 0, "action": "confirm-outer-completion"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-bdp-seg-1", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-bdp-seg-2", "generation": "1", "pages": "2", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-bdp-seg-1", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-bdp-seg-2", "generation": "1", "pages": "2", "status": "live"}
+  ],
+  "expectation": {"conserved": ["obj-bdp-seg-1", "obj-bdp-seg-2"], "transitioned": [], "added": [], "removed": []}
+}

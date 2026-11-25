@@ -1,0 +1,22 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "loss-and-bounds",
+  "family": "quality",
+  "namespace": "not_applicable",
+  "notes": "Loss, censored stop, denied access, absent sources and exhausted bounds each yield a scoped partial result; loss never converts to zero.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-lb-loss-1", "object": "obj-lb-detail-1", "pages": "2", "native_result": 0, "action": "inject-exact-loss"},
+    {"ordinal": "2", "operation": "op-lb-censored-2", "object": "obj-lb-detail-1", "pages": "2", "native_result": -1, "action": "record-censored-stop"},
+    {"ordinal": "3", "operation": "op-lb-denied-3", "object": "obj-lb-detail-1", "pages": "2", "native_result": -13, "action": "record-denied-access"},
+    {"ordinal": "4", "operation": "op-lb-absent-4", "object": "none", "pages": "1", "native_result": -19, "action": "record-absent-source"},
+    {"ordinal": "5", "operation": "op-lb-exhausted-5", "object": "none", "pages": "1", "native_result": -12, "action": "record-exhausted-bound"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-lb-detail-1", "generation": "1", "pages": "2", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-lb-detail-1", "generation": "1", "pages": "2", "status": "unknown"}
+  ],
+  "expectation": {"conserved": [], "transitioned": ["obj-lb-detail-1"], "added": [], "removed": []}
+}

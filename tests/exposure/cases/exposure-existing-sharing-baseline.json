@@ -1,0 +1,23 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "existing-sharing-baseline",
+  "family": "census",
+  "namespace": "guest_physical",
+  "notes": "Boot sharing is inventoried first; one pre-attach increase is then recorded with exact owned deltas.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-esb-scan-1", "object": "obj-esb-boot-1", "pages": "4", "native_result": 0, "action": "inventory-boot-sharing"},
+    {"ordinal": "2", "operation": "op-esb-scan-2", "object": "obj-esb-boot-2", "pages": "2", "native_result": 0, "action": "inventory-boot-sharing"},
+    {"ordinal": "3", "operation": "op-esb-pre-3", "object": "obj-esb-pre-1", "pages": "1", "native_result": 0, "action": "inventory-pre-attach-increase"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-esb-boot-1", "generation": "1", "pages": "4", "status": "live"},
+    {"object_token": "obj-esb-boot-2", "generation": "1", "pages": "2", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-esb-boot-1", "generation": "1", "pages": "4", "status": "live"},
+    {"object_token": "obj-esb-boot-2", "generation": "1", "pages": "2", "status": "live"},
+    {"object_token": "obj-esb-pre-1", "generation": "1", "pages": "1", "status": "created"}
+  ],
+  "expectation": {"conserved": ["obj-esb-boot-1", "obj-esb-boot-2"], "transitioned": [], "added": ["obj-esb-pre-1"], "removed": []}
+}

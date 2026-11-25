@@ -1,0 +1,20 @@
+{
+  "format": "exposure-fixture-case/0.1.0",
+  "provenance": "Independently authored expectations for lease-free self-tests; no values derived from collector output.",
+  "scenario": "shared-to-private-lifecycle",
+  "family": "object lifetimes",
+  "namespace": "session_token",
+  "notes": "An owned buffer moves shared-to-private across one admitted boundary; the new lineage generation is explicit.",
+  "control_flow": [
+    {"ordinal": "1", "operation": "op-stp-share-1", "object": "obj-stp-buf-1", "pages": "2", "native_result": 0, "action": "admit-shared-origin"},
+    {"ordinal": "2", "operation": "op-stp-convert-2", "object": "obj-stp-buf-1", "pages": "2", "native_result": 0, "action": "convert-shared-to-private"},
+    {"ordinal": "3", "operation": "op-stp-confirm-3", "object": "obj-stp-buf-1", "pages": "2", "native_result": 0, "action": "confirm-private-lineage"}
+  ],
+  "before_ledger": [
+    {"object_token": "obj-stp-buf-1", "generation": "1", "pages": "2", "status": "live"}
+  ],
+  "after_ledger": [
+    {"object_token": "obj-stp-buf-1", "generation": "2", "pages": "2", "status": "live"}
+  ],
+  "expectation": {"conserved": [], "transitioned": ["obj-stp-buf-1"], "added": [], "removed": []}
+}

@@ -1,0 +1,34 @@
+{
+  "format": "exposure-fixture-manifest/0.1.0",
+  "catalog_version": "0.1.0",
+  "note": "Independently authored fixture expectations for lease-free self-tests. Page counts and event order come from each case control flow. Nothing here is derived from collector output, and fixtures never feed observations into the collector.",
+  "spec_scenarios": [
+    {"id": "spec-01", "title": "Healthy persistent sharing across sustained I/O with zero new conversions", "cases": ["persistent-queue-traffic", "conversion-request-result", "bounced-and-direct-paths"]},
+    {"id": "spec-02", "title": "Deliberately unexpected covered sharing under an authored rule", "cases": ["authored-policy-finding"]},
+    {"id": "spec-03", "title": "Owned incomplete cleanup and a distinct safe quarantine case", "cases": ["shared-to-private-lifecycle", "shared-heap-retention"]},
+    {"id": "spec-04", "title": "Boot and pre-attach sharing, snapshot and event overlap, concurrent object reuse", "cases": ["existing-sharing-baseline", "channel-lifetimes"]},
+    {"id": "spec-05", "title": "Loss, censored stop, denied access, absent sources and exhausted bounds", "cases": ["loss-and-bounds"]},
+    {"id": "spec-06", "title": "Equal metadata with different fixed test-data protection and no payload inspection", "cases": ["mapping-dax-inventory"]},
+    {"id": "spec-07", "title": "Normal interface use versus an authored native rejection where observable", "cases": ["interface-activity", "tdx-ve-interface-activity"]},
+    {"id": "spec-08", "title": "Identical guest traces with and without a modeled host read stay indistinguishable", "cases": ["egress-control-facts"]},
+    {"id": "spec-09", "title": "Mixed namespaces, paravisor peers and generic non-confidential objects", "cases": ["channel-lifetimes", "mapping-dax-inventory", "shared-heap-retention"]},
+    {"id": "spec-10", "title": "Compatible and incompatible comparisons, reordered rules, conflicts and empty scope", "cases": ["before-after-delta", "operator-walkthrough"]}
+  ],
+  "cases": [
+    {"id": "conversion-request-result", "file": "cases/exposure-conversion-request-result.json"},
+    {"id": "existing-sharing-baseline", "file": "cases/exposure-existing-sharing-baseline.json"},
+    {"id": "shared-to-private-lifecycle", "file": "cases/exposure-shared-to-private-lifecycle.json"},
+    {"id": "persistent-queue-traffic", "file": "cases/exposure-persistent-queue-traffic.json"},
+    {"id": "shared-heap-retention", "file": "cases/exposure-shared-heap-retention.json"},
+    {"id": "interface-activity", "file": "cases/exposure-interface-activity.json"},
+    {"id": "tdx-ve-interface-activity", "file": "cases/exposure-tdx-ve-interface-activity.json"},
+    {"id": "channel-lifetimes", "file": "cases/exposure-channel-lifetimes.json"},
+    {"id": "mapping-dax-inventory", "file": "cases/exposure-mapping-dax-inventory.json"},
+    {"id": "egress-control-facts", "file": "cases/exposure-egress-control-facts.json"},
+    {"id": "bounced-and-direct-paths", "file": "cases/exposure-bounced-and-direct-paths.json"},
+    {"id": "authored-policy-finding", "file": "cases/exposure-authored-policy-finding.json"},
+    {"id": "before-after-delta", "file": "cases/exposure-before-after-delta.json"},
+    {"id": "loss-and-bounds", "file": "cases/exposure-loss-and-bounds.json"},
+    {"id": "operator-walkthrough", "file": "cases/exposure-operator-walkthrough.json"}
+  ]
+}
