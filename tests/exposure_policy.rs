@@ -436,9 +436,35 @@ fn live_objects_violate_boundary() {
 #[test]
 fn censored_capture_is_not_teardown() {
     let policy = parse_policy_text(BOUNDARY_POLICY).expect("parse");
-    let input = input_bundle(false, &[SOURCE], vec![], vec![object("tok-1", "released")]);
+    let input = input_bundle(
+        false,
+        &[SOURCE],
+        vec![],
+        vec![object("tok-1", "released"), object("tok-2", "live")],
+    );
     let out = evaluate(&policy, &input).expect("evaluate");
-    assert_eq!(only(&out.results).result, "inconclusive");
+    let result = only(&out.results);
+    assert_eq!(result.result, "inconclusive");
+    assert!(result.reason.contains("unfinalized"));
+    assert_eq!(out.overall, "inconclusive");
+    assert_eq!(strict_exit(&out.overall), 4);
+}
+
+#[test]
+fn exceeded_duration_proves_in_censored_capture() {
+    let text = BOUNDARY_POLICY.replace(
+        r#""obligation": {"status": "released"}"#,
+        r#""obligation": {"status": "released", "within": "5000", "clock": "guest_monotonic_active"}"#,
+    );
+    let policy = parse_policy_text(&text).expect("parse");
+    let mut slow = object("tok-1", "released");
+    slow.elapsed = Some(6000);
+    slow.elapsed_clock = Some("guest_monotonic_active".to_string());
+    let input = input_bundle(false, &[SOURCE], vec![], vec![slow]);
+    let out = evaluate(&policy, &input).expect("evaluate");
+    let result = only(&out.results);
+    assert_eq!(result.result, "violates");
+    assert_eq!(strict_exit(&out.overall), 5);
 }
 
 #[test]

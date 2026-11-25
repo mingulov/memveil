@@ -867,7 +867,12 @@ fn eval_obligation_rule(
             ));
             continue;
         }
-        if object.lifecycle_status != obligation.status {
+        // A status not yet reached proves nothing while the
+        // capture is censored: teardown is unproved, so the
+        // outcome below stays inconclusive. Only a finalized
+        // capture can miss an obligation status. An already
+        // exceeded duration still proves a violation either way.
+        if input.finalized && object.lifecycle_status != obligation.status {
             nonconforming.push(reference.clone());
         }
         if let Some(within) = obligation.within {
