@@ -27,8 +27,7 @@
     }
   ],
   "illustrative_only": {
-    "note": "NOT evidence for any cell: no target image is selected. Fedora 7.2.13-200.fc44 build headers plus /boot/config show a force-none lockdown default with BTF enabled (CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y, CONFIG_DEBUG_INFO_BTF=y, CONFIG_BPF_SYSCALL=y); target-image lockdown/BTF/config stays a lease-gated question on every row.",
-    "paths": ["/usr/src/kernels/7.2.13-200.fc44.x86_64", "/boot/config-7.2.13-200.fc44.x86_64"]
+    "note": "NOT evidence for any cell: no target image is selected. A local distro build-headers tree plus its boot config illustrate a force-none lockdown default with BTF enabled (CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y, CONFIG_DEBUG_INFO_BTF=y, CONFIG_BPF_SYSCALL=y); target-image lockdown/BTF/config stays a lease-gated question on every row."
   },
   "proof_status": {
     "safe_attachment_readout": "BLOCKED-no-lease",
@@ -195,6 +194,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
         {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_map_phys/dma_alloc/dma_alloc_pages/dma_free/dma_free_pages coherent-DMA tracepoints"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "coherent memory is not synonymous with host-shared; path admission per operation"],
@@ -213,6 +213,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
         {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_map_phys/dma_alloc/dma_alloc_pages/dma_free/dma_free_pages coherent-DMA tracepoints"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "SNP evidence never qualifies TDX"],
@@ -231,6 +232,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/swiotlb.h:10", "what": "swiotlb_bounced tracepoint declaration"},
         {"source_ref": "upstream-v7.0", "pointer": "kernel/dma/swiotlb.c:1597", "what": "swiotlb_bounced emission site"},
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:163-374", "what": "dma_alloc_sgt/free_sgt/map_sg/map_sg_err/unmap_sg tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma.h:77,159-160,242-243", "what": "dma_map_phys/dma_alloc/dma_alloc_pages/dma_free/dma_free_pages coherent-DMA tracepoints"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/virtio/virtio_ring.c:2819-2974", "what": "virtqueue_add_* queue-entry functions (fentry candidates); no virtio trace header exists"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "queue identity across the capture window with independently driven traffic", "VMBus-backed devices need the vmbus-channels source alongside"],
@@ -249,7 +251,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma_buf.h:96-149", "what": "dma_buf export/mmap/mmap_internal/put/dynamic_attach/detach/fd/get tracepoints"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "shared origin must be proven per object; generic buffer objects never imply confidential sharing", "owned allocation ledger agreement (attach/map/use/destruction distinct)"],
-      "reviewer_notes": "Full dma-buf lifecycle tracepoints; origin admission needs producer proof. No admitted cell selected."
+      "reviewer_notes": "Candidate dma-buf export/map/put tracepoints; full lifecycle coverage unproven (put is a reference drop, not destruction); origin admission needs producer proof. No admitted cell selected."
     },
     {
       "source_id": "heap-dmabuf-objects",
@@ -264,7 +266,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma_buf.h:96-149", "what": "dma_buf export/mmap/mmap_internal/put/dynamic_attach/detach/fd/get tracepoints"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "shared origin must be proven per object; generic buffer objects never imply confidential sharing"],
-      "reviewer_notes": "Full dma-buf lifecycle tracepoints; origin admission needs producer proof. No admitted cell selected."
+      "reviewer_notes": "Candidate dma-buf export/map/put tracepoints; full lifecycle coverage unproven (put is a reference drop, not destruction); origin admission needs producer proof. No admitted cell selected."
     },
     {
       "source_id": "heap-dmabuf-objects",
@@ -279,7 +281,7 @@
         {"source_ref": "upstream-v7.0", "pointer": "include/trace/events/dma_buf.h:96-149", "what": "dma_buf export/mmap/mmap_internal/put/dynamic_attach/detach/fd/get tracepoints"}
       ],
       "lease_gated": ["safe attachment proof on the exact target image", "shared origin must be proven per object; generic buffer objects never imply confidential sharing"],
-      "reviewer_notes": "Full dma-buf lifecycle tracepoints; origin admission needs producer proof. No admitted cell selected."
+      "reviewer_notes": "Candidate dma-buf export/map/put tracepoints; full lifecycle coverage unproven (put is a reference drop, not destruction); origin admission needs producer proof. No admitted cell selected."
     },
     {
       "source_id": "ghcb-exceptions",
@@ -308,8 +310,9 @@
       "verifier_acceptance": "not-applicable",
       "real_semantics": "not-applicable",
       "evidence": [
-        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/include/asm/idtentry.h:674-676", "what": "#VC declared only under CONFIG_AMD_MEM_ENCRYPT (AMD SEV family)"},
-        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/core.c:410-424", "what": "SNP paths early-return without CC_ATTR_GUEST_SEV_SNP"}
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/core.c:1089-1092", "what": "setup_ghcb returns early unless CC_ATTR_GUEST_STATE_ENCRYPT is set"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/sev/core.c:1230-1237", "what": "sev_es_init_vc_handling returns early unless CC_ATTR_GUEST_STATE_ENCRYPT is set"},
+        {"source_ref": "upstream-v7.0", "pointer": "arch/x86/coco/core.c:30-40", "what": "intel_cc_platform_has answers true only for MEM_ENCRYPT/GUEST_MEM_ENCRYPT/UNROLL_STRING_IO and false otherwise, so both SEV gates stay off on a TDX guest"}
       ],
       "lease_gated": [],
       "reviewer_notes": "N/A with reason: #VC/GHCB cannot fire on a TDX guest; absence of events is not the basis."
@@ -469,12 +472,12 @@
       "verifier_acceptance": "unproven",
       "real_semantics": "unproven",
       "evidence": [
-        {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/hv_trace.h:11-129", "what": "vmbus offer/rescind/open-result/gpadl-created/gpadl-torndown/modify/version tracepoints"},
+        {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/hv_trace.h:11-276", "what": "vmbus offer/rescind/open/close/gpadl-created/gpadl-torndown/teardown-gpadl/negotiate-version/release-relid tracepoints"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/channel.c:580-586", "what": "vmbus_establish_gpadl GPADL setup entry"},
         {"source_ref": "upstream-v7.0", "pointer": "drivers/hv/channel.c:652-750", "what": "__vmbus_open channel-open path with gpadl/open trace emission"}
       ],
       "lease_gated": ["host-facing vs paravisor peer topology needs the exact cell; no inference into paravisor internal memory", "offer/GPADL/flags agreement across channel lifetime with independent ledger", "safe attachment plus positive fixture proof"],
-      "reviewer_notes": "Offer/GPADL/open tracepoints give full lifetime coverage; peer topology is lease-gated. No admitted cell selected."
+      "reviewer_notes": "Candidate offer/GPADL/open/close/teardown/release tracepoints; lifetime coverage unproven; peer topology is lease-gated. No admitted cell selected."
     },
     {
       "source_id": "mapping-inventory-scan",
