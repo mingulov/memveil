@@ -317,12 +317,8 @@ fn profiles_mirror_sources() {
                 if path.is_dir() {
                     stack.push(path);
                 } else if path.is_file() {
-                    let name =
-                        path.file_name().unwrap().to_str().unwrap();
-                    if !filtered
-                        || name == "manifest.txt"
-                        || name.ends_with(".json")
-                    {
+                    let name = path.file_name().unwrap().to_str().unwrap();
+                    if !filtered || name == "manifest.txt" || name.ends_with(".json") {
                         out.push(
                             path.strip_prefix(dir)
                                 .unwrap()
