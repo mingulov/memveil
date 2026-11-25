@@ -114,15 +114,30 @@ first, then the right; within a capture, in order:
 | --- | --- | --- |
 | V1 | `duplicate-metric` | A metric id repeats on one side |
 | V2 | `invalid-window` | The window ends before it starts |
-| V3 | `invalid-value` | A known value carries a reason, or an unknown value lacks one; a blank reason counts as lacking one |
+| V3 | `invalid-value` | A known value carries a reason, or an unknown value lacks one; a blank reason counts as lacking one, and a non-blank reason with a control character is malformed |
+| V4 | `invalid-meaning` | A non-blank source meaning carries a control character |
+| V5 | `invalid-clock` | A non-blank clock domain carries a control character |
 
 A blank string is invalid everywhere it carries
-meaning: a string expected to be non-empty that is
-empty or whitespace-only counts as missing where its
-content is interpreted. A blank source meaning is
-unknown, never equal to another blank and never a
-change; a blank value reason explains nothing, so
+meaning: blank means empty or ASCII-whitespace-only
+(space, tab, line feed, carriage return, vertical
+tab, form feed), identically in the comparator and
+its independent oracle. A blank string counts as
+missing where its content is interpreted: a blank
+source meaning or clock domain is unknown, never
+equal to another blank and never a change or a
+mismatch; a blank value reason explains nothing, so
 the capture refuses as `invalid-value`.
+
+A control character (U+0000-U+001F or U+007F-U+009F)
+in a meaning, clock label or reason is malformed
+input and refuses the whole comparison: meanings as
+`invalid-meaning`, clocks as `invalid-clock`, reasons
+as `invalid-value`. Blank is checked first, so ASCII
+whitespace stays missing rather than malformed.
+Malformed clocks also refuse at parse once the
+capture reader lands; the comparator never repairs
+or guesses one.
 
 Checks run in order; the first failure names the reason:
 
@@ -139,10 +154,11 @@ Checks run in order; the first failure names the reason:
 | 9 | `source-mismatch` | The metric names different sources per side |
 | 10 | `source-meaning-unknown` | A side records no meaning for the source; a blank meaning counts as no meaning |
 | 11 | `source-meaning-change` | The metric's source changed meaning |
-| 12 | `clock-mismatch` | Clock domains differ |
-| 13 | `window-mismatch` | Window bounds differ |
-| 14 | `partial-census` | Census-derived on either side with a bounded scan on either side |
-| 15 | `compatible` | Predicate passed; delta rules below apply |
+| 12 | `clock-unknown` | A side records no clock domain; a blank clock is unknown, never shared |
+| 13 | `clock-mismatch` | Clock domains differ |
+| 14 | `window-mismatch` | Window bounds differ |
+| 15 | `partial-census` | Census-derived on either side with a bounded scan on either side |
+| 16 | `compatible` | Predicate passed; delta rules below apply |
 
 Compatible rows carry `delta` except when a side is
 unknown (`value-unknown`, null delta with reason) or

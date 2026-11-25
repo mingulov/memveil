@@ -453,6 +453,48 @@ fn clock_change_refuses_all_metrics() {
     );
 }
 
+// case: clock-unknown
+#[test]
+fn blank_clocks_refuse_as_unknown() {
+    let left = capture(
+        "cap-left-027",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(1),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            true,
+        )],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-027".to_string();
+    right.metrics[0].value = Some(9);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+    assert_eq!(
+        rows,
+        vec![refused_row(
+            "shared-bytes",
+            "incompatible",
+            "clock-unknown",
+            "cap-left-027",
+            "cap-right-027",
+            "bytes",
+            "guest-direct-map",
+        )]
+    );
+}
+
 // case: partial-census
 #[test]
 fn partial_census_keeps_unaffected_metrics() {
@@ -1322,6 +1364,106 @@ fn blank_reason_with_unknown_value_refuses_input() {
     }
 }
 
+// case: invalid-meaning
+#[test]
+fn control_meaning_refuses_input() {
+    let mut left = capture(
+        "cap-left-028",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(1),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            true,
+        )],
+    );
+    left.source_meanings
+        .insert("census-direct-map".to_string(), "\u{1c}".to_string());
+    let right = capture(
+        "cap-right-028",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(9),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            true,
+        )],
+    );
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-meaning");
+}
+
+// case: invalid-clock
+#[test]
+fn control_clock_refuses_input() {
+    let left = capture(
+        "cap-left-029",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "\u{1c}",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(1),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            true,
+        )],
+    );
+    let right = capture(
+        "cap-right-029",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        standard_meanings(),
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![metric(
+            "shared-bytes",
+            Some(9),
+            None,
+            "bytes",
+            "guest-direct-map",
+            "census-direct-map",
+            true,
+        )],
+    );
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-clock");
+}
+
 #[test]
 fn input_validation_order_is_documented() {
     // A repeated id beats a backward window on the same
@@ -1438,6 +1580,31 @@ fn input_validation_order_is_documented() {
     );
     let refusal = compare_captures(&left_value_bad, &right_dup).unwrap_err();
     assert_eq!(refusal.reason, "invalid-value");
+    // A bad value beats a bad meaning, which beats a bad
+    // clock, and the left capture still goes first.
+    let mut value_and_meaning_bad = left_value_bad.clone();
+    value_and_meaning_bad
+        .source_meanings
+        .insert("census-direct-map".to_string(), "\u{1c}".to_string());
+    let refusal = compare_captures(&value_and_meaning_bad, &clean).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-value");
+    let mut meaning_and_clock_bad = clean.clone();
+    meaning_and_clock_bad
+        .source_meanings
+        .insert("census-direct-map".to_string(), "\u{1c}".to_string());
+    meaning_and_clock_bad.clock_domain = "\u{1c}".to_string();
+    let refusal = compare_captures(&meaning_and_clock_bad, &clean).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-meaning");
+    let mut left_clock_bad = clean.clone();
+    left_clock_bad.evidence_id = "cap-left-022".to_string();
+    left_clock_bad.clock_domain = "\u{1c}".to_string();
+    let mut right_meaning_bad = clean.clone();
+    right_meaning_bad.evidence_id = "cap-right-022".to_string();
+    right_meaning_bad
+        .source_meanings
+        .insert("census-direct-map".to_string(), "\u{1c}".to_string());
+    let refusal = compare_captures(&left_clock_bad, &right_meaning_bad).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-clock");
 }
 
 // case: delta-overflow
@@ -1626,4 +1793,242 @@ fn predicate_order_holds_across_new_checks() {
     assert_eq!(rows[0].compatibility, "incompatible");
     assert_eq!(rows[0].reason, "source-meaning-unknown");
     assert_eq!(rows[0].delta, None);
+    // A changed meaning beats an unknown clock: content
+    // compares before clock availability runs.
+    let mut changed_blank_clock = changed_right.clone();
+    changed_blank_clock.clock_domain.clear();
+    let rows = compare_captures(&left, &changed_blank_clock).expect("valid comparison inputs");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].compatibility, "incompatible");
+    assert_eq!(rows[0].reason, "source-meaning-change");
+    assert_eq!(rows[0].delta, None);
+    // An unknown clock beats a clock mismatch: a blank
+    // clock names no clock to compare.
+    let mut unknown_clock = left.clone();
+    unknown_clock.clock_domain.clear();
+    let mut mismatch_right = left.clone();
+    mismatch_right.clock_domain = "guest_boottime_elapsed".to_string();
+    let rows = compare_captures(&unknown_clock, &mismatch_right).expect("valid comparison inputs");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].compatibility, "incompatible");
+    assert_eq!(rows[0].reason, "clock-unknown");
+    assert_eq!(rows[0].delta, None);
+}
+
+#[test]
+fn tricky_string_battery_matches_oracle() {
+    // Tricky-string battery in the same order as
+    // TRICKY_STRINGS in tests/exposure/test_compare.py:
+    // blank is empty or ASCII-whitespace-only, malformed
+    // is non-blank with a control character, content is
+    // anything else. Both suites must agree on every row.
+    let battery: Vec<(&str, &str)> = vec![
+        ("", "blank"),
+        ("   ", "blank"),
+        ("\t", "blank"),
+        ("\n", "blank"),
+        ("\u{0}", "malformed"),
+        ("\u{1c}", "malformed"),
+        ("\u{1f}", "malformed"),
+        ("\u{7f}", "malformed"),
+        ("\u{9f}", "malformed"),
+        ("a\x00b", "malformed"),
+        (" \u{1c} ", "malformed"),
+        ("\u{a0}", "content"),
+        (" \u{a0}", "content"),
+        ("a\u{a0}b", "content"),
+        ("\u{200b}", "content"),
+        ("\u{feff}", "content"),
+        ("\u{200b}\u{200b}", "content"),
+        ("a\u{200b}b", "content"),
+        ("meaning-1", "content"),
+    ];
+    let pair = || {
+        let left = capture(
+            "cap-left-tricky",
+            "idle-snapshot",
+            41,
+            "snp-guest-01",
+            standard_meanings(),
+            1000,
+            2000,
+            "guest_monotonic_active",
+            false,
+            false,
+            vec![metric(
+                "shared-bytes",
+                Some(1),
+                None,
+                "bytes",
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            )],
+        );
+        let mut right = left.clone();
+        right.evidence_id = "cap-right-tricky".to_string();
+        right.metrics[0].value = Some(9);
+        (left, right)
+    };
+    for (value, kind) in battery {
+        // Meaning position: blank is unknown per row,
+        // malformed refuses the whole input, content
+        // compares by equality (equal pairs keep delta 8).
+        let (mut left, mut right) = pair();
+        left.source_meanings
+            .insert("census-direct-map".to_string(), value.to_string());
+        right
+            .source_meanings
+            .insert("census-direct-map".to_string(), value.to_string());
+        match kind {
+            "blank" => {
+                let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+                assert_eq!(
+                    rows,
+                    vec![refused_row(
+                        "shared-bytes",
+                        "incompatible",
+                        "source-meaning-unknown",
+                        "cap-left-tricky",
+                        "cap-right-tricky",
+                        "bytes",
+                        "guest-direct-map",
+                    )],
+                    "meaning {value:?}"
+                );
+            }
+            "malformed" => {
+                let refusal = compare_captures(&left, &right).unwrap_err();
+                assert_eq!(refusal.reason, "invalid-meaning", "meaning {value:?}");
+            }
+            _ => {
+                let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+                assert_eq!(
+                    rows,
+                    vec![compatible_row(
+                        "shared-bytes",
+                        "cap-left-tricky",
+                        "cap-right-tricky",
+                        Some(8),
+                        None,
+                        "bytes",
+                        "guest-direct-map",
+                    )],
+                    "meaning {value:?}"
+                );
+            }
+        }
+        // Clock position mirrors the meaning position.
+        let (mut left, mut right) = pair();
+        left.clock_domain = value.to_string();
+        right.clock_domain = value.to_string();
+        match kind {
+            "blank" => {
+                let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+                assert_eq!(
+                    rows,
+                    vec![refused_row(
+                        "shared-bytes",
+                        "incompatible",
+                        "clock-unknown",
+                        "cap-left-tricky",
+                        "cap-right-tricky",
+                        "bytes",
+                        "guest-direct-map",
+                    )],
+                    "clock {value:?}"
+                );
+            }
+            "malformed" => {
+                let refusal = compare_captures(&left, &right).unwrap_err();
+                assert_eq!(refusal.reason, "invalid-clock", "clock {value:?}");
+            }
+            _ => {
+                let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+                assert_eq!(
+                    rows,
+                    vec![compatible_row(
+                        "shared-bytes",
+                        "cap-left-tricky",
+                        "cap-right-tricky",
+                        Some(8),
+                        None,
+                        "bytes",
+                        "guest-direct-map",
+                    )],
+                    "clock {value:?}"
+                );
+            }
+        }
+        // Reason position with a null value: blank and
+        // malformed both refuse as invalid-value, while
+        // content is a usable reason and yields a
+        // value-unknown row.
+        let (mut left, right) = pair();
+        left.metrics[0].value = None;
+        left.metrics[0].value_reason = Some(value.to_string());
+        if kind == "content" {
+            let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+            assert_eq!(
+                rows,
+                vec![compatible_row(
+                    "shared-bytes",
+                    "cap-left-tricky",
+                    "cap-right-tricky",
+                    None,
+                    Some("value-unknown"),
+                    "bytes",
+                    "guest-direct-map",
+                )],
+                "reason {value:?}"
+            );
+        } else {
+            let refusal = compare_captures(&left, &right).unwrap_err();
+            assert_eq!(refusal.reason, "invalid-value", "reason {value:?}");
+        }
+    }
+    // One-sided malformed input refuses whichever side
+    // carries it; one-sided blank clocks stay unknown;
+    // invisible content still compares by equality.
+    let (left, mut right) = pair();
+    right
+        .source_meanings
+        .insert("census-direct-map".to_string(), "\u{1c}".to_string());
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-meaning");
+    let (mut left, right) = pair();
+    left.clock_domain = "\u{1c}".to_string();
+    let refusal = compare_captures(&left, &right).unwrap_err();
+    assert_eq!(refusal.reason, "invalid-clock");
+    let (left, mut right) = pair();
+    right.clock_domain.clear();
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+    assert_eq!(
+        rows,
+        vec![refused_row(
+            "shared-bytes",
+            "incompatible",
+            "clock-unknown",
+            "cap-left-tricky",
+            "cap-right-tricky",
+            "bytes",
+            "guest-direct-map",
+        )]
+    );
+    let (mut left, right) = pair();
+    left.source_meanings
+        .insert("census-direct-map".to_string(), "\u{200b}".to_string());
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+    assert_eq!(
+        rows,
+        vec![refused_row(
+            "shared-bytes",
+            "incompatible",
+            "source-meaning-change",
+            "cap-left-tricky",
+            "cap-right-tricky",
+            "bytes",
+            "guest-direct-map",
+        )]
+    );
 }

@@ -60,6 +60,7 @@ FAMILIES = {
     "unequal window/clock": [
         "unequal_window.json",
         "clock_mismatch.json",
+        "clock_unknown.json",
     ],
     "partial census": [
         "partial_census.json",
@@ -78,6 +79,8 @@ FAMILIES = {
         "invalid_window.json",
         "invalid_value.json",
         "invalid_value_blank_reason.json",
+        "invalid_meaning.json",
+        "invalid_clock.json",
     ],
 }
 
@@ -98,6 +101,7 @@ REASONS = (
     "source-mismatch",
     "source-meaning-unknown",
     "source-meaning-change",
+    "clock-unknown",
     "clock-mismatch",
     "window-mismatch",
     "partial-census",
@@ -106,6 +110,8 @@ REASONS = (
     "duplicate-metric",
     "invalid-window",
     "invalid-value",
+    "invalid-meaning",
+    "invalid-clock",
 )
 
 # Conclusion language that must never appear: a smaller
@@ -137,21 +143,46 @@ def metric_by_id(capture, metric_id):
     return None
 
 
+# ASCII whitespace for the shared blank definition:
+# space, tab, line feed, carriage return, vertical tab,
+# form feed.
+ASCII_WHITESPACE = " \t\n\r\x0b\x0c"
+
+
 def is_blank(value):
     """A meaning-carrying string counts as missing when it
-    is empty or whitespace-only."""
-    return value.strip() == ""
+    is empty or every character is ASCII whitespace. This
+    definition is shared verbatim with the Rust comparator
+    so both sides always agree."""
+    return value == "" or all(c in ASCII_WHITESPACE for c in value)
+
+
+def has_control(value):
+    """A string carries a control character when any
+    codepoint is U+0000-U+001F or U+007F-U+009F. This
+    definition is shared verbatim with the Rust comparator.
+    ASCII whitespace overlaps this range, so callers check
+    blankness first: a blank string is missing, never
+    malformed."""
+    return any("\x00" <= c <= "\x1f" or "\x7f" <= c <= "\x9f"
+               for c in value)
 
 
 def validate_capture(capture):
     """Independent input validation over one capture.
 
     Order within a capture: repeated metric id, backward
-    window, then value/reason pairing. A blank reason
-    (empty or whitespace-only) counts as missing, so a
-    null value with a blank reason refuses. Returns the
-    refusal reason, or None when the capture validates.
-    Callers validate the left capture before the right.
+    window, value/reason pairing, source meaning content,
+    then clock content. Blank means empty or
+    ASCII-whitespace-only; a control character means
+    U+0000-U+001F or U+007F-U+009F. A blank reason counts
+    as missing, so a null value with a blank reason
+    refuses; a non-blank reason with a control character
+    is malformed and refuses too. Meanings and clocks
+    with control characters refuse as invalid-meaning and
+    invalid-clock. Returns the refusal reason, or None
+    when the capture validates. Callers validate the left
+    capture before the right.
     """
     seen = set()
     for metric in capture["metrics"]:
@@ -169,6 +200,14 @@ def validate_capture(capture):
                 return "invalid-value"
         elif reason is None or is_blank(reason):
             return "invalid-value"
+        elif has_control(reason):
+            return "invalid-value"
+    for meaning in capture["source_meanings"].values():
+        if not is_blank(meaning) and has_control(meaning):
+            return "invalid-meaning"
+    clock = capture["window"]["clock_domain"]
+    if not is_blank(clock) and has_control(clock):
+        return "invalid-clock"
     return None
 
 
@@ -211,8 +250,11 @@ def expect_row(case, left, right, metric_id):
         return ("incompatible", "source-meaning-unknown", "absent")
     if left_meaning != right_meaning:
         return ("incompatible", "source-meaning-change", "absent")
-    if (left["window"]["clock_domain"]
-            != right["window"]["clock_domain"]):
+    left_clock = left["window"]["clock_domain"]
+    right_clock = right["window"]["clock_domain"]
+    if is_blank(left_clock) or is_blank(right_clock):
+        return ("incompatible", "clock-unknown", "absent")
+    if left_clock != right_clock:
         return ("incompatible", "clock-mismatch", "absent")
     if (left["window"]["start"] != right["window"]["start"]
             or left["window"]["end"] != right["window"]["end"]):
@@ -434,6 +476,7 @@ CHECK_ORDER = (
     "source-mismatch",
     "source-meaning-unknown",
     "source-meaning-change",
+    "clock-unknown",
     "clock-mismatch",
     "window-mismatch",
     "partial-census",
@@ -499,6 +542,8 @@ def break_check(reason, left, right):
         del right["source_meanings"]["census-direct-map"]
     elif reason == "source-meaning-change":
         right["source_meanings"]["census-direct-map"] = "meaning-2"
+    elif reason == "clock-unknown":
+        left["window"]["clock_domain"] = ""
     elif reason == "clock-mismatch":
         right["window"]["clock_domain"] = "guest_boottime_elapsed"
     elif reason == "window-mismatch":
@@ -558,6 +603,25 @@ def test_checks_run_in_documented_order():
     assert validate_capture(right) == "duplicate-metric"
     assert (validate_capture(left) or validate_capture(right)) \
         == "invalid-value"
+    # Malformed content refuses after the pairing rule: a
+    # bad value beats a bad meaning, which beats a bad
+    # clock, and the left capture still goes first.
+    left, right = base_pair()
+    left["metrics"][0]["value"] = None
+    left["metrics"][0]["value_reason"] = None
+    left["source_meanings"]["census-direct-map"] = "\x1c"
+    assert validate_capture(left) == "invalid-value"
+    left, right = base_pair()
+    left["source_meanings"]["census-direct-map"] = "\x1c"
+    left["window"]["clock_domain"] = "\x1c"
+    assert validate_capture(left) == "invalid-meaning"
+    left, right = base_pair()
+    left["window"]["clock_domain"] = "\x1c"
+    right["source_meanings"]["census-direct-map"] = "\x1c"
+    assert validate_capture(left) == "invalid-clock"
+    assert validate_capture(right) == "invalid-meaning"
+    assert (validate_capture(left) or validate_capture(right)) \
+        == "invalid-clock"
 
 
 def test_docs_table_follows_check_order():
@@ -624,3 +688,156 @@ def test_blank_value_reason_refuses_input():
     left, _right = base_pair()
     left["metrics"][0]["value_reason"] = ""
     assert validate_capture(left) == "invalid-value"
+
+
+def test_blank_clocks_are_unknown():
+    # A blank clock names no clock: empty or ASCII
+    # whitespace on either side, or both, refuses the
+    # metric as unknown with no delta. Two blank clocks
+    # are not a shared clock; blank against a changed
+    # clock is unknown, never a mismatch.
+    cases = [
+        ("", ""),
+        ("", "guest_monotonic_active"),
+        ("guest_monotonic_active", ""),
+        ("   ", "guest_monotonic_active"),
+        ("guest_monotonic_active", "\t"),
+        ("", "guest_boottime_elapsed"),
+    ]
+    for left_blank, right_blank in cases:
+        left, right = base_pair()
+        left["window"]["clock_domain"] = left_blank
+        right["window"]["clock_domain"] = right_blank
+        assert validate_capture(left) is None
+        assert validate_capture(right) is None
+        assert expect_row("blank-clock", left, right, "x") == (
+            "incompatible", "clock-unknown", "absent"), \
+            (left_blank, right_blank)
+
+
+# Tricky-string battery: (value, kind) with kind one of
+# "blank" (empty or ASCII-whitespace-only),
+# "malformed" (non-blank with a control character) or
+# "content" (anything else). The Rust suite carries this
+# same table in the same order under
+# tricky_string_battery_matches_oracle; both sides must
+# agree on every row, and the coupling test below pins
+# the shared literals.
+TRICKY_STRINGS = (
+    ("", "blank"),
+    ("   ", "blank"),
+    ("\t", "blank"),
+    ("\n", "blank"),
+    ("\x00", "malformed"),
+    ("\x1c", "malformed"),
+    ("\x1f", "malformed"),
+    ("\x7f", "malformed"),
+    ("\x9f", "malformed"),
+    ("a\x00b", "malformed"),
+    (" \x1c ", "malformed"),
+    ("\u00a0", "content"),
+    (" \u00a0", "content"),
+    ("a\u00a0b", "content"),
+    ("\u200b", "content"),
+    ("\ufeff", "content"),
+    ("\u200b\u200b", "content"),
+    ("a\u200bb", "content"),
+    ("meaning-1", "content"),
+)
+
+
+def test_tricky_string_battery():
+    for value, kind in TRICKY_STRINGS:
+        # Meaning position: blank is unknown per row,
+        # malformed refuses the whole input, content
+        # compares by equality (equal pairs keep delta 8).
+        left, right = base_pair()
+        left["source_meanings"]["census-direct-map"] = value
+        right["source_meanings"]["census-direct-map"] = value
+        if kind == "blank":
+            assert validate_capture(left) is None, repr(value)
+            assert validate_capture(right) is None, repr(value)
+            assert expect_row("tricky", left, right, "x") == (
+                "incompatible", "source-meaning-unknown",
+                "absent"), repr(value)
+        elif kind == "malformed":
+            assert validate_capture(left) == "invalid-meaning", \
+                repr(value)
+            assert validate_capture(right) == "invalid-meaning", \
+                repr(value)
+        else:
+            assert validate_capture(left) is None, repr(value)
+            assert validate_capture(right) is None, repr(value)
+            assert expect_row("tricky", left, right, "x") == (
+                "compatible", "compatible",
+                ("delta", 8)), repr(value)
+        # Clock position mirrors the meaning position:
+        # blank is unknown per row, malformed refuses the
+        # whole input, equal content keeps delta 8.
+        left, right = base_pair()
+        left["window"]["clock_domain"] = value
+        right["window"]["clock_domain"] = value
+        if kind == "blank":
+            assert validate_capture(left) is None, repr(value)
+            assert validate_capture(right) is None, repr(value)
+            assert expect_row("tricky", left, right, "x") == (
+                "incompatible", "clock-unknown", "absent"), \
+                repr(value)
+        elif kind == "malformed":
+            assert validate_capture(left) == "invalid-clock", \
+                repr(value)
+            assert validate_capture(right) == "invalid-clock", \
+                repr(value)
+        else:
+            assert validate_capture(left) is None, repr(value)
+            assert validate_capture(right) is None, repr(value)
+            assert expect_row("tricky", left, right, "x") == (
+                "compatible", "compatible",
+                ("delta", 8)), repr(value)
+        # Reason position with a null value: blank and
+        # malformed both refuse as invalid-value, while
+        # content (even invisible content) is a usable
+        # reason and yields a value-unknown row.
+        left, right = base_pair()
+        left["metrics"][0]["value"] = None
+        left["metrics"][0]["value_reason"] = value
+        if kind == "content":
+            assert validate_capture(left) is None, repr(value)
+            assert validate_capture(right) is None, repr(value)
+            assert expect_row("tricky", left, right, "x") == (
+                "compatible", "compatible",
+                ("null", "value-unknown")), repr(value)
+        else:
+            assert validate_capture(left) == "invalid-value", \
+                repr(value)
+    # One-sided malformed input refuses whichever side
+    # carries it; one-sided blank clocks stay unknown;
+    # invisible content still compares by equality.
+    left, right = base_pair()
+    right["source_meanings"]["census-direct-map"] = "\x1c"
+    assert validate_capture(right) == "invalid-meaning"
+    left, right = base_pair()
+    left["window"]["clock_domain"] = "\x1c"
+    assert validate_capture(left) == "invalid-clock"
+    left, right = base_pair()
+    right["window"]["clock_domain"] = ""
+    assert expect_row("tricky", left, right, "x") == (
+        "incompatible", "clock-unknown", "absent")
+    left, right = base_pair()
+    left["source_meanings"]["census-direct-map"] = "\u200b"
+    assert expect_row("tricky", left, right, "x") == (
+        "incompatible", "source-meaning-change", "absent")
+
+
+def test_rust_suite_covers_tricky_string_battery():
+    with open(RUST_TEST, encoding="utf-8") as handle:
+        suite = handle.read()
+    assert "tricky_string_battery_matches_oracle" in suite
+    # The battery literals in Rust escape spelling; every
+    # row of TRICKY_STRINGS above must appear on the Rust
+    # side or the two batteries drift apart.
+    for escape in (r'"\u{0}"', r'"\u{1c}"', r'"\u{1f}"',
+                   r'"\u{7f}"', r'"\u{9f}"', r'"\u{a0}"',
+                   r'"\u{200b}"', r'"\u{feff}"', r'"\t"',
+                   r'"\n"', r'"a\x00b"'):
+        assert escape in suite, "rust battery lacks %s" % escape

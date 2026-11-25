@@ -23,9 +23,9 @@ use std::collections::BTreeMap;
 /// One observed metric inside a persisted capture.
 ///
 /// `value` is `None` exactly when the metric is unknown; then
-/// `value_reason` names why with a non-blank reason.
-/// Unknown is never zero, and a blank reason explains
-/// nothing.
+/// `value_reason` names why with a non-blank reason free of
+/// control characters. Unknown is never zero, and a blank
+/// reason explains nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Metric {
     pub metric_id: String,
@@ -159,21 +159,27 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 ///
 /// Both captures validate first: the left capture, then the
 /// right, each for a repeated metric id, a backward window,
-/// then value/reason pairing. A blank string is invalid
-/// everywhere it carries meaning: empty or whitespace-only
-/// counts as missing where its content is interpreted, so
-/// a blank reason refuses as `invalid-value` and a blank
-/// source meaning refuses its row as unknown. An invalid
-/// input refuses the whole comparison with [`InputRefusal`]
-/// and no rows.
+/// value/reason pairing, source meaning content, then clock
+/// content. Blank means empty or ASCII-whitespace-only, and
+/// a control character means U+0000-U+001F or U+007F-U+009F;
+/// both definitions are shared verbatim with the Python
+/// oracle. A blank string counts as missing where its content
+/// is interpreted, so a blank reason refuses as
+/// `invalid-value` while a blank source meaning or clock
+/// refuses its row as unknown. A non-blank string with a
+/// control character is malformed input: meanings refuse as
+/// `invalid-meaning`, clocks as `invalid-clock`, reasons as
+/// `invalid-value`. An invalid input refuses the whole
+/// comparison with [`InputRefusal`] and no rows.
 ///
 /// Row order is stable: left-capture order first, then metrics
 /// seen only on the right. The first failing compatibility
 /// check names the reason, in this order: metric presence,
 /// unit, scope, legacy input, epoch, device binding, profile,
 /// workload, per-side source, source meaning availability,
-/// source meaning, clock domain, window, census completeness,
-/// then value availability for the delta itself.
+/// source meaning, clock availability, clock domain, window,
+/// census completeness, then value availability for the delta
+/// itself.
 pub fn compare_captures(left: &Capture, right: &Capture) -> Result<Vec<Comparison>, InputRefusal> {
     validate_capture(left)?;
     validate_capture(right)?;
@@ -196,9 +202,26 @@ fn refuse_input(reason: &str) -> InputRefusal {
 }
 
 /// A meaning-carrying string counts as missing when it is
-/// empty or whitespace-only.
+/// empty or every character is ASCII whitespace: space, tab,
+/// line feed, carriage return, vertical tab or form feed.
+/// This definition is shared verbatim with the Python oracle
+/// so both sides always agree.
 fn is_blank(value: &str) -> bool {
-    value.trim().is_empty()
+    value.is_empty()
+        || value
+            .chars()
+            .all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c'))
+}
+
+/// A string carries a control character when any codepoint is
+/// U+0000-U+001F or U+007F-U+009F. This definition is shared
+/// verbatim with the Python oracle. ASCII whitespace overlaps
+/// this range, so callers check blankness first: a blank
+/// string is missing, never malformed.
+fn has_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|c| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
 }
 
 fn validate_capture(capture: &Capture) -> Result<(), InputRefusal> {
@@ -215,9 +238,17 @@ fn validate_capture(capture: &Capture) -> Result<(), InputRefusal> {
     for metric in capture.metrics.iter() {
         match (metric.value, metric.value_reason.as_deref()) {
             (Some(_), None) => {}
-            (None, Some(reason)) if !is_blank(reason) => {}
+            (None, Some(reason)) if !is_blank(reason) && !has_control(reason) => {}
             _ => return Err(refuse_input("invalid-value")),
         }
+    }
+    for meaning in capture.source_meanings.values() {
+        if !is_blank(meaning) && has_control(meaning) {
+            return Err(refuse_input("invalid-meaning"));
+        }
+    }
+    if !is_blank(&capture.clock_domain) && has_control(&capture.clock_domain) {
+        return Err(refuse_input("invalid-clock"));
     }
     Ok(())
 }
@@ -349,6 +380,17 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             metric_id,
             "incompatible",
             "source-meaning-change",
+            left,
+            right,
+            &left_metric.unit,
+            &left_metric.scope,
+        );
+    }
+    if is_blank(&left.clock_domain) || is_blank(&right.clock_domain) {
+        return refused(
+            metric_id,
+            "incompatible",
+            "clock-unknown",
             left,
             right,
             &left_metric.unit,
