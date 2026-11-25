@@ -41,6 +41,7 @@ static bool mv_ready;
 static bool mv_started;
 static bool mv_uncertain;
 static bool mv_queue_shared;
+static bool mv_owned_shared;
 static unsigned int mv_count;
 static struct mv_record mv_records[MV_EXPOSURE_MAX_RECORDS];
 
@@ -84,6 +85,8 @@ static int mv_share(void)
 		mv_append(false, false, mv_exposure_oracle_pages, rc);
 		owned_touched = true;
 		owned_proved = false;
+		if (!rc)
+			mv_owned_shared = true;
 	}
 	if (rc) {
 		if (owned_touched) {
@@ -110,6 +113,9 @@ static int mv_share(void)
 /* The caller holds mv_lock; the entire owned allocation needs a successful
  * restore. The persistent queue buffer intentionally stays shared: it is
  * restored only at unload, after the owned region is proved private.
+ * Exactly one restore is attempted: success proves the owned region
+ * private and releases the module reference, while failure quarantines
+ * it (the reference is retained and the pages are never freed).
  */
 static int mv_restore_owned(void)
 {
@@ -117,6 +123,7 @@ static int mv_restore_owned(void)
 				      mv_exposure_oracle_pages);
 
 	mv_append(false, true, mv_exposure_oracle_pages, rc);
+	mv_owned_shared = false;
 	if (!rc) {
 		mv_uncertain = false;
 		module_put(THIS_MODULE);
@@ -138,7 +145,7 @@ static int mv_command_set(const char *value, const struct kernel_param *kp)
 	}
 	if (sysfs_streq(value, "share") && !mv_started) {
 		rc = mv_share();
-	} else if (sysfs_streq(value, "restore") && mv_count == 2) {
+	} else if (sysfs_streq(value, "restore") && mv_owned_shared) {
 		rc = mv_restore_owned();
 	}
 out:
@@ -213,14 +220,20 @@ static void __exit mv_exposure_oracle_exit(void)
 		mv_queue = NULL;
 		mv_owned = NULL;
 	} else if (mv_owned && !mv_uncertain) {
-		/* Owned is proved private; restore the persistent buffer
-		 * before freeing. A failed restore quarantines both
-		 * regions: they stay shared and are never freed, rather
-		 * than freeing unproved-private pages.
+		/* Owned is proved private; restore the persistent buffer,
+		 * but only if it is still shared. A failed restore
+		 * quarantines both regions: they stay shared and are never
+		 * freed, rather than freeing unproved-private pages.
+		 * Converting an already-private buffer would touch pages
+		 * twice, so the shared flag gates this step.
 		 */
-		rc = set_memory_encrypted((unsigned long)mv_queue,
-					  MV_EXPOSURE_QUEUE_PAGES);
-		if (!rc) {
+		if (mv_queue_shared) {
+			rc = set_memory_encrypted((unsigned long)mv_queue,
+						  MV_EXPOSURE_QUEUE_PAGES);
+			if (!rc)
+				mv_queue_shared = false;
+		}
+		if (!mv_queue_shared) {
 			free_pages_exact(mv_queue,
 					 (size_t)MV_EXPOSURE_QUEUE_PAGES * PAGE_SIZE);
 			free_pages_exact(mv_owned,

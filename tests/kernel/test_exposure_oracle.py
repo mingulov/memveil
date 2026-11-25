@@ -323,6 +323,41 @@ class ConcurrentShare(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class SafetyMutations(unittest.TestCase):
+    def test_safety_mutations_are_detected(self):
+        source = (ROOT / 'memveil_exposure_oracle.c').read_text()
+        quarantine_body = '''int main(void) {
+            mv_exposure_oracle_arm=true; mv_exposure_oracle_epoch=1;
+            dec_owned_rc=-EIO; enc_owned_rc=-EIO; enc_queue_rc=0;
+            assert(!mv_exposure_oracle_init());
+            assert(mv_command_set("share", NULL) == -EIO);
+            assert(refs == 1 && calls == 4 && mv_uncertain);
+            mv_exposure_oracle_exit(); assert(!frees && owned && queue);
+            return 0;
+        }'''
+        recovered_body = '''int main(void) {
+            mv_exposure_oracle_arm=true; mv_exposure_oracle_epoch=1;
+            dec_queue_rc=-EIO; enc_queue_rc=0;
+            assert(!mv_exposure_oracle_init());
+            assert(mv_command_set("share", NULL) == -EIO);
+            assert(refs == 0 && calls == 2);
+            mv_exposure_oracle_exit(); assert(calls == 2 && frees == 2);
+            return 0;
+        }'''
+        mutations = [('mv_owned && !mv_uncertain', 'mv_owned', quarantine_body),
+                     ('if (mv_queue_shared) {', 'if (1) {', recovered_body),
+                     ('GFP_KERNEL | __GFP_ZERO', 'GFP_KERNEL', recovered_body)]
+        with tempfile.TemporaryDirectory() as tmp:
+            for old, new, body in mutations:
+                with self.subTest(mutation=old):
+                    self.assertIn(old, source)
+                    path = Path(tmp) / 'mutant.c'
+                    path.write_text(source.replace(old, new, 1))
+                    result = compile_run(body, source=path)
+                    self.assertNotEqual(result.returncode, 0, old)
+                    self.assertIn('Assertion', result.stderr)
+
+
 class SourceHygiene(unittest.TestCase):
     def test_no_address_logging(self):
         source = (ROOT / 'memveil_exposure_oracle.c').read_text()
