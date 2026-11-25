@@ -92,5 +92,5 @@ its admitted reference cell.
 Session, event and report 0.3.0 plus standalone policy
 0.1.0 are reserved for this milestone; no schema files
 ship yet and current readers refuse them. See
-[format compatibility](format-compatibility.md) and the
-[schema notes](../schemas/README.md).
+[format compatibility](format-compatibility.md) for the
+reservation table.
