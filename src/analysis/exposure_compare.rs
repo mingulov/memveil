@@ -166,8 +166,11 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 /// oracle. A blank string counts as missing where its content
 /// is interpreted, so a blank reason refuses as
 /// `invalid-value` while a blank source meaning or clock
-/// refuses its row as unknown. A non-blank string with a
-/// control character is malformed input: meanings refuse as
+/// refuses its row as unknown. A unit outside the frozen
+/// vocabulary (`bytes`, `unknown`) — a blank unit
+/// included — likewise refuses its row as `unit-unknown`
+/// with no delta. A non-blank string with a control
+/// character is malformed input: meanings refuse as
 /// `invalid-meaning`, clocks as `invalid-clock`, reasons as
 /// `invalid-value`. An invalid input refuses the whole
 /// comparison with [`InputRefusal`] and no rows.
@@ -175,11 +178,11 @@ fn find_metric<'m>(capture: &'m Capture, id: &str) -> Option<&'m Metric> {
 /// Row order is stable: left-capture order first, then metrics
 /// seen only on the right. The first failing compatibility
 /// check names the reason, in this order: metric presence,
-/// unit, scope, legacy input, epoch, device binding, profile,
-/// workload, per-side source, source meaning availability,
-/// source meaning, clock availability, clock domain, window,
-/// census completeness, then value availability for the delta
-/// itself.
+/// unit availability, unit, scope, legacy input, epoch,
+/// device binding, profile, workload, per-side source,
+/// source meaning availability, source meaning, clock
+/// availability, clock domain, window, census completeness,
+/// then value availability for the delta itself.
 pub fn compare_captures(left: &Capture, right: &Capture) -> Result<Vec<Comparison>, InputRefusal> {
     validate_capture(left)?;
     validate_capture(right)?;
@@ -222,6 +225,15 @@ fn has_control(value: &str) -> bool {
     value
         .chars()
         .any(|c| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
+}
+
+/// Frozen unit vocabulary from the exposure catalog:
+/// only these labels compare; anything else (a blank
+/// label included) records no unit.
+const KNOWN_UNITS: [&str; 2] = ["bytes", "unknown"];
+
+fn is_known_unit(unit: &str) -> bool {
+    KNOWN_UNITS.contains(&unit)
 }
 
 fn validate_capture(capture: &Capture) -> Result<(), InputRefusal> {
@@ -268,6 +280,17 @@ fn compare_metric(left: &Capture, right: &Capture, metric_id: &str) -> Compariso
             &shape.scope,
         );
     };
+    if !is_known_unit(&left_metric.unit) || !is_known_unit(&right_metric.unit) {
+        return refused(
+            metric_id,
+            "incompatible",
+            "unit-unknown",
+            left,
+            right,
+            &left_metric.unit,
+            &left_metric.scope,
+        );
+    }
     if left_metric.unit != right_metric.unit {
         return refused(
             metric_id,

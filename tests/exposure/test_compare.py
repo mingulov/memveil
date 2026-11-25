@@ -73,6 +73,7 @@ FAMILIES = {
     ],
     "metric shape": [
         "metric_shape.json",
+        "unit_unknown.json",
     ],
     "invalid input": [
         "duplicate_metric.json",
@@ -91,6 +92,7 @@ FAMILIES = {
 REASONS = (
     "compatible",
     "metric-missing",
+    "unit-unknown",
     "unit-mismatch",
     "scope-mismatch",
     "legacy-input",
@@ -221,12 +223,21 @@ def expect_compatible(left_metric, right_metric):
     return delta, None
 
 
+# Frozen unit vocabulary from the exposure
+# catalog: only these labels compare; anything else
+# (a blank label included) records no unit.
+KNOWN_UNITS = ("bytes", "unknown")
+
+
 def expect_row(case, left, right, metric_id):
     """Independent compatibility predicate over one metric."""
     left_metric = metric_by_id(left, metric_id)
     right_metric = metric_by_id(right, metric_id)
     if left_metric is None or right_metric is None:
         return ("unavailable", "metric-missing", "absent")
+    if (left_metric["unit"] not in KNOWN_UNITS
+            or right_metric["unit"] not in KNOWN_UNITS):
+        return ("incompatible", "unit-unknown", "absent")
     if left_metric["unit"] != right_metric["unit"]:
         return ("incompatible", "unit-mismatch", "absent")
     if left_metric["scope"] != right_metric["scope"]:
@@ -466,6 +477,7 @@ def test_rust_suite_covers_every_fixture():
 # this same sequence.
 CHECK_ORDER = (
     "metric-missing",
+    "unit-unknown",
     "unit-mismatch",
     "scope-mismatch",
     "legacy-input",
@@ -521,6 +533,8 @@ def break_check(reason, left, right):
     metric = right["metrics"][0]
     if reason == "metric-missing":
         right["metrics"] = []
+    elif reason == "unit-unknown":
+        left["metrics"][0]["unit"] = ""
     elif reason == "unit-mismatch":
         metric["unit"] = "unknown"
     elif reason == "scope-mismatch":
@@ -713,6 +727,56 @@ def test_blank_clocks_are_unknown():
         assert expect_row("blank-clock", left, right, "x") == (
             "incompatible", "clock-unknown", "absent"), \
             (left_blank, right_blank)
+
+
+def test_blank_units_are_unknown():
+    # A blank unit names no unit: empty or ASCII
+    # whitespace on either side, or both, refuses the
+    # metric as unknown with no delta. Two blank units
+    # are not a shared unit; blank against a changed
+    # unit is unknown, never a mismatch.
+    cases = [
+        ("", ""),
+        ("", "bytes"),
+        ("bytes", ""),
+        ("   ", "bytes"),
+        ("bytes", "\t"),
+        ("", "unknown"),
+    ]
+    for left_blank, right_blank in cases:
+        left, right = base_pair()
+        left["metrics"][0]["unit"] = left_blank
+        right["metrics"][0]["unit"] = right_blank
+        assert validate_capture(left) is None
+        assert validate_capture(right) is None
+        assert expect_row("blank-unit", left, right, "x") == (
+            "incompatible", "unit-unknown", "absent"), \
+            (left_blank, right_blank)
+
+
+def test_unlisted_units_are_unknown():
+    # A unit outside the frozen vocabulary (bytes,
+    # unknown) records no unit even when both sides
+    # agree on the label: the metric refuses as
+    # unknown with no delta. A control character in a
+    # unit never refuses the whole input here; the
+    # future capture reader owns malformed refusal.
+    cases = [
+        ("counts", "counts"),
+        ("counts", "bytes"),
+        ("bytes", "counts"),
+        ("\x1c", "\x1c"),
+        ("bytes", "a\x00b"),
+    ]
+    for left_unit, right_unit in cases:
+        left, right = base_pair()
+        left["metrics"][0]["unit"] = left_unit
+        right["metrics"][0]["unit"] = right_unit
+        assert validate_capture(left) is None
+        assert validate_capture(right) is None
+        assert expect_row("unit-unknown", left, right, "x") == (
+            "incompatible", "unit-unknown", "absent"), \
+            (left_unit, right_unit)
 
 
 # Tricky-string battery: (value, kind) with kind one of

@@ -797,6 +797,173 @@ fn missing_unit_and_scope_shapes_refuse() {
     );
 }
 
+// case: unit-unknown
+#[test]
+fn blank_and_unlisted_units_refuse_their_metrics() {
+    let left = capture(
+        "cap-left-030",
+        "idle-snapshot",
+        41,
+        "snp-guest-01",
+        vec![
+            ("census-direct-map", "meaning-1"),
+            ("queue-ledger", "meaning-1"),
+            ("tally-ledger", "meaning-1"),
+        ],
+        1000,
+        2000,
+        "guest_monotonic_active",
+        false,
+        false,
+        vec![
+            metric(
+                "shared-bytes",
+                Some(1),
+                None,
+                "",
+                "guest-direct-map",
+                "census-direct-map",
+                true,
+            ),
+            metric(
+                "queue-count",
+                Some(4),
+                None,
+                "bytes",
+                "guest-driver-virtio",
+                "queue-ledger",
+                false,
+            ),
+            metric(
+                "tally-events",
+                Some(4),
+                None,
+                "counts",
+                "guest-driver-virtio",
+                "queue-ledger",
+                false,
+            ),
+            metric(
+                "heap-retained",
+                Some(7),
+                None,
+                "bytes",
+                "guest-kernel-allocator",
+                "tally-ledger",
+                false,
+            ),
+        ],
+    );
+    let mut right = left.clone();
+    right.evidence_id = "cap-right-030".to_string();
+    right.metrics[0].value = Some(9);
+    right.metrics[1].value = Some(6);
+    right.metrics[1].unit = "   ".to_string();
+    right.metrics[2].value = Some(6);
+    right.metrics[3].value = Some(9);
+    let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+    assert_eq!(
+        rows,
+        vec![
+            refused_row(
+                "shared-bytes",
+                "incompatible",
+                "unit-unknown",
+                "cap-left-030",
+                "cap-right-030",
+                "",
+                "guest-direct-map",
+            ),
+            refused_row(
+                "queue-count",
+                "incompatible",
+                "unit-unknown",
+                "cap-left-030",
+                "cap-right-030",
+                "bytes",
+                "guest-driver-virtio",
+            ),
+            refused_row(
+                "tally-events",
+                "incompatible",
+                "unit-unknown",
+                "cap-left-030",
+                "cap-right-030",
+                "counts",
+                "guest-driver-virtio",
+            ),
+            compatible_row(
+                "heap-retained",
+                "cap-left-030",
+                "cap-right-030",
+                Some(2),
+                None,
+                "bytes",
+                "guest-kernel-allocator",
+            ),
+        ]
+    );
+}
+
+#[test]
+fn unlisted_units_refuse_without_input_refusal() {
+    // A unit outside the frozen vocabulary refuses its
+    // metric as unknown even when both sides agree on
+    // the label; a control character in a unit never
+    // refuses the whole input here.
+    let pair = |left_unit: &str, right_unit: &str| {
+        let left = capture(
+            "cap-left-031",
+            "idle-snapshot",
+            41,
+            "snp-guest-01",
+            standard_meanings(),
+            1000,
+            2000,
+            "guest_monotonic_active",
+            false,
+            false,
+            vec![metric(
+                "shared-bytes",
+                Some(1),
+                None,
+                left_unit,
+                "guest-direct-map",
+                "census-direct-map",
+                false,
+            )],
+        );
+        let mut right = left.clone();
+        right.evidence_id = "cap-right-031".to_string();
+        right.metrics[0].unit = right_unit.to_string();
+        right.metrics[0].value = Some(9);
+        (left, right)
+    };
+    for (left_unit, right_unit) in [
+        ("counts", "counts"),
+        ("counts", "bytes"),
+        ("bytes", "counts"),
+        ("\u{1c}", "\u{1c}"),
+        ("bytes", "a\x00b"),
+    ] {
+        let (left, right) = pair(left_unit, right_unit);
+        let rows = compare_captures(&left, &right).expect("valid comparison inputs");
+        assert_eq!(
+            rows,
+            vec![refused_row(
+                "shared-bytes",
+                "incompatible",
+                "unit-unknown",
+                "cap-left-031",
+                "cap-right-031",
+                left_unit,
+                "guest-direct-map",
+            )],
+            "units {left_unit:?} vs {right_unit:?}"
+        );
+    }
+}
+
 #[test]
 fn overflowing_delta_stays_compatible_without_value() {
     let left = capture(
@@ -1812,6 +1979,17 @@ fn predicate_order_holds_across_new_checks() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].compatibility, "incompatible");
     assert_eq!(rows[0].reason, "clock-unknown");
+    assert_eq!(rows[0].delta, None);
+    // An unknown unit beats a unit mismatch: a blank
+    // unit names no unit to compare.
+    let mut unknown_unit = left.clone();
+    unknown_unit.metrics[0].unit.clear();
+    let mut mismatch_right = left.clone();
+    mismatch_right.metrics[0].unit = "unknown".to_string();
+    let rows = compare_captures(&unknown_unit, &mismatch_right).expect("valid comparison inputs");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].compatibility, "incompatible");
+    assert_eq!(rows[0].reason, "unit-unknown");
     assert_eq!(rows[0].delta, None);
 }
 
