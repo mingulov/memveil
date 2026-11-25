@@ -1381,6 +1381,97 @@ pub fn verify_sealed_snapshot(text: &str) -> Result<SealReport, SealError> {
     })
 }
 
+/// One evidence identity replayed from sealed snapshot lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedEvidenceKey {
+    /// Session-unique evidence handle.
+    pub evidence_id: String,
+    /// Catalog source entry.
+    pub source_id: String,
+    /// Measurement epoch.
+    pub epoch: u64,
+}
+
+/// Replay exposure-fact identities from the sealed lines only.
+///
+/// Lines of other kinds carry no evidence identities and are
+/// skipped. Callers check [`verify_sealed_snapshot`] first; replay
+/// itself refuses unparseable lines and fact lines without a
+/// well-formed identity rather than dropping evidence silently.
+pub fn sealed_evidence_keys(text: &str) -> Result<Vec<SealedEvidenceKey>, SealError> {
+    let value = parse_value(text).map_err(|err| SealError::new(err.what, err.message))?;
+    let JsonValue::Object(top) = &value else {
+        return Err(SealError::new("snapshot", "expected object"));
+    };
+    let Some(JsonValue::Array(lines)) = find_field(top, "event_lines") else {
+        return Err(SealError::new("event_lines", "expected array"));
+    };
+    let mut keys = Vec::new();
+    for line in lines {
+        let JsonValue::Str(text) = line else {
+            return Err(SealError::new("event_lines", "expected string lines"));
+        };
+        let value = parse_value(text).map_err(|err| SealError::new(err.what, err.message))?;
+        let JsonValue::Object(fields) = &value else {
+            return Err(SealError::new("event_lines", "expected object lines"));
+        };
+        let Some(JsonValue::Str(kind)) = find_field(fields, "kind") else {
+            return Err(SealError::new("kind", "expected string"));
+        };
+        if kind != EXPOSURE_FACT_KIND {
+            continue;
+        }
+        let Some(JsonValue::Object(data)) = find_field(fields, "data") else {
+            return Err(SealError::new("data", "expected object"));
+        };
+        let Some(JsonValue::Str(evidence_id)) = find_field(data, "evidence_id") else {
+            return Err(SealError::new("evidence_id", "expected string"));
+        };
+        let Some(JsonValue::Str(source_id)) = find_field(data, "source_id") else {
+            return Err(SealError::new("source_id", "expected string"));
+        };
+        let Some(JsonValue::Str(epoch)) = find_field(data, "epoch") else {
+            return Err(SealError::new("epoch", "expected string"));
+        };
+        if !is_canonical_u64(epoch) {
+            return Err(SealError::new("epoch", "non-canonical u64"));
+        }
+        let epoch = epoch
+            .parse::<u64>()
+            .map_err(|_| SealError::new("epoch", "non-canonical u64"))?;
+        keys.push(SealedEvidenceKey {
+            evidence_id: evidence_id.clone(),
+            source_id: source_id.clone(),
+            epoch,
+        });
+    }
+    Ok(keys)
+}
+
+/// Read the session terminal-channel status from a snapshot.
+///
+/// The status names the snapshot's own settlement; callers compare
+/// it against the settled label rather than assuming it.
+pub fn snapshot_terminal_status(text: &str) -> Result<String, SealError> {
+    let value = parse_value(text).map_err(|err| SealError::new(err.what, err.message))?;
+    let JsonValue::Object(top) = &value else {
+        return Err(SealError::new("snapshot", "expected object"));
+    };
+    let Some(JsonValue::Object(session)) = find_field(top, "session") else {
+        return Err(SealError::new("session", "expected object"));
+    };
+    let Some(JsonValue::Object(quality)) = find_field(session, "quality") else {
+        return Err(SealError::new("quality", "expected object"));
+    };
+    let Some(JsonValue::Object(terminal)) = find_field(quality, "terminal") else {
+        return Err(SealError::new("terminal", "expected object"));
+    };
+    let Some(JsonValue::Str(status)) = find_field(terminal, "status") else {
+        return Err(SealError::new("terminal", "expected status"));
+    };
+    Ok(status.clone())
+}
+
 /// Re-render a parsed integrity object for the seal parser.
 fn render_ordered_for_seal(
     fields: &[(String, JsonValue)],

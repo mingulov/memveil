@@ -20,7 +20,10 @@ use exposure::{
     is_exposure_version,
 };
 use exposure_quality::RuleOutcome;
-use exposure_records::{EvidenceKey, check_evidence_keys, verify_sealed_snapshot};
+use exposure_records::{
+    EvidenceKey, check_evidence_keys, sealed_evidence_keys, snapshot_terminal_status,
+    verify_sealed_snapshot,
+};
 
 const SEALED: &str = include_str!("exposure/fixtures/contracts/sealed_snapshot.json");
 const UNSEALED: &str = include_str!("exposure/fixtures/contracts/unsealed_snapshot.json");
@@ -39,22 +42,35 @@ fn keys_of(facts: &[ExposureFact]) -> Vec<EvidenceKey<'_>> {
         .collect()
 }
 
+fn borrowed(keys: &[exposure_records::SealedEvidenceKey]) -> Vec<EvidenceKey<'_>> {
+    keys.iter()
+        .map(|key| EvidenceKey {
+            evidence_id: key.evidence_id.as_str(),
+            source_id: key.source_id.as_str(),
+            epoch: key.epoch,
+        })
+        .collect()
+}
+
 #[test]
 fn unsealed_snapshot_cannot_satisfy_rule() {
     let sealed = verify_sealed_snapshot(SEALED).expect("positive control seals");
     assert!(sealed.verified);
+    let terminal = snapshot_terminal_status(SEALED).expect("control carries terminal");
+    assert_eq!(terminal, "complete_for_scope");
     let outcome = exposure_quality::rule_outcome(
         sealed.verified,
-        "complete_for_scope",
+        &terminal,
         &[("sharing-census", "available", true)],
     );
     assert_eq!(outcome, RuleOutcome::Satisfied);
 
     let unsealed = verify_sealed_snapshot(UNSEALED).expect("unsealed parses");
     assert!(!unsealed.verified);
+    let terminal = snapshot_terminal_status(UNSEALED).expect("unsealed carries terminal");
     let outcome = exposure_quality::rule_outcome(
         unsealed.verified,
-        "complete_for_scope",
+        &terminal,
         &[("sharing-census", "available", true)],
     );
     assert_eq!(outcome, RuleOutcome::Inconclusive);
@@ -86,25 +102,47 @@ fn duplicate_source_and_cross_epoch_evidence_rejected() {
     let err = check_evidence_keys(&keys_of(&mixed)).unwrap_err();
     assert_eq!(err.what, "source_id");
 
-    assert!(verify_sealed_snapshot(DUPLICATE).is_ok());
-    assert!(verify_sealed_snapshot(CROSS_EPOCH).is_ok());
+    let control = verify_sealed_snapshot(SEALED).expect("positive control seals");
+    assert!(control.verified);
+    let owned = sealed_evidence_keys(SEALED).expect("control replays");
+    assert!(!owned.is_empty(), "control carries fact identities");
+    check_evidence_keys(&borrowed(&owned)).unwrap();
+
+    let report = verify_sealed_snapshot(DUPLICATE).expect("duplicate seals");
+    assert!(report.verified);
+    let owned = sealed_evidence_keys(DUPLICATE).expect("duplicate replays");
+    assert!(owned.len() >= 2, "duplicate carries two identities");
+    let err = check_evidence_keys(&borrowed(&owned)).unwrap_err();
+    assert_eq!(err.what, "evidence_id");
+
+    let report = verify_sealed_snapshot(CROSS_EPOCH).expect("mixed epochs seal");
+    assert!(report.verified);
+    let owned = sealed_evidence_keys(CROSS_EPOCH).expect("mixed epochs replay");
+    assert!(owned.len() >= 2, "mixed epochs carry two identities");
+    let err = check_evidence_keys(&borrowed(&owned)).unwrap_err();
+    assert_eq!(err.what, "source_id");
 }
 
 #[test]
 fn missing_terminal_evidence_is_partial() {
     let settled = verify_sealed_snapshot(SEALED).expect("positive control seals");
+    let terminal = snapshot_terminal_status(SEALED).expect("control carries terminal");
+    assert_eq!(terminal, "complete_for_scope");
     let outcome = exposure_quality::rule_outcome(
         settled.verified,
-        "complete_for_scope",
+        &terminal,
         &[("sharing-census", "available", true)],
     );
     assert_eq!(outcome, RuleOutcome::Satisfied);
 
     let unsettled = verify_sealed_snapshot(MISSING_TERMINAL).expect("partial parses");
     assert!(unsettled.verified, "partial evidence still seals");
+    let terminal =
+        snapshot_terminal_status(MISSING_TERMINAL).expect("partial carries terminal");
+    assert_ne!(terminal, "complete_for_scope");
     let outcome = exposure_quality::rule_outcome(
         unsettled.verified,
-        "unavailable",
+        &terminal,
         &[("sharing-census", "available", true)],
     );
     assert_eq!(outcome, RuleOutcome::Partial);
