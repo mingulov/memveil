@@ -1924,13 +1924,13 @@ mod tests {
     }
 
     fn policy_doc(rules: &str, exceptions: &str) -> String {
-    format!(
-        "{{\"schema\":\"policy\",\"schema_version\":\"0.1.0\",\"policy_id\":\"p\",\
+        format!(
+            "{{\"schema\":\"policy\",\"schema_version\":\"0.1.0\",\"policy_id\":\"p\",\
         \"subject_scope\":\"s\",\"applies_to\":{{\"platform\":\"ordinary-linux\",\
         \"profile\":\"p\"}},\"required_sources\":[\"sharing-census\"],\
         \"clock\":\"guest_monotonic_active\",\"role_bindings\":{{}},\
         \"rules\":[{rules}],\"exceptions\":[{exceptions}]}}"
-    )
+        )
     }
 
     #[test]
@@ -1951,8 +1951,7 @@ mod tests {
         let many_rules = vec![rule; POLICY_FILE_MAX_RULES + 1].join(",");
         let err = parse_policy_file(&policy_doc(&many_rules, "")).unwrap_err();
         assert_eq!(err.what, "rules");
-        let many_exceptions =
-            vec![exception; POLICY_FILE_MAX_EXCEPTIONS_PER_RULE + 1].join(",");
+        let many_exceptions = vec![exception; POLICY_FILE_MAX_EXCEPTIONS_PER_RULE + 1].join(",");
         let err = parse_policy_file(&policy_doc(rule, &many_exceptions)).unwrap_err();
         assert_eq!(err.what, "exceptions");
         let capped = vec![exception; POLICY_FILE_MAX_EXCEPTIONS_PER_RULE].join(",");

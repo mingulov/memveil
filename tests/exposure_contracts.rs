@@ -138,8 +138,7 @@ fn missing_terminal_evidence_is_partial() {
 
     let unsettled = verify_sealed_snapshot(MISSING_TERMINAL).expect("partial parses");
     assert!(unsettled.verified, "partial evidence still seals");
-    let terminal =
-        snapshot_terminal_status(MISSING_TERMINAL).expect("partial carries terminal");
+    let terminal = snapshot_terminal_status(MISSING_TERMINAL).expect("partial carries terminal");
     assert_ne!(terminal, "complete_for_scope");
     let outcome = exposure_quality::rule_outcome(
         unsettled.verified,
@@ -254,10 +253,7 @@ fn tampered_bytes_fail_the_seal() {
 
 #[test]
 fn policy_file_bounds_match_published_limits() {
-    assert_eq!(
-        exposure_records::POLICY_FILE_MAX_BYTES,
-        POLICY_MAX_BYTES
-    );
+    assert_eq!(exposure_records::POLICY_FILE_MAX_BYTES, POLICY_MAX_BYTES);
     assert_eq!(exposure_records::POLICY_FILE_MAX_RULES, POLICY_MAX_RULES);
     assert_eq!(
         exposure_records::POLICY_FILE_MAX_EXCEPTIONS_PER_RULE,
