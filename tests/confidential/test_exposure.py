@@ -305,6 +305,16 @@ class DistinguishingContentTests(unittest.TestCase):
                        if token in after
                        and before[token]["generation"] != after[token]["generation"]]
         self.assertTrue(reused, "spec-04 needs a token reused under a new generation")
+        for case_id, token in reused:
+            steps = [step for step in self.cases[case_id]["control_flow"]
+                     if step["object"] == token]
+            text = " ".join(f'{step["action"]} {step["operation"]}'
+                            for step in steps)
+            for marker in ("teardown", "reoffer", "overlap"):
+                self.assertIn(
+                    marker, text,
+                    f"spec-04 needs a {marker} step for reused token "
+                    f"{token} in {case_id}, not just a generation change")
 
     def test_spec_06_pairs_equal_metadata_with_different_protection(self):
         case = self.cases["mapping-dax-inventory"]
@@ -318,6 +328,19 @@ class DistinguishingContentTests(unittest.TestCase):
                     pairs.append((left["object_token"], right["object_token"]))
         self.assertTrue(pairs, "spec-06 needs a pair with equal pages and generation "
                                "but different protection outcomes")
+        protection = [step for step in case["control_flow"]
+                      if "protection" in step["action"]]
+        self.assertTrue(protection, "spec-06 needs a protection step establishing "
+                                    "the pair difference, not just different "
+                                    "lifecycle statuses")
+        for step in protection:
+            self.assertNotEqual(step["native_result"], 0,
+                                "the protection step must record a refusal result")
+        protected = {step["object"] for step in protection}
+        self.assertTrue(any(left in protected or right in protected
+                            for left, right in pairs),
+                        "the differing pair must be the subject of the "
+                        "protection step")
         for step in case["control_flow"]:
             self.assertNotIn("payload", step["action"])
 
@@ -329,6 +352,10 @@ class DistinguishingContentTests(unittest.TestCase):
         self.assertTrue(all(step["object"] == "none" for step in modeled),
                         "the modeled host read itself observes no object")
         after = {entry["object_token"]: entry for entry in case["after_ledger"]}
+        observed = {}
+        for step in case["control_flow"]:
+            if step["object"] != "none":
+                observed.setdefault(step["object"], []).append(step)
         pairs = 0
         for token, entry in after.items():
             if not token.endswith("-1"):
@@ -341,6 +368,17 @@ class DistinguishingContentTests(unittest.TestCase):
             del twin["object_token"], want["object_token"]
             self.assertEqual(twin, want,
                              f"paired traces must stay indistinguishable for {token}")
+            self.assertIn(token, observed,
+                          f"spec-08 needs a trace observation for {token}")
+            self.assertIn(sibling, observed,
+                          f"spec-08 needs a trace observation for {sibling}")
+            first = [(step["native_result"], step["pages"])
+                     for step in observed[token]]
+            second = [(step["native_result"], step["pages"])
+                      for step in observed[sibling]]
+            self.assertEqual(first, second,
+                             f"paired trace observations must agree for {token}, "
+                             "not just the final ledger entries")
             pairs += 1
         self.assertGreater(pairs, 0, "spec-08 needs at least one with/without pair")
 
@@ -359,6 +397,16 @@ class DistinguishingContentTests(unittest.TestCase):
         for token in applies:
             self.assertEqual(before[token], after[token],
                              "reordered rule evaluation must agree with ordered evaluation")
+        ordered = {step["object"]: step["native_result"] for step in steps
+                 if step["action"] == "apply-rule-in-order"}
+        reordered_results = {step["object"]: step["native_result"] for step in steps
+                             if step["action"] == "reapply-rule-reordered"}
+        self.assertEqual(set(ordered), set(reordered_results),
+                         "every ordered rule needs a reordered result")
+        for token in ordered:
+            self.assertEqual(ordered[token], reordered_results[token],
+                             f"rule {token} must evaluate the same under reordered "
+                             "application, not just agree in the object ledger")
         conflicts = [step for step in steps if "conflict" in step["action"]]
         self.assertTrue(conflicts, "spec-10 needs a conflicting-rules step")
         scopes = [step for step in steps if "empty-scope" in step["action"]]
