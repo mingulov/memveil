@@ -11,10 +11,12 @@ never prove any live performance claim; live measurement
 belongs to the controller-owned live suites.
 """
 
+import ctypes
 import resource
 import sys
 import threading
 import time
+import tracemalloc
 
 # Explicit per-check offline budgets. Fixture corpora are a few
 # kilobytes, so a healthy check finishes in milliseconds with no
@@ -25,6 +27,80 @@ RSS_GROWTH_BUDGET_KB = 131072
 
 class BoundExceeded(AssertionError):
     """A check exceeded its explicit time or growth budget."""
+
+
+class WorkerTimeout(BaseException):
+    """Internal termination request for a worker past its budget.
+
+    A BaseException (like KeyboardInterrupt) so blanket
+    ``except Exception`` handlers inside the timed-out work
+    cannot swallow the termination request.
+    """
+
+
+# Workers that outlived their time budget and were asked to
+# stop. A worker that is still alive here at the next bounded
+# call is refused loudly: timed-out work may never continue
+# unobserved.
+_timed_out_lock = threading.Lock()
+_timed_out_workers = []
+
+
+def _set_async_exc(thread_id, exc):
+    """Deliver ``exc`` to another thread, best effort.
+
+    Returns True when the interpreter accepted the request
+    for exactly one thread. A missing API (non-CPython) or
+    a vanished thread reports False without raising.
+    """
+    setter = getattr(ctypes.pythonapi, "PyThreadState_SetAsyncExc", None)
+    if setter is None:
+        return False
+    setter.argtypes = (ctypes.c_ulong, ctypes.py_object)
+    setter.restype = ctypes.c_int
+    try:
+        affected = setter(ctypes.c_ulong(thread_id), exc)
+    except (ctypes.ArgumentError, SystemError, ValueError):
+        return False
+    if affected == 0:
+        return False
+    if affected != 1:
+        try:
+            setter(ctypes.c_ulong(thread_id), None)
+        except (ctypes.ArgumentError, SystemError, ValueError):
+            pass
+        return False
+    return True
+
+
+def _terminate_worker(worker, label):
+    """Stop a worker that outlived its time budget.
+
+    The timeout alone only releases the waiter; without
+    termination the worker would keep running unobserved.
+    The pending request fires as soon as the worker resumes
+    Python execution, so no further step of the timed-out
+    work can run. A worker that still will not stop is
+    recorded so the next bounded call refuses to proceed.
+    """
+    ident = worker.ident
+    if ident is not None and worker.is_alive():
+        _set_async_exc(ident, ctypes.py_object(WorkerTimeout(
+            "%s: stopping work past its time budget" % label)))
+    if worker.is_alive():
+        with _timed_out_lock:
+            _timed_out_workers.append(worker)
+
+
+def _refuse_lingering_workers(label):
+    """Fail when earlier timed-out work is still running."""
+    with _timed_out_lock:
+        _timed_out_workers[:] = [worker for worker in _timed_out_workers
+                                 if worker.is_alive()]
+        if _timed_out_workers:
+            raise BoundExceeded(
+                "%s: earlier timed-out work is still running; "
+                "refusing to continue unobserved" % (label,))
 
 
 def current_rss_kb():
@@ -68,39 +144,61 @@ def run_bounded(label, func, *args, **kwargs):
     ``func``. Returns a dict with the observed cost on success.
 
     The time budget is enforced while ``func`` runs: a call
-    that is still running past ``time_ms`` fails promptly
-    instead of waiting for it to return. Growth is the
-    current resident-set delta across this call only.
+    that is still running past ``time_ms`` fails promptly,
+    the worker is asked to stop so its work cannot continue
+    unobserved, and any later bounded call refuses to proceed
+    while that worker is still alive. Growth is the larger
+    of the resident-set delta across this call and the
+    allocation peak reached within it, so a transient spike
+    that is freed before return still fails its limit.
     """
     time_ms = kwargs.pop("time_ms", TIME_BUDGET_MS)
     rss_kb = kwargs.pop("rss_kb", RSS_GROWTH_BUDGET_KB)
+    _refuse_lingering_workers(label)
     before_kb = current_rss_kb()
     start = time.monotonic()
     outcome = {}
+    started_tracing = False
+    if not tracemalloc.is_tracing():
+        tracemalloc.start()
+        started_tracing = True
+    tracemalloc.reset_peak()
+    traced_before, _ = tracemalloc.get_traced_memory()
+    try:
+        def run():
+            try:
+                func(*args, **kwargs)
+            except BaseException as error:
+                # BaseException, not Exception: worker failures
+                # that bypass Exception (such as the test
+                # runner's failure outcomes) must still fail the
+                # check instead of dying in the thread unobserved.
+                outcome["error"] = error
 
-    def run():
-        try:
-            func(*args, **kwargs)
-        except BaseException as error:
-            # BaseException, not Exception: worker failures
-            # that bypass Exception (such as the test
-            # runner's failure outcomes) must still fail the
-            # check instead of dying in the thread unobserved.
-            outcome["error"] = error
-
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(time_ms / 1000.0)
-    if worker.is_alive():
-        raise BoundExceeded(
-            "%s: still running past the %d ms offline budget"
-            % (label, time_ms))
-    if "error" in outcome:
-        raise outcome["error"]
-    elapsed_ms = (time.monotonic() - start) * 1000.0
-    growth_kb = current_rss_kb() - before_kb
-    return check_bounds(label, elapsed_ms, growth_kb,
-                        time_ms=time_ms, rss_kb=rss_kb)
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(time_ms / 1000.0)
+        if worker.is_alive():
+            _terminate_worker(worker, label)
+            raise BoundExceeded(
+                "%s: still running past the %d ms offline budget"
+                % (label, time_ms))
+        if "error" in outcome:
+            raise outcome["error"]
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+        _, traced_peak = tracemalloc.get_traced_memory()
+        # Resident counters only offer lifetime high-water
+        # marks, so a transient spike freed before return is
+        # invisible to an end-delta read; the traced peak
+        # within this call bounds that transient growth
+        # deterministically instead.
+        traced_growth_kb = max(0, (traced_peak - traced_before) // 1024)
+        growth_kb = max(current_rss_kb() - before_kb, traced_growth_kb)
+        return check_bounds(label, elapsed_ms, growth_kb,
+                            time_ms=time_ms, rss_kb=rss_kb)
+    finally:
+        if started_tracing:
+            tracemalloc.stop()
 
 
 if __name__ == "__main__":
