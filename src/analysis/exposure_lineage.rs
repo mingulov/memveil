@@ -362,13 +362,30 @@ fn joinable(
     gens
 }
 
+/// Restoration-uncertain lines that keep an ordinary
+/// join ambiguous: unknown-status lines of the row's own
+/// origin that no loss gap sealed. No lifetime event
+/// ended them, so one may still answer the row beside
+/// any open line. Sealed lines keep their last state and
+/// exclude themselves.
+fn has_unsealed_unknown(state: &State, row: &LedgerRow, token: &str) -> bool {
+    state.linked.iter().any(|((name, generation), obj)| {
+        name == token
+            && obj.status == "unknown"
+            && !state.sealed.contains(&(token.to_string(), *generation))
+            && same_origin(obj, row)
+    })
+}
+
 /// Shared lookup for state-changing rows and alias binds:
 /// exactly one joinable line must exist. A line sealed by
 /// a loss gap keeps its last state but accepts no new
 /// joins, so a fresh post-loss allocation stays
 /// unambiguous; a refused allocation keeps the token
 /// ambiguous, since an untracked generation may exist
-/// beside any tracked line.
+/// beside any tracked line. A restoration-uncertain line
+/// beside the one open candidate keeps the join
+/// ambiguous too, since no lifetime event ended it.
 fn join(
     state: &State,
     refusals: &Refusals,
@@ -401,6 +418,12 @@ fn join(
             return Err(format!(
                 "ambiguous join for '{token}': a refused allocation may hide \
                  another generation beside open generation {generation}"
+            ));
+        }
+        if !unknown_ok && has_unsealed_unknown(state, row, token) {
+            return Err(format!(
+                "ambiguous join for '{token}': a restoration-uncertain line may \
+                 still answer beside open generation {generation}"
             ));
         }
         return Ok(generation);
