@@ -787,6 +787,14 @@ fn shown_identity(
     if sealed.len() > 1 {
         return None;
     }
+    // The same restoration-uncertain guard as the open
+    // candidate above: when one sealed line could show,
+    // an unsealed unknown-status line may still answer
+    // beside it, so the row shows no identity rather
+    // than select the older sealed generation.
+    if sealed.len() == 1 && has_unsealed_unknown(state, row, token) {
+        return None;
+    }
     if let Some(generation) = sealed.pop() {
         let status = match state.linked.get(&(token.to_string(), generation)) {
             Some(obj) => obj.status.clone(),
