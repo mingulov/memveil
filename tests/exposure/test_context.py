@@ -62,9 +62,22 @@ VOCABULARIES = {
 }
 
 # Token grammar for every carried identifier and label,
-# mirroring the reader: lowercase letters, digits,
-# hyphens, and underscores, bounded length.
-TOKEN = re.compile(r"\A[a-z0-9_-]{1,64}\Z")
+# mirroring the reader: a leading lowercase letter, then
+# lowercase letters, digits, hyphens, and underscores,
+# bounded length.
+TOKEN = re.compile(r"\A[a-z][a-z0-9_-]{0,63}\Z")
+
+# Address shapes that never enter a fact even inside a
+# grammatical token, mirroring the reader: `0x…` hex
+# runs, `%p`, `pfn =`.
+ADDRESS_LIKE = re.compile(r"0[xX][0-9a-fA-F]+|%p|pfn\s*=")
+
+
+def valid_token(value):
+    """Mirror the reader: grammar plus address-shape refusal."""
+    return (isinstance(value, str)
+            and TOKEN.match(value) is not None
+            and ADDRESS_LIKE.search(value) is None)
 
 # Tokens no context fixture may carry: commands,
 # environments, logs, payloads, or movement claims.
@@ -105,6 +118,13 @@ GRAMMAR_POISONS = (
     "proc/self/mem", "UPPER", "has space", "a=b",
 )
 
+# Bare addresses refused in every carrier even though no
+# refusal-list fragment matches them. The letter-led
+# `trace-0x1f` pins the address-shape rule itself: it is
+# grammatical, so only that rule refuses it.
+BARE_ADDRESSES = ("0xffff888012345000", "0xfe000000")
+SHAPED_ADDRESS = "trace-0x1f"
+
 SAMPLE_REQUIRED = (
     "sample_id", "tick", "control", "native_result", "detail",
 )
@@ -129,7 +149,7 @@ def oracle(document):
     for token in ("dev/mem", "kcore", "/proc/", "exfil"):
         assert token not in document["capture_id"], \
             document["capture_id"]
-    assert TOKEN.match(document["capture_id"]), \
+    assert valid_token(document["capture_id"]), \
         document["capture_id"]
     frozen = catalog()["vocabularies"]["frozen"]
     assert document["clock_domain"] in frozen["clock_domains"]
@@ -144,10 +164,9 @@ def oracle(document):
             assert key in sample, sample
         assert sample["sample_id"] not in seen, sample["sample_id"]
         seen.add(sample["sample_id"])
-        assert TOKEN.match(sample["sample_id"]), sample
+        assert valid_token(sample["sample_id"]), sample
         for value in sample["detail"].values():
-            assert isinstance(value, str) and TOKEN.match(value), \
-                sample
+            assert valid_token(value), sample
         usable = (
             sample["control"] in CONTROLS
             and sample["native_result"] in STATUS
@@ -346,6 +365,29 @@ def test_grammar_poison_capture_id_refuses():
         document["capture_id"] = poison
         with pytest.raises(AssertionError):
             oracle(document)
+
+
+def test_bare_address_labels_refuse_in_every_carrier():
+    for address in BARE_ADDRESSES:
+        for fragment in ("dev/mem", "kcore", "/proc/", "exfil"):
+            assert fragment not in address, address
+        document = load("swap-encrypted.json")
+        document["capture_id"] = address
+        with pytest.raises(AssertionError):
+            oracle(document)
+        document = load("swap-encrypted.json")
+        document["samples"][0]["sample_id"] = address
+        with pytest.raises(AssertionError):
+            oracle(document)
+        document = load("swap-encrypted.json")
+        document["samples"][0]["detail"]["name"] = address
+        with pytest.raises(AssertionError):
+            oracle(document)
+    assert TOKEN.match(SHAPED_ADDRESS) is not None
+    document = load("swap-encrypted.json")
+    document["samples"][0]["detail"]["name"] = SHAPED_ADDRESS
+    with pytest.raises(AssertionError):
+        oracle(document)
 
 
 def test_detail_values_stay_in_vocabulary():

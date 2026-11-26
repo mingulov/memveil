@@ -81,13 +81,33 @@ GRAMMAR_POISONS = (
     "proc/self/mem", "UPPER", "has space", "a=b",
 )
 
+# Bare addresses refused in every carrier even though no
+# refusal-list fragment matches them. The letter-led
+# `trace-0x1f` pins the address-shape rule itself: it is
+# grammatical, so only that rule refuses it.
+BARE_ADDRESSES = ("0xffff888012345000", "0xfe000000")
+SHAPED_ADDRESS = "trace-0x1f"
+
 # Closed mapping-class vocabulary, mirroring the reader.
 MAPPING_CLASSES = ("mmio", "dax")
 
 # Token grammar for every carried identifier and label,
-# mirroring the reader: lowercase letters, digits,
-# hyphens, and underscores, bounded length.
-TOKEN = re.compile(r"\A[a-z0-9_-]{1,64}\Z")
+# mirroring the reader: a leading lowercase letter, then
+# lowercase letters, digits, hyphens, and underscores,
+# bounded length.
+TOKEN = re.compile(r"\A[a-z][a-z0-9_-]{0,63}\Z")
+
+# Address shapes that never enter a fact even inside a
+# grammatical token, mirroring the reader: `0x…` hex
+# runs, `%p`, `pfn =`.
+ADDRESS_LIKE = re.compile(r"0[xX][0-9a-fA-F]+|%p|pfn\s*=")
+
+
+def valid_token(value):
+    """Mirror the reader: grammar plus address-shape refusal."""
+    return (isinstance(value, str)
+            and TOKEN.match(value) is not None
+            and ADDRESS_LIKE.search(value) is None)
 
 ENTRY_REQUIRED = (
     "entry_id", "mapping_class", "peer_class",
@@ -114,7 +134,7 @@ def oracle(document):
     for token in ("dev/mem", "kcore", "/proc/"):
         assert token not in document["capture_id"], \
             document["capture_id"]
-    assert TOKEN.match(document["capture_id"]), \
+    assert valid_token(document["capture_id"]), \
         document["capture_id"]
     facts = []
     refused = 0
@@ -132,8 +152,7 @@ def oracle(document):
         if "alias_of" in entry:
             carried.append(entry["alias_of"])
         for value in carried:
-            assert isinstance(value, str) and TOKEN.match(value), \
-                entry
+            assert valid_token(value), entry
         usable = (
             entry["peer_class"] in peers
             and entry["address_namespace"] == "guest_physical"
@@ -291,6 +310,29 @@ def test_grammar_poison_capture_id_refuses():
         document["capture_id"] = poison
         with pytest.raises(AssertionError):
             oracle(document)
+
+
+def test_bare_address_labels_refuse_in_every_carrier():
+    for address in BARE_ADDRESSES:
+        for fragment in ("dev/mem", "kcore", "/proc/"):
+            assert fragment not in address, address
+        document = load("mmio-supported.json")
+        document["capture_id"] = address
+        with pytest.raises(AssertionError):
+            oracle(document)
+        document = load("mmio-supported.json")
+        document["entries"][0]["entry_id"] = address
+        with pytest.raises(AssertionError):
+            oracle(document)
+        document = load("mmio-supported.json")
+        document["entries"][0]["trust_boundary"] = address
+        with pytest.raises(AssertionError):
+            oracle(document)
+    assert TOKEN.match(SHAPED_ADDRESS) is not None
+    document = load("mmio-supported.json")
+    document["entries"][0]["trust_boundary"] = SHAPED_ADDRESS
+    with pytest.raises(AssertionError):
+        oracle(document)
 
 
 def test_mapping_classes_stay_in_vocabulary():
