@@ -841,7 +841,9 @@ fn shown_certainty(
 /// when the handle never allocated its own token. A
 /// restoration-uncertain line beside that one
 /// candidate keeps the display ambiguous, as with ordinary
-/// joins. One sealed line shows its last state with
+/// joins, and a refused allocation of the shown token
+/// hides the display, since an untracked generation may
+/// sit beside it. One sealed line shows its last state with
 /// unknown certainty, and an unambiguous closed line
 /// shows its terminal state; ambiguity never shows an
 /// identity.
@@ -923,6 +925,18 @@ fn shown_identity(
         if uncertain {
             return None;
         }
+        // The same refusal check as ordinary joins: a
+        // refused allocation of the shown token may hide
+        // an untracked generation beside it, so the row
+        // shows no identity rather than display past the
+        // refusal.
+        if shown_token != token
+            && refusals
+                .refused_alloc
+                .contains(&refusal_key(&shown_token, row))
+        {
+            return None;
+        }
         let (status, line_certainty) =
             match state.linked.get(&(shown_token.clone(), generation)) {
                 Some(obj) => (obj.status.clone(), obj.certainty.clone()),
@@ -991,6 +1005,13 @@ fn shown_identity(
         }
     }
     if let Some((shown_token, generation)) = sealed.pop() {
+        if shown_token != token
+            && refusals
+                .refused_alloc
+                .contains(&refusal_key(&shown_token, row))
+        {
+            return None;
+        }
         let status = match state.linked.get(&(shown_token.clone(), generation)) {
             Some(obj) => obj.status.clone(),
             None => return None,
@@ -1033,6 +1054,13 @@ fn shown_identity(
         return None;
     }
     let (shown_token, generation) = closed.pop()?;
+    if shown_token != token
+        && refusals
+            .refused_alloc
+            .contains(&refusal_key(&shown_token, row))
+    {
+        return None;
+    }
     let (status, line_certainty) = match state.linked.get(&(shown_token.clone(), generation)) {
         Some(obj) => (obj.status.clone(), obj.certainty.clone()),
         None => return None,
