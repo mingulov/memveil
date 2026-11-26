@@ -33,7 +33,12 @@
 //!   an alias
 //!   never double-count and never follow address reuse
 //!   until the alias is rebound. An ambiguous or
-//!   loss-sealed target refuses the alias.
+//!   loss-sealed target refuses the alias. Invalidating a
+//!   pin never erases the handle's recorded allocations:
+//!   a reuse through a live binding keeps later rows at
+//!   the handle ambiguous while both lines stay open, and
+//!   the handle refuses rebinding while it records a
+//!   tracked allocation.
 //! * Rows that share an `atom` marker commit only as a
 //!   unit: when any leg cannot join, every leg resolves
 //!   UNKNOWN and the legs stay separate samples. A group
@@ -243,6 +248,23 @@ struct State {
     /// explicitly rebound, and one source never
     /// overwrites another source's binding.
     alias: BTreeMap<(String, String, String), (String, u64)>,
+    /// Handle provenance of allocations: (handle,
+    /// source, class) to the (canonical token,
+    /// generation) lines recorded through that handle
+    /// under a different token. A reuse through a live
+    /// binding records the new generation under the
+    /// canonical token, but the allocation was made at
+    /// the handle, so later rows at the handle still see
+    /// it after the pin is invalidated.
+    handle_alloc: BTreeMap<(String, String, String), Vec<(String, u64)>>,
+    /// Pins invalidated by allocation: (handle, source,
+    /// class) to the (canonical token, generation) the
+    /// pin last bound. A reuse through a live binding
+    /// leaves both the old pinned generation and the new
+    /// allocation plausible at the handle, so the old pin
+    /// answers no later rows alone but keeps them
+    /// ambiguous while its line stays open.
+    dropped_pin: BTreeMap<(String, String, String), (String, u64)>,
     /// Lines with temporally bounded claims, keyed per
     /// generation and origin: a gap observed through one
     /// source and class never bounds another origin's
@@ -411,32 +433,40 @@ fn bound_key(
 /// bounds only that generation, so a suspend or clock
 /// marker never bounds a newer generation the pin does
 /// not address; an unpinned row bounds every
-/// same-origin line of its token. Other origins' lines
-/// stay unaffected either way.
+/// same-origin line its handle denotes, including
+/// generations recorded through the handle under another
+/// token and the generation an invalidated pin last
+/// bound. Other origins' lines stay unaffected either way.
 fn bound_token_lines(
     state: &mut State,
     row: &LedgerRow,
     canonical: &str,
     pinned: Option<u64>,
 ) {
-    let bound: Vec<u64> = match pinned {
+    let bound: Vec<(String, u64)> = match pinned {
         Some(generation) => state
             .linked
             .get(&(canonical.to_string(), generation))
             .filter(|obj| same_origin(obj, row))
-            .map(|_| vec![generation])
+            .map(|_| vec![(canonical.to_string(), generation)])
             .unwrap_or_default(),
-        None => state
-            .linked
-            .iter()
-            .filter(|((name, _), obj)| name == canonical && same_origin(obj, row))
-            .map(|((_, generation), _)| *generation)
-            .collect(),
+        None => {
+            let mut bound: Vec<(String, u64)> = state
+                .linked
+                .iter()
+                .filter(|((name, _), obj)| name == canonical && same_origin(obj, row))
+                .map(|((name, generation), _)| (name.clone(), *generation))
+                .collect();
+            bound.extend(denoted_extras(state, row, canonical));
+            bound.sort();
+            bound.dedup();
+            bound
+        }
     };
-    for generation in bound {
+    for (token, generation) in bound {
         state
             .temporal_bounded
-            .insert(bound_key(canonical, generation, row));
+            .insert(bound_key(&token, generation, row));
     }
 }
 
@@ -458,6 +488,45 @@ fn alias_key(handle: &str, row: &LedgerRow) -> (String, String, String) {
         row.source_id.clone(),
         row.object_class.clone(),
     )
+}
+
+/// Lines one unpinned handle denotes beyond its own
+/// token's lines: generations recorded through the handle
+/// under another token, plus the generation an invalidated
+/// pin last bound. Only lines still tracked in the row's
+/// own origin count; callers apply their own status and
+/// seal filters. Sorted and deduplicated.
+fn denoted_extras(
+    state: &State,
+    row: &LedgerRow,
+    handle: &str,
+) -> Vec<(String, u64)> {
+    let mut lines: Vec<(String, u64)> = Vec::new();
+    if let Some(recorded) = state.handle_alloc.get(&alias_key(handle, row)) {
+        for (token, generation) in recorded {
+            if state
+                .linked
+                .get(&(token.clone(), *generation))
+                .map(|obj| same_origin(obj, row))
+                .unwrap_or(false)
+            {
+                lines.push((token.clone(), *generation));
+            }
+        }
+    }
+    if let Some((token, generation)) = state.dropped_pin.get(&alias_key(handle, row)) {
+        if state
+            .linked
+            .get(&(token.clone(), *generation))
+            .map(|obj| same_origin(obj, row))
+            .unwrap_or(false)
+        {
+            lines.push((token.clone(), *generation));
+        }
+    }
+    lines.sort();
+    lines.dedup();
+    lines
 }
 
 /// Compare a row's clock domain against the generation it
@@ -559,7 +628,12 @@ fn has_unsealed_unknown(state: &State, row: &LedgerRow, token: &str) -> bool {
 }
 
 /// Shared lookup for state-changing rows and alias binds:
-/// exactly one joinable line must exist. A line sealed by
+/// exactly one joinable line must exist. An unpinned handle
+/// denotes its own token's lines plus the generations it
+/// recorded under another token and the generation an
+/// invalidated pin last bound, so a reuse through a live
+/// binding keeps later rows at the handle ambiguous while
+/// both lines stay open. A line sealed by
 /// a loss gap keeps its last state but accepts no new
 /// joins, so a fresh post-loss allocation stays
 /// unambiguous; a refused allocation keeps the token
@@ -574,10 +648,7 @@ fn join(
     token: &str,
     pinned: Option<u64>,
     unknown_ok: bool,
-) -> Result<u64, String> {
-    if !state.latest.contains_key(token) {
-        return Err(format!("no allocated identity for '{token}'"));
-    }
+) -> Result<(String, u64), String> {
     if let Some(generation) = pinned {
         if refused_on_path(state, refusals, row, &row.virtual_id, token) {
             return Err(format!(
@@ -587,30 +658,58 @@ fn join(
         }
         return join_pinned(state, row, token, generation, unknown_ok);
     }
-    let candidates = joinable(state, row, token, unknown_ok);
+    let mut candidates: Vec<(String, u64)> = joinable(state, row, token, unknown_ok)
+        .into_iter()
+        .map(|generation| (token.to_string(), generation))
+        .collect();
+    for (extra_token, extra_generation) in denoted_extras(state, row, token) {
+        let key = (extra_token.clone(), extra_generation);
+        let usable = state
+            .linked
+            .get(&key)
+            .map(|obj| {
+                (is_open(obj.status.as_str()) || (unknown_ok && obj.status == "unknown"))
+                    && !state.sealed.contains(&key)
+            })
+            .unwrap_or(false);
+        if usable {
+            candidates.push((extra_token, extra_generation));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
     if candidates.len() > 1 {
         return Err(format!(
             "ambiguous join: {} joinable generations for '{token}'",
             candidates.len()
         ));
     }
-    if let Some(generation) = candidates.into_iter().next() {
-        if refusals
+    if let Some((joined_token, generation)) = candidates.into_iter().next() {
+        let refused = refusals
             .refused_alloc
             .contains(&refusal_key(token, row))
-        {
+            || (joined_token != token
+                && refusals
+                    .refused_alloc
+                    .contains(&refusal_key(&joined_token, row)));
+        if refused {
             return Err(format!(
                 "ambiguous join for '{token}': a refused allocation may hide \
                  another generation beside open generation {generation}"
             ));
         }
-        if !unknown_ok && has_unsealed_unknown(state, row, token) {
+        let uncertain = has_unsealed_unknown(state, row, token)
+            || (joined_token != token && has_unsealed_unknown(state, row, &joined_token));
+        if !unknown_ok && uncertain {
             return Err(format!(
                 "ambiguous join for '{token}': a restoration-uncertain line may \
                  still answer beside open generation {generation}"
             ));
         }
-        return Ok(generation);
+        return Ok((joined_token, generation));
+    }
+    if !state.latest.contains_key(token) {
+        return Err(format!("no allocated identity for '{token}'"));
     }
     let sealed_open = open_generations(state, token).iter().any(|generation| {
         let key = (token.to_string(), *generation);
@@ -653,7 +752,7 @@ fn join_pinned(
     token: &str,
     generation: u64,
     unknown_ok: bool,
-) -> Result<u64, String> {
+) -> Result<(String, u64), String> {
     let key = (token.to_string(), generation);
     let obj = match state.linked.get(&key) {
         Some(obj) => obj,
@@ -681,7 +780,7 @@ fn join_pinned(
             row.source_id, row.object_class
         ));
     }
-    Ok(generation)
+    Ok((token.to_string(), generation))
 }
 
 /// Certainty shown for one line: a loss-sealed line shows
@@ -713,7 +812,11 @@ fn shown_certainty(
 /// Identity shown by informational rows. An alias
 /// binding shows its pinned generation; otherwise exactly
 /// one joinable line must exist, else the row shows no
-/// identity. A restoration-uncertain line beside that one
+/// identity. The candidates are the same lines an
+/// ordinary join could take: the handle's own token plus
+/// the generations it recorded under another token and
+/// the generation an invalidated pin last bound. A
+/// restoration-uncertain line beside that one
 /// candidate keeps the display ambiguous, as with ordinary
 /// joins. One sealed line shows its last state with
 /// unknown certainty, and an unambiguous closed line
@@ -756,31 +859,54 @@ fn shown_identity(
             shown_certainty(state, row, token, generation, &line_certainty),
         ));
     }
-    let candidates = joinable(state, row, token, false);
+    // The same denoted lines as ordinary joins: the
+    // handle's own token plus the generations it recorded
+    // under another token and the generation an
+    // invalidated pin last bound. Informational rows show
+    // only what a join could prove.
+    let mut candidates: Vec<(String, u64)> = joinable(state, row, token, false)
+        .into_iter()
+        .map(|generation| (token.to_string(), generation))
+        .collect();
+    for (extra_token, extra_generation) in denoted_extras(state, row, token) {
+        let key = (extra_token.clone(), extra_generation);
+        let usable = state
+            .linked
+            .get(&key)
+            .map(|obj| is_open(obj.status.as_str()) && !state.sealed.contains(&key))
+            .unwrap_or(false);
+        if usable {
+            candidates.push((extra_token, extra_generation));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
     if candidates.len() > 1 {
         return None;
     }
-    if let Some(generation) = candidates.into_iter().next() {
+    if let Some((shown_token, generation)) = candidates.into_iter().next() {
         // The same restoration-uncertain guard as ordinary
         // joins: an unsealed unknown-status line may still
         // answer beside this candidate, so the row shows no
         // identity rather than select a generation.
-        if has_unsealed_unknown(state, row, token) {
+        let uncertain = has_unsealed_unknown(state, row, token)
+            || (shown_token != token && has_unsealed_unknown(state, row, &shown_token));
+        if uncertain {
             return None;
         }
         let (status, line_certainty) =
-            match state.linked.get(&(token.to_string(), generation)) {
+            match state.linked.get(&(shown_token.clone(), generation)) {
                 Some(obj) => (obj.status.clone(), obj.certainty.clone()),
                 None => return None,
             };
-        note_domain(state, row, token, generation);
+        note_domain(state, row, &shown_token, generation);
         return Some((
             QualifiedIdentity {
-                token: token.to_string(),
+                token: shown_token.clone(),
                 generation: generation,
             },
             status,
-            shown_certainty(state, row, token, generation, &line_certainty),
+            shown_certainty(state, row, &shown_token, generation, &line_certainty),
         ));
     }
     // No joinable line: one sealed line shows its last
@@ -789,7 +915,9 @@ fn shown_identity(
     // select a generation. Sealed restoration-uncertain
     // lines count beside sealed open lines; an unambiguous
     // same-origin closed line shows its terminal state.
-    let mut sealed: Vec<u64> = state
+    // Recorded and invalidated-pin lines count here too, as
+    // with the joinable candidates above.
+    let mut sealed: Vec<(String, u64)> = state
         .linked
         .iter()
         .filter(|((name, generation), obj)| {
@@ -798,9 +926,24 @@ fn shown_identity(
                 && state.sealed.contains(&(token.to_string(), *generation))
                 && same_origin(obj, row)
         })
-        .map(|((_, generation), _)| *generation)
+        .map(|((name, generation), _)| (name.clone(), *generation))
         .collect();
+    for (extra_token, extra_generation) in denoted_extras(state, row, token) {
+        let key = (extra_token.clone(), extra_generation);
+        let usable = state
+            .linked
+            .get(&key)
+            .map(|obj| {
+                (is_open(obj.status.as_str()) || obj.status == "unknown")
+                    && state.sealed.contains(&key)
+            })
+            .unwrap_or(false);
+        if usable {
+            sealed.push((extra_token, extra_generation));
+        }
+    }
     sealed.sort();
+    sealed.dedup();
     if sealed.len() > 1 {
         return None;
     }
@@ -809,52 +952,69 @@ fn shown_identity(
     // an unsealed unknown-status line may still answer
     // beside it, so the row shows no identity rather
     // than select the older sealed generation.
-    if sealed.len() == 1 && has_unsealed_unknown(state, row, token) {
-        return None;
+    if sealed.len() == 1 {
+        let (shown_token, _) = &sealed[0];
+        let uncertain = has_unsealed_unknown(state, row, token)
+            || (shown_token != token && has_unsealed_unknown(state, row, shown_token));
+        if uncertain {
+            return None;
+        }
     }
-    if let Some(generation) = sealed.pop() {
-        let status = match state.linked.get(&(token.to_string(), generation)) {
+    if let Some((shown_token, generation)) = sealed.pop() {
+        let status = match state.linked.get(&(shown_token.clone(), generation)) {
             Some(obj) => obj.status.clone(),
             None => return None,
         };
-        note_domain(state, row, token, generation);
+        note_domain(state, row, &shown_token, generation);
         return Some((
             QualifiedIdentity {
-                token: token.to_string(),
+                token: shown_token.clone(),
                 generation: generation,
             },
             status,
             "unknown".to_string(),
         ));
     }
-    let mut closed: Vec<u64> = state
+    let mut closed: Vec<(String, u64)> = state
         .linked
         .iter()
         .filter(|((name, _), obj)| {
             name == token && same_origin(obj, row) && !is_open(obj.status.as_str())
         })
-        .map(|((_, generation), _)| *generation)
+        .map(|((name, generation), _)| (name.clone(), *generation))
         .collect();
+    for (extra_token, extra_generation) in denoted_extras(state, row, token) {
+        let key = (extra_token.clone(), extra_generation);
+        let usable = state
+            .linked
+            .get(&key)
+            .map(|obj| !is_open(obj.status.as_str()))
+            .unwrap_or(false);
+        if usable {
+            closed.push((extra_token, extra_generation));
+        }
+    }
     closed.sort();
+    closed.dedup();
     // Like the sealed fallback above: two terminal
     // generations could each match, so the row shows no
     // identity rather than select the highest one.
     if closed.len() > 1 {
         return None;
     }
-    let generation = closed.pop()?;
-    let (status, line_certainty) = match state.linked.get(&(token.to_string(), generation)) {
+    let (shown_token, generation) = closed.pop()?;
+    let (status, line_certainty) = match state.linked.get(&(shown_token.clone(), generation)) {
         Some(obj) => (obj.status.clone(), obj.certainty.clone()),
         None => return None,
     };
-    note_domain(state, row, token, generation);
+    note_domain(state, row, &shown_token, generation);
     Some((
         QualifiedIdentity {
-            token: token.to_string(),
+            token: shown_token.clone(),
             generation: generation,
         },
         status,
-        shown_certainty(state, row, token, generation, &line_certainty),
+        shown_certainty(state, row, &shown_token, generation, &line_certainty),
     ))
 }
 
@@ -899,22 +1059,27 @@ fn apply_row(
         "allocated" => {
             let applied = apply_allocated(state, config, refusals, row, &canonical);
             // A successful allocation drops the handle's
-            // stale binding: a fresh identity addresses
-            // the new line, and a reuse through a live
-            // binding leaves both generations plausible,
-            // so the old pin must not answer later rows
-            // until the alias is explicitly rebound. A
+            // stale binding but keeps its provenance: a
+            // fresh identity addresses the new line, and a
+            // reuse through a live binding leaves both
+            // generations plausible, so the old pin must
+            // not answer later rows alone yet still keeps
+            // them ambiguous while its line stays open. A
             // refusal changes nothing.
             if !applied.failed {
-                state
-                    .alias
-                    .remove(&alias_key(row.virtual_id.as_str(), row));
+                if let Some(prior) = state.alias.remove(&alias_key(row.virtual_id.as_str(), row))
+                {
+                    state
+                        .dropped_pin
+                        .insert(alias_key(row.virtual_id.as_str(), row), prior);
+                }
             }
             applied
         }
         "observed" => {
-            let generation = match join(state, refusals, row, &canonical, pinned, false) {
-                Ok(generation) => generation,
+            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
+            {
+                Ok(joined) => joined,
                 Err(note) => return failed(row, note),
             };
             note_domain(state, row, &canonical, generation);
@@ -949,8 +1114,9 @@ fn apply_row(
             }
         }
         "released" => {
-            let generation = match join(state, refusals, row, &canonical, pinned, false) {
-                Ok(generation) => generation,
+            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
+            {
+                Ok(joined) => joined,
                 Err(note) => return failed(row, note),
             };
             note_domain(state, row, &canonical, generation);
@@ -989,8 +1155,9 @@ fn apply_row(
             // lines: a failed revert keeps the line
             // visible here, and the recorded quarantine
             // preserves the unknown certainty.
-            let generation = match join(state, refusals, row, &canonical, pinned, true) {
-                Ok(generation) => generation,
+            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, true)
+            {
+                Ok(joined) => joined,
                 Err(note) => return failed(row, note),
             };
             note_domain(state, row, &canonical, generation);
@@ -1031,8 +1198,9 @@ fn apply_row(
             // A successful revert records the conversion
             // without ending the live allocation: the
             // lifecycle status is unchanged.
-            let generation = match join(state, refusals, row, &canonical, pinned, false) {
-                Ok(generation) => generation,
+            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
+            {
+                Ok(joined) => joined,
                 Err(note) => return failed(row, note),
             };
             note_domain(state, row, &canonical, generation);
@@ -1070,8 +1238,9 @@ fn apply_row(
             }
         }
         "revert_failed" => {
-            let generation = match join(state, refusals, row, &canonical, pinned, false) {
-                Ok(generation) => generation,
+            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
+            {
+                Ok(joined) => joined,
                 Err(note) => return failed(row, note),
             };
             note_domain(state, row, &canonical, generation);
@@ -1126,8 +1295,13 @@ fn apply_row(
             // failed revert followed by loss accepts no
             // later joins. A row addressed through a pinned
             // alias seals only that generation; loss through
-            // an old pin never seals a newer generation.
-            let seal: Vec<u64> = match pinned {
+            // an old pin never seals a newer generation. An
+            // unpinned row seals every same-origin line its
+            // handle denotes, including generations
+            // recorded through the handle under another
+            // token and the generation an invalidated pin
+            // last bound.
+            let seal: Vec<(String, u64)> = match pinned {
                 Some(generation) => state
                     .linked
                     .get(&(canonical.clone(), generation))
@@ -1135,21 +1309,40 @@ fn apply_row(
                         (is_open(obj.status.as_str()) || obj.status == "unknown")
                             && same_origin(obj, row)
                     })
-                    .map(|_| vec![generation])
+                    .map(|_| vec![(canonical.clone(), generation)])
                     .unwrap_or_default(),
-                None => state
-                    .linked
-                    .iter()
-                    .filter(|((name, _), obj)| {
-                        name == &canonical
-                            && (is_open(obj.status.as_str()) || obj.status == "unknown")
-                            && same_origin(obj, row)
-                    })
-                    .map(|((_, generation), _)| *generation)
-                    .collect(),
+                None => {
+                    let mut seal: Vec<(String, u64)> = state
+                        .linked
+                        .iter()
+                        .filter(|((name, _), obj)| {
+                            name == &canonical
+                                && (is_open(obj.status.as_str()) || obj.status == "unknown")
+                                && same_origin(obj, row)
+                        })
+                        .map(|((name, generation), _)| (name.clone(), *generation))
+                        .collect();
+                    let extras = denoted_extras(state, row, &canonical);
+                    for (extra_token, extra_generation) in extras {
+                        let key = (extra_token.clone(), extra_generation);
+                        let usable = state
+                            .linked
+                            .get(&key)
+                            .map(|obj| {
+                                is_open(obj.status.as_str()) || obj.status == "unknown"
+                            })
+                            .unwrap_or(false);
+                        if usable {
+                            seal.push((extra_token, extra_generation));
+                        }
+                    }
+                    seal.sort();
+                    seal.dedup();
+                    seal
+                }
             };
-            for generation in seal {
-                state.sealed.insert((canonical.clone(), generation));
+            for (token, generation) in seal {
+                state.sealed.insert((token, generation));
             }
             apply_shown(
                 state,
@@ -1255,6 +1448,18 @@ fn apply_allocated(
         },
     );
     state.latest.insert(canonical.to_string(), generation);
+    // A reuse through a live binding records the new
+    // generation under the canonical token but the
+    // allocation was made at the handle: keep that
+    // provenance so later rows at the handle still see
+    // the open allocation after the pin is invalidated.
+    if row.virtual_id != canonical {
+        state
+            .handle_alloc
+            .entry(alias_key(row.virtual_id.as_str(), row))
+            .or_default()
+            .push((canonical.to_string(), generation));
+    }
     // A fresh generation starts its own temporal line in
     // this origin: gap state is keyed per generation, so
     // the new line starts unbounded without clearing
@@ -1309,11 +1514,26 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     // Admission is per origin: a handle allocated only
     // in another source or class stays bindable here,
     // while a handle already allocated in this origin
-    // refuses the alias instead of binding over it.
+    // refuses the alias instead of binding over it. A
+    // handle that recorded an allocation under another
+    // token counts as allocated too: the still-tracked
+    // line was made at this handle, so rebinding would
+    // hide it.
     let allocated_here = state.linked.iter().any(|((name, _), obj)| {
         name == &row.virtual_id && same_origin(obj, row)
     });
-    if allocated_here {
+    let recorded_here = state
+        .handle_alloc
+        .get(&alias_key(row.virtual_id.as_str(), row))
+        .map(|lines| {
+            lines.iter().any(|(token, generation)| {
+                state
+                    .linked
+                    .contains_key(&(token.clone(), *generation))
+            })
+        })
+        .unwrap_or(false);
+    if allocated_here || recorded_here {
         return failed(
             row,
             format!("token '{}' already allocated; alias refused", row.virtual_id),
@@ -1345,7 +1565,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     // refused allocation poisons the inherited binding
     // too, since an untracked generation may sit beside
     // the pinned one.
-    let generation = match state
+    let (bound_token, generation) = match state
         .alias
         .get(&alias_key(target, row))
         .map(|(_, generation)| *generation)
@@ -1399,25 +1619,25 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
                     ),
                 );
             }
-            bound
+            (target_canonical.clone(), bound)
         }
         None => match join(state, refusals, row, &target_canonical, None, false) {
-            Ok(generation) => generation,
+            Ok(joined) => joined,
             Err(note) => return failed(row, note),
         },
     };
     state.alias.insert(
         alias_key(row.virtual_id.as_str(), row),
-        (target_canonical.clone(), generation),
+        (bound_token.clone(), generation),
     );
     let bound = state
         .linked
-        .get(&(target_canonical.clone(), generation))
+        .get(&(bound_token.clone(), generation))
         .expect("bound generation exists");
     let mut certainty = shown_certainty(
         state,
         row,
-        &target_canonical,
+        &bound_token,
         generation,
         bound.certainty.as_str(),
     );
@@ -1432,7 +1652,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     if line_clock != row.clock_domain {
         state
             .temporal_bounded
-            .insert(bound_key(&target_canonical, generation, row));
+            .insert(bound_key(&bound_token, generation, row));
         if certainty == "known" {
             certainty = "bounded".to_string();
         }
@@ -1442,13 +1662,13 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
             row_id: row.row_id.clone(),
             seq: row.seq,
             identity: Some(QualifiedIdentity {
-                token: target_canonical.clone(),
+                token: bound_token.clone(),
                 generation: generation,
             }),
             status: line_status,
             certainty,
             note: format!(
-                "token '{}' aliases '{target_canonical}' at generation {generation}",
+                "token '{}' aliases '{bound_token}' at generation {generation}",
                 row.virtual_id
             ),
         },
