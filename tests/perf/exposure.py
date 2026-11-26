@@ -93,7 +93,17 @@ def _terminate_worker(worker, label):
 
 
 def _refuse_lingering_workers(label):
-    """Fail when earlier timed-out work is still running."""
+    """Fail when earlier timed-out work is still running.
+
+    A terminated worker that simply has not been
+    re-scheduled yet is given a short grace to die from its
+    pending termination request; only a worker that is still
+    alive past that grace refuses the call.
+    """
+    with _timed_out_lock:
+        lingering = list(_timed_out_workers)
+    for worker in lingering:
+        worker.join(1.0)
     with _timed_out_lock:
         _timed_out_workers[:] = [worker for worker in _timed_out_workers
                                  if worker.is_alive()]
