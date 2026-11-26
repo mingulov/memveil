@@ -381,6 +381,12 @@ fn join(
         return Err(format!("no allocated identity for '{token}'"));
     }
     if let Some(generation) = pinned {
+        if refusals.refused_alloc.contains(token) {
+            return Err(format!(
+                "ambiguous join for '{token}': a refused allocation may hide \
+                 another generation beside pinned generation {generation}"
+            ));
+        }
         return join_pinned(state, row, token, generation, unknown_ok);
     }
     let candidates = joinable(state, row, token, unknown_ok);
@@ -1005,9 +1011,21 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     // binding; otherwise the target must offer exactly one
     // joinable line through the shared lookup, so an
     // ambiguous or loss-sealed target refuses the alias
-    // instead of selecting a generation.
+    // instead of selecting a generation. A refused
+    // allocation poisons the inherited binding too, since
+    // an untracked generation may sit beside the pinned
+    // one.
     let generation = match state.alias.get(target).map(|(_, generation)| *generation) {
         Some(bound) => {
+            if refusals.refused_alloc.contains(&target_canonical) {
+                return failed(
+                    row,
+                    format!(
+                        "a refused allocation of '{target_canonical}' may hide \
+                         another generation; alias refused"
+                    ),
+                );
+            }
             let key = (target_canonical.clone(), bound);
             let obj = match state.linked.get(&key) {
                 Some(obj) => obj,
