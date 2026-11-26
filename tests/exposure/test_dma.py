@@ -137,6 +137,12 @@ LANE_SCOPES = (
     "bounced-and-direct-paths",
 )
 
+# Lane capability pinned by the envelope: a fact
+# may only cite a catalog source carrying this
+# capability. Another lane's source id exists in
+# the catalog but backs no coverage here.
+LANE_CAPABILITY = "dma-paths"
+
 U64_MAX = 18446744073709551615
 U64_RE = re.compile(r"^(0|[1-9][0-9]{0,19})$")
 S64_MIN = -(2 ** 63)
@@ -226,6 +232,13 @@ def catalog():
 
 def frozen(name):
     return catalog()["vocabularies"]["frozen"][name]
+
+
+def lane_sources():
+    return [entry["source_id"]
+            for entry in catalog()["sources"]
+            if entry["capability"]
+            == LANE_CAPABILITY]
 
 
 def is_u64(value):
@@ -383,6 +396,12 @@ def check_fact(errors, where, fact, catalog_sources):
         errors.append("closed-enum-violation: "
                       "%s.source_id=%r"
                       % (where, fact.get("source_id")))
+    elif fact.get("source_id") not in lane_sources():
+        errors.append("foreign-source: "
+                      "%s.source_id=%r is outside this "
+                      "lane's sources %r"
+                      % (where, fact.get("source_id"),
+                         lane_sources()))
     check_u64(errors, where + ".epoch",
               fact.get("epoch"))
     check_slug(errors, where + ".operation_id",
