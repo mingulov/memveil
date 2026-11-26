@@ -455,7 +455,11 @@ def validate(doc, name):
         out.append("%s: expect %r" % (name, doc["expect"]))
     sections = {}
     for section in ENVELOPE_SECTIONS:
-        rows = doc.get(section, [])
+        if section not in doc:
+            out.append("%s: missing section %r" % (name, section))
+            rows = []
+        else:
+            rows = doc[section]
         if not isinstance(rows, list):
             out.append("%s: %s must be an array" % (name, section))
             rows = []

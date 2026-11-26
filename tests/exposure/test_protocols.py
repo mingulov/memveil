@@ -406,7 +406,11 @@ def validate(doc, name):
         out.append("%s: expect %r" % (name, doc["expect"]))
     sections = {}
     for section in ENVELOPE_SECTIONS:
-        rows = doc.get(section, [])
+        if section not in doc:
+            out.append("%s: missing section %r" % (name, section))
+            rows = []
+        else:
+            rows = doc[section]
         if not isinstance(rows, list):
             out.append("%s: %s must be an array" % (name, section))
             rows = []
@@ -525,6 +529,24 @@ def semantics_counts(facts):
     return {key: str(tally[key]) for key in sorted(tally)}
 
 
+def parity_shape(node):
+    """One parity record with its benign/shaped tags blanked.
+
+    Family and provenance carry the pair wording by design;
+    every other leaf keeps its authored value except the
+    `-ben-`/`-adv-` identity tags, which normalize to `-tag-`.
+    """
+    if isinstance(node, dict):
+        return {key: parity_shape(value)
+                for key, value in node.items()
+                if key not in ("family", "provenance")}
+    if isinstance(node, list):
+        return [parity_shape(entry) for entry in node]
+    if isinstance(node, str):
+        return node.replace("-ben-", "-tag-").replace("-adv-", "-tag-")
+    return node
+
+
 def test_parity_keeps_identical_counts():
     _, benign = load_raw("parity-benign.json")
     _, shaped = load_raw("parity-adversarial.json")
@@ -542,6 +564,8 @@ def test_parity_keeps_identical_counts():
         "request": "2", "result": "2"}
     assert benign["family"] == "parity-benign"
     assert shaped["family"] == "parity-adversarial"
+    assert sorted(benign.keys()) == sorted(shaped.keys())
+    assert parity_shape(benign) == parity_shape(shaped)
 
 
 def test_catalog_conformance():
