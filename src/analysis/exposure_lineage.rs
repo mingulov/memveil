@@ -618,13 +618,18 @@ fn apply_row(
         .alias
         .get(row.virtual_id.as_str())
         .map(|(_, generation)| *generation);
-    // A row observed in a clock domain none of the token's
-    // lines shares crosses a clock-domain change: the
-    // token's temporal claims bound from here on.
+    // A row observed in a clock domain the token's
+    // current generation does not share crosses a
+    // clock-domain change: the token's temporal claims
+    // bound from here on. Older generations never mask
+    // the mismatch.
     let token_tracked = state.latest.contains_key(&canonical);
-    let shares_domain = state.linked.iter().any(|((name, _), obj)| {
-        name == &canonical && obj.clock_domain == row.clock_domain
-    });
+    let shares_domain = state
+        .latest
+        .get(&canonical)
+        .and_then(|generation| state.linked.get(&(canonical.clone(), *generation)))
+        .map(|obj| obj.clock_domain == row.clock_domain)
+        .unwrap_or(false);
     if token_tracked && !shares_domain {
         state.temporal_bounded.insert(canonical.clone());
     }
@@ -834,16 +839,19 @@ fn apply_row(
         "loss_gap" => {
             // A loss gap seals only lines the gap's own
             // origin observed: a foreign loss row never
-            // seals same-source identities.
-            let seal: Vec<u64> = open_generations(state, &canonical)
-                .into_iter()
-                .filter(|generation| {
-                    state
-                        .linked
-                        .get(&(canonical.clone(), *generation))
-                        .map(|obj| same_origin(obj, row))
-                        .unwrap_or(false)
+            // seals same-source identities. Open lines and
+            // restoration-uncertain lines both seal, so a
+            // failed revert followed by loss accepts no
+            // later joins.
+            let seal: Vec<u64> = state
+                .linked
+                .iter()
+                .filter(|((name, _), obj)| {
+                    name == &canonical
+                        && (is_open(obj.status.as_str()) || obj.status == "unknown")
+                        && same_origin(obj, row)
                 })
+                .map(|((_, generation), _)| *generation)
                 .collect();
             for generation in seal {
                 state.sealed.insert((canonical.clone(), generation));
@@ -1051,12 +1059,11 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
         generation,
         obj.certainty.as_str(),
     );
-    // A binding claimed from a clock domain none of the
-    // target's lines shares is temporally bounded,
+    // A binding claimed from a clock domain the bound
+    // line does not share is temporally bounded,
     // without changing the target's own standing.
-    let shares_domain = state.linked.iter().any(|((name, _), line)| {
-        name == &target_canonical && line.clock_domain == row.clock_domain
-    });
+    // Older generations never mask the mismatch.
+    let shares_domain = obj.clock_domain == row.clock_domain;
     if !shares_domain && certainty == "known" {
         certainty = "bounded".to_string();
     }
