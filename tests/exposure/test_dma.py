@@ -793,6 +793,15 @@ def test_nested_mixed_sg_segments():
         by_operation.setdefault(
             fact["operation_id"], []).append(fact)
     for operation, group in by_operation.items():
+        # A request in one operation and a result in
+        # another are not a paired transfer: each
+        # outer operation must carry both records.
+        semantics = {fact["semantics"]
+                     for fact in group}
+        assert {"request", "result"} <= semantics, \
+            "outer operation %r lacks a paired " \
+            "request and result: %r" % (
+                operation, sorted(semantics))
         extents = {(fact["offset"],
                     fact["length_bytes"])
                    for fact in group}
