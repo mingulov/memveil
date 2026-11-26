@@ -7,7 +7,18 @@
 //! live source, no raw memory device, no payload, no address,
 //! and no command is ever read. Facts carry labels alone; equal
 //! mapping-class names never merge distinct trust boundaries,
-//! and a DAX access claim exists only when separately proved.
+//! and any DAX access claim refuses: this slice carries no
+//! separate proof, so a positive access attestation fails closed.
+//!
+//! Every carried identifier and label obeys a token grammar
+//! (ASCII lowercase letters, digits, hyphens, and
+//! underscores, bounded length): paths, commands,
+//! environments, and free-form
+//! wording refuse the whole read instead of entering a fact.
+//! Mapping classes come from a closed vocabulary; an unknown
+//! class refuses its entry without guessing. The snapshot
+//! shape is closed: unknown top-level keys refuse the whole
+//! read, mirroring the entry level.
 //!
 //! The module is self-contained on purpose: it declares no parent
 //! items, so it compiles both under its public module path and
@@ -37,6 +48,12 @@ pub const KNOWN_PEER_CLASSES: &[&str] = &[
     "host-or-paravisor",
 ];
 
+/// Mapping classes this reader reports; anything else refuses the entry.
+pub const KNOWN_MAPPING_CLASSES: &[&str] = &["mmio", "dax"];
+
+/// Carried identifiers and labels refused above this byte length.
+pub const MAX_LABEL_LEN: usize = 64;
+
 /// Entry keys that refuse the whole read: raw memory handles,
 /// payloads, addresses, and commands never enter a fact.
 pub const FORBIDDEN_KEYS: &[&str] = &[
@@ -57,7 +74,9 @@ pub const FORBIDDEN_KEYS: &[&str] = &[
 ];
 
 /// Value fragments that refuse the whole read: raw memory
-/// device paths never enter a fact.
+/// device paths never enter a fact. This scan stays as a
+/// second layer under the token grammar, so bare device-name
+/// tokens without separators still refuse.
 pub const FORBIDDEN_VALUES: &[&str] = &["dev/mem", "kcore", "/proc/"];
 
 /// Native results the reader maps; anything else refuses the entry.
@@ -90,7 +109,8 @@ pub struct DaxStatus {
     pub presence: String,
     /// One of `supported`, `unsupported`, `unknown`.
     pub support: String,
-    /// Proved claim only; `None` whenever unproved.
+    /// Always `None` in this slice: any claim refuses, since
+    /// no separate proof exists.
     pub access_claim: Option<String>,
 }
 
@@ -423,6 +443,58 @@ fn check_object_clean(fields: &[(String, JsonValue)], what: &str) -> Result<(), 
     Ok(())
 }
 
+/// Token grammar for every carried identifier and label:
+/// ASCII lowercase letters, digits, hyphens, and
+/// underscores, bounded length. Paths (`/`, `.`),
+/// commands (whitespace, `=`), and free-form wording
+/// fail the grammar.
+fn is_token(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_LABEL_LEN
+        && text.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+/// Refuse a carried string outside the token grammar.
+fn check_token(text: &str, what: &str) -> Result<(), ReadError> {
+    if is_token(text) {
+        Ok(())
+    } else {
+        Err(ReadError::new(what, "value outside token grammar"))
+    }
+}
+
+/// Refuse forbidden or unknown keys against a closed shape.
+fn check_shape_closed(fields: &[(String, JsonValue)], known: &[&str]) -> Result<(), ReadError> {
+    for (key, _) in fields {
+        if FORBIDDEN_KEYS.contains(&key.as_str()) {
+            return Err(ReadError::new(key.clone(), "forbidden field refused"));
+        }
+        if !known.contains(&key.as_str()) {
+            return Err(ReadError::new(key.clone(), "unknown field"));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse carried entry strings outside the token grammar.
+fn check_entry_tokens(entry_fields: &[(String, JsonValue)]) -> Result<(), ReadError> {
+    for key in [
+        "entry_id",
+        "mapping_class",
+        "peer_class",
+        "trust_boundary",
+        "address_namespace",
+        "alias_of",
+    ] {
+        if let Some(JsonValue::Str(text)) = find_field(entry_fields, key) {
+            check_token(text, key)?;
+        }
+    }
+    Ok(())
+}
+
 fn configuration_name(native_result: i64) -> Option<&'static str> {
     match native_result {
         NATIVE_PRESENT => Some("present"),
@@ -436,12 +508,23 @@ fn configuration_name(native_result: i64) -> Option<&'static str> {
 ///
 /// Unknown peers, namespaces, classes, or native results refuse
 /// the entry and count it in `refused_entries`; nothing is
-/// guessed. Forbidden fields or raw-device values refuse the
-/// whole read. The snapshot's `expected` block, when present,
-/// is never consulted.
+/// guessed. Forbidden fields, raw-device values, carried
+/// strings outside the token grammar, and unknown top-level
+/// keys refuse the whole read. The snapshot's `expected`
+/// block, when present, is never consulted.
 pub fn read_inventory(text: &str) -> Result<Inventory, ReadError> {
     let root = parse_value(text)?;
     let fields = as_object(&root, "snapshot")?;
+    const TOP_LEVEL: &[&str] = &[
+        "format",
+        "provenance",
+        "capture_id",
+        "source_id",
+        "entries",
+        "dax",
+        "expected",
+    ];
+    check_shape_closed(fields, TOP_LEVEL)?;
     let format = as_str(required(fields, "format")?, "format")?;
     if format != FIXTURE_FORMAT {
         return Err(ReadError::new("format", "unknown snapshot format"));
@@ -459,6 +542,7 @@ pub fn read_inventory(text: &str) -> Result<Inventory, ReadError> {
             return Err(ReadError::new("capture_id", "forbidden value refused"));
         }
     }
+    check_token(capture, "capture_id")?;
     let entries = as_array(required(fields, "entries")?, "entries")?;
     if entries.len() > MAX_ENTRIES {
         return Err(ReadError::new("entries", "too many entries"));
@@ -484,10 +568,19 @@ pub fn read_inventory(text: &str) -> Result<Inventory, ReadError> {
             ));
         }
     };
-    if claim.is_some() && !proved {
+    // This slice carries no separate proof, so any positive
+    // access attestation fails closed: a self-attested boolean
+    // never admits a claim.
+    if proved {
+        return Err(ReadError::new(
+            "dax.access_proved",
+            "access claim without separate proof refused",
+        ));
+    }
+    if claim.is_some() {
         return Err(ReadError::new(
             "dax.access_claim",
-            "access claim without proof refused",
+            "access claim without separate proof refused",
         ));
     }
     let mut facts = Vec::new();
@@ -496,6 +589,7 @@ pub fn read_inventory(text: &str) -> Result<Inventory, ReadError> {
     for entry in entries {
         let entry_fields = as_object(entry, "entries")?;
         check_object_clean(entry_fields, "entries")?;
+        check_entry_tokens(entry_fields)?;
         let entry_id = match find_field(entry_fields, "entry_id") {
             Some(value) => as_str(value, "entry_id")?.to_string(),
             None => {
@@ -540,7 +634,8 @@ pub fn read_inventory(text: &str) -> Result<Inventory, ReadError> {
 ///
 /// Only the allowlisted entry keys are read; `alias_of` may ride
 /// along as a string but never changes the fact, and any other
-/// unknown key refuses the entry.
+/// unknown key refuses the entry. Mapping classes come from a
+/// closed vocabulary; an unknown class refuses the entry.
 fn read_entry_usable(
     entry_fields: &[(String, JsonValue)],
 ) -> Option<(String, String, String, &str)> {
@@ -563,8 +658,24 @@ fn read_entry_usable(
     {
         return None;
     }
+    for key in [
+        "entry_id",
+        "mapping_class",
+        "peer_class",
+        "trust_boundary",
+        "address_namespace",
+        "alias_of",
+    ] {
+        if let Some(JsonValue::Str(text)) = find_field(entry_fields, key)
+            && !is_token(text)
+        {
+            return None;
+        }
+    }
     let class = match find_field(entry_fields, "mapping_class") {
-        Some(JsonValue::Str(text)) if !text.is_empty() => text.clone(),
+        Some(JsonValue::Str(text)) if KNOWN_MAPPING_CLASSES.contains(&text.as_str()) => {
+            text.clone()
+        }
         _ => return None,
     };
     let peer = match find_field(entry_fields, "peer_class") {

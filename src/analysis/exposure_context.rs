@@ -3,13 +3,25 @@
 //!
 //! The reader turns one fixture-shaped snapshot into timed typed
 //! facts for swap, dump, hibernation, module, channel, NIC, and
-//! device controls, plus explicit resample gaps. It consumes
-//! snapshot text only: no live source, no full command, no
-//! environment, no log, and no payload is ever read. Each fact
-//! stands on its own sample; the reader never merges samples,
-//! never interpolates across a gap, and never derives an
-//! encryption state from a name. Facts describe control state
-//! alone and stay silent about whether anything crossed a boundary.
+//! device controls, plus explicit per-control resample gaps. It
+//! consumes snapshot text only: no live source, no full command,
+//! no environment, no log, and no payload is ever read. Each
+//! fact stands on its own sample; the reader never merges
+//! samples, never interpolates across a gap, and never derives
+//! an encryption state from a name. Facts describe control
+//! state alone and stay silent about whether anything crossed
+//! a boundary.
+//!
+//! Every carried identifier and label obeys a token grammar
+//! (ASCII lowercase letters, digits, hyphens, and
+//! underscores, bounded length): paths, commands,
+//! environments, and free-form
+//! wording refuse the whole read instead of entering a fact.
+//! Encryption, mode, and backing come from closed
+//! vocabularies; an unknown value refuses its sample without
+//! guessing. The snapshot shape is closed: unknown
+//! top-level or resample keys refuse the whole read,
+//! mirroring the sample level.
 //!
 //! The module is self-contained on purpose: it declares no parent
 //! items, so it compiles both under its public module path and
@@ -55,6 +67,18 @@ pub const DETAIL_KEYS: &[&str] = &[
     "writeback",
 ];
 
+/// Encryption states this reader reports; anything else refuses the sample.
+pub const KNOWN_ENCRYPTION: &[&str] = &["encrypted", "mixed", "unresolved", "unknown"];
+
+/// Control modes this reader reports; anything else refuses the sample.
+pub const KNOWN_MODES: &[&str] = &["strict", "permissive", "unknown"];
+
+/// Swap backing labels this reader reports; anything else refuses the sample.
+pub const KNOWN_BACKING: &[&str] = &["partition", "file", "zram", "zswap"];
+
+/// Carried identifiers and labels refused above this byte length.
+pub const MAX_LABEL_LEN: usize = 64;
+
 /// Sample keys that refuse the whole read: full commands,
 /// environments, logs, and payloads never enter a fact.
 pub const FORBIDDEN_KEYS: &[&str] = &[
@@ -75,6 +99,8 @@ pub const FORBIDDEN_KEYS: &[&str] = &[
 
 /// Value fragments that refuse the whole read: raw memory
 /// device paths and movement-claim wording never enter a fact.
+/// This scan stays as a second layer under the token grammar,
+/// so bare device-name tokens without separators still refuse.
 pub const FORBIDDEN_VALUES: &[&str] = &["dev/mem", "kcore", "/proc/", "exfil"];
 
 /// Native results the reader maps; anything else refuses the sample.
@@ -451,6 +477,59 @@ fn check_object_clean(fields: &[(String, JsonValue)]) -> Result<(), ReadError> {
     Ok(())
 }
 
+/// Token grammar for every carried identifier and label:
+/// ASCII lowercase letters, digits, hyphens, and
+/// underscores, bounded length. Paths (`/`, `.`),
+/// commands (whitespace, `=`), and free-form wording
+/// fail the grammar.
+fn is_token(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_LABEL_LEN
+        && text.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+        })
+}
+
+/// Refuse a carried string outside the token grammar.
+fn check_token(text: &str, what: &str) -> Result<(), ReadError> {
+    if is_token(text) {
+        Ok(())
+    } else {
+        Err(ReadError::new(what, "value outside token grammar"))
+    }
+}
+
+/// Refuse forbidden or unknown keys against a closed shape.
+fn check_shape_closed(fields: &[(String, JsonValue)], known: &[&str]) -> Result<(), ReadError> {
+    for (key, _) in fields {
+        if FORBIDDEN_KEYS.contains(&key.as_str()) {
+            return Err(ReadError::new(key.clone(), "forbidden field refused"));
+        }
+        if !known.contains(&key.as_str()) {
+            return Err(ReadError::new(key.clone(), "unknown field"));
+        }
+    }
+    Ok(())
+}
+
+/// Refuse carried sample and detail strings outside the token grammar.
+fn check_sample_tokens(
+    sample_fields: &[(String, JsonValue)],
+    detail: &[(String, JsonValue)],
+) -> Result<(), ReadError> {
+    for key in ["sample_id", "control"] {
+        if let Some(JsonValue::Str(text)) = find_field(sample_fields, key) {
+            check_token(text, key)?;
+        }
+    }
+    for (key, value) in detail {
+        if let JsonValue::Str(text) = value {
+            check_token(text, key)?;
+        }
+    }
+    Ok(())
+}
+
 fn status_name(native_result: i64) -> Option<&'static str> {
     match native_result {
         NATIVE_OBSERVED => Some("observed"),
@@ -469,15 +548,31 @@ fn detail_string(detail: &[(String, JsonValue)], key: &str) -> Option<String> {
 
 /// Read one egress-context snapshot into timed facts and gaps.
 ///
-/// Unknown controls, ticks, or native results refuse the sample
-/// and count it in `refused_samples`; nothing is guessed. Gaps
-/// wider than the resample interval stay explicit records; the
-/// reader never fills them. Forbidden fields or values refuse
+/// Unknown controls, ticks, detail values, or native results
+/// refuse the sample and count it in `refused_samples`;
+/// nothing is guessed. Each control keeps its own tick
+/// series: a gap wider than the resample interval in one
+/// control stays an explicit record even when other
+/// controls report between its ticks; the reader never
+/// fills a gap. Forbidden fields, raw-device or
+/// movement-claim values, carried strings outside the token
+/// grammar, and unknown top-level or resample keys refuse
 /// the whole read. The snapshot's `expected` block, when
 /// present, is never consulted.
 pub fn read_context(text: &str) -> Result<Context, ReadError> {
     let root = parse_value(text)?;
     let fields = as_object(&root, "snapshot")?;
+    const TOP_LEVEL: &[&str] = &[
+        "format",
+        "provenance",
+        "capture_id",
+        "source_id",
+        "clock_domain",
+        "resample",
+        "samples",
+        "expected",
+    ];
+    check_shape_closed(fields, TOP_LEVEL)?;
     let format = as_str(required(fields, "format")?, "format")?;
     if format != FIXTURE_FORMAT {
         return Err(ReadError::new("format", "unknown snapshot format"));
@@ -495,11 +590,13 @@ pub fn read_context(text: &str) -> Result<Context, ReadError> {
             return Err(ReadError::new("capture_id", "forbidden value refused"));
         }
     }
+    check_token(capture, "capture_id")?;
     let clock = as_str(required(fields, "clock_domain")?, "clock_domain")?;
     if !KNOWN_CLOCK_DOMAINS.contains(&clock) {
         return Err(ReadError::new("clock_domain", "unknown clock"));
     }
     let resample = as_object(required(fields, "resample")?, "resample")?;
+    check_shape_closed(resample, &["interval_ticks"])?;
     let interval = as_num(
         required(resample, "interval_ticks")?,
         "resample.interval_ticks",
@@ -529,6 +626,7 @@ pub fn read_context(text: &str) -> Result<Context, ReadError> {
             }
         };
         check_object_clean(detail)?;
+        check_sample_tokens(sample_fields, detail)?;
         let sample_id = match find_field(sample_fields, "sample_id") {
             Some(JsonValue::Str(text)) if !text.is_empty() => text.clone(),
             _ => {
@@ -545,19 +643,31 @@ pub fn read_context(text: &str) -> Result<Context, ReadError> {
             None => refused += 1,
         }
     }
-    let mut ticks: Vec<u64> = facts.iter().map(|fact| fact.tick).collect();
-    ticks.sort();
+    let mut series: Vec<(&str, u64)> = facts
+        .iter()
+        .map(|fact| (fact.control.as_str(), fact.tick))
+        .collect();
+    series.sort();
     let mut gaps = Vec::new();
-    for pair in ticks.windows(2) {
-        let span = pair[1] - pair[0];
+    for pair in series.windows(2) {
+        if pair[0].0 != pair[1].0 {
+            continue;
+        }
+        let span = pair[1].1 - pair[0].1;
         if span > interval {
             gaps.push(Gap {
-                from_tick: pair[0],
-                to_tick: pair[1],
+                from_tick: pair[0].1,
+                to_tick: pair[1].1,
                 ticks: span,
             });
         }
     }
+    gaps.sort_by(|left, right| {
+        (left.from_tick, left.to_tick).cmp(&(right.from_tick, right.to_tick))
+    });
+    gaps.dedup_by(|left, right| {
+        left.from_tick == right.from_tick && left.to_tick == right.to_tick
+    });
     Ok(Context {
         capture_id: capture.to_string(),
         facts,
@@ -572,6 +682,8 @@ pub fn read_context(text: &str) -> Result<Context, ReadError> {
 /// refuses the sample. Denied samples drop every detail field.
 /// Encryption comes from the explicit field alone: a missing
 /// field yields `unknown` no matter what any name suggests.
+/// Encryption, mode, and backing come from closed
+/// vocabularies; an unknown value refuses the sample.
 fn read_sample_usable(
     sample_id: &str,
     capture: &str,
@@ -584,11 +696,33 @@ fn read_sample_usable(
             return None;
         }
     }
+    for key in ["sample_id", "control"] {
+        if let Some(JsonValue::Str(text)) = find_field(sample_fields, key)
+            && !is_token(text)
+        {
+            return None;
+        }
+    }
     for (key, value) in detail {
         if !DETAIL_KEYS.contains(&key.as_str()) {
             return None;
         }
-        if !matches!(value, JsonValue::Str(_)) {
+        let text = match value {
+            JsonValue::Str(text) => text,
+            _ => return None,
+        };
+        if !is_token(text) {
+            return None;
+        }
+        let known = match key.as_str() {
+            "encryption" => Some(KNOWN_ENCRYPTION),
+            "mode" => Some(KNOWN_MODES),
+            "backing" => Some(KNOWN_BACKING),
+            _ => None,
+        };
+        if let Some(vocabulary) = known
+            && !vocabulary.contains(&text.as_str())
+        {
             return None;
         }
     }
