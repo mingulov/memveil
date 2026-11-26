@@ -925,10 +925,28 @@ def check_shared_expected(doc):
             doc["family"], sorted(expected),
             sorted(allowed))
     for name, value in derived.items():
-        assert expected.get(name) == value, \
-            "%s: expected.%s=%r derived=%r" % (
+        got = expected.get(name)
+        # Python `True == 1`, so plain equality
+        # lets a boolean pass as an integer count.
+        # The recorded type must match the derived
+        # type exactly, including every per-key
+        # count.
+        assert type(got) is type(value), \
+            "%s: expected.%s type %s != " \
+            "derived %s" % (
                 doc["family"], name,
-                expected.get(name), value)
+                type(got).__name__,
+                type(value).__name__)
+        if isinstance(value, dict):
+            for key in value:
+                assert type(got.get(key)) is int, \
+                    "%s: expected.%s[%r]=%r is " \
+                    "not an int" % (
+                        doc["family"], name, key,
+                        got.get(key))
+        assert got == value, \
+            "%s: expected.%s=%r derived=%r" % (
+                doc["family"], name, got, value)
 
 
 def valid_fixtures():
