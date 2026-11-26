@@ -631,6 +631,12 @@ def check_coverage(errors, where, record,
         errors.append("closed-enum-violation: "
                       "%s.source_id=%r"
                       % (where, record.get("source_id")))
+    elif record.get("source_id") not in lane_sources():
+        errors.append("foreign-source: "
+                      "%s.source_id=%r is outside this "
+                      "lane's sources %r"
+                      % (where, record.get("source_id"),
+                         lane_sources()))
     check_slug(errors, where + ".capability",
                record.get("capability"))
     if not isinstance(record.get("profile_id"), str) \
