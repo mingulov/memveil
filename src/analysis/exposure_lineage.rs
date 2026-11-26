@@ -2028,10 +2028,28 @@ pub fn replay(
         // before its tentative replay: rollback re-resolves
         // every leg against the refusals proved when replay
         // reached it, never against a later leg's refusal.
-        let mut leg_refusals = Vec::new();
+        // Legs share one snapshot while no leg adds a
+        // refusal, so a large group keeps one copy instead
+        // of a full clone per leg. Refusals only grow —
+        // counters increment, keys insert — so equal
+        // counters and length mean an unchanged set.
+        let mut refusal_snapshots: Vec<Refusals> = Vec::new();
+        let mut leg_snapshot: Vec<usize> = Vec::new();
         let mut group_failed = false;
         for row in &legs {
-            leg_refusals.push(refusals.clone());
+            let reuse = leg_snapshot.last().copied().filter(|&index| {
+                let snapshot = &refusal_snapshots[index];
+                snapshot.overflow == refusals.overflow
+                    && snapshot.bound == refusals.bound
+                    && snapshot.refused_alloc.len() == refusals.refused_alloc.len()
+            });
+            match reuse {
+                Some(index) => leg_snapshot.push(index),
+                None => {
+                    leg_snapshot.push(refusal_snapshots.len());
+                    refusal_snapshots.push(refusals.clone());
+                }
+            }
             let applied = apply_row(&mut state, config, &mut refusals, row);
             if applied.failed {
                 group_failed = true;
@@ -2094,7 +2112,10 @@ pub fn replay(
         // the first failure sees the tentative set, since its
         // position follows every leg that ran.
         for (index, row) in legs.iter().enumerate() {
-            let at_position = leg_refusals.get(index).unwrap_or(&refusals);
+            let at_position = leg_snapshot
+                .get(index)
+                .and_then(|slot| refusal_snapshots.get(*slot))
+                .unwrap_or(&refusals);
             record_rollback_evidence(&mut state, at_position, row);
         }
         resolved.truncate(resolved_len);
