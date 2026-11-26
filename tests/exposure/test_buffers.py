@@ -162,6 +162,21 @@ LANE_SCAN_SCOPES = (
     "heap-scan", "attachment-scan",
 )
 
+# State evidence must support the claimed state:
+# each object state needs at least one cited fact
+# whose kind observes the claim. Same lineage
+# alone is not support: a creation fact proves
+# the object existed, never that it was
+# released, quarantined, or held.
+STATE_SUPPORT = {
+    "inventoried": ("inventory",),
+    "shared-live": ("attachment",),
+    "released": ("release-put", "destruction"),
+    "quarantined": ("callback-result",),
+    "scan-held": ("scan-hold",),
+    "reused": ("creation", "destruction"),
+}
+
 # Lane capability pinned by the envelope: a fact
 # may only cite a catalog source carrying this
 # capability. Another lane's source id exists in
@@ -874,6 +889,7 @@ def validate_fixture(doc):
         for index, obj in enumerate(doc["objects"]):
             if not isinstance(obj, dict):
                 continue
+            cited_kinds = []
             for ident in \
                     obj.get("state_evidence", []):
                 if ident not in evidence:
@@ -883,6 +899,8 @@ def validate_fixture(doc):
                         % (index, ident))
                 else:
                     cited = evidence[ident]
+                    cited_kinds.append(
+                        cited.get("kind"))
                     if (cited.get("object_token"),
                             cited.get("generation")) != \
                             (obj.get("object_token"),
@@ -897,6 +915,21 @@ def validate_fixture(doc):
                                 cited.get("generation")),
                                (obj.get("object_token"),
                                 obj.get("generation"))))
+            # The cited evidence must support the
+            # claimed state kind: at least one cited
+            # fact carries a kind that observes the
+            # claim.
+            want_kinds = STATE_SUPPORT.get(
+                obj.get("state"))
+            if want_kinds is not None and \
+                    not any(kind in want_kinds
+                            for kind in cited_kinds):
+                errors.append(
+                    "unsupported-state-evidence: "
+                    "objects[%d] state=%r cites no "
+                    "supporting kind %r"
+                    % (index, obj.get("state"),
+                       want_kinds))
         for index, fact in enumerate(doc["facts"]):
             if not isinstance(fact, dict):
                 continue
