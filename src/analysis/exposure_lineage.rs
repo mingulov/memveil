@@ -410,6 +410,40 @@ fn note_domain(state: &mut State, row: &LedgerRow, canonical: &str, generation: 
     }
 }
 
+/// Whether any handle on the alias path from `start` to
+/// the terminal token carries a refused allocation in the
+/// row's origin: a refusal stored under an intermediate
+/// handle poisons every lookup that goes through it,
+/// since an untracked generation may sit beside the
+/// pinned one.
+fn refused_on_path(
+    state: &State,
+    refusals: &Refusals,
+    row: &LedgerRow,
+    start: &str,
+    terminal: &str,
+) -> bool {
+    let mut probe = start.to_string();
+    for _ in 0..=MAX_ALIAS_HOPS {
+        if refusals
+            .refused_alloc
+            .contains(&refusal_key(&probe, row))
+        {
+            return true;
+        }
+        if probe == terminal {
+            break;
+        }
+        match state.alias.get(&probe).map(|(token, _)| token.clone()) {
+            Some(next) => probe = next,
+            None => break,
+        }
+    }
+    refusals
+        .refused_alloc
+        .contains(&refusal_key(terminal, row))
+}
+
 /// Generations one lookup may join: open lines, plus
 /// restoration-uncertain lines when the caller allows
 /// them, restricted to the row's own origin and
@@ -472,10 +506,7 @@ fn join(
         return Err(format!("no allocated identity for '{token}'"));
     }
     if let Some(generation) = pinned {
-        if refusals
-            .refused_alloc
-            .contains(&refusal_key(token, row))
-        {
+        if refused_on_path(state, refusals, row, &row.virtual_id, token) {
             return Err(format!(
                 "ambiguous join for '{token}': a refused allocation may hide \
                  another generation beside pinned generation {generation}"
@@ -630,6 +661,9 @@ fn shown_identity(
         return None;
     }
     if let Some(generation) = pinned {
+        if refused_on_path(state, refusals, row, &row.virtual_id, token) {
+            return None;
+        }
         let (status, line_certainty) =
             match state.linked.get(&(token.to_string(), generation)) {
                 Some(obj) if same_origin(obj, row) => {
@@ -1179,14 +1213,11 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     // one.
     let generation = match state.alias.get(target).map(|(_, generation)| *generation) {
         Some(bound) => {
-            if refusals
-                .refused_alloc
-                .contains(&refusal_key(&target_canonical, row))
-            {
+            if refused_on_path(state, refusals, row, target, &target_canonical) {
                 return failed(
                     row,
                     format!(
-                        "a refused allocation of '{target_canonical}' may hide \
+                        "a refused allocation on the alias path to '{target_canonical}' may hide \
                          another generation; alias refused"
                     ),
                 );
