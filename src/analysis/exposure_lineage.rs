@@ -627,6 +627,25 @@ fn has_unsealed_unknown(state: &State, row: &LedgerRow, token: &str) -> bool {
     })
 }
 
+/// Restoration-uncertain lines one handle denotes beyond
+/// its own token's lines: generations recorded through
+/// the handle under another token, or the generation an
+/// invalidated pin last bound, that no loss gap sealed.
+/// No lifetime event ended them, so one may still answer
+/// the row beside any open line, exactly like an
+/// uncertain line of the requested token.
+fn has_denoted_uncertain_extra(state: &State, row: &LedgerRow, handle: &str) -> bool {
+    denoted_extras(state, row, handle).iter().any(|(token, generation)| {
+        let key = (token.clone(), *generation);
+        !state.sealed.contains(&key)
+            && state
+                .linked
+                .get(&key)
+                .map(|obj| obj.status == "unknown")
+                .unwrap_or(false)
+    })
+}
+
 /// Shared lookup for state-changing rows and alias binds:
 /// exactly one joinable line must exist. An unpinned handle
 /// denotes its own token's lines plus the generations it
@@ -640,7 +659,9 @@ fn has_unsealed_unknown(state: &State, row: &LedgerRow, token: &str) -> bool {
 /// ambiguous, since an untracked generation may exist
 /// beside any tracked line. A restoration-uncertain line
 /// beside the one open candidate keeps the join
-/// ambiguous too, since no lifetime event ended it.
+/// ambiguous too, since no lifetime event ended it —
+/// including an uncertain line the handle denotes through
+/// a recorded allocation or an invalidated pin.
 fn join(
     state: &State,
     refusals: &Refusals,
@@ -699,7 +720,8 @@ fn join(
             ));
         }
         let uncertain = has_unsealed_unknown(state, row, token)
-            || (joined_token != token && has_unsealed_unknown(state, row, &joined_token));
+            || (joined_token != token && has_unsealed_unknown(state, row, &joined_token))
+            || has_denoted_uncertain_extra(state, row, token);
         if !unknown_ok && uncertain {
             return Err(format!(
                 "ambiguous join for '{token}': a restoration-uncertain line may \
@@ -890,7 +912,8 @@ fn shown_identity(
         // answer beside this candidate, so the row shows no
         // identity rather than select a generation.
         let uncertain = has_unsealed_unknown(state, row, token)
-            || (shown_token != token && has_unsealed_unknown(state, row, &shown_token));
+            || (shown_token != token && has_unsealed_unknown(state, row, &shown_token))
+            || has_denoted_uncertain_extra(state, row, token);
         if uncertain {
             return None;
         }
@@ -955,7 +978,8 @@ fn shown_identity(
     if sealed.len() == 1 {
         let (shown_token, _) = &sealed[0];
         let uncertain = has_unsealed_unknown(state, row, token)
-            || (shown_token != token && has_unsealed_unknown(state, row, shown_token));
+            || (shown_token != token && has_unsealed_unknown(state, row, shown_token))
+            || has_denoted_uncertain_extra(state, row, token);
         if uncertain {
             return None;
         }
