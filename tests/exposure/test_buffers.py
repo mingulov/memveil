@@ -882,7 +882,23 @@ def test_scan_held_reference_bounded():
     assert doc["expected"]["observer_retention"] \
         is False
     assert doc["expected"]["scan_bounded"] is True
-    assert kind_facts(doc, "scan-hold") != []
+    holds = kind_facts(doc, "scan-hold")
+    assert holds != []
+    # A hold is evidence for this scan only when its
+    # observed interval meets the scan window; a hold
+    # entirely outside the window proves nothing
+    # about the scan.
+    window_start = int(scan["start_time"])
+    window_end = int(scan["end_time"])
+    for fact in holds:
+        start = int(fact["observed_interval"]["start"])
+        end = int(fact["observed_interval"]["end"])
+        assert start <= window_end \
+            and end >= window_start, \
+            "scan hold outside the scan window: " \
+            "%r not meeting [%r, %r]" % (
+                (start, end),
+                window_start, window_end)
     assert kind_facts(doc, "destruction") == []
     assert doc["expected"]["live_tokens"] != []
 
