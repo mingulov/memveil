@@ -1,0 +1,1 @@
+{"case": "outcome-ordinary-policy-nonstrict", "description": "A policy result without the strict flag exits 0 with the policy field shown independently.", "expected": {"exit": 0}, "outcome": {"collection_missing": false, "evidence_complete": true, "inputs_valid": true, "policy_violation_proved": true, "recovered": false, "refused_metrics": false, "strict": false}}

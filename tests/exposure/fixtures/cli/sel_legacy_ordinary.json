@@ -1,0 +1,1 @@
+{"case": "legacy-ordinary", "description": "Legacy input with an ordinary channel selects and keeps the attempt dependency.", "expected": {"device": null, "exit": 0, "reason": null, "requires_attempt_hook": true, "selected": ["attempt-trace"]}, "selection": {"capabilities": "attempt-trace", "device": null, "legacy": true}}

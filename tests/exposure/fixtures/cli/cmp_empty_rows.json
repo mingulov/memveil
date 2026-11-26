@@ -1,0 +1,1 @@
+{"case": "compare-empty-rows", "description": "A comparison with no requested metrics refuses as invalid input.", "expected": {"exit": 2, "reason": "no-requested-metrics"}, "compare": {"collection_missing": false, "evidence_complete": true, "left_valid": true, "policy_violation_proved": false, "recovered": false, "right_valid": true, "rows": [], "strict": false}}

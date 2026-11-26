@@ -1,0 +1,1 @@
+{"case": "lifecycle-alone", "description": "The lifecycle channel without the attempt channel refuses: the attempt channel is the mandatory base.", "expected": {"device": null, "exit": 2, "reason": "attempt-trace-required", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "mapping-lifecycle", "device": null, "legacy": false}}

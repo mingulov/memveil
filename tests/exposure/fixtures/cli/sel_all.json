@@ -1,0 +1,1 @@
+{"case": "all-channels", "description": "The sole item all expands to the three ordinary channels only; opt-in journal channels stay unselected.", "expected": {"device": null, "exit": 0, "reason": null, "requires_attempt_hook": true, "selected": ["attempt-trace", "mapping-lifecycle", "copy-actual"]}, "selection": {"capabilities": "all", "device": null, "legacy": false}}

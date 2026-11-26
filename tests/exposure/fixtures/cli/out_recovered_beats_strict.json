@@ -1,0 +1,1 @@
+{"case": "outcome-recovered-beats-strict", "description": "Recovery stays partial regardless of policy flags: 4 precedes 5.", "expected": {"exit": 4}, "outcome": {"collection_missing": false, "evidence_complete": true, "inputs_valid": true, "policy_violation_proved": true, "recovered": true, "refused_metrics": false, "strict": true}}

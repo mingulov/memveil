@@ -1,0 +1,1 @@
+{"case": "legacy-journal", "description": "Legacy input with a journal channel refuses: new channels need integrity metadata.", "expected": {"device": null, "exit": 2, "reason": "legacy-input", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "conversion-journal", "device": null, "legacy": true}}

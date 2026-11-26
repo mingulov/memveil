@@ -1,0 +1,1 @@
+{"case": "unknown-beats-device", "description": "An unknown name refuses before an empty device value is even checked.", "expected": {"device": null, "exit": 2, "reason": "unknown-capability", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "bogus", "device": "", "legacy": false}}

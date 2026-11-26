@@ -1,0 +1,1 @@
+{"case": "device-empty", "description": "An empty device value is invalid input.", "expected": {"device": null, "exit": 2, "reason": "invalid-device", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "attempt-trace", "device": "", "legacy": false}}

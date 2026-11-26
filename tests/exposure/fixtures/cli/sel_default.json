@@ -1,0 +1,1 @@
+{"case": "default-selection", "description": "An absent capability list selects the default attempt channel and keeps the attempt dependency.", "expected": {"device": null, "exit": 0, "reason": null, "requires_attempt_hook": true, "selected": ["attempt-trace"]}, "selection": {"capabilities": null, "device": null, "legacy": false}}

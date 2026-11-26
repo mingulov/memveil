@@ -1,0 +1,1 @@
+{"case": "observe-alone", "description": "The named observe channel parses with no attempt hook, then refuses: no record channel exists yet.", "expected": {"device": null, "exit": 3, "reason": "no-record-channel", "requires_attempt_hook": false, "selected": ["conversion-observe"]}, "selection": {"capabilities": "conversion-observe", "device": null, "legacy": false}}

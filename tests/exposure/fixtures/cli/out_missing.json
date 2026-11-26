@@ -1,0 +1,1 @@
+{"case": "outcome-missing", "description": "An explicitly required but unavailable collection exits 3.", "expected": {"exit": 3}, "outcome": {"collection_missing": true, "evidence_complete": true, "inputs_valid": true, "policy_violation_proved": false, "recovered": false, "refused_metrics": false, "strict": false}}
