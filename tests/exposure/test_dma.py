@@ -162,11 +162,22 @@ DISCLOSURE_FIELDS = (
 def disclosure_key(name):
     """Normalize a key before the disclosure match.
 
-    Hyphen, underscore, and case spellings of the
-    same field disclose the same identity or
-    addressing, so they match as one field.
+    Underscore, hyphen, case, and camelCase
+    spellings of the same field disclose the same
+    identity or addressing, so they match as one
+    field.
     """
-    return name.lower().replace("-", "_")
+    split = re.sub(r"([a-z0-9])([A-Z])",
+                   r"\1_\2", name)
+    split = re.sub(r"([A-Z]+)([A-Z][a-z])",
+                   r"\1_\2", split)
+    return re.sub(r"[^a-z0-9]+", "",
+                  split.casefold())
+
+
+DISCLOSURE_KEYS = frozenset(
+    disclosure_key(field)
+    for field in DISCLOSURE_FIELDS)
 
 
 def load_json(path):
@@ -509,7 +520,7 @@ def check_no_disclosure(errors, where, value):
         for name, item in value.items():
             if isinstance(name, str) and \
                     disclosure_key(name) in \
-                    DISCLOSURE_FIELDS:
+                    DISCLOSURE_KEYS:
                 errors.append("forbidden-content: "
                               "%s.%s discloses identity "
                               "or addressing"
