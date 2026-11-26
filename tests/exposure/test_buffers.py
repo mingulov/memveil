@@ -178,6 +178,13 @@ FORBIDDEN = (
     ".c", ".h", "/dev/", "heap-name",
 )
 
+# Object keys that disclose buffer identity or raw
+# addressing; never accepted anywhere in a fixture,
+# whatever object carries them.
+DISCLOSURE_FIELDS = (
+    "buffer_name", "raw_pointer",
+)
+
 
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
@@ -260,6 +267,11 @@ def check_present_reason(errors, where, record,
 
 def check_nullable(errors, where, record, name):
     if name not in record:
+        # A reason without its base value is still
+        # validated: disclosure-shaped reasons must
+        # fail even when the base field is absent.
+        check_present_reason(errors, where, record,
+                             name)
         return
     if record[name] is not None:
         check_present_reason(errors, where, record,
@@ -571,6 +583,11 @@ def check_no_disclosure(errors, where, value):
                           "a raw address" % where)
     elif isinstance(value, dict):
         for name, item in value.items():
+            if name in DISCLOSURE_FIELDS:
+                errors.append("forbidden-content: "
+                              "%s.%s discloses identity "
+                              "or addressing"
+                              % (where, name))
             check_no_disclosure(
                 errors, "%s.%s" % (where, name), item)
     elif isinstance(value, list):
