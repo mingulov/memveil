@@ -989,17 +989,30 @@ fn apply_row(
             // seals same-source identities. Open lines and
             // restoration-uncertain lines both seal, so a
             // failed revert followed by loss accepts no
-            // later joins.
-            let seal: Vec<u64> = state
-                .linked
-                .iter()
-                .filter(|((name, _), obj)| {
-                    name == &canonical
-                        && (is_open(obj.status.as_str()) || obj.status == "unknown")
-                        && same_origin(obj, row)
-                })
-                .map(|((_, generation), _)| *generation)
-                .collect();
+            // later joins. A row addressed through a pinned
+            // alias seals only that generation; loss through
+            // an old pin never seals a newer generation.
+            let seal: Vec<u64> = match pinned {
+                Some(generation) => state
+                    .linked
+                    .get(&(canonical.clone(), generation))
+                    .filter(|obj| {
+                        (is_open(obj.status.as_str()) || obj.status == "unknown")
+                            && same_origin(obj, row)
+                    })
+                    .map(|_| vec![generation])
+                    .unwrap_or_default(),
+                None => state
+                    .linked
+                    .iter()
+                    .filter(|((name, _), obj)| {
+                        name == &canonical
+                            && (is_open(obj.status.as_str()) || obj.status == "unknown")
+                            && same_origin(obj, row)
+                    })
+                    .map(|((_, generation), _)| *generation)
+                    .collect(),
+            };
             for generation in seal {
                 state.sealed.insert((canonical.clone(), generation));
             }
