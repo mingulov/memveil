@@ -819,6 +819,12 @@ fn shown_identity(
         .map(|((_, generation), _)| *generation)
         .collect();
     closed.sort();
+    // Like the sealed fallback above: two terminal
+    // generations could each match, so the row shows no
+    // identity rather than select the highest one.
+    if closed.len() > 1 {
+        return None;
+    }
     let generation = closed.pop()?;
     let (status, line_certainty) = match state.linked.get(&(token.to_string(), generation)) {
         Some(obj) => (obj.status.clone(), obj.certainty.clone()),
