@@ -235,8 +235,7 @@ Refusal reasons:
 
 | Reason | Meaning |
 | --- | --- |
-| `unknown-capability` | A name outside the catalog |
-| `planned-capability` | A catalog name whose adapter is unshipped |
+| `unknown-capability` | A name outside the catalog, or a catalog name whose adapter is unshipped |
 | `bad-capability-list` | An empty item in the list |
 | `empty-capability-list` | An explicitly empty list; the default applies only when absent |
 | `attempt-trace-required` | An ordinary channel without the attempt base |

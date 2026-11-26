@@ -229,7 +229,7 @@ pub fn resolve_cli_selection(request: &SelectionRequest) -> SelectionOutcome {
             let mut ids = Vec::new();
             for item in items {
                 if is_planned(item) {
-                    return parse_refusal("planned-capability");
+                    return parse_refusal("unknown-capability");
                 }
                 if !is_ordinary(item) && !is_journal(item) {
                     return parse_refusal("unknown-capability");

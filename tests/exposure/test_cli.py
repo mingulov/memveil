@@ -109,7 +109,6 @@ FAMILIES = {
 # label rule.
 REASONS = (
     "unknown-capability",
-    "planned-capability",
     "bad-capability-list",
     "empty-capability-list",
     "attempt-trace-required",
@@ -196,7 +195,7 @@ def expect_selection(sel):
         ids = []
         for item in items:
             if item in PLANNED:
-                return {"exit": 2, "reason": "planned-capability",
+                return {"exit": 2, "reason": "unknown-capability",
                         "selected": [],
                         "requires_attempt_hook": False,
                         "device": None}

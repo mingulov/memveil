@@ -202,18 +202,18 @@ fn invented_names_refuse_as_unknown() {
 #[test]
 fn planned_census_refuses_until_its_adapter_ships() {
     let outcome = resolve_cli_selection(&request(Some("census"), None, false));
-    expect_parse_refusal(&outcome, "planned-capability");
+    expect_parse_refusal(&outcome, "unknown-capability");
 }
 
 // case: planned-shared-buffers
 #[test]
 fn planned_heap_channel_refuses_until_its_adapter_ships() {
     let outcome = resolve_cli_selection(&request(Some("shared-buffers"), None, false));
-    expect_parse_refusal(&outcome, "planned-capability");
+    expect_parse_refusal(&outcome, "unknown-capability");
 }
 
 #[test]
-fn every_planned_channel_refuses_as_planned() {
+fn every_planned_channel_refuses_as_unknown() {
     for id in [
         "census",
         "object-lifetimes",
@@ -227,7 +227,7 @@ fn every_planned_channel_refuses_as_planned() {
         assert_eq!(outcome.exit, compare::EXIT_INVALID, "id {id}");
         assert_eq!(
             outcome.reason.as_deref(),
-            Some("planned-capability"),
+            Some("unknown-capability"),
             "id {id}"
         );
     }
