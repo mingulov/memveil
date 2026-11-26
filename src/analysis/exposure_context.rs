@@ -13,10 +13,12 @@
 //! a boundary.
 //!
 //! Every carried identifier and label obeys a token grammar
-//! (ASCII lowercase letters, digits, hyphens, and
-//! underscores, bounded length): paths, commands,
-//! environments, and free-form
-//! wording refuse the whole read instead of entering a fact.
+//! (a leading lowercase letter, then lowercase letters,
+//! digits, hyphens, and underscores, bounded length):
+//! paths, commands, environments, free-form wording, and
+//! bare addresses refuse the whole read instead of
+//! entering a fact. Address shapes (`0x…` hex runs, `%p`,
+//! `pfn =`) refuse even inside a grammatical token.
 //! Encryption, mode, and backing come from closed
 //! vocabularies; an unknown value refuses its sample without
 //! guessing. The snapshot shape is closed: unknown
@@ -477,26 +479,61 @@ fn check_object_clean(fields: &[(String, JsonValue)]) -> Result<(), ReadError> {
     Ok(())
 }
 
-/// Token grammar for every carried identifier and label:
-/// ASCII lowercase letters, digits, hyphens, and
-/// underscores, bounded length. Paths (`/`, `.`),
-/// commands (whitespace, `=`), and free-form wording
-/// fail the grammar.
+/// Token grammar for every carried identifier and label: a
+/// leading lowercase letter, then lowercase letters,
+/// digits, hyphens, and underscores, bounded length.
+/// Paths (`/`, `.`), commands (whitespace, `=`),
+/// free-form wording, and leading-digit values such as
+/// bare addresses fail the grammar.
 fn is_token(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= MAX_LABEL_LEN
-        && text.bytes().all(|byte| {
+    let mut bytes = text.bytes();
+    match bytes.next() {
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    text.len() <= MAX_LABEL_LEN
+        && bytes.all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
         })
 }
 
-/// Refuse a carried string outside the token grammar.
-fn check_token(text: &str, what: &str) -> Result<(), ReadError> {
-    if is_token(text) {
-        Ok(())
-    } else {
-        Err(ReadError::new(what, "value outside token grammar"))
+/// Address shapes that never enter a fact even inside a
+/// grammatical token: `0x…`/`0X…` hex runs, `%p`
+/// handles, and `pfn =` markers.
+fn is_address_like(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.windows(3).any(|window| {
+        window[0] == b'0'
+            && (window[1] == b'x' || window[1] == b'X')
+            && window[2].is_ascii_hexdigit()
+    }) {
+        return true;
     }
+    if text.contains("%p") {
+        return true;
+    }
+    let mut rest = text;
+    while let Some(at) = rest.find("pfn") {
+        let after = &rest[at + 3..];
+        let trimmed = after.trim_start_matches([' ', '\t', '\n', '\r', '\x0C', '\x0B']);
+        if trimmed.starts_with('=') {
+            return true;
+        }
+        rest = &rest[at + 3..];
+    }
+    false
+}
+
+/// Refuse a carried string outside the token grammar or
+/// carrying an address shape.
+fn check_token(text: &str, what: &str) -> Result<(), ReadError> {
+    if !is_token(text) {
+        return Err(ReadError::new(what, "value outside token grammar"));
+    }
+    if is_address_like(text) {
+        return Err(ReadError::new(what, "address-like value refused"));
+    }
+    Ok(())
 }
 
 /// Refuse forbidden or unknown keys against a closed shape.
@@ -696,7 +733,7 @@ fn read_sample_usable(
     }
     for key in ["sample_id", "control"] {
         if let Some(JsonValue::Str(text)) = find_field(sample_fields, key)
-            && !is_token(text)
+            && (!is_token(text) || is_address_like(text))
         {
             return None;
         }
@@ -709,7 +746,7 @@ fn read_sample_usable(
             JsonValue::Str(text) => text,
             _ => return None,
         };
-        if !is_token(text) {
+        if !is_token(text) || is_address_like(text) {
             return None;
         }
         let known = match key.as_str() {
