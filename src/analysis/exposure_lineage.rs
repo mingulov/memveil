@@ -1122,14 +1122,37 @@ fn record_gap(state: &mut State, row: &LedgerRow) {
 /// exactly as a replayed row would. Only the discontinuity
 /// outlives the refused group: binds, fresh lines and other
 /// lifecycle transitions never survive.
+/// Events whose discontinuity evidence outlives a refused
+/// group: explicit gaps plus the state-changing rows that
+/// join a line and note its clock domain. Rollback
+/// re-derivation handles exactly this set, and the
+/// interleaved-group deferral filter reuses it, so neither
+/// path drops a carried clock change or a failed revert's
+/// uncertainty.
+fn preserves_discontinuity(event: &str) -> bool {
+    matches!(
+        event,
+        "loss_gap"
+            | "suspend_gap"
+            | "clock_change"
+            | "observed"
+            | "released"
+            | "quarantined"
+            | "revert_ok"
+            | "revert_failed"
+    )
+}
+
 fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &LedgerRow) {
+    if !preserves_discontinuity(row.event.as_str()) {
+        return;
+    }
     match row.event.as_str() {
         "loss_gap" | "suspend_gap" | "clock_change" => {
             record_gap(state, row);
             return;
         }
-        "observed" | "released" | "quarantined" | "revert_ok" | "revert_failed" => {}
-        _ => return,
+        _ => {}
     }
     let canonical = match resolve(state, row, row.virtual_id.as_str()) {
         Some(token) => token,
@@ -1898,11 +1921,12 @@ fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
 /// replay. Rows sharing an `atom` marker commit as a unit:
 /// when any leg fails, the group rolls back and every leg
 /// resolves UNKNOWN with the legs left separate, while
-/// each gap leg still records its discontinuity against
-/// proved state. A group whose legs are interleaved with
-/// other rows is refused outright, with its gap rows
-/// recorded once replay passes their ledger positions,
-/// and output always follows ledger order.
+/// each discontinuity leg still records its evidence
+/// against proved state. A group whose legs are
+/// interleaved with other rows is refused outright, with
+/// its discontinuity legs recorded once replay passes
+/// their ledger positions, and output always follows
+/// ledger order.
 pub fn replay(
     rows: &[LedgerRow],
     capture_id: &str,
@@ -1948,23 +1972,24 @@ pub fn replay(
     let mut refusals = Refusals::default();
     let mut resolved = Vec::new();
     let mut failed_joins = Vec::new();
-    // Ledger positions of gap rows deferred from refused
-    // interleaved groups, recorded once replay passes them.
-    let mut pending_gaps: Vec<usize> = Vec::new();
+    // Ledger positions of discontinuity legs deferred
+    // from refused interleaved groups, recorded once
+    // replay passes them.
+    let mut pending_deferred: Vec<usize> = Vec::new();
     for group in &groups {
         let legs: Vec<&LedgerRow> = group.iter().map(|&position| admitted[position]).collect();
-        // Record deferred gaps whose ledger position
+        // Record deferred legs whose ledger position
         // replay has passed, oldest first: every earlier
-        // row already applied, so each gap records against
-        // its exact prefix while rows before it replayed
-        // unaffected.
-        pending_gaps.sort();
+        // row already applied, so each leg re-derives its
+        // discontinuity against its exact prefix while rows
+        // before it replayed unaffected.
+        pending_deferred.sort();
         let mut due = 0;
-        while due < pending_gaps.len() && pending_gaps[due] < group[0] {
+        while due < pending_deferred.len() && pending_deferred[due] < group[0] {
             due += 1;
         }
-        for position in pending_gaps.drain(..due) {
-            record_gap(&mut state, admitted[position]);
+        for position in pending_deferred.drain(..due) {
+            record_rollback_evidence(&mut state, &refusals, admitted[position]);
         }
         // An atomic group whose legs are interleaved with
         // other rows cannot commit as a unit: refuse every
@@ -1983,17 +2008,14 @@ pub fn replay(
                 failed_joins.push(row.row_id.clone());
                 push_unlinked_sample(&mut state, row);
             }
-            // A refused group's gap rows still observed a
-            // discontinuity in the ledger stream: defer
-            // each gap to its own ledger position so rows
+            // A refused group's discontinuity legs still
+            // observed a break in the ledger stream: defer
+            // each one to its own ledger position so rows
             // before it replay unaffected while later rows
-            // see the seal or bound.
+            // see the seal, bound, or uncertainty.
             for &position in group {
-                match admitted[position].event.as_str() {
-                    "loss_gap" | "suspend_gap" | "clock_change" => {
-                        pending_gaps.push(position);
-                    }
-                    _ => {}
+                if preserves_discontinuity(admitted[position].event.as_str()) {
+                    pending_deferred.push(position);
                 }
             }
             continue;
@@ -2090,12 +2112,12 @@ pub fn replay(
             push_unlinked_sample(&mut state, row);
         }
     }
-    // Gaps deferred past the last group still record,
+    // Legs deferred past the last group still record,
     // against final state: no later row can observe them,
     // but the evidence stays total.
-    pending_gaps.sort();
-    for position in pending_gaps {
-        record_gap(&mut state, admitted[position]);
+    pending_deferred.sort();
+    for position in pending_deferred {
+        record_rollback_evidence(&mut state, &refusals, admitted[position]);
     }
     // Groups replay at their first leg; restore ledger
     // order so output always follows (seq, row_id).
