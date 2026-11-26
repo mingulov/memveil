@@ -164,6 +164,8 @@ LANE_SCAN_SCOPES = (
 
 U64_MAX = 18446744073709551615
 U64_RE = re.compile(r"^(0|[1-9][0-9]{0,19})$")
+S64_MIN = -(2 ** 63)
+S64_MAX = 2 ** 63 - 1
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HEXADDR_RE = re.compile(r"0x[0-9a-fA-F]{3,}")
 
@@ -191,8 +193,10 @@ def frozen(name):
 
 
 def is_u64(value):
+    # fullmatch: `$` alone would still accept a
+    # trailing newline before the end of string.
     return (isinstance(value, str)
-            and U64_RE.match(value) is not None
+            and U64_RE.fullmatch(value) is not None
             and int(value) <= U64_MAX)
 
 
@@ -216,7 +220,7 @@ def check_enum(errors, where, value, allowed):
 
 
 def check_keys(errors, where, record, required,
-               optional=()):
+               optional=(), reason_bases=()):
     if not isinstance(record, dict):
         errors.append("missing-required-key: %s is not "
                       "an object" % where)
@@ -226,9 +230,10 @@ def check_keys(errors, where, record, required,
             errors.append("missing-required-key: %s.%s"
                           % (where, name))
     allowed = set(required) | set(optional)
+    allowed |= {base + "_reason"
+                for base in reason_bases}
     for name in record:
-        if name not in allowed and \
-                not name.endswith("_reason"):
+        if name not in allowed:
             errors.append("unknown-field: %s.%s"
                           % (where, name))
     return True
@@ -285,9 +290,11 @@ def check_interval(errors, where, value):
 
 
 def check_fact(errors, where, fact, catalog_sources):
-    if not check_keys(errors, where, fact,
-                      FACT_REQUIRED,
-                      FACT_OPTIONAL_NULLABLE):
+    if not check_keys(
+            errors, where, fact, FACT_REQUIRED,
+            FACT_OPTIONAL_NULLABLE,
+            tuple(FACT_OPTIONAL_NULLABLE)
+            + ("native_result",)):
         return
     check_slug(errors, where + ".evidence_id",
                fact.get("evidence_id"))
@@ -317,6 +324,9 @@ def check_fact(errors, where, fact, catalog_sources):
             or isinstance(native, bool):
         errors.append("bad-s64: %s.native_result=%r"
                       % (where, native))
+    elif not S64_MIN <= native <= S64_MAX:
+        errors.append("bad-s64: %s.native_result=%r "
+                      "outside s64" % (where, native))
     check_enum(errors, where + ".caller_class",
                fact.get("caller_class"), LANE_CALLERS)
     check_enum(errors, where + ".peer_class",
@@ -379,11 +389,26 @@ def check_object(errors, where, obj, catalog_sources):
                       "%s.expected_boundary must never "
                       "be null" % where)
     gaps = obj.get("uncertainty")
-    if not isinstance(gaps, dict) \
-            or "gaps" not in gaps \
-            or not isinstance(gaps["gaps"], list):
+    if not isinstance(gaps, dict):
         errors.append("missing-required-key: "
-                      "%s.uncertainty.gaps" % where)
+                      "%s.uncertainty is not an object"
+                      % where)
+    else:
+        for name in gaps:
+            if name != "gaps":
+                errors.append("unknown-field: "
+                              "%s.uncertainty.%s"
+                              % (where, name))
+        if "gaps" not in gaps \
+                or not isinstance(gaps["gaps"], list):
+            errors.append("missing-required-key: "
+                          "%s.uncertainty.gaps" % where)
+        else:
+            for entry in gaps["gaps"]:
+                check_slug(
+                    errors,
+                    where + ".uncertainty.gaps[]",
+                    entry)
 
 
 def check_coverage(errors, where, record,
@@ -787,6 +812,18 @@ def test_last_reference_teardown():
     assert len(attaches) == len(puts) > 0
     assert len(destroys) == 1, \
         "teardown needs one destruction fact"
+    # Destruction is witnessed only after the last
+    # put: compare the observed timestamps, not just
+    # the counts.
+    last_put_end = max(
+        int(fact["observed_interval"]["end"])
+        for fact in puts)
+    first_destroy_start = min(
+        int(fact["observed_interval"]["start"])
+        for fact in destroys)
+    assert first_destroy_start >= last_put_end, \
+        "destruction before last put: %r < %r" % (
+            first_destroy_start, last_put_end)
     assert doc["expected"]["puts"] == len(puts)
     assert doc["expected"]["destructions"] == 1
     assert doc["expected"]["live_tokens"] == []
@@ -827,6 +864,17 @@ def test_scan_held_reference_bounded():
     assert scan["bounded"] is True
     assert int(scan["visited"]) >= int(scan["returned"])
     assert scan["atomicity"] == "interval"
+    # A scan that hit its bound is explicitly
+    # partial, never complete.
+    assert scan["quality"]["terminal"] == "partial"
+    assert doc["expected"]["scan_complete"] is False
+    # The visit counter must agree with the visited
+    # total; retention stays attributed to the scan
+    # hold, never to the observer.
+    assert scan["counts"]["buffers-visited"] == \
+        scan["visited"]
+    assert doc["expected"]["observer_retention"] \
+        is False
     assert doc["expected"]["scan_bounded"] is True
     assert kind_facts(doc, "scan-hold") != []
     assert kind_facts(doc, "destruction") == []
@@ -848,6 +896,14 @@ def test_concurrent_create_reuse_witness():
     assert any(len(gens) > 1
                for gens in lineages.values()), \
         "reuse needs a second generation"
+    # The witness must record actual release
+    # evidence; a bare inventory entry is not a
+    # release observation.
+    for event in doc["release_witness"]:
+        assert event["observed"] in (
+            "lifecycle", "result"), \
+            "release witness without release " \
+            "evidence: %r" % (event["witness_id"],)
     witnessed = sorted(
         {(event["object_token"],
           event["generation"])
