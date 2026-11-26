@@ -655,7 +655,7 @@ fn apply_row(
                 failed: false,
             }
         }
-        "released" | "quarantined" | "revert_ok" => {
+        "released" => {
             let generation = match join(state, refusals, row, &canonical, pinned, false) {
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
@@ -667,28 +667,11 @@ fn apply_row(
                 .certainty
                 .clone();
             let certainty = event_certainty(state, &canonical, &line_certainty);
-            let (status, note) = match row.event.as_str() {
-                "released" => (
-                    "released".to_string(),
-                    format!("released generation {generation} of '{canonical}'"),
-                ),
-                "quarantined" => (
-                    "quarantined".to_string(),
-                    format!(
-                        "quarantined generation {generation} of '{canonical}'; \
-                         quarantine is not reuse"
-                    ),
-                ),
-                _ => (
-                    "released".to_string(),
-                    format!("reverted generation {generation} of '{canonical}' to private"),
-                ),
-            };
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
                 .expect("joined generation exists");
-            obj.status = status.clone();
+            obj.status = "released".to_string();
             obj.certainty = certainty.clone();
             obj.last_seq = row.seq;
             obj.evidence.push(row.row_id.clone());
@@ -697,12 +680,95 @@ fn apply_row(
                     row_id: row.row_id.clone(),
                     seq: row.seq,
                     identity: Some(QualifiedIdentity {
-                        token: canonical,
+                        token: canonical.clone(),
                         generation: generation,
                     }),
-                    status,
+                    status: "released".to_string(),
                     certainty,
-                    note,
+                    note: format!("released generation {generation} of '{canonical}'"),
+                },
+                failed: false,
+            }
+        }
+        "quarantined" => {
+            // Quarantine also sees restoration-uncertain
+            // lines: a failed revert keeps the line
+            // visible here, and the recorded quarantine
+            // preserves the unknown certainty.
+            let generation = match join(state, refusals, row, &canonical, pinned, true) {
+                Ok(generation) => generation,
+                Err(note) => return failed(row, note),
+            };
+            let line_certainty = state
+                .linked
+                .get(&(canonical.clone(), generation))
+                .expect("joined generation exists")
+                .certainty
+                .clone();
+            let certainty = event_certainty(state, &canonical, &line_certainty);
+            let obj = state
+                .linked
+                .get_mut(&(canonical.clone(), generation))
+                .expect("joined generation exists");
+            obj.status = "quarantined".to_string();
+            obj.certainty = certainty.clone();
+            obj.last_seq = row.seq;
+            obj.evidence.push(row.row_id.clone());
+            Applied {
+                resolved: ResolvedRow {
+                    row_id: row.row_id.clone(),
+                    seq: row.seq,
+                    identity: Some(QualifiedIdentity {
+                        token: canonical.clone(),
+                        generation: generation,
+                    }),
+                    status: "quarantined".to_string(),
+                    certainty,
+                    note: format!(
+                        "quarantined generation {generation} of '{canonical}'; \
+                         quarantine is not reuse"
+                    ),
+                },
+                failed: false,
+            }
+        }
+        "revert_ok" => {
+            // A successful revert records the conversion
+            // without ending the live allocation: the
+            // lifecycle status is unchanged.
+            let generation = match join(state, refusals, row, &canonical, pinned, false) {
+                Ok(generation) => generation,
+                Err(note) => return failed(row, note),
+            };
+            let line_certainty = state
+                .linked
+                .get(&(canonical.clone(), generation))
+                .expect("joined generation exists")
+                .certainty
+                .clone();
+            let certainty = event_certainty(state, &canonical, &line_certainty);
+            let obj = state
+                .linked
+                .get_mut(&(canonical.clone(), generation))
+                .expect("joined generation exists");
+            let status = obj.status.clone();
+            obj.certainty = certainty.clone();
+            obj.last_seq = row.seq;
+            obj.evidence.push(row.row_id.clone());
+            Applied {
+                resolved: ResolvedRow {
+                    row_id: row.row_id.clone(),
+                    seq: row.seq,
+                    identity: Some(QualifiedIdentity {
+                        token: canonical.clone(),
+                        generation: generation,
+                    }),
+                    status: status.clone(),
+                    certainty,
+                    note: format!(
+                        "recorded conversion of generation {generation} of '{canonical}'; \
+                         allocation stays {status}"
+                    ),
                 },
                 failed: false,
             }
