@@ -446,9 +446,25 @@ def check_fact(errors, where, fact, catalog_sources):
     check_enum(errors, where + ".clock_domain",
                fact.get("clock_domain"),
                frozen("clock_domains"))
+    interval = fact.get("observed_interval")
     check_interval(errors,
                    where + ".observed_interval",
-                   fact.get("observed_interval"))
+                   interval)
+    # A nested interval clock restates the
+    # fact-level clock; a conflicting declaration
+    # proves no comparable observation window.
+    if isinstance(interval, dict) and \
+            "clock_domain" in interval and \
+            interval["clock_domain"] != \
+            fact.get("clock_domain"):
+        errors.append("clock-domain-conflict: "
+                      "%s.observed_interval.clock_domain"
+                      "=%r disagrees with "
+                      "%s.clock_domain=%r"
+                      % (where,
+                         interval["clock_domain"],
+                         where,
+                         fact.get("clock_domain")))
     check_enum(errors, where + ".semantics",
                fact.get("semantics"),
                frozen("semantics"))

@@ -399,9 +399,25 @@ def check_fact(errors, where, fact, catalog_sources):
     check_enum(errors, where + ".clock_domain",
                fact.get("clock_domain"),
                frozen("clock_domains"))
+    interval = fact.get("observed_interval")
     check_interval(errors,
                    where + ".observed_interval",
-                   fact.get("observed_interval"))
+                   interval)
+    # A nested interval clock restates the
+    # fact-level clock; a conflicting declaration
+    # proves no comparable observation window.
+    if isinstance(interval, dict) and \
+            "clock_domain" in interval and \
+            interval["clock_domain"] != \
+            fact.get("clock_domain"):
+        errors.append("clock-domain-conflict: "
+                      "%s.observed_interval.clock_domain"
+                      "=%r disagrees with "
+                      "%s.clock_domain=%r"
+                      % (where,
+                         interval["clock_domain"],
+                         where,
+                         fact.get("clock_domain")))
     check_enum(errors, where + ".semantics",
                fact.get("semantics"),
                frozen("semantics"))
@@ -725,6 +741,21 @@ def valid_fixtures():
     return names
 
 
+def effective_clock(fact):
+    """The clock a fact's interval is read in.
+
+    A nested interval clock restates the
+    fact-level clock (shape validation refuses a
+    conflict); the completion comparison reads
+    the nested declaration when present.
+    """
+    interval = fact.get("observed_interval")
+    if isinstance(interval, dict) and \
+            "clock_domain" in interval:
+        return interval["clock_domain"]
+    return fact.get("clock_domain")
+
+
 def test_fixtures_present():
     assert os.path.isdir(FIX), "missing %s" % FIX
     for name in valid_fixtures():
@@ -875,7 +906,7 @@ def test_nested_mixed_sg_segments():
                 operation, sorted(epochs))
         # Pairing needs one clock domain: no clock
         # silently replaces another.
-        domains = {fact["clock_domain"]
+        domains = {effective_clock(fact)
                    for fact in group}
         assert len(domains) == 1, \
             "outer operation %r pairs facts " \
@@ -918,9 +949,9 @@ def test_nested_mixed_sg_segments():
         assert group, \
             "segment %r names no outer operation " \
             "%r" % (fact["evidence_id"], parent)
-        domains = {entry["clock_domain"]
+        domains = {effective_clock(entry)
                    for entry in group}
-        domains.add(fact["clock_domain"])
+        domains.add(effective_clock(fact))
         assert len(domains) == 1, \
             "segment %r order needs one clock " \
             "domain: %r" % (
