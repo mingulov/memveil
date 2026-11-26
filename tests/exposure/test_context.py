@@ -20,6 +20,7 @@ Run directly: `python3 -m pytest tests/exposure/test_context.py -q`.
 
 import json
 import os
+import re
 
 import pytest
 
@@ -39,6 +40,7 @@ FAMILIES = (
     "zram-writeback-zswap.json",
     "transient-changes.json",
     "denied-unknown-mode.json",
+    "two-control-gaps.json",
 )
 
 CONTROLS = (
@@ -50,6 +52,19 @@ DETAIL_KEYS = (
     "backing", "encryption", "path_state", "mode",
     "channel", "name", "writeback",
 )
+
+# Closed detail vocabularies, mirroring the reader: an
+# unknown value refuses its sample without guessing.
+VOCABULARIES = {
+    "encryption": ("encrypted", "mixed", "unresolved", "unknown"),
+    "mode": ("strict", "permissive", "unknown"),
+    "backing": ("partition", "file", "zram", "zswap"),
+}
+
+# Token grammar for every carried identifier and label,
+# mirroring the reader: lowercase letters, digits,
+# hyphens, and underscores, bounded length.
+TOKEN = re.compile(r"\A[a-z0-9_-]{1,64}\Z")
 
 # Tokens no context fixture may carry: commands,
 # environments, logs, payloads, or movement claims.
@@ -83,6 +98,13 @@ SOURCE_CAPTURE_REFUSAL = '"capture_id", "forbidden value refused"'
 # Capture values the oracle and the reader must both refuse.
 POISONED_CAPTURES = ("/dev/mem", "/proc/kcore", "kcore-view-1")
 
+# Capture values outside the token grammar, refused even
+# though no refusal-list fragment matches them.
+GRAMMAR_POISONS = (
+    "/dev//mem", "/dev/./mem", "/dev/kmem", "/proc",
+    "proc/self/mem", "UPPER", "has space", "a=b",
+)
+
 SAMPLE_REQUIRED = (
     "sample_id", "tick", "control", "native_result", "detail",
 )
@@ -107,19 +129,25 @@ def oracle(document):
     for token in ("dev/mem", "kcore", "/proc/", "exfil"):
         assert token not in document["capture_id"], \
             document["capture_id"]
+    assert TOKEN.match(document["capture_id"]), \
+        document["capture_id"]
     frozen = catalog()["vocabularies"]["frozen"]
     assert document["clock_domain"] in frozen["clock_domains"]
     interval = document["resample"]["interval_ticks"]
     assert isinstance(interval, int) and interval > 0
     facts = []
     refused = 0
-    ticks = []
+    by_control = {}
     seen = set()
     for sample in document["samples"]:
         for key in SAMPLE_REQUIRED:
             assert key in sample, sample
         assert sample["sample_id"] not in seen, sample["sample_id"]
         seen.add(sample["sample_id"])
+        assert TOKEN.match(sample["sample_id"]), sample
+        for value in sample["detail"].values():
+            assert isinstance(value, str) and TOKEN.match(value), \
+                sample
         usable = (
             sample["control"] in CONTROLS
             and sample["native_result"] in STATUS
@@ -127,11 +155,15 @@ def oracle(document):
             and sample["tick"] >= 0
             and all(key in DETAIL_KEYS
                     for key in sample["detail"])
+            and all(sample["detail"][key] in vocabulary
+                    for key, vocabulary in VOCABULARIES.items()
+                    if key in sample["detail"])
         )
         if not usable:
             refused += 1
             continue
-        ticks.append(sample["tick"])
+        by_control.setdefault(sample["control"], []).append(
+            sample["tick"])
         detail = sample["detail"]
         denied = sample["native_result"] == -13
         fact = {
@@ -152,11 +184,16 @@ def oracle(document):
                 fact[key] = detail.get(key)
         facts.append(fact)
     gaps = []
-    for before, after in zip(sorted(ticks), sorted(ticks)[1:]):
-        if after - before > interval:
-            gaps.append({"from_tick": before, "to_tick": after,
-                         "ticks": after - before})
-    return facts, gaps, refused
+    for control in sorted(by_control):
+        ordered = sorted(by_control[control])
+        for before, after in zip(ordered, ordered[1:]):
+            if after - before > interval:
+                gaps.append({"from_tick": before, "to_tick": after,
+                             "ticks": after - before})
+    gaps.sort(key=lambda gap: (gap["from_tick"], gap["to_tick"]))
+    merged = [gap for index, gap in enumerate(gaps)
+              if index == 0 or gap != gaps[index - 1]]
+    return facts, merged, refused
 
 
 def test_all_families_present_and_shaped():
@@ -248,6 +285,15 @@ def test_gaps_are_explicit_and_bounded():
     assert load("swap-encrypted.json")["expected"]["gaps"] == []
 
 
+def test_gaps_are_per_control():
+    document = load("two-control-gaps.json")
+    facts, gaps, refused = oracle(document)
+    assert refused == 0
+    assert len(facts) == 5
+    assert gaps == [{"from_tick": 0, "to_tick": 40, "ticks": 40}], \
+        "module ticks between swap ticks never fill the swap gap"
+
+
 def test_transient_changes_yield_independent_facts():
     document = load("transient-changes.json")
     facts, _, refused = oracle(document)
@@ -292,12 +338,34 @@ def test_poisoned_capture_id_refuses():
             oracle(document)
 
 
+def test_grammar_poison_capture_id_refuses():
+    for poison in GRAMMAR_POISONS:
+        for fragment in ("dev/mem", "kcore", "/proc/", "exfil"):
+            assert fragment not in poison, poison
+        document = load("swap-encrypted.json")
+        document["capture_id"] = poison
+        with pytest.raises(AssertionError):
+            oracle(document)
+
+
+def test_detail_values_stay_in_vocabulary():
+    for name in FAMILIES:
+        for sample in load(name)["samples"]:
+            for key, vocabulary in VOCABULARIES.items():
+                if key in sample["detail"]:
+                    assert sample["detail"][key] in vocabulary, \
+                        (name, sample)
+
+
 def test_reader_source_refuses_and_stays_offline():
     with open(MODEL, encoding="utf-8") as handle:
         text = handle.read()
     for token in SOURCE_REFUSAL_PRESENT:
         assert token in text, token
     assert SOURCE_CAPTURE_REFUSAL in text
+    for marker in ("value outside token grammar", "KNOWN_ENCRYPTION",
+                   "KNOWN_MODES", "KNOWN_BACKING"):
+        assert marker in text, marker
     for token in SOURCE_ABSENT + SOURCE_NO_IO:
         assert token not in text, token
 

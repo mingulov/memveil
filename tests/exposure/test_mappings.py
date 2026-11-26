@@ -20,6 +20,7 @@ Run directly: `python3 -m pytest tests/exposure/test_mappings.py -q`.
 
 import json
 import os
+import re
 
 import pytest
 
@@ -73,6 +74,21 @@ SOURCE_CAPTURE_REFUSAL = '"capture_id", "forbidden value refused"'
 # Capture values the oracle and the reader must both refuse.
 POISONED_CAPTURES = ("/dev/mem", "/proc/kcore", "kcore-view-1")
 
+# Capture values outside the token grammar, refused even
+# though no refusal-list fragment matches them.
+GRAMMAR_POISONS = (
+    "/dev//mem", "/dev/./mem", "/dev/kmem", "/proc",
+    "proc/self/mem", "UPPER", "has space", "a=b",
+)
+
+# Closed mapping-class vocabulary, mirroring the reader.
+MAPPING_CLASSES = ("mmio", "dax")
+
+# Token grammar for every carried identifier and label,
+# mirroring the reader: lowercase letters, digits,
+# hyphens, and underscores, bounded length.
+TOKEN = re.compile(r"\A[a-z0-9_-]{1,64}\Z")
+
 ENTRY_REQUIRED = (
     "entry_id", "mapping_class", "peer_class",
     "trust_boundary", "address_namespace", "native_result",
@@ -98,6 +114,8 @@ def oracle(document):
     for token in ("dev/mem", "kcore", "/proc/"):
         assert token not in document["capture_id"], \
             document["capture_id"]
+    assert TOKEN.match(document["capture_id"]), \
+        document["capture_id"]
     facts = []
     refused = 0
     frozen = catalog()["vocabularies"]["frozen"]
@@ -108,10 +126,18 @@ def oracle(document):
             assert key in entry, entry
         assert entry["entry_id"] not in seen, entry["entry_id"]
         seen.add(entry["entry_id"])
+        carried = [entry["entry_id"], entry["mapping_class"],
+                   entry["peer_class"], entry["trust_boundary"],
+                   entry["address_namespace"]]
+        if "alias_of" in entry:
+            carried.append(entry["alias_of"])
+        for value in carried:
+            assert isinstance(value, str) and TOKEN.match(value), \
+                entry
         usable = (
             entry["peer_class"] in peers
             and entry["address_namespace"] == "guest_physical"
-            and bool(entry["mapping_class"])
+            and entry["mapping_class"] in MAPPING_CLASSES
             and bool(entry["trust_boundary"])
             and entry["native_result"] in CONFIGURATION
         )
@@ -129,8 +155,10 @@ def oracle(document):
     dax = document["dax"]
     assert dax["presence"] in ("present", "absent", "unknown")
     assert dax["support"] in ("supported", "unsupported", "unknown")
-    if not dax["access_proved"]:
-        assert dax["access_claim"] is None
+    # This slice carries no separate proof, so any positive
+    # access attestation fails closed in the reader.
+    assert dax["access_proved"] is False
+    assert dax["access_claim"] is None
     return facts, dax, refused
 
 
@@ -255,12 +283,32 @@ def test_poisoned_capture_id_refuses():
             oracle(document)
 
 
+def test_grammar_poison_capture_id_refuses():
+    for poison in GRAMMAR_POISONS:
+        for fragment in ("dev/mem", "kcore", "/proc/"):
+            assert fragment not in poison, poison
+        document = load("mmio-supported.json")
+        document["capture_id"] = poison
+        with pytest.raises(AssertionError):
+            oracle(document)
+
+
+def test_mapping_classes_stay_in_vocabulary():
+    for name in FAMILIES:
+        for entry in load(name)["entries"]:
+            assert entry["mapping_class"] in MAPPING_CLASSES, \
+                (name, entry)
+
+
 def test_reader_source_refuses_and_stays_offline():
     with open(MODEL, encoding="utf-8") as handle:
         text = handle.read()
     for token in SOURCE_REFUSAL_PRESENT:
         assert token in text, token
     assert SOURCE_CAPTURE_REFUSAL in text
+    for marker in ("value outside token grammar",
+                   "KNOWN_MAPPING_CLASSES"):
+        assert marker in text, marker
     for token in SOURCE_ABSENT + SOURCE_NO_IO:
         assert token not in text, token
 
