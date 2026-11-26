@@ -1132,10 +1132,17 @@ fn apply_allocated(
             format!("generation overflow at '{canonical}'; reuse refused"),
         );
     }
+    // A failed conversion is not a lifetime end: open
+    // lines and restoration-uncertain lines both occupy
+    // the per-source cap, so failed conversions never free
+    // capacity without an observed teardown.
     let open_here = state
         .linked
         .values()
-        .filter(|obj| obj.source_id == row.source_id && is_open(obj.status.as_str()))
+        .filter(|obj| {
+            obj.source_id == row.source_id
+                && (is_open(obj.status.as_str()) || obj.status == "unknown")
+        })
         .count();
     if open_here >= config.max_open_per_source {
         refusals.bound += 1;
