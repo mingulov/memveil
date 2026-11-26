@@ -623,7 +623,7 @@ def base_pair():
                 "unit": "events",
                 "value": "1",
             }],
-            "coverage": ["census-mmap"],
+            "coverage": ["census-sweep"],
             "epoch": "41",
             "evidence_id": evidence,
             "journal": {"complete": True,
@@ -664,7 +664,7 @@ def break_check(reason, left, right):
     elif reason == "device-binding-mismatch":
         right["platform_cell"] = "ordinary-guest-02"
     elif reason == "coverage-mismatch":
-        right["coverage"] = ["census-mmap", "census-munmap"]
+        right["coverage"] = ["census-sweep", "census-resweep"]
     elif reason == "atomicity-unknown":
         left["atomicity"]["mode"] = "unknown"
     elif reason == "atomicity-mismatch":

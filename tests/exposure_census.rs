@@ -54,7 +54,7 @@ fn snapshot(evidence: &str, value: Option<u64>) -> CensusSnapshot {
             start: 1000,
             end: 2000,
         },
-        coverage: vec!["census-mmap".to_string()],
+        coverage: vec!["census-sweep".to_string()],
         atomicity: atomicity("atomic", false, None),
         journal: journal("journal-main", true),
         counts: vec![count("x", "events", value, None)],
@@ -105,18 +105,18 @@ fn compatible_golden_reports_exact_known_deltas() {
     // Fixture case "compatible-golden".
     let mut left = snapshot("snap-left-001", Some(120));
     left.counts
-        .push(count("munmap-calls", "events", Some(50), None));
-    left.counts[0].class_id = "mmap-calls".to_string();
+        .push(count("class-b", "events", Some(50), None));
+    left.counts[0].class_id = "class-a".to_string();
     let mut right = snapshot("snap-right-001", Some(128));
     right
         .counts
-        .push(count("munmap-calls", "events", Some(41), None));
-    right.counts[0].class_id = "mmap-calls".to_string();
+        .push(count("class-b", "events", Some(41), None));
+    right.counts[0].class_id = "class-a".to_string();
     let rows = compare_snapshots(&left, &right).expect("compatible pair compares");
     assert_eq!(rows.len(), 2);
     expect_row(
         &rows[0],
-        "mmap-calls",
+        "class-a",
         "compatible",
         "compatible",
         "snap-left-001",
@@ -130,7 +130,7 @@ fn compatible_golden_reports_exact_known_deltas() {
     );
     expect_row(
         &rows[1],
-        "munmap-calls",
+        "class-b",
         "compatible",
         "compatible",
         "snap-left-001",
@@ -671,7 +671,7 @@ fn coverage_mismatch_refuses_comparison() {
     let (mut left, mut right) = pair();
     left.evidence_id = "snap-left-011".to_string();
     right.evidence_id = "snap-right-011".to_string();
-    right.coverage.push("census-munmap".to_string());
+    right.coverage.push("census-resweep".to_string());
     let rows = compare_snapshots(&left, &right).expect("pair compares");
     assert_eq!(rows.len(), 1);
     expect_row(
@@ -696,8 +696,8 @@ fn coverage_order_does_not_matter() {
     // different order still compare. No fixture: order is
     // a struct-level property, not a golden row.
     let (mut left, mut right) = pair();
-    left.coverage.push("census-munmap".to_string());
-    right.coverage = vec!["census-munmap".to_string(), "census-mmap".to_string()];
+    left.coverage.push("census-resweep".to_string());
+    right.coverage = vec!["census-resweep".to_string(), "census-sweep".to_string()];
     let rows = compare_snapshots(&left, &right).expect("same coverage compares");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].reason, "compatible");
@@ -770,7 +770,7 @@ fn duplicated_coverage_refuses_the_whole_input() {
     // Fixture case "invalid-coverage".
     let (mut left, mut right) = pair();
     left.evidence_id = "snap-left-026".to_string();
-    left.coverage.push("census-mmap".to_string());
+    left.coverage.push("census-sweep".to_string());
     right.evidence_id = "snap-right-026".to_string();
     let refusal = compare_snapshots(&left, &right).expect_err("duplicated coverage refuses");
     assert_eq!(refusal.reason, "invalid-coverage");
@@ -888,7 +888,7 @@ fn checks_run_in_documented_order() {
                 "device-binding-mismatch" => {
                     right.platform_cell = "ordinary-guest-02".to_string();
                 }
-                "coverage-mismatch" => right.coverage.push("census-munmap".to_string()),
+                "coverage-mismatch" => right.coverage.push("census-resweep".to_string()),
                 "atomicity-unknown" => left.atomicity.mode = "unknown".to_string(),
                 "atomicity-mismatch" => right.atomicity.mode = "interval".to_string(),
                 "clock-unknown" => left.window.clock_domain = String::new(),
