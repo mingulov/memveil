@@ -280,6 +280,29 @@ fn resolve(state: &State, virtual_id: &str) -> Option<String> {
     None
 }
 
+/// Token an allocation row names: a handle bound to a
+/// still-open line continues that address's reuse chain
+/// through the canonical token; a handle bound to a
+/// closed line, or to no line, names its own fresh
+/// identity instead of following the stale binding.
+fn allocation_token(state: &State, handle: &str) -> Option<String> {
+    match state.alias.get(handle) {
+        Some((token, generation)) => {
+            let open = state
+                .linked
+                .get(&(token.clone(), *generation))
+                .map(|obj| is_open(obj.status.as_str()))
+                .unwrap_or(false);
+            if open {
+                resolve(state, handle)
+            } else {
+                Some(handle.to_string())
+            }
+        }
+        None => Some(handle.to_string()),
+    }
+}
+
 /// Open generations of one canonical token, oldest first.
 fn open_generations(state: &State, token: &str) -> Vec<u64> {
     let mut gens: Vec<u64> = state
@@ -629,7 +652,17 @@ fn apply_row(
     refusals: &mut Refusals,
     row: &LedgerRow,
 ) -> Applied {
-    let canonical = match resolve(state, row.virtual_id.as_str()) {
+    // An allocation names its own handle first: a handle
+    // bound to a still-open line continues that address's
+    // reuse chain, while any other handle — unbound, or
+    // bound to a closed line — starts its own identity.
+    // Every other event resolves aliases before it joins.
+    let addressed = if row.event == "allocated" {
+        allocation_token(state, row.virtual_id.as_str())
+    } else {
+        resolve(state, row.virtual_id.as_str())
+    };
+    let canonical = match addressed {
         Some(token) => token,
         None => {
             return failed(
@@ -663,7 +696,18 @@ fn apply_row(
         state.temporal_bounded.insert(canonical.clone());
     }
     match row.event.as_str() {
-        "allocated" => apply_allocated(state, config, refusals, row, &canonical),
+        "allocated" => {
+            let applied = apply_allocated(state, config, refusals, row, &canonical);
+            // A fresh identity for the handle drops its
+            // stale binding, so later rows address the new
+            // line; a reuse through a live binding keeps
+            // the binding pinned, and a refusal changes
+            // nothing.
+            if !applied.failed && canonical == row.virtual_id {
+                state.alias.remove(row.virtual_id.as_str());
+            }
+            applied
+        }
         "observed" => {
             let generation = match join(state, refusals, row, &canonical, pinned, false) {
                 Ok(generation) => generation,
