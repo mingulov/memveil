@@ -13,6 +13,7 @@ belongs to the controller-owned live suites.
 
 import resource
 import sys
+import threading
 import time
 
 # Explicit per-check offline budgets. Fixture corpora are a few
@@ -27,11 +28,21 @@ class BoundExceeded(AssertionError):
 
 
 def current_rss_kb():
-    """Return the current peak process size in KiB (standard library)."""
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == "darwin":
-        return peak // 1024
-    return peak
+    """Return the current resident process size in KiB.
+
+    Per-check accounting reads the current resident set, never
+    the process lifetime peak: retained bytes must count against
+    the calling check even when an earlier peak was larger.
+    """
+    try:
+        with open("/proc/self/statm", encoding="utf-8") as handle:
+            resident_pages = int(handle.read().split()[1])
+        return resident_pages * resource.getpagesize() // 1024
+    except (OSError, ValueError, IndexError):
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == "darwin":
+            return peak // 1024
+        return peak
 
 
 def check_bounds(label, elapsed_ms, growth_kb,
@@ -55,12 +66,33 @@ def run_bounded(label, func, *args, **kwargs):
     Extra keyword arguments ``time_ms`` and ``rss_kb`` override
     the default budgets for one call; remaining arguments go to
     ``func``. Returns a dict with the observed cost on success.
+
+    The time budget is enforced while ``func`` runs: a call
+    that is still running past ``time_ms`` fails promptly
+    instead of waiting for it to return. Growth is the
+    current resident-set delta across this call only.
     """
     time_ms = kwargs.pop("time_ms", TIME_BUDGET_MS)
     rss_kb = kwargs.pop("rss_kb", RSS_GROWTH_BUDGET_KB)
     before_kb = current_rss_kb()
     start = time.monotonic()
-    func(*args, **kwargs)
+    outcome = {}
+
+    def run():
+        try:
+            func(*args, **kwargs)
+        except Exception as error:
+            outcome["error"] = error
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(time_ms / 1000.0)
+    if worker.is_alive():
+        raise BoundExceeded(
+            "%s: still running past the %d ms offline budget"
+            % (label, time_ms))
+    if "error" in outcome:
+        raise outcome["error"]
     elapsed_ms = (time.monotonic() - start) * 1000.0
     growth_kb = current_rss_kb() - before_kb
     return check_bounds(label, elapsed_ms, growth_kb,
