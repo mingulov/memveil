@@ -240,7 +240,10 @@ struct State {
     /// so an alias never follows address reuse until it
     /// is explicitly rebound.
     alias: BTreeMap<String, (String, u64)>,
-    temporal_bounded: BTreeSet<String>,
+    /// Tokens with temporally bounded claims, keyed per
+    /// origin: a gap observed through one source and class
+    /// never bounds another origin's claims.
+    temporal_bounded: BTreeSet<(String, String, String)>,
     sealed: BTreeSet<(String, u64)>,
     samples: Vec<(String, ObjState)>,
 }
@@ -317,13 +320,22 @@ fn open_generations(state: &State, token: &str) -> Vec<u64> {
 }
 
 /// Certainty recorded by a state-changing row: a
-/// temporally bounded token bounds the claim, and an
-/// unknown or bounded line never upgrades.
-fn event_certainty(state: &State, token: &str, line_certainty: &str) -> String {
+/// temporally bounded token bounds the claim in the
+/// row's own origin, and an unknown or bounded line
+/// never upgrades.
+fn event_certainty(
+    state: &State,
+    row: &LedgerRow,
+    canonical: &str,
+    line_certainty: &str,
+) -> String {
     if line_certainty == "unknown" {
         return "unknown".to_string();
     }
-    if state.temporal_bounded.contains(token) {
+    if state
+        .temporal_bounded
+        .contains(&bound_key(canonical, row))
+    {
         return "bounded".to_string();
     }
     line_certainty.to_string()
@@ -357,6 +369,32 @@ fn failed(row: &LedgerRow, note: String) -> Applied {
 /// classes.
 fn same_origin(obj: &ObjState, row: &LedgerRow) -> bool {
     obj.source_id == row.source_id && obj.object_class == row.object_class
+}
+
+/// Per-origin key for gap state: the canonical token plus
+/// the row's own source and object class.
+fn bound_key(canonical: &str, row: &LedgerRow) -> (String, String, String) {
+    (
+        canonical.to_string(),
+        row.source_id.clone(),
+        row.object_class.clone(),
+    )
+}
+
+/// Compare a row's clock domain against the generation it
+/// joined or shows: a mismatch crosses a clock-domain
+/// change, so the token's later claims in this origin stay
+/// bounded. Older or newer generations never mask the
+/// mismatch, and other origins stay unaffected.
+fn note_domain(state: &mut State, row: &LedgerRow, canonical: &str, generation: u64) {
+    let shares = state
+        .linked
+        .get(&(canonical.to_string(), generation))
+        .map(|obj| obj.clock_domain == row.clock_domain)
+        .unwrap_or(false);
+    if !shares {
+        state.temporal_bounded.insert(bound_key(canonical, row));
+    }
 }
 
 /// Generations one lookup may join: open lines, plus
@@ -525,9 +563,11 @@ fn join_pinned(
 
 /// Certainty shown for one line: a loss-sealed line shows
 /// unknown, an unknown line never upgrades, and a
-/// temporally bounded token shows bounded at best.
+/// temporally bounded token shows bounded at best in the
+/// row's own origin.
 fn shown_certainty(
     state: &State,
+    row: &LedgerRow,
     token: &str,
     generation: u64,
     line_certainty: &str,
@@ -538,7 +578,10 @@ fn shown_certainty(
     if line_certainty == "unknown" {
         return "unknown".to_string();
     }
-    if state.temporal_bounded.contains(token) {
+    if state
+        .temporal_bounded
+        .contains(&bound_key(token, row))
+    {
         return "bounded".to_string();
     }
     line_certainty.to_string()
@@ -552,7 +595,7 @@ fn shown_certainty(
 /// shows its terminal state; ambiguity never shows an
 /// identity.
 fn shown_identity(
-    state: &State,
+    state: &mut State,
     refusals: &Refusals,
     row: &LedgerRow,
     token: &str,
@@ -565,17 +608,21 @@ fn shown_identity(
         return None;
     }
     if let Some(generation) = pinned {
-        let obj = state.linked.get(&(token.to_string(), generation))?;
-        if !same_origin(obj, row) {
-            return None;
-        }
+        let (status, line_certainty) =
+            match state.linked.get(&(token.to_string(), generation)) {
+                Some(obj) if same_origin(obj, row) => {
+                    (obj.status.clone(), obj.certainty.clone())
+                }
+                _ => return None,
+            };
+        note_domain(state, row, token, generation);
         return Some((
             QualifiedIdentity {
                 token: token.to_string(),
                 generation: generation,
             },
-            obj.status.clone(),
-            shown_certainty(state, token, generation, obj.certainty.as_str()),
+            status,
+            shown_certainty(state, row, token, generation, &line_certainty),
         ));
     }
     let candidates = joinable(state, row, token, false);
@@ -583,14 +630,19 @@ fn shown_identity(
         return None;
     }
     if let Some(generation) = candidates.into_iter().next() {
-        let obj = state.linked.get(&(token.to_string(), generation))?;
+        let (status, line_certainty) =
+            match state.linked.get(&(token.to_string(), generation)) {
+                Some(obj) => (obj.status.clone(), obj.certainty.clone()),
+                None => return None,
+            };
+        note_domain(state, row, token, generation);
         return Some((
             QualifiedIdentity {
                 token: token.to_string(),
                 generation: generation,
             },
-            obj.status.clone(),
-            shown_certainty(state, token, generation, obj.certainty.as_str()),
+            status,
+            shown_certainty(state, row, token, generation, &line_certainty),
         ));
     }
     // No joinable line: one sealed line shows its last
@@ -615,13 +667,17 @@ fn shown_identity(
         return None;
     }
     if let Some(generation) = sealed.pop() {
-        let obj = state.linked.get(&(token.to_string(), generation))?;
+        let status = match state.linked.get(&(token.to_string(), generation)) {
+            Some(obj) => obj.status.clone(),
+            None => return None,
+        };
+        note_domain(state, row, token, generation);
         return Some((
             QualifiedIdentity {
                 token: token.to_string(),
                 generation: generation,
             },
-            obj.status.clone(),
+            status,
             "unknown".to_string(),
         ));
     }
@@ -635,14 +691,18 @@ fn shown_identity(
         .collect();
     closed.sort();
     let generation = closed.pop()?;
-    let obj = state.linked.get(&(token.to_string(), generation))?;
+    let (status, line_certainty) = match state.linked.get(&(token.to_string(), generation)) {
+        Some(obj) => (obj.status.clone(), obj.certainty.clone()),
+        None => return None,
+    };
+    note_domain(state, row, token, generation);
     Some((
         QualifiedIdentity {
             token: token.to_string(),
             generation: generation,
         },
-        obj.status.clone(),
-        shown_certainty(state, token, generation, obj.certainty.as_str()),
+        status,
+        shown_certainty(state, row, token, generation, &line_certainty),
     ))
 }
 
@@ -675,26 +735,13 @@ fn apply_row(
         }
     };
     // A row addressed through a bound alias may join only
-    // the pinned generation.
+    // the pinned generation. Clock-domain comparison
+    // happens at the join or display below, against the
+    // generation the row actually joined or shows.
     let pinned = state
         .alias
         .get(row.virtual_id.as_str())
         .map(|(_, generation)| *generation);
-    // A row observed in a clock domain the token's
-    // current generation does not share crosses a
-    // clock-domain change: the token's temporal claims
-    // bound from here on. Older generations never mask
-    // the mismatch.
-    let token_tracked = state.latest.contains_key(&canonical);
-    let shares_domain = state
-        .latest
-        .get(&canonical)
-        .and_then(|generation| state.linked.get(&(canonical.clone(), *generation)))
-        .map(|obj| obj.clock_domain == row.clock_domain)
-        .unwrap_or(false);
-    if token_tracked && !shares_domain {
-        state.temporal_bounded.insert(canonical.clone());
-    }
     match row.event.as_str() {
         "allocated" => {
             let applied = apply_allocated(state, config, refusals, row, &canonical);
@@ -713,13 +760,14 @@ fn apply_row(
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
+            note_domain(state, row, &canonical, generation);
             let line_certainty = state
                 .linked
                 .get(&(canonical.clone(), generation))
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -748,13 +796,14 @@ fn apply_row(
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
+            note_domain(state, row, &canonical, generation);
             let line_certainty = state
                 .linked
                 .get(&(canonical.clone(), generation))
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -787,13 +836,14 @@ fn apply_row(
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
+            note_domain(state, row, &canonical, generation);
             let line_certainty = state
                 .linked
                 .get(&(canonical.clone(), generation))
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -828,13 +878,14 @@ fn apply_row(
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
+            note_domain(state, row, &canonical, generation);
             let line_certainty = state
                 .linked
                 .get(&(canonical.clone(), generation))
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -866,6 +917,7 @@ fn apply_row(
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
+            note_domain(state, row, &canonical, generation);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -940,7 +992,7 @@ fn apply_row(
         }
         "suspend_gap" => {
             if state.latest.contains_key(&canonical) {
-                state.temporal_bounded.insert(canonical.clone());
+                state.temporal_bounded.insert(bound_key(&canonical, row));
             }
             apply_shown(
                 state,
@@ -953,7 +1005,7 @@ fn apply_row(
         }
         "clock_change" => {
             if state.latest.contains_key(&canonical) {
-                state.temporal_bounded.insert(canonical.clone());
+                state.temporal_bounded.insert(bound_key(&canonical, row));
             }
             apply_shown(
                 state,
@@ -1024,7 +1076,9 @@ fn apply_allocated(
         },
     );
     state.latest.insert(canonical.to_string(), generation);
-    state.temporal_bounded.remove(canonical);
+    // A fresh generation starts its own temporal line in
+    // this origin; other origins keep their gap state.
+    state.temporal_bounded.remove(&bound_key(canonical, row));
     Applied {
         resolved: ResolvedRow {
             row_id: row.row_id.clone(),
@@ -1134,23 +1188,32 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
         row.virtual_id.clone(),
         (target_canonical.clone(), generation),
     );
-    let obj = state
+    let bound = state
         .linked
         .get(&(target_canonical.clone(), generation))
         .expect("bound generation exists");
     let mut certainty = shown_certainty(
         state,
+        row,
         &target_canonical,
         generation,
-        obj.certainty.as_str(),
+        bound.certainty.as_str(),
     );
     // A binding claimed from a clock domain the bound
     // line does not share is temporally bounded,
     // without changing the target's own standing.
-    // Older generations never mask the mismatch.
-    let shares_domain = obj.clock_domain == row.clock_domain;
-    if !shares_domain && certainty == "known" {
-        certainty = "bounded".to_string();
+    // Older generations never mask the mismatch, and the
+    // crossing bounds the token's later claims in this
+    // origin.
+    let line_clock = bound.clock_domain.clone();
+    let line_status = bound.status.clone();
+    if line_clock != row.clock_domain {
+        state
+            .temporal_bounded
+            .insert(bound_key(&target_canonical, row));
+        if certainty == "known" {
+            certainty = "bounded".to_string();
+        }
     }
     Applied {
         resolved: ResolvedRow {
@@ -1160,7 +1223,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
                 token: target_canonical.clone(),
                 generation: generation,
             }),
-            status: obj.status.clone(),
+            status: line_status,
             certainty,
             note: format!(
                 "token '{}' aliases '{target_canonical}' at generation {generation}",
@@ -1173,8 +1236,10 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
 
 /// Informational rows (`capture_end`, `baseline`, gaps):
 /// they show the current line but change no lifecycle.
+/// Showing a line still notes its clock domain, so a
+/// cross-domain display bounds later claims.
 fn apply_shown(
-    state: &State,
+    state: &mut State,
     refusals: &Refusals,
     row: &LedgerRow,
     canonical: &str,
