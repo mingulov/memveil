@@ -783,6 +783,13 @@ def test_steady_io_no_new_conversions():
 def test_nested_mixed_sg_segments():
     doc = load_fixture("nested_mixed_sg.json")
     assert doc["family"] == "nested-mixed-sg"
+    # One transfer, one measurement epoch:
+    # segment cover math across a reset is not
+    # comparable.
+    epochs = {fact["epoch"] for fact in doc["facts"]}
+    assert len(epochs) == 1, \
+        "mixed transfer spans epochs: %r" % (
+            sorted(epochs),)
     children = [fact for fact in doc["facts"]
                 if fact.get("parent_operation_id")]
     assert children, "nested segments need parents"
@@ -825,6 +832,40 @@ def test_nested_mixed_sg_segments():
             "outer operation %r lacks a paired " \
             "request and result: %r" % (
                 operation, sorted(semantics))
+        # Pairing needs one measurement epoch: a
+        # result from another epoch is not
+        # comparable with this request, because a
+        # reset breaks comparability.
+        epochs = {fact["epoch"] for fact in group}
+        assert len(epochs) == 1, \
+            "outer operation %r pairs facts " \
+            "across epochs: %r" % (
+                operation, sorted(epochs))
+        # Pairing needs one clock domain: no clock
+        # silently replaces another.
+        domains = {fact["clock_domain"]
+                   for fact in group}
+        assert len(domains) == 1, \
+            "outer operation %r pairs facts " \
+            "across clock domains: %r" % (
+                operation, sorted(domains))
+        # The result must not precede its request:
+        # a completion observed before the request
+        # starts is not this transfer.
+        starts = {}
+        for fact in group:
+            starts.setdefault(
+                fact["semantics"], []).append(
+                    int(fact["observed_interval"][
+                        "start"]))
+        for result_start in starts["result"]:
+            for request_start in starts["request"]:
+                assert result_start >= request_start, \
+                    "outer result before its " \
+                    "request for %r: result %r " \
+                    "request %r" % (
+                        operation, result_start,
+                        request_start)
         extents = {(fact["offset"],
                     fact["length_bytes"])
                    for fact in group}
