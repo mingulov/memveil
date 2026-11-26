@@ -257,7 +257,10 @@ struct State {
 struct Refusals {
     overflow: usize,
     bound: usize,
-    refused_alloc: BTreeSet<String>,
+    /// Refused allocations, keyed per origin: a refusal in
+    /// one source and class never blocks another origin's
+    /// joins.
+    refused_alloc: BTreeSet<(String, String, String)>,
 }
 
 fn is_open(status: &str) -> bool {
@@ -381,6 +384,16 @@ fn bound_key(canonical: &str, row: &LedgerRow) -> (String, String, String) {
     )
 }
 
+/// Per-origin key for allocation refusals: the refused
+/// token plus the refusing row's source and class.
+fn refusal_key(token: &str, row: &LedgerRow) -> (String, String, String) {
+    (
+        token.to_string(),
+        row.source_id.clone(),
+        row.object_class.clone(),
+    )
+}
+
 /// Compare a row's clock domain against the generation it
 /// joined or shows: a mismatch crosses a clock-domain
 /// change, so the token's later claims in this origin stay
@@ -459,7 +472,10 @@ fn join(
         return Err(format!("no allocated identity for '{token}'"));
     }
     if let Some(generation) = pinned {
-        if refusals.refused_alloc.contains(token) {
+        if refusals
+            .refused_alloc
+            .contains(&refusal_key(token, row))
+        {
             return Err(format!(
                 "ambiguous join for '{token}': a refused allocation may hide \
                  another generation beside pinned generation {generation}"
@@ -475,7 +491,10 @@ fn join(
         ));
     }
     if let Some(generation) = candidates.into_iter().next() {
-        if refusals.refused_alloc.contains(token) {
+        if refusals
+            .refused_alloc
+            .contains(&refusal_key(token, row))
+        {
             return Err(format!(
                 "ambiguous join for '{token}': a refused allocation may hide \
                  another generation beside open generation {generation}"
@@ -604,7 +623,10 @@ fn shown_identity(
     if !state.latest.contains_key(token) {
         return None;
     }
-    if refusals.refused_alloc.contains(token) {
+    if refusals
+        .refused_alloc
+        .contains(&refusal_key(token, row))
+    {
         return None;
     }
     if let Some(generation) = pinned {
@@ -1031,7 +1053,9 @@ fn apply_allocated(
         Some(generation) => generation,
         None => {
             refusals.overflow += 1;
-            refusals.refused_alloc.insert(canonical.to_string());
+            refusals
+                .refused_alloc
+                .insert(refusal_key(canonical, row));
             return failed(
                 row,
                 format!("generation overflow at '{canonical}'; reuse refused"),
@@ -1040,7 +1064,9 @@ fn apply_allocated(
     };
     if generation > config.max_generation {
         refusals.overflow += 1;
-        refusals.refused_alloc.insert(canonical.to_string());
+        refusals
+            .refused_alloc
+            .insert(refusal_key(canonical, row));
         return failed(
             row,
             format!("generation overflow at '{canonical}'; reuse refused"),
@@ -1053,7 +1079,9 @@ fn apply_allocated(
         .count();
     if open_here >= config.max_open_per_source {
         refusals.bound += 1;
-        refusals.refused_alloc.insert(canonical.to_string());
+        refusals
+            .refused_alloc
+            .insert(refusal_key(canonical, row));
         return failed(
             row,
             format!(
@@ -1138,7 +1166,10 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     // one.
     let generation = match state.alias.get(target).map(|(_, generation)| *generation) {
         Some(bound) => {
-            if refusals.refused_alloc.contains(&target_canonical) {
+            if refusals
+                .refused_alloc
+                .contains(&refusal_key(&target_canonical, row))
+            {
                 return failed(
                     row,
                     format!(
