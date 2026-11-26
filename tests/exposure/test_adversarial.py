@@ -36,6 +36,7 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 CASES = os.path.join(HERE, "cases")
+MANIFEST = os.path.join(HERE, "cases.json")
 CONTRACTS = os.path.join(HERE, "fixtures", "contracts")
 COMPARE = os.path.join(HERE, "fixtures", "compare")
 CATALOG = os.path.join(ROOT, "profiles", "exposure", "catalog.json")
@@ -224,11 +225,12 @@ def check_denied_partial(case):
 
 
 def fixture_tree_files():
-    """List every consumed fixture file plus the frozen catalog.
+    """List every consumed fixture file, the catalog and the manifest.
 
-    The platform checks read the catalog, so the snapshot must
-    cover it: a post-snapshot catalog change is a hidden rebuild.
-    Read-only walk; nothing here is ever written.
+    The platform checks read the catalog and the acceptance
+    legs read the case manifest, so the snapshot must cover
+    both: a post-snapshot change to either is a hidden
+    rebuild. Read-only walk; nothing here is ever written.
     """
     roots = [CASES, COMPARE, CONTRACTS,
              os.path.join(HERE, "fixtures", "policy")]
@@ -239,6 +241,7 @@ def fixture_tree_files():
             if os.path.isfile(path):
                 found.append(path)
     found.append(CATALOG)
+    found.append(MANIFEST)
     return found
 
 
