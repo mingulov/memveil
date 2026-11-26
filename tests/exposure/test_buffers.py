@@ -168,6 +168,13 @@ S64_MIN = -(2 ** 63)
 S64_MAX = 2 ** 63 - 1
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HEXADDR_RE = re.compile(r"0x[0-9a-fA-F]{3,}")
+# Denial markers: a witness detail carrying one of
+# these negates the event kinds it names instead
+# of confirming them.
+NEGATED_RE = re.compile(
+    r"\b(not|no|never|none|neither|nor|without|"
+    r"missing|absent|lacking|failed|failure)\b"
+    r"|n't\b")
 
 # Strings that must never appear in a fixture: raw
 # addresses, payload/key material, buffer names, or
@@ -1054,9 +1061,10 @@ def test_concurrent_create_reuse_witness():
         pair = (event["object_token"],
                 event["generation"])
         kinds = kinds_by_lineage.get(pair, set())
+        detail = event["detail"].casefold()
         words = set(re.findall(
             r"[a-z0-9]+(?:-[a-z0-9]+)*",
-            event["detail"].lower()))
+            detail))
         claimed = words & lane_kinds
         assert claimed, \
             "witness %r names no observed event " \
@@ -1067,6 +1075,18 @@ def test_concurrent_create_reuse_witness():
             "fact for lineage %r" % (
                 event["witness_id"],
                 sorted(claimed), pair)
+        # The claim must semantically match the
+        # recorded facts: word overlap with a
+        # recorded kind is not confirmation when
+        # the detail denies the event. "Creation
+        # did not occur" contradicts a recorded
+        # creation; it does not witness it.
+        assert not (NEGATED_RE.search(detail)
+                    and claimed & kinds), \
+            "witness %r denies the recorded %r " \
+            "for lineage %r" % (
+                event["witness_id"],
+                sorted(claimed & kinds), pair)
     witnessed = sorted(
         {(event["object_token"],
           event["generation"])
