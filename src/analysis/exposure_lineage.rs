@@ -287,19 +287,22 @@ fn resolve(state: &State, virtual_id: &str) -> Option<String> {
 }
 
 /// Token an allocation row names: a handle bound to a
-/// still-open line continues that address's reuse chain
-/// through the canonical token; a handle bound to a
-/// closed line, or to no line, names its own fresh
-/// identity instead of following the stale binding.
+/// still-open unsealed line continues that address's
+/// reuse chain through the canonical token; a handle
+/// bound to a closed or loss-sealed line, or to no line,
+/// names its own fresh identity instead of following the
+/// stale binding.
 fn allocation_token(state: &State, handle: &str) -> Option<String> {
     match state.alias.get(handle) {
         Some((token, generation)) => {
-            let open = state
+            let key = (token.clone(), *generation);
+            let reusable = state
                 .linked
-                .get(&(token.clone(), *generation))
+                .get(&key)
                 .map(|obj| is_open(obj.status.as_str()))
-                .unwrap_or(false);
-            if open {
+                .unwrap_or(false)
+                && !state.sealed.contains(&key);
+            if reusable {
                 resolve(state, handle)
             } else {
                 Some(handle.to_string())
@@ -778,9 +781,10 @@ fn apply_row(
     row: &LedgerRow,
 ) -> Applied {
     // An allocation names its own handle first: a handle
-    // bound to a still-open line continues that address's
-    // reuse chain, while any other handle — unbound, or
-    // bound to a closed line — starts its own identity.
+    // bound to a still-open unsealed line continues that
+    // address's reuse chain, while any other handle —
+    // unbound, or bound to a closed or loss-sealed line —
+    // starts its own identity.
     // Every other event resolves aliases before it joins.
     let addressed = if row.event == "allocated" {
         allocation_token(state, row.virtual_id.as_str())
