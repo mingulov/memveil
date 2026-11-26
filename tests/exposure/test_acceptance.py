@@ -183,8 +183,11 @@ def check_defining_outcome(case_id, case, summary, events):
         assert after["obj-mdx-pair-2"]["status"] == "unknown"
         assert "obj-mdx-pair-2" in groups["transitioned"]
         assert any(step["object"] == "obj-mdx-pair-2"
+                   and step["operation"] == "op-mdx-protect-6"
+                   and step["action"] == "probe-pair-protection-differs"
                    and step["native_result"] == -22
-                   for step in case["control_flow"])
+                   for step in case["control_flow"]), \
+            "no protection probe on pair-2"
         assert groups["added"] == ["obj-mdx-unsupported-1"]
     elif case_id == "interface-activity":
         assert results == [0, -22, 0]
@@ -306,8 +309,12 @@ def test_spec_06_identical_metadata_finding():
         assert after["obj-mdx-pair-2"]["status"] == "unknown", \
             "equal-metadata pair shows no protection difference"
         assert "obj-mdx-pair-2" in case["expectation"]["transitioned"]
+        # The probe is the actual protection operation,
+        # not any negative result on the second token.
         probes = [step for step in case["control_flow"]
                   if step["object"] == "obj-mdx-pair-2"
+                  and step["operation"] == "op-mdx-protect-6"
+                  and step["action"] == "probe-pair-protection-differs"
                   and step["native_result"] < 0]
         assert probes, "no denied protection probe on pair-2"
         for key in walk_keys(raw, []):
