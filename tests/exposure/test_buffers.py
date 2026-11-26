@@ -179,6 +179,19 @@ STATE_SUPPORT = {
     "reused": ("creation", "destruction"),
 }
 
+# Lifecycle evidence must support the object's real
+# status: the scenario state alone cannot carry a
+# release or quarantine claim. A `released` lineage
+# needs destruction-kind evidence and a
+# `quarantined` lineage needs callback-result-kind
+# evidence regardless of any other field — a
+# creation fact proves the object existed, never
+# that it was destroyed or quarantined.
+LIFECYCLE_SUPPORT = {
+    "released": ("destruction",),
+    "quarantined": ("callback-result",),
+}
+
 # Lane capability pinned by the envelope: a fact
 # may only cite a catalog source carrying this
 # capability. Another lane's source id exists in
@@ -986,6 +999,29 @@ def validate_fixture(doc):
                     "supporting kind %r"
                     % (index, obj.get("state"),
                        want_kinds))
+            # The cited evidence must also support
+            # the object's real lifecycle status: a
+            # `released` lineage cites destruction
+            # even when the scenario state would
+            # accept creation. The status value must
+            # be text before the support-table
+            # lookup, mirroring the state guard
+            # above.
+            lifecycle = obj.get("lifecycle_status")
+            if isinstance(lifecycle, str):
+                need_kinds = \
+                    LIFECYCLE_SUPPORT.get(lifecycle)
+            else:
+                need_kinds = None
+            if need_kinds is not None and \
+                    not any(kind in need_kinds
+                            for kind in cited_kinds):
+                errors.append(
+                    "unsupported-state-evidence: "
+                    "objects[%d] lifecycle_status=%r "
+                    "cites no supporting kind %r"
+                    % (index, lifecycle,
+                       need_kinds))
         for index, fact in enumerate(doc["facts"]):
             if not isinstance(fact, dict):
                 continue
