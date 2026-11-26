@@ -81,7 +81,11 @@ def run_bounded(label, func, *args, **kwargs):
     def run():
         try:
             func(*args, **kwargs)
-        except Exception as error:
+        except BaseException as error:
+            # BaseException, not Exception: worker failures
+            # that bypass Exception (such as the test
+            # runner's failure outcomes) must still fail the
+            # check instead of dying in the thread unobserved.
             outcome["error"] = error
 
     worker = threading.Thread(target=run, daemon=True)
