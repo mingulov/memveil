@@ -1248,6 +1248,22 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
         Some(name) => name,
         None => return failed(row, format!("alias row '{}' names no target", row.row_id)),
     };
+    // The handle being bound joins the refusal check
+    // beside the target path: a refused allocation of
+    // this handle may hide an untracked generation, so
+    // the alias refuses rather than bind over ambiguity.
+    if refusals
+        .refused_alloc
+        .contains(&refusal_key(&row.virtual_id, row))
+    {
+        return failed(
+            row,
+            format!(
+                "allocation of '{}' was refused; alias refused",
+                row.virtual_id
+            ),
+        );
+    }
     let target_canonical = match resolve(state, row, target) {
         Some(token) => token,
         None => {
