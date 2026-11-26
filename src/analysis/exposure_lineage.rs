@@ -243,10 +243,12 @@ struct State {
     /// explicitly rebound, and one source never
     /// overwrites another source's binding.
     alias: BTreeMap<(String, String, String), (String, u64)>,
-    /// Tokens with temporally bounded claims, keyed per
-    /// origin: a gap observed through one source and class
-    /// never bounds another origin's claims.
-    temporal_bounded: BTreeSet<(String, String, String)>,
+    /// Lines with temporally bounded claims, keyed per
+    /// generation and origin: a gap observed through one
+    /// source and class never bounds another origin's
+    /// claims, and a fresh generation starts its own
+    /// temporal line without clearing older ones.
+    temporal_bounded: BTreeSet<(String, u64, String, String)>,
     sealed: BTreeSet<(String, u64)>,
     samples: Vec<(String, ObjState)>,
 }
@@ -336,13 +338,14 @@ fn open_generations(state: &State, token: &str) -> Vec<u64> {
 }
 
 /// Certainty recorded by a state-changing row: a
-/// temporally bounded token bounds the claim in the
+/// temporally bounded line bounds the claim in the
 /// row's own origin, and an unknown or bounded line
 /// never upgrades.
 fn event_certainty(
     state: &State,
     row: &LedgerRow,
     canonical: &str,
+    generation: u64,
     line_certainty: &str,
 ) -> String {
     if line_certainty == "unknown" {
@@ -350,7 +353,7 @@ fn event_certainty(
     }
     if state
         .temporal_bounded
-        .contains(&bound_key(canonical, row))
+        .contains(&bound_key(canonical, generation, row))
     {
         return "bounded".to_string();
     }
@@ -387,14 +390,37 @@ fn same_origin(obj: &ObjState, row: &LedgerRow) -> bool {
     obj.source_id == row.source_id && obj.object_class == row.object_class
 }
 
-/// Per-origin key for gap state: the canonical token plus
-/// the row's own source and object class.
-fn bound_key(canonical: &str, row: &LedgerRow) -> (String, String, String) {
+/// Per-generation, per-origin key for gap state: the
+/// canonical token and generation plus the row's own
+/// source and object class.
+fn bound_key(
+    canonical: &str,
+    generation: u64,
+    row: &LedgerRow,
+) -> (String, u64, String, String) {
     (
         canonical.to_string(),
+        generation,
         row.source_id.clone(),
         row.object_class.clone(),
     )
+}
+
+/// Bound every tracked line of one token in the row's
+/// own origin: a gap row bounds the generations it can
+/// see without touching other origins' lines.
+fn bound_token_lines(state: &mut State, row: &LedgerRow, canonical: &str) {
+    let bound: Vec<u64> = state
+        .linked
+        .iter()
+        .filter(|((name, _), obj)| name == canonical && same_origin(obj, row))
+        .map(|((_, generation), _)| *generation)
+        .collect();
+    for generation in bound {
+        state
+            .temporal_bounded
+            .insert(bound_key(canonical, generation, row));
+    }
 }
 
 /// Per-origin key for allocation refusals: the refused
@@ -429,7 +455,9 @@ fn note_domain(state: &mut State, row: &LedgerRow, canonical: &str, generation: 
         .map(|obj| obj.clock_domain == row.clock_domain)
         .unwrap_or(false);
     if !shares {
-        state.temporal_bounded.insert(bound_key(canonical, row));
+        state
+            .temporal_bounded
+            .insert(bound_key(canonical, generation, row));
     }
 }
 
@@ -658,7 +686,7 @@ fn shown_certainty(
     }
     if state
         .temporal_bounded
-        .contains(&bound_key(token, row))
+        .contains(&bound_key(token, generation, row))
     {
         return "bounded".to_string();
     }
@@ -863,7 +891,7 @@ fn apply_row(
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, row, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, generation, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -899,7 +927,7 @@ fn apply_row(
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, row, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, generation, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -939,7 +967,7 @@ fn apply_row(
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, row, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, generation, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -981,7 +1009,7 @@ fn apply_row(
                 .expect("joined generation exists")
                 .certainty
                 .clone();
-            let certainty = event_certainty(state, row, &canonical, &line_certainty);
+            let certainty = event_certainty(state, row, &canonical, generation, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -1100,9 +1128,7 @@ fn apply_row(
             )
         }
         "suspend_gap" => {
-            if state.latest.contains_key(&canonical) {
-                state.temporal_bounded.insert(bound_key(&canonical, row));
-            }
+            bound_token_lines(state, row, &canonical);
             apply_shown(
                 state,
                 refusals,
@@ -1113,9 +1139,7 @@ fn apply_row(
             )
         }
         "clock_change" => {
-            if state.latest.contains_key(&canonical) {
-                state.temporal_bounded.insert(bound_key(&canonical, row));
-            }
+            bound_token_lines(state, row, &canonical);
             apply_shown(
                 state,
                 refusals,
@@ -1199,8 +1223,10 @@ fn apply_allocated(
     );
     state.latest.insert(canonical.to_string(), generation);
     // A fresh generation starts its own temporal line in
-    // this origin; other origins keep their gap state.
-    state.temporal_bounded.remove(&bound_key(canonical, row));
+    // this origin: gap state is keyed per generation, so
+    // the new line starts unbounded without clearing
+    // older generations' bounds. Other origins keep
+    // their gap state.
     Applied {
         resolved: ResolvedRow {
             row_id: row.row_id.clone(),
@@ -1340,7 +1366,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     if line_clock != row.clock_domain {
         state
             .temporal_bounded
-            .insert(bound_key(&target_canonical, row));
+            .insert(bound_key(&target_canonical, generation, row));
         if certainty == "known" {
             certainty = "bounded".to_string();
         }
