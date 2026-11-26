@@ -490,6 +490,11 @@ pub fn read_context(text: &str) -> Result<Context, ReadError> {
     if capture.is_empty() {
         return Err(ReadError::new("capture_id", "empty capture"));
     }
+    for fragment in FORBIDDEN_VALUES {
+        if capture.contains(fragment) {
+            return Err(ReadError::new("capture_id", "forbidden value refused"));
+        }
+    }
     let clock = as_str(required(fields, "clock_domain")?, "clock_domain")?;
     if !KNOWN_CLOCK_DOMAINS.contains(&clock) {
         return Err(ReadError::new("clock_domain", "unknown clock"));

@@ -454,6 +454,11 @@ pub fn read_inventory(text: &str) -> Result<Inventory, ReadError> {
     if capture.is_empty() {
         return Err(ReadError::new("capture_id", "empty capture"));
     }
+    for fragment in FORBIDDEN_VALUES {
+        if capture.contains(fragment) {
+            return Err(ReadError::new("capture_id", "forbidden value refused"));
+        }
+    }
     let entries = as_array(required(fields, "entries")?, "entries")?;
     if entries.len() > MAX_ENTRIES {
         return Err(ReadError::new("entries", "too many entries"));
