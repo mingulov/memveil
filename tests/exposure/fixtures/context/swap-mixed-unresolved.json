@@ -1,0 +1,90 @@
+{
+  "format": "exposure-context-fixture/0.1.0",
+  "provenance": "Hand-written resample inputs; timings and modes fixed here, never read back from a run.",
+  "capture_id": "cap-ctx-mixed-1",
+  "source_id": "egress-controls",
+  "clock_domain": "guest_monotonic_active",
+  "resample": {
+    "interval_ticks": 10
+  },
+  "samples": [
+    {
+      "sample_id": "swap-mix-1",
+      "tick": 0,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "partition",
+        "encryption": "mixed",
+        "path_state": "resolved"
+      }
+    },
+    {
+      "sample_id": "swap-mix-2",
+      "tick": 5,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "file",
+        "encryption": "unresolved",
+        "path_state": "unresolved"
+      }
+    },
+    {
+      "sample_id": "swap-mix-3",
+      "tick": 8,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "partition",
+        "name": "cryptswap0",
+        "path_state": "unresolved"
+      }
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-ctx-mixed-1:swap-mix-1",
+        "tick": 0,
+        "control": "swap",
+        "status": "observed",
+        "backing": "partition",
+        "encryption": "mixed",
+        "path_state": "resolved",
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-mixed-1:swap-mix-2",
+        "tick": 5,
+        "control": "swap",
+        "status": "observed",
+        "backing": "file",
+        "encryption": "unresolved",
+        "path_state": "unresolved",
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-mixed-1:swap-mix-3",
+        "tick": 8,
+        "control": "swap",
+        "status": "observed",
+        "backing": "partition",
+        "encryption": "unknown",
+        "path_state": "unresolved",
+        "mode": null,
+        "channel": null,
+        "name": "cryptswap0",
+        "writeback": null
+      }
+    ],
+    "gaps": [],
+    "refused_samples": 0
+  }
+}

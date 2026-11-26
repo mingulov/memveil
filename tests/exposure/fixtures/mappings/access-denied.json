@@ -1,0 +1,60 @@
+{
+  "format": "mapping-inventory-fixture/0.1.0",
+  "provenance": "Hand-written inventory inputs; classes, peers and boundaries fixed here, never read back from a run.",
+  "capture_id": "cap-map-denied-1",
+  "source_id": "mapping-inventory-scan",
+  "entries": [
+    {
+      "entry_id": "map-ok-1",
+      "mapping_class": "mmio",
+      "peer_class": "device",
+      "trust_boundary": "guest-device-bar0",
+      "address_namespace": "guest_physical",
+      "native_result": 0
+    },
+    {
+      "entry_id": "map-denied-1",
+      "mapping_class": "mmio",
+      "peer_class": "device",
+      "trust_boundary": "guest-device-bar2",
+      "address_namespace": "guest_physical",
+      "native_result": -13
+    },
+    {
+      "entry_id": "map-future-1",
+      "mapping_class": "mmio",
+      "peer_class": "future-peer",
+      "trust_boundary": "guest-device-bar9",
+      "address_namespace": "guest_physical",
+      "native_result": 0
+    }
+  ],
+  "dax": {
+    "presence": "unknown",
+    "support": "unknown",
+    "access_proved": false,
+    "access_claim": null
+  },
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-map-denied-1:map-ok-1",
+        "mapping_class": "mmio",
+        "peer_class": "device",
+        "trust_boundary": "guest-device-bar0",
+        "configuration": "present"
+      },
+      {
+        "evidence_id": "cap-map-denied-1:map-denied-1",
+        "mapping_class": "mmio",
+        "peer_class": "device",
+        "trust_boundary": "guest-device-bar2",
+        "configuration": "denied"
+      }
+    ],
+    "dax_presence": "unknown",
+    "dax_support": "unknown",
+    "dax_access_claim": null,
+    "refused_entries": 1
+  }
+}

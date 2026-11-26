@@ -1,0 +1,53 @@
+{
+  "format": "mapping-inventory-fixture/0.1.0",
+  "provenance": "Hand-written inventory inputs; classes, peers and boundaries fixed here, never read back from a run.",
+  "capture_id": "cap-map-alias-1",
+  "source_id": "mapping-inventory-scan",
+  "entries": [
+    {
+      "entry_id": "map-alias-1",
+      "mapping_class": "mmio",
+      "peer_class": "device",
+      "trust_boundary": "guest-device-bar0",
+      "address_namespace": "guest_physical",
+      "native_result": 0
+    },
+    {
+      "entry_id": "map-alias-2",
+      "mapping_class": "mmio",
+      "peer_class": "device",
+      "trust_boundary": "guest-device-bar0-alias",
+      "address_namespace": "guest_physical",
+      "native_result": 0,
+      "alias_of": "map-alias-1"
+    }
+  ],
+  "dax": {
+    "presence": "absent",
+    "support": "unknown",
+    "access_proved": false,
+    "access_claim": null
+  },
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-map-alias-1:map-alias-1",
+        "mapping_class": "mmio",
+        "peer_class": "device",
+        "trust_boundary": "guest-device-bar0",
+        "configuration": "present"
+      },
+      {
+        "evidence_id": "cap-map-alias-1:map-alias-2",
+        "mapping_class": "mmio",
+        "peer_class": "device",
+        "trust_boundary": "guest-device-bar0-alias",
+        "configuration": "present"
+      }
+    ],
+    "dax_presence": "absent",
+    "dax_support": "unknown",
+    "dax_access_claim": null,
+    "refused_entries": 0
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "format": "exposure-context-fixture/0.1.0",
+  "provenance": "Hand-written resample inputs; timings and modes fixed here, never read back from a run.",
+  "capture_id": "cap-ctx-gaps-1",
+  "source_id": "egress-controls",
+  "clock_domain": "guest_monotonic_active",
+  "resample": {
+    "interval_ticks": 10
+  },
+  "samples": [
+    {
+      "sample_id": "swap-gap-1",
+      "tick": 0,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "partition"
+      }
+    },
+    {
+      "sample_id": "mod-gap-1",
+      "tick": 10,
+      "control": "module",
+      "native_result": 0,
+      "detail": {
+        "mode": "strict"
+      }
+    },
+    {
+      "sample_id": "mod-gap-2",
+      "tick": 20,
+      "control": "module",
+      "native_result": 0,
+      "detail": {
+        "mode": "strict"
+      }
+    },
+    {
+      "sample_id": "mod-gap-3",
+      "tick": 30,
+      "control": "module",
+      "native_result": 0,
+      "detail": {
+        "mode": "permissive"
+      }
+    },
+    {
+      "sample_id": "swap-gap-2",
+      "tick": 40,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "partition"
+      }
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-ctx-gaps-1:swap-gap-1",
+        "tick": 0,
+        "control": "swap",
+        "status": "observed",
+        "backing": "partition",
+        "encryption": "unknown",
+        "path_state": null,
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-gaps-1:mod-gap-1",
+        "tick": 10,
+        "control": "module",
+        "status": "observed",
+        "backing": null,
+        "encryption": "unknown",
+        "path_state": null,
+        "mode": "strict",
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-gaps-1:mod-gap-2",
+        "tick": 20,
+        "control": "module",
+        "status": "observed",
+        "backing": null,
+        "encryption": "unknown",
+        "path_state": null,
+        "mode": "strict",
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-gaps-1:mod-gap-3",
+        "tick": 30,
+        "control": "module",
+        "status": "observed",
+        "backing": null,
+        "encryption": "unknown",
+        "path_state": null,
+        "mode": "permissive",
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-gaps-1:swap-gap-2",
+        "tick": 40,
+        "control": "swap",
+        "status": "observed",
+        "backing": "partition",
+        "encryption": "unknown",
+        "path_state": null,
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      }
+    ],
+    "gaps": [
+      {
+        "from_tick": 0,
+        "to_tick": 40,
+        "ticks": 40
+      }
+    ],
+    "refused_samples": 0
+  }
+}
