@@ -1,0 +1,1 @@
+{"case": "planned-shared-buffers", "description": "A second catalog-planned channel refuses as unknown input until its collection adapter ships.", "expected": {"device": null, "exit": 2, "reason": "unknown-capability", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "shared-buffers", "device": null, "legacy": false}}

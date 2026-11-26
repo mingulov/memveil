@@ -1,0 +1,1 @@
+{"case": "outcome-refused-beats-violation", "description": "Refused requested metrics beat a strict proved violation: 4 precedes 5.", "expected": {"exit": 4}, "outcome": {"collection_missing": false, "evidence_complete": true, "inputs_valid": true, "policy_violation_proved": true, "recovered": false, "refused_metrics": true, "strict": true}}

@@ -1,0 +1,1 @@
+{"case": "explicit-empty-list", "description": "An explicitly empty list is invalid input; the default applies only when the list is absent.", "expected": {"device": null, "exit": 2, "reason": "empty-capability-list", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "", "device": null, "legacy": false}}

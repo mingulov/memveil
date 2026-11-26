@@ -1,0 +1,1 @@
+{"case": "outcome-ordinary-valid", "description": "An ordinary valid report exits 0.", "expected": {"exit": 0}, "outcome": {"collection_missing": false, "evidence_complete": true, "inputs_valid": true, "policy_violation_proved": false, "recovered": false, "refused_metrics": false, "strict": false}}

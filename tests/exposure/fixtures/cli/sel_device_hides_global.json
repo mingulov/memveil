@@ -1,0 +1,1 @@
+{"case": "device-hides-global", "description": "A device filter with a journal channel refuses: filtering cannot hide global conversion evidence.", "expected": {"device": null, "exit": 2, "reason": "device-hides-global-evidence", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "conversion-journal", "device": "eth0", "legacy": false}}

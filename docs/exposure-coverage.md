@@ -192,3 +192,58 @@ comparator reads finalized metric values only. A
 comparison whose requested metrics include refused rows
 exits 4 with per-metric reasons; counts stay counts and
 never become verdicts about the guest.
+
+## CLI capability selection
+
+A capability list names what to collect as comma-separated
+ids from the frozen exposure catalog. An absent list
+selects the default `attempt-trace` channel; the sole item
+`all` expands to the three ordinary channels and never
+implies an opt-in channel. Splitting is strict, so a
+spaced item names nothing; duplicates collapse with the
+first occurrence winning. The three partitions behave
+differently:
+
+| Partition | Ids | Attempt hook | Outcome |
+| --- | --- | --- | --- |
+| Ordinary | `attempt-trace`, `mapping-lifecycle`, `copy-actual` | Always required when selected, and `attempt-trace` is the mandatory base | Selects |
+| Journal (opt-in) | `conversion-observe`, `conversion-journal` | Never required, and never implied by the default or `all` | Parses, then refuses: no record channel exists yet |
+| Planned exposure | `census`, `object-lifetimes`, `dma-paths`, `shared-buffers`, `host-interfaces`, `mapping-inventory`, `exposure-context` | None yet | Refuses as unknown until its collection adapter ships |
+
+Any selection containing an ordinary channel keeps the
+existing attempt dependency, as does legacy input on an
+ordinary selection. A literal device filter selects
+alongside ordinary channels only: filtering cannot hide
+global conversion evidence, so a device filter with a
+journal selection refuses. Legacy input refuses journal
+selections, which need integrity metadata.
+
+Stage exits follow one precedence, earliest first:
+invalid input (2), missing collection (3), recovered
+capture (4), refused requested metrics (4), strict
+proved violation (5), strict incomplete evidence (4),
+else 0. Recovery stays partial regardless of policy
+flags; a comparison with refused requested metrics is
+partial for the same reason. A non-strict valid report
+stays 0 with its policy field shown independently. The
+comparison skeleton reads the comparator verdict rows
+and refuses malformed requests; per-metric reasons
+stay attached to their metrics, and no summary claims
+the pair is healthy.
+
+Refusal reasons:
+
+| Reason | Meaning |
+| --- | --- |
+| `unknown-capability` | A name outside the catalog, or a catalog name whose adapter is unshipped |
+| `bad-capability-list` | An empty item in the list |
+| `empty-capability-list` | An explicitly empty list; the default applies only when absent |
+| `attempt-trace-required` | An ordinary channel without the attempt base |
+| `invalid-device` | An empty or overlong device filter |
+| `device-hides-global-evidence` | A device filter with a journal selection |
+| `legacy-input` | Legacy input with a journal selection |
+| `no-record-channel` | A parsed journal selection with nowhere to record |
+| `invalid-capture` | A comparison side that failed validation |
+| `no-requested-metrics` | A comparison with no requested rows |
+| `duplicate-metric` | A comparison naming one metric twice |
+| `unknown-compatibility` | A comparison row with an unknown verdict label |

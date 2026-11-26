@@ -1,0 +1,1 @@
+{"case": "unknown-capability", "description": "An invented name refuses as unknown input.", "expected": {"device": null, "exit": 2, "reason": "unknown-capability", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "census-2", "device": null, "legacy": false}}

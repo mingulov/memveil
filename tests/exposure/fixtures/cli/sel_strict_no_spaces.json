@@ -1,0 +1,1 @@
+{"case": "strict-no-spaces", "description": "List splitting is strict: a spaced item names no capability and refuses as unknown.", "expected": {"device": null, "exit": 2, "reason": "unknown-capability", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "attempt-trace, mapping-lifecycle", "device": null, "legacy": false}}

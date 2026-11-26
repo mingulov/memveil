@@ -1,0 +1,1 @@
+{"case": "journal-alone", "description": "The named journal channel parses with no attempt hook, then refuses: no record channel exists yet.", "expected": {"device": null, "exit": 3, "reason": "no-record-channel", "requires_attempt_hook": false, "selected": ["conversion-journal"]}, "selection": {"capabilities": "conversion-journal", "device": null, "legacy": false}}

@@ -1,0 +1,1 @@
+{"case": "bad-list-empty-item", "description": "A trailing comma leaves an empty item and the whole list refuses.", "expected": {"device": null, "exit": 2, "reason": "bad-capability-list", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "attempt-trace,", "device": null, "legacy": false}}

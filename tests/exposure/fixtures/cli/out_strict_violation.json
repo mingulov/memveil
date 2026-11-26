@@ -1,0 +1,1 @@
+{"case": "outcome-strict-violation", "description": "A finalized strict proved policy violation exits 5.", "expected": {"exit": 5}, "outcome": {"collection_missing": false, "evidence_complete": true, "inputs_valid": true, "policy_violation_proved": true, "recovered": false, "refused_metrics": false, "strict": true}}

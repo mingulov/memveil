@@ -1,0 +1,1 @@
+{"case": "outcome-strict-incomplete", "description": "A finalized strict result without a violation but with incomplete required evidence exits 4.", "expected": {"exit": 4}, "outcome": {"collection_missing": false, "evidence_complete": false, "inputs_valid": true, "policy_violation_proved": false, "recovered": false, "refused_metrics": false, "strict": true}}

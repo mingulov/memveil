@@ -1,0 +1,1 @@
+{"case": "outcome-invalid-beats-missing", "description": "Invalid input beats a missing collection: 2 precedes 3.", "expected": {"exit": 2}, "outcome": {"collection_missing": true, "evidence_complete": true, "inputs_valid": false, "policy_violation_proved": false, "recovered": false, "refused_metrics": false, "strict": false}}

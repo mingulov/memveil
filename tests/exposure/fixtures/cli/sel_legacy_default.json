@@ -1,0 +1,1 @@
+{"case": "legacy-default", "description": "Legacy input with an absent list still selects the default attempt channel with the attempt dependency.", "expected": {"device": null, "exit": 0, "reason": null, "requires_attempt_hook": true, "selected": ["attempt-trace"]}, "selection": {"capabilities": null, "device": null, "legacy": true}}

@@ -1,0 +1,1 @@
+{"case": "device-accepted", "description": "A literal device filter selects alongside the ordinary attempt channel.", "expected": {"device": "0000:00:1f.2", "exit": 0, "reason": null, "requires_attempt_hook": true, "selected": ["attempt-trace"]}, "selection": {"capabilities": "attempt-trace", "device": "0000:00:1f.2", "legacy": false}}

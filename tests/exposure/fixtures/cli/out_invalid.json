@@ -1,0 +1,1 @@
+{"case": "outcome-invalid", "description": "Invalid input exits 2 with no repaired result.", "expected": {"exit": 2}, "outcome": {"collection_missing": false, "evidence_complete": true, "inputs_valid": false, "policy_violation_proved": false, "recovered": false, "refused_metrics": false, "strict": false}}

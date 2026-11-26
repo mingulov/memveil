@@ -1,0 +1,1 @@
+{"case": "copy-alone", "description": "The copy channel without the attempt channel refuses: the attempt channel is the mandatory base.", "expected": {"device": null, "exit": 2, "reason": "attempt-trace-required", "requires_attempt_hook": false, "selected": []}, "selection": {"capabilities": "copy-actual", "device": null, "legacy": false}}

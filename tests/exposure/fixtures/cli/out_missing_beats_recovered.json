@@ -1,0 +1,1 @@
+{"case": "outcome-missing-beats-recovered", "description": "A missing collection beats a recovered capture: 3 precedes 4.", "expected": {"exit": 3}, "outcome": {"collection_missing": true, "evidence_complete": true, "inputs_valid": true, "policy_violation_proved": false, "recovered": true, "refused_metrics": false, "strict": false}}
