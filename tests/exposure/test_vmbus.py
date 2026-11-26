@@ -398,18 +398,23 @@ def interval_start(fact):
     return int(start) if is_u64(start) else None
 
 
+# Kinds that open a token generation for a later attach.
+OFFER_KINDS = ("channel-offer", "channel-reoffer")
+
+
 def check_offer_before_attach(out, facts, name):
-    """Every attach rides on an earlier offer for the same token."""
+    """Every attach rides on an earlier offer for its token lineage."""
     offers = {}
     for fact in facts:
         if not isinstance(fact, dict):
             continue
-        if fact.get("kind") != "channel-offer":
+        if fact.get("kind") not in OFFER_KINDS:
             continue
         token = fact.get("object_token")
         start = interval_start(fact)
+        key = (token, fact.get("generation"))
         if token is not None and start is not None:
-            offers[token] = min(start, offers.get(token, start))
+            offers[key] = min(start, offers.get(key, start))
     for pos, fact in enumerate(facts):
         if not isinstance(fact, dict):
             continue
@@ -417,7 +422,7 @@ def check_offer_before_attach(out, facts, name):
             continue
         token = fact.get("object_token")
         start = interval_start(fact)
-        offered = offers.get(token)
+        offered = offers.get((token, fact.get("generation")))
         if token is None or offered is None or start is None \
                 or offered > start:
             out.append("%s fact %d: attach lineage without an offer"
@@ -515,10 +520,30 @@ def test_accept_files_validate_clean():
 
 def test_missing_offer_flags_lineage():
     _, doc = load_raw("missing-offer.json")
-    joined = "\n".join(validate(doc, "missing-offer.json"))
-    assert joined, "missing-offer control must fail validation"
-    assert "lineage" in joined
+    assert validate(doc, "missing-offer.json") == [
+        "missing-offer.json fact 0: attach lineage without an offer"]
     assert doc["expect"] == "reject"
+
+
+def test_attach_on_unoffered_generation_flags_lineage():
+    _, doc = load_raw("offer-before-attach.json")
+    doc["facts"][1]["generation"] = "2"
+    moved = dict(doc["objects"][0])
+    moved["generation"] = "2"
+    doc["objects"].append(moved)
+    assert validate(doc, "offer-before-attach.json") == [
+        "offer-before-attach.json fact 1: "
+        "attach lineage without an offer"]
+
+
+def test_post_reoffer_attach_accepts():
+    _, doc = load_raw("channel-reuse.json")
+    follow = dict(doc["facts"][1])
+    follow.update(kind="channel-attach", evidence_id="ev-chn-reuse-3",
+                  observed_interval=dict(start="200", end="300",
+                                         uncertainty="10"))
+    doc["facts"].append(follow)
+    assert validate(doc, "channel-reuse.json") == []
 
 
 def test_wrong_peer_topology_flags_peer():
