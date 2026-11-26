@@ -186,6 +186,16 @@ DISCLOSURE_FIELDS = (
 )
 
 
+def disclosure_key(name):
+    """Normalize a key before the disclosure match.
+
+    Hyphen, underscore, and case spellings of the
+    same field disclose the same identity or
+    addressing, so they match as one field.
+    """
+    return name.lower().replace("-", "_")
+
+
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
@@ -583,7 +593,9 @@ def check_no_disclosure(errors, where, value):
                           "a raw address" % where)
     elif isinstance(value, dict):
         for name, item in value.items():
-            if name in DISCLOSURE_FIELDS:
+            if isinstance(name, str) and \
+                    disclosure_key(name) in \
+                    DISCLOSURE_FIELDS:
                 errors.append("forbidden-content: "
                               "%s.%s discloses identity "
                               "or addressing"
