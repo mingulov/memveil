@@ -96,10 +96,14 @@ REASONS = (
     "unit-mismatch",
     "scope-unknown",
     "scope-mismatch",
+    "profile-unknown",
     "profile-mismatch",
+    "workload-unknown",
     "workload-mismatch",
     "epoch-mismatch",
+    "device-binding-unknown",
     "device-binding-mismatch",
+    "coverage-unknown",
     "coverage-mismatch",
     "atomicity-unknown",
     "atomicity-mismatch",
@@ -353,14 +357,22 @@ def expect_row(case, left, right, class_id):
         return ("incompatible", "scope-unknown", "absent")
     if left["scope"] != right["scope"]:
         return ("incompatible", "scope-mismatch", "absent")
+    if is_blank(left["profile_id"]) or is_blank(right["profile_id"]):
+        return ("incompatible", "profile-unknown", "absent")
     if left["profile_id"] != right["profile_id"]:
         return ("incompatible", "profile-mismatch", "absent")
+    if is_blank(left["workload"]) or is_blank(right["workload"]):
+        return ("incompatible", "workload-unknown", "absent")
     if left["workload"] != right["workload"]:
         return ("incompatible", "workload-mismatch", "absent")
     if left["epoch"] != right["epoch"]:
         return ("incompatible", "epoch-mismatch", "absent")
+    if is_blank(left["platform_cell"]) or is_blank(right["platform_cell"]):
+        return ("incompatible", "device-binding-unknown", "absent")
     if left["platform_cell"] != right["platform_cell"]:
         return ("incompatible", "device-binding-mismatch", "absent")
+    if not left["coverage"] or not right["coverage"]:
+        return ("incompatible", "coverage-unknown", "absent")
     if sorted(left["coverage"]) != sorted(right["coverage"]):
         return ("incompatible", "coverage-mismatch", "absent")
     left_mode = left["atomicity"]["mode"]
@@ -600,10 +612,14 @@ CHECK_ORDER = (
     "unit-mismatch",
     "scope-unknown",
     "scope-mismatch",
+    "profile-unknown",
     "profile-mismatch",
+    "workload-unknown",
     "workload-mismatch",
     "epoch-mismatch",
+    "device-binding-unknown",
     "device-binding-mismatch",
+    "coverage-unknown",
     "coverage-mismatch",
     "atomicity-unknown",
     "atomicity-mismatch",
@@ -658,14 +674,22 @@ def break_check(reason, left, right):
         left["scope"] = ""
     elif reason == "scope-mismatch":
         right["scope"] = "guest-view-narrow"
+    elif reason == "profile-unknown":
+        left["profile_id"] = ""
     elif reason == "profile-mismatch":
         right["profile_id"] = "linux-x86_64-7.0-hardened"
+    elif reason == "workload-unknown":
+        left["workload"] = ""
     elif reason == "workload-mismatch":
         right["workload"] = "io-batch"
     elif reason == "epoch-mismatch":
         right["epoch"] = "42"
+    elif reason == "device-binding-unknown":
+        left["platform_cell"] = ""
     elif reason == "device-binding-mismatch":
         right["platform_cell"] = "ordinary-guest-02"
+    elif reason == "coverage-unknown":
+        left["coverage"] = []
     elif reason == "coverage-mismatch":
         right["coverage"] = ["census-sweep", "census-resweep"]
     elif reason == "atomicity-unknown":

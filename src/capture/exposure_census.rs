@@ -9,9 +9,11 @@
 //! every compatibility check below admits the pair; the
 //! first failing check names the reason, in this order:
 //! "class-missing", "unit-unknown", "unit-mismatch",
-//! "scope-unknown", "scope-mismatch", "profile-mismatch",
+//! "scope-unknown", "scope-mismatch", "profile-unknown",
+//! "profile-mismatch", "workload-unknown",
 //! "workload-mismatch", "epoch-mismatch",
-//! "device-binding-mismatch", "coverage-mismatch",
+//! "device-binding-unknown", "device-binding-mismatch",
+//! "coverage-unknown", "coverage-mismatch",
 //! "atomicity-unknown", "atomicity-mismatch",
 //! "clock-unknown", "clock-mismatch", "window-mismatch",
 //! "journal-scope-mismatch", "partial-journal".
@@ -241,11 +243,16 @@ fn find_count<'m>(snapshot: &'m CensusSnapshot, id: &str) -> Option<&'m CensusCo
 /// Row order is stable: left-snapshot order first, then classes
 /// seen only on the right. The first failing compatibility
 /// check names the reason, in this order: class presence, unit
-/// availability, unit, scope availability, scope, profile,
-/// workload, epoch, device binding, coverage, atomicity
+/// availability, unit, scope availability, scope, profile
+/// availability, profile, workload availability, workload,
+/// epoch, device-binding availability, device binding,
+/// coverage availability, coverage, atomicity
 /// availability, atomicity, clock availability, clock domain,
 /// window, journal scope, journal completeness, then value
-/// availability for the delta itself.
+/// availability for the delta itself. Two unknowns never
+/// compare equal: a blank binding or an empty coverage on
+/// either side refuses, the same rule the scope check
+/// already applies.
 pub fn compare_snapshots(
     left: &CensusSnapshot,
     right: &CensusSnapshot,
@@ -428,11 +435,31 @@ fn compare_class(left: &CensusSnapshot, right: &CensusSnapshot, id: &str) -> Cen
             &left_count.unit,
         );
     }
+    if is_blank(&left.profile_id) || is_blank(&right.profile_id) {
+        return refused(
+            id,
+            "incompatible",
+            "profile-unknown",
+            left,
+            right,
+            &left_count.unit,
+        );
+    }
     if left.profile_id != right.profile_id {
         return refused(
             id,
             "incompatible",
             "profile-mismatch",
+            left,
+            right,
+            &left_count.unit,
+        );
+    }
+    if is_blank(&left.workload) || is_blank(&right.workload) {
+        return refused(
+            id,
+            "incompatible",
+            "workload-unknown",
             left,
             right,
             &left_count.unit,
@@ -458,11 +485,31 @@ fn compare_class(left: &CensusSnapshot, right: &CensusSnapshot, id: &str) -> Cen
             &left_count.unit,
         );
     }
+    if is_blank(&left.platform_cell) || is_blank(&right.platform_cell) {
+        return refused(
+            id,
+            "incompatible",
+            "device-binding-unknown",
+            left,
+            right,
+            &left_count.unit,
+        );
+    }
     if left.platform_cell != right.platform_cell {
         return refused(
             id,
             "incompatible",
             "device-binding-mismatch",
+            left,
+            right,
+            &left_count.unit,
+        );
+    }
+    if left.coverage.is_empty() || right.coverage.is_empty() {
+        return refused(
+            id,
+            "incompatible",
+            "coverage-unknown",
             left,
             right,
             &left_count.unit,

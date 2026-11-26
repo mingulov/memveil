@@ -880,14 +880,18 @@ fn checks_run_in_documented_order() {
                 "unit-mismatch" => right.counts[0].unit = "bytes".to_string(),
                 "scope-unknown" => left.scope = String::new(),
                 "scope-mismatch" => right.scope = "guest-view-narrow".to_string(),
+                "profile-unknown" => left.profile_id = String::new(),
                 "profile-mismatch" => {
                     right.profile_id = "linux-x86_64-7.0-hardened".to_string();
                 }
+                "workload-unknown" => left.workload = String::new(),
                 "workload-mismatch" => right.workload = "io-batch".to_string(),
                 "epoch-mismatch" => right.epoch = 42,
+                "device-binding-unknown" => left.platform_cell = String::new(),
                 "device-binding-mismatch" => {
                     right.platform_cell = "ordinary-guest-02".to_string();
                 }
+                "coverage-unknown" => left.coverage.clear(),
                 "coverage-mismatch" => right.coverage.push("census-resweep".to_string()),
                 "atomicity-unknown" => left.atomicity.mode = "unknown".to_string(),
                 "atomicity-mismatch" => right.atomicity.mode = "interval".to_string(),
@@ -913,10 +917,14 @@ fn checks_run_in_documented_order() {
         "unit-mismatch",
         "scope-unknown",
         "scope-mismatch",
+        "profile-unknown",
         "profile-mismatch",
+        "workload-unknown",
         "workload-mismatch",
         "epoch-mismatch",
+        "device-binding-unknown",
         "device-binding-mismatch",
+        "coverage-unknown",
         "coverage-mismatch",
         "atomicity-unknown",
         "atomicity-mismatch",
