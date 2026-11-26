@@ -869,6 +869,12 @@ def validate_fixture(doc):
         errors.append("closed-enum-violation: "
                       "envelope.source_id=%r"
                       % (doc.get("source_id"),))
+    elif doc.get("source_id") not in lane_sources():
+        errors.append("foreign-source: "
+                      "envelope.source_id=%r is outside "
+                      "this lane's sources %r"
+                      % (doc.get("source_id"),
+                         lane_sources()))
     if not isinstance(doc.get("coverage"), list) \
             or not doc.get("coverage"):
         errors.append("missing-required-key: "
