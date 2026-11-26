@@ -552,11 +552,7 @@ fn compare_class(left: &CensusSnapshot, right: &CensusSnapshot, id: &str) -> Cen
                 None => (None, Some("delta-overflow".to_string()), Quality::unknown()),
             }
         }
-        (None, _) | (_, None) => (
-            None,
-            Some("value-unknown".to_string()),
-            Quality::unknown(),
-        ),
+        (None, _) | (_, None) => (None, Some("value-unknown".to_string()), Quality::unknown()),
     };
     CensusDelta {
         class_id: id.to_string(),
@@ -578,7 +574,10 @@ fn compare_class(left: &CensusSnapshot, right: &CensusSnapshot, id: &str) -> Cen
 /// Both markers must name the same session and epoch, and the
 /// stop must not precede the start; anything else refuses
 /// with a typed reason instead of inventing a window.
-pub fn observe_window(start: &Observation, stop: &Observation) -> Result<(u64, u64), SnapshotRefusal> {
+pub fn observe_window(
+    start: &Observation,
+    stop: &Observation,
+) -> Result<(u64, u64), SnapshotRefusal> {
     if start.session_id != stop.session_id {
         return Err(refuse_input("session-mismatch"));
     }
@@ -595,9 +594,7 @@ pub fn observe_window(start: &Observation, stop: &Observation) -> Result<(u64, u
 /// holds: privileges, resolved symbols, admitted semantics,
 /// and sufficient bounds. The first missing prerequisite
 /// names the refusal; collection never runs degraded.
-pub fn check_collection_readiness(
-    req: &CollectionRequirements,
-) -> Result<(), CollectionRefusal> {
+pub fn check_collection_readiness(req: &CollectionRequirements) -> Result<(), CollectionRefusal> {
     if !req.privileged {
         return Err(CollectionRefusal {
             reason: "privilege-refused".to_string(),

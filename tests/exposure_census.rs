@@ -104,10 +104,13 @@ fn expect_row(
 fn compatible_golden_reports_exact_known_deltas() {
     // Fixture case "compatible-golden".
     let mut left = snapshot("snap-left-001", Some(120));
-    left.counts.push(count("munmap-calls", "events", Some(50), None));
+    left.counts
+        .push(count("munmap-calls", "events", Some(50), None));
     left.counts[0].class_id = "mmap-calls".to_string();
     let mut right = snapshot("snap-right-001", Some(128));
-    right.counts.push(count("munmap-calls", "events", Some(41), None));
+    right
+        .counts
+        .push(count("munmap-calls", "events", Some(41), None));
     right.counts[0].class_id = "mmap-calls".to_string();
     let rows = compare_snapshots(&left, &right).expect("compatible pair compares");
     assert_eq!(rows.len(), 2);

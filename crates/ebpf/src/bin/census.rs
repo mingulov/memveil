@@ -147,8 +147,7 @@ fn emit_cn(kind: u16) -> i32 {
     let ktime = unsafe { bpf_ktime_get_ns() };
     let mut payload = [0u8; MV_CN_LEN];
     payload[MV_CN_OFF_MAGIC..MV_CN_OFF_MAGIC + 4].copy_from_slice(&MV_CN_MAGIC.to_le_bytes());
-    payload[MV_CN_OFF_VERSION..MV_CN_OFF_VERSION + 2]
-        .copy_from_slice(&MV_CN_VERSION.to_le_bytes());
+    payload[MV_CN_OFF_VERSION..MV_CN_OFF_VERSION + 2].copy_from_slice(&MV_CN_VERSION.to_le_bytes());
     payload[MV_CN_OFF_KIND..MV_CN_OFF_KIND + 2].copy_from_slice(&kind.to_le_bytes());
     // v1 carries no flags or reasons and no reserved payload: the
     // explicit zero writes pin the layout offsets at compile time.
@@ -157,7 +156,10 @@ fn emit_cn(kind: u16) -> i32 {
     payload[MV_CN_OFF_RESERVED..MV_CN_OFF_RESERVED + 4].copy_from_slice(&0u32.to_le_bytes());
     payload[MV_CN_OFF_SEQ..MV_CN_OFF_SEQ + 8].copy_from_slice(&seq.to_le_bytes());
     payload[MV_CN_OFF_KTIME..MV_CN_OFF_KTIME + 8].copy_from_slice(&ktime.to_le_bytes());
-    if MV_CENSUS_EVENTS.output::<[u8; MV_CN_LEN]>(&payload, 0).is_err() {
+    if MV_CENSUS_EVENTS
+        .output::<[u8; MV_CN_LEN]>(&payload, 0)
+        .is_err()
+    {
         submit_fail();
         return 0;
     }
