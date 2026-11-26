@@ -9,10 +9,12 @@
 //! joins fail, failed reverts keep UNKNOWN state,
 //! quarantine never counts as reuse, and capture end never
 //! counts as teardown. Gaps bound or void the claims they
-//! touch: a clock-domain change or a suspend gap bounds
-//! temporal claims, while an event-loss gap keeps later
-//! observations as separate samples until a fresh
-//! allocation re-establishes identity.
+//! touch: a clock-domain change, a suspend gap, or a row
+//! observed in a new clock domain bounds temporal claims,
+//! while an event-loss gap keeps later observations as
+//! separate samples until a fresh allocation
+//! re-establishes identity. Certainty only moves down:
+//! unknown lines never upgrade to bounded or known.
 //!
 //! Contract:
 //!
@@ -289,12 +291,17 @@ fn open_generations(state: &State, token: &str) -> Vec<u64> {
     gens
 }
 
-fn temporal_certainty(state: &State, token: &str) -> &'static str {
-    if state.temporal_bounded.contains(token) {
-        "bounded"
-    } else {
-        "known"
+/// Certainty recorded by a state-changing row: a
+/// temporally bounded token bounds the claim, and an
+/// unknown or bounded line never upgrades.
+fn event_certainty(state: &State, token: &str, line_certainty: &str) -> String {
+    if line_certainty == "unknown" {
+        return "unknown".to_string();
     }
+    if state.temporal_bounded.contains(token) {
+        return "bounded".to_string();
+    }
+    line_certainty.to_string()
 }
 
 struct Applied {
@@ -483,39 +490,97 @@ fn shown_certainty(
     line_certainty.to_string()
 }
 
-/// Identity shown by informational rows: the open line when
-/// exactly one exists, else the latest known line.
-fn shown_identity(state: &State, token: &str) -> Option<(QualifiedIdentity, String, String)> {
+/// Identity shown by informational rows. An alias
+/// binding shows its pinned generation; otherwise exactly
+/// one joinable line must exist, else the row shows no
+/// identity. A sealed line shows its last state with
+/// unknown certainty, and an unambiguous closed line
+/// shows its terminal state; ambiguity never shows an
+/// identity.
+fn shown_identity(
+    state: &State,
+    refusals: &Refusals,
+    row: &LedgerRow,
+    token: &str,
+    pinned: Option<u64>,
+) -> Option<(QualifiedIdentity, String, String)> {
     if !state.latest.contains_key(token) {
         return None;
     }
-    let open = open_generations(state, token);
-    let generation = if open.len() == 1 {
-        open[0]
-    } else {
-        state.latest.get(token).copied().unwrap_or(0)
-    };
-    let obj = state
+    if refusals.refused_alloc.contains(token) {
+        return None;
+    }
+    if let Some(generation) = pinned {
+        let obj = state.linked.get(&(token.to_string(), generation))?;
+        return Some((
+            QualifiedIdentity {
+                token: token.to_string(),
+                generation: generation,
+            },
+            obj.status.clone(),
+            shown_certainty(state, token, generation, obj.certainty.as_str()),
+        ));
+    }
+    let candidates = joinable(state, row, token, false);
+    if candidates.len() > 1 {
+        return None;
+    }
+    if let Some(generation) = candidates.into_iter().next() {
+        let obj = state.linked.get(&(token.to_string(), generation))?;
+        return Some((
+            QualifiedIdentity {
+                token: token.to_string(),
+                generation: generation,
+            },
+            obj.status.clone(),
+            shown_certainty(state, token, generation, obj.certainty.as_str()),
+        ));
+    }
+    // No joinable line: a sealed line shows its last state
+    // as unknown; an unambiguous same-origin closed line
+    // shows its terminal state.
+    let mut sealed: Vec<u64> = open_generations(state, token)
+        .into_iter()
+        .filter(|generation| {
+            let key = (token.to_string(), *generation);
+            state.sealed.contains(&key)
+                && state
+                    .linked
+                    .get(&key)
+                    .map(|obj| same_origin(obj, row))
+                    .unwrap_or(false)
+        })
+        .collect();
+    sealed.sort();
+    if let Some(generation) = sealed.pop() {
+        let obj = state.linked.get(&(token.to_string(), generation))?;
+        return Some((
+            QualifiedIdentity {
+                token: token.to_string(),
+                generation: generation,
+            },
+            obj.status.clone(),
+            "unknown".to_string(),
+        ));
+    }
+    let mut closed: Vec<u64> = state
         .linked
-        .get(&(token.to_string(), generation))
-        .cloned()
-        .unwrap_or(ObjState {
-            source_id: String::new(),
-            object_class: String::new(),
-            clock_domain: String::new(),
-            status: "unknown".to_string(),
-            certainty: "unknown".to_string(),
-            first_seq: 0,
-            last_seq: 0,
-            evidence: Vec::new(),
-        });
+        .iter()
+        .filter(|((name, _), obj)| {
+            name == token && same_origin(obj, row) && !is_open(obj.status.as_str())
+        })
+        .map(|((_, generation), _)| *generation)
+        .collect();
+    closed.sort();
+    let generation = closed.pop()?;
+    let obj = state.linked.get(&(token.to_string(), generation))?;
     Some((
         QualifiedIdentity {
             token: token.to_string(),
             generation: generation,
         },
-        obj.status,
-        obj.certainty,
+        obj.status.clone(),
+        shown_certainty(state, token, generation, obj.certainty.as_str()),
     ))
 }
 
@@ -543,6 +608,16 @@ fn apply_row(
         .alias
         .get(row.virtual_id.as_str())
         .map(|(_, generation)| *generation);
+    // A row observed in a clock domain none of the token's
+    // lines shares crosses a clock-domain change: the
+    // token's temporal claims bound from here on.
+    let token_tracked = state.latest.contains_key(&canonical);
+    let shares_domain = state.linked.iter().any(|((name, _), obj)| {
+        name == &canonical && obj.clock_domain == row.clock_domain
+    });
+    if token_tracked && !shares_domain {
+        state.temporal_bounded.insert(canonical.clone());
+    }
     match row.event.as_str() {
         "allocated" => apply_allocated(state, config, refusals, row, &canonical),
         "observed" => {
@@ -550,7 +625,13 @@ fn apply_row(
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
-            let certainty = temporal_certainty(state, &canonical).to_string();
+            let line_certainty = state
+                .linked
+                .get(&(canonical.clone(), generation))
+                .expect("joined generation exists")
+                .certainty
+                .clone();
+            let certainty = event_certainty(state, &canonical, &line_certainty);
             let obj = state
                 .linked
                 .get_mut(&(canonical.clone(), generation))
@@ -579,7 +660,13 @@ fn apply_row(
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
-            let certainty = temporal_certainty(state, &canonical).to_string();
+            let line_certainty = state
+                .linked
+                .get(&(canonical.clone(), generation))
+                .expect("joined generation exists")
+                .certainty
+                .clone();
+            let certainty = event_certainty(state, &canonical, &line_certainty);
             let (status, note) = match row.event.as_str() {
                 "released" => (
                     "released".to_string(),
@@ -654,14 +741,18 @@ fn apply_row(
         "alias" => apply_alias(state, refusals, row),
         "capture_end" => apply_shown(
             state,
+            refusals,
             row,
             &canonical,
+            pinned,
             "capture end is not teardown".to_string(),
         ),
         "baseline" => apply_shown(
             state,
+            refusals,
             row,
             &canonical,
+            pinned,
             "baseline declaration; reconciled explicitly".to_string(),
         ),
         "loss_gap" => {
@@ -670,8 +761,10 @@ fn apply_row(
             }
             apply_shown(
                 state,
+                refusals,
                 row,
                 &canonical,
+                pinned,
                 "event-loss gap; later observations stay separate samples".to_string(),
             )
         }
@@ -681,8 +774,10 @@ fn apply_row(
             }
             apply_shown(
                 state,
+                refusals,
                 row,
                 &canonical,
+                pinned,
                 "suspend gap; elapsed unknown".to_string(),
             )
         }
@@ -692,8 +787,10 @@ fn apply_row(
             }
             apply_shown(
                 state,
+                refusals,
                 row,
                 &canonical,
+                pinned,
                 "clock domain change; temporal claims bounded".to_string(),
             )
         }
@@ -897,31 +994,24 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
 /// they show the current line but change no lifecycle.
 fn apply_shown(
     state: &State,
+    refusals: &Refusals,
     row: &LedgerRow,
     canonical: &str,
+    pinned: Option<u64>,
     note: String,
 ) -> Applied {
-    match shown_identity(state, canonical) {
-        Some((identity, status, certainty)) => {
-            let certainty = if row.event == "loss_gap" {
-                "unknown".to_string()
-            } else if row.event == "suspend_gap" || row.event == "clock_change" {
-                "bounded".to_string()
-            } else {
-                certainty
-            };
-            Applied {
-                resolved: ResolvedRow {
-                    row_id: row.row_id.clone(),
-                    seq: row.seq,
-                    identity: Some(identity),
-                    status,
-                    certainty,
-                    note,
-                },
-                failed: false,
-            }
-        }
+    match shown_identity(state, refusals, row, canonical, pinned) {
+        Some((identity, status, certainty)) => Applied {
+            resolved: ResolvedRow {
+                row_id: row.row_id.clone(),
+                seq: row.seq,
+                identity: Some(identity),
+                status,
+                certainty,
+                note,
+            },
+            failed: false,
+        },
         None => Applied {
             resolved: unknown_row(row, format!("{note}; no identity joined")),
             failed: false,
