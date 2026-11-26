@@ -36,6 +36,10 @@ path = "src/bin/lifecycle.rs"
 name = "memveil-ebpf-copy"
 path = "src/bin/copy.rs"
 
+[[bin]]
+name = "memveil-ebpf-census"
+path = "src/bin/census.rs"
+
 [profile.release]
 panic = "abort"
 lto = true
