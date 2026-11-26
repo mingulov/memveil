@@ -754,6 +754,32 @@ def test_nested_mixed_sg_segments():
         assert fact["native_result"] == 0, \
             "failed outer is not complete: %r" % (
                 fact["evidence_id"],)
+    requests = [fact for fact in outer
+                if fact["semantics"] == "request"]
+    assert requests, "outer request fact required"
+    # Request and result describe the same outer
+    # transfer: their extents must agree. A 1-byte
+    # request paired with an 8192-byte result is not
+    # a coherent transfer.
+    by_operation = {}
+    for fact in outer:
+        by_operation.setdefault(
+            fact["operation_id"], []).append(fact)
+    for operation, group in by_operation.items():
+        extents = {(fact["offset"],
+                    fact["length_bytes"])
+                   for fact in group}
+        assert len(extents) == 1, \
+            "outer request/result extent mismatch " \
+            "for %r: %r" % (
+                operation, sorted(extents))
+    # Every child segment must have succeeded: a
+    # failed segment while claiming complete
+    # transfer is not a complete transfer.
+    for fact in children:
+        assert fact["native_result"] == 0, \
+            "failed segment is not complete " \
+            "transfer: %r" % (fact["evidence_id"],)
     # Segment extents must be disjoint and jointly
     # cover the outer transfer length.
     extents = sorted(
