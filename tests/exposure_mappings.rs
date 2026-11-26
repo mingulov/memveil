@@ -205,3 +205,98 @@ fn poisoned_capture_id_refuses() {
         assert!(err.to_string().contains("forbidden"), "{poison}: {err}");
     }
 }
+
+#[test]
+fn path_variants_refuse_in_every_carrier() {
+    // None of these carries a refusal-list fragment, so the
+    // token grammar (not the fragment scan) must refuse each.
+    for variant in [
+        "/dev//mem",
+        "/dev/./mem",
+        "/dev/kmem",
+        "/proc",
+        "proc/self/mem",
+    ] {
+        let capture = MMIO.replacen("cap-map-mmio-1", variant, 1);
+        let err = read_inventory(&capture).expect_err("capture variant must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{variant}");
+
+        let entry = MMIO.replacen("map-mmio-1", variant, 1);
+        let err = read_inventory(&entry).expect_err("entry variant must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{variant}");
+
+        let class = MMIO.replacen(
+            "\"mapping_class\": \"mmio\"",
+            &format!("\"mapping_class\": \"{variant}\""),
+            1,
+        );
+        let err = read_inventory(&class).expect_err("class variant must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{variant}");
+
+        let boundary = MMIO.replacen("guest-device-bar0", variant, 1);
+        let err = read_inventory(&boundary).expect_err("boundary variant must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{variant}");
+    }
+}
+
+#[test]
+fn address_and_command_labels_refuse() {
+    let address = MMIO.replacen("guest-device-bar0", "0xffff888012345000 leaked", 1);
+    let err = read_inventory(&address).expect_err("address label must refuse");
+    assert_eq!(err.message, "value outside token grammar");
+
+    let command = MMIO.replacen(
+        "guest-device-bar0",
+        "swapon -p 5 /dev/mapper/cryptswap0 HOME=/root",
+        1,
+    );
+    let err = read_inventory(&command).expect_err("command label must refuse");
+    assert_eq!(err.message, "value outside token grammar");
+}
+
+#[test]
+fn self_attested_dax_access_refuses() {
+    // This slice carries no separate proof, so even a
+    // `true` boolean never admits a claim.
+    let proved = DAX.replacen("\"access_proved\": false", "\"access_proved\": true", 1);
+    let text = proved.replacen(
+        "\"access_claim\": null",
+        "\"access_claim\": \"dax-read\"",
+        1,
+    );
+    let err = read_inventory(&text).expect_err("proved claim must refuse");
+    assert!(err.to_string().contains("access"), "{err}");
+
+    let err = read_inventory(&proved).expect_err("proved flag alone must refuse");
+    assert_eq!(err.what, "dax.access_proved", "{err}");
+    assert!(err.to_string().contains("access"), "{err}");
+}
+
+#[test]
+fn unknown_mapping_class_refuses_entry_without_guessing() {
+    let text = MMIO.replacen(
+        "\"mapping_class\": \"mmio\"",
+        "\"mapping_class\": \"turbo\"",
+        1,
+    );
+    let inventory = read_inventory(&text).expect("unknown class refuses entry");
+    assert_eq!(inventory.refused_entries, 1);
+    assert_eq!(inventory.facts.len(), 1);
+    assert_eq!(inventory.facts[0].mapping_class, "mmio");
+}
+
+#[test]
+fn unknown_top_level_key_refuses() {
+    let probe = MMIO.replacen(
+        "\"capture_id\"",
+        "\"source_path\": \"/dev/mem\", \"payload\": \"aa\", \"capture_id\"",
+        1,
+    );
+    let err = read_inventory(&probe).expect_err("forbidden top-level keys must refuse");
+    assert_eq!(err.what, "source_path", "{err}");
+
+    let benign = MMIO.replacen("\"capture_id\"", "\"zzz\": 1, \"capture_id\"", 1);
+    let err = read_inventory(&benign).expect_err("unknown top-level key must refuse");
+    assert_eq!(err.what, "zzz", "{err}");
+    assert_eq!(err.message, "unknown field", "{err}");
+}
