@@ -219,7 +219,7 @@ def check_nullable(out, fact, base, where, is_value):
                        % (where, reason))
 
 
-def check_fact(out, fact, where):
+def check_fact(out, fact, source_id, where):
     """One exposure fact keeps the frozen record shape."""
     if not isinstance(fact, dict):
         out.append("%s: fact must be an object" % where)
@@ -240,8 +240,8 @@ def check_fact(out, fact, where):
     if fact["kind"] not in LANE_KINDS:
         out.append("%s: kind %r outside the lane spellings"
                    % (where, fact["kind"]))
-    if fact["source_id"] not in LANE_SOURCES:
-        out.append("%s: source_id %r leaves the lane sources"
+    if fact["source_id"] != source_id:
+        out.append("%s: source_id %r leaves the envelope source"
                    % (where, fact["source_id"]))
     for field in ("epoch", "generation", "offset", "length_bytes"):
         if not is_u64(fact[field]):
@@ -353,6 +353,9 @@ def check_coverage(out, entry, cell, where):
         out.append("%s: profile_id not opaque" % where)
     if entry["subject_id"] not in FROZEN_SUBJECT:
         out.append("%s: subject_id %r" % (where, entry["subject_id"]))
+    elif entry["subject_id"] != LANE_SUBJECT:
+        out.append("%s: subject_id %r is not the lane subject"
+                   % (where, entry["subject_id"]))
     if entry["platform_cell"] != cell:
         out.append("%s: platform_cell %r leaves the envelope cell"
                    % (where, entry["platform_cell"]))
@@ -423,7 +426,8 @@ def validate(doc, name):
         sections[section] = rows
     facts = sections["facts"]
     for pos, fact in enumerate(facts):
-        check_fact(out, fact, "%s fact %d" % (name, pos))
+        check_fact(out, fact, doc["source_id"],
+                   "%s fact %d" % (name, pos))
     seen = [fact["evidence_id"] for fact in facts
             if isinstance(fact, dict) and "evidence_id" in fact]
     if len(set(seen)) != len(seen):
@@ -507,6 +511,9 @@ def test_direction_stage_ordering_pins():
     assert [fact["operation_id"] for fact in facts] == [
         "op-tdx-conv-1", "op-tdx-conv-1",
         "op-tdx-conv-2", "op-tdx-conv-2"]
+    assert [fact["direction"] for fact in facts] == [
+        "guest-to-host", "host-to-guest",
+        "guest-to-host", "host-to-guest"]
     by_op = {}
     for fact in facts:
         by_op.setdefault(fact["operation_id"], {})[
@@ -537,9 +544,11 @@ def test_ordinary_noop_pins():
 def test_missing_btf_source_pins():
     _, doc = load_raw("missing-btf-source.json")
     rows = doc["coverage"]
-    assert [(row["source_id"], row["status"], row["reason"])
+    assert [(row["source_id"], row["subject_id"],
+             row["status"], row["reason"])
             for row in rows] == [
-                ("tdx-conversions", "unavailable", "hook-absent")]
+                ("tdx-conversions", "guest-kernel-cc-platform",
+                 "unavailable", "hook-absent")]
     assert doc["facts"] == []
     assert doc["objects"] == []
 
@@ -551,7 +560,7 @@ def test_no_inherited_state_from_other_technology():
         assert doc["platform_cell"] == LANE_CELL, name
         for fact in doc["facts"]:
             assert fact["peer_class"] == LANE_PEER, name
-            assert fact["source_id"] in LANE_SOURCES, name
+            assert fact["source_id"] == doc["source_id"], name
         for obj in doc["objects"]:
             assert obj["origin_source"] in LANE_SOURCES, name
 
