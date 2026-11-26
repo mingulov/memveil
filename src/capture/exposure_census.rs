@@ -386,7 +386,10 @@ fn race_bound(snapshot: &CensusSnapshot) -> u64 {
 /// `uncertainty-overflow` reason, never a silent clamp:
 /// a saturated bound must stay distinguishable from an
 /// exact one.
-fn stated_uncertainty(left: &CensusSnapshot, right: &CensusSnapshot) -> (Option<u64>, Option<String>) {
+fn stated_uncertainty(
+    left: &CensusSnapshot,
+    right: &CensusSnapshot,
+) -> (Option<u64>, Option<String>) {
     match race_bound(left).checked_add(race_bound(right)) {
         Some(bound) => (Some(bound), None),
         None => (None, Some("uncertainty-overflow".to_string())),
