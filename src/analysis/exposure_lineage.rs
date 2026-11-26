@@ -640,7 +640,9 @@ fn shown_certainty(
 /// Identity shown by informational rows. An alias
 /// binding shows its pinned generation; otherwise exactly
 /// one joinable line must exist, else the row shows no
-/// identity. One sealed line shows its last state with
+/// identity. A restoration-uncertain line beside that one
+/// candidate keeps the display ambiguous, as with ordinary
+/// joins. One sealed line shows its last state with
 /// unknown certainty, and an unambiguous closed line
 /// shows its terminal state; ambiguity never shows an
 /// identity.
@@ -686,6 +688,13 @@ fn shown_identity(
         return None;
     }
     if let Some(generation) = candidates.into_iter().next() {
+        // The same restoration-uncertain guard as ordinary
+        // joins: an unsealed unknown-status line may still
+        // answer beside this candidate, so the row shows no
+        // identity rather than select a generation.
+        if has_unsealed_unknown(state, row, token) {
+            return None;
+        }
         let (status, line_certainty) =
             match state.linked.get(&(token.to_string(), generation)) {
                 Some(obj) => (obj.status.clone(), obj.certainty.clone()),
