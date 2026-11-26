@@ -968,9 +968,15 @@ def validate_fixture(doc):
             # The cited evidence must support the
             # claimed state kind: at least one cited
             # fact carries a kind that observes the
-            # claim.
-            want_kinds = STATE_SUPPORT.get(
-                obj.get("state"))
+            # claim. The state value must be text
+            # before the support-table lookup: an
+            # array-valued state is a closed-enum
+            # violation, never a TypeError.
+            state = obj.get("state")
+            if isinstance(state, str):
+                want_kinds = STATE_SUPPORT.get(state)
+            else:
+                want_kinds = None
             if want_kinds is not None and \
                     not any(kind in want_kinds
                             for kind in cited_kinds):
