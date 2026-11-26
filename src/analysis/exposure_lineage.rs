@@ -495,7 +495,7 @@ fn shown_certainty(
 /// Identity shown by informational rows. An alias
 /// binding shows its pinned generation; otherwise exactly
 /// one joinable line must exist, else the row shows no
-/// identity. A sealed line shows its last state with
+/// identity. One sealed line shows its last state with
 /// unknown certainty, and an unambiguous closed line
 /// shows its terminal state; ambiguity never shows an
 /// identity.
@@ -538,9 +538,11 @@ fn shown_identity(
             shown_certainty(state, token, generation, obj.certainty.as_str()),
         ));
     }
-    // No joinable line: a sealed line shows its last state
-    // as unknown; an unambiguous same-origin closed line
-    // shows its terminal state.
+    // No joinable line: one sealed line shows its last
+    // state as unknown, but two sealed lines could each
+    // match, so the row shows no identity rather than
+    // select a generation; an unambiguous same-origin
+    // closed line shows its terminal state.
     let mut sealed: Vec<u64> = open_generations(state, token)
         .into_iter()
         .filter(|generation| {
@@ -554,6 +556,9 @@ fn shown_identity(
         })
         .collect();
     sealed.sort();
+    if sealed.len() > 1 {
+        return None;
+    }
     if let Some(generation) = sealed.pop() {
         let obj = state.linked.get(&(token.to_string(), generation))?;
         return Some((
