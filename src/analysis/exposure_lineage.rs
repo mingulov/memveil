@@ -713,19 +713,19 @@ fn shown_identity(
     // No joinable line: one sealed line shows its last
     // state as unknown, but two sealed lines could each
     // match, so the row shows no identity rather than
-    // select a generation; an unambiguous same-origin
-    // closed line shows its terminal state.
-    let mut sealed: Vec<u64> = open_generations(state, token)
-        .into_iter()
-        .filter(|generation| {
-            let key = (token.to_string(), *generation);
-            state.sealed.contains(&key)
-                && state
-                    .linked
-                    .get(&key)
-                    .map(|obj| same_origin(obj, row))
-                    .unwrap_or(false)
+    // select a generation. Sealed restoration-uncertain
+    // lines count beside sealed open lines; an unambiguous
+    // same-origin closed line shows its terminal state.
+    let mut sealed: Vec<u64> = state
+        .linked
+        .iter()
+        .filter(|((name, generation), obj)| {
+            name == token
+                && (is_open(obj.status.as_str()) || obj.status == "unknown")
+                && state.sealed.contains(&(token.to_string(), *generation))
+                && same_origin(obj, row)
         })
+        .map(|((_, generation), _)| *generation)
         .collect();
     sealed.sort();
     if sealed.len() > 1 {
