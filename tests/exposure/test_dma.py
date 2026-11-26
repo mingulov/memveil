@@ -212,11 +212,32 @@ def check_keys(errors, where, record, required,
     return True
 
 
+def check_present_reason(errors, where, record,
+                         name):
+    # A reason carried alongside a present (non-null)
+    # value must still be a closed-set null-reason
+    # string; reason objects or disclosure-shaped
+    # fields are never accepted.
+    key = name + "_reason"
+    if key not in record:
+        return
+    reason = record[key]
+    if not isinstance(reason, str) or not reason:
+        errors.append("bad-reason: %s.%s is not a "
+                      "null-reason string" % (where, key))
+    elif reason not in LANE_NULL_REASONS:
+        errors.append("closed-enum-violation: "
+                      "%s.%s=%r"
+                      % (where, key, reason))
+
+
 def check_nullable(errors, where, record, name,
                    expect_reason=True):
     if name not in record:
         return
     if record[name] is not None:
+        check_present_reason(errors, where, record,
+                             name)
         return
     reason = record.get(name + "_reason")
     if not expect_reason:
@@ -302,13 +323,18 @@ def check_fact(errors, where, fact, catalog_sources):
     if native is None:
         check_nullable(errors, where, fact,
                        "native_result")
-    elif not isinstance(native, int) \
-            or isinstance(native, bool):
-        errors.append("bad-s64: %s.native_result=%r"
-                      % (where, native))
-    elif not S64_MIN <= native <= S64_MAX:
-        errors.append("bad-s64: %s.native_result=%r "
-                      "outside s64" % (where, native))
+    else:
+        check_present_reason(errors, where, fact,
+                             "native_result")
+        if not isinstance(native, int) \
+                or isinstance(native, bool):
+            errors.append(
+                "bad-s64: %s.native_result=%r"
+                % (where, native))
+        elif not S64_MIN <= native <= S64_MAX:
+            errors.append(
+                "bad-s64: %s.native_result=%r "
+                "outside s64" % (where, native))
     check_enum(errors, where + ".caller_class",
                fact.get("caller_class"), LANE_CALLERS)
     check_enum(errors, where + ".peer_class",
@@ -365,11 +391,18 @@ def check_object(errors, where, obj, catalog_sources):
             check_slug(errors,
                        where + ".state_evidence[]",
                        ident)
-    if "expected_boundary" in obj \
-            and obj["expected_boundary"] is None:
-        errors.append("bare-null-without-reason: "
-                      "%s.expected_boundary must never "
-                      "be null" % where)
+    if "expected_boundary" in obj:
+        boundary = obj["expected_boundary"]
+        if boundary is None:
+            errors.append(
+                "bare-null-without-reason: "
+                "%s.expected_boundary must never "
+                "be null" % where)
+        elif not isinstance(boundary, dict):
+            errors.append(
+                "bad-boundary: "
+                "%s.expected_boundary is not an "
+                "object" % where)
     gaps = obj.get("uncertainty")
     if not isinstance(gaps, dict):
         errors.append("missing-required-key: "
