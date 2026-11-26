@@ -814,7 +814,13 @@ def test_last_reference_teardown():
         "teardown needs one destruction fact"
     # Destruction is witnessed only after the last
     # put: compare the observed timestamps, not just
-    # the counts.
+    # the counts. Timestamps order only within one
+    # clock domain; mixed domains prove no order.
+    domains = {fact["clock_domain"]
+               for fact in puts + destroys}
+    assert len(domains) == 1, \
+        "teardown order needs one clock domain: " \
+        "%r" % (sorted(domains),)
     last_put_end = max(
         int(fact["observed_interval"]["end"])
         for fact in puts)
@@ -904,6 +910,26 @@ def test_concurrent_create_reuse_witness():
             "lifecycle", "result"), \
             "release witness without release " \
             "evidence: %r" % (event["witness_id"],)
+    # Each witness event must name genuine evidence
+    # for its lineage: some fact for that
+    # token/generation must carry the observed
+    # semantics. An unrelated result observed
+    # nowhere in the lineage is not evidence.
+    observed_by_lineage = {}
+    for fact in doc["facts"]:
+        observed_by_lineage.setdefault(
+            (fact.get("object_token"),
+             fact.get("generation")),
+            set()).add(fact["semantics"])
+    for event in doc["release_witness"]:
+        pair = (event["object_token"],
+                event["generation"])
+        assert event["observed"] in \
+            observed_by_lineage.get(pair, set()), \
+            "witness %r claims %r with no such " \
+            "fact for lineage %r" % (
+                event["witness_id"],
+                event["observed"], pair)
     witnessed = sorted(
         {(event["object_token"],
           event["generation"])
