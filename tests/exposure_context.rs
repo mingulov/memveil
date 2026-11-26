@@ -267,6 +267,38 @@ fn command_and_movement_labels_refuse() {
 }
 
 #[test]
+fn bare_address_labels_refuse_in_every_carrier() {
+    // Bare addresses carry no refusal-list fragment, so the
+    // leading-letter grammar must refuse each; a letter-led
+    // `0x…` token pins the address-shape rule itself.
+    for address in ["0xffff888012345000", "0xfe000000"] {
+        let capture = ENCRYPTED.replacen("cap-ctx-swap-1", address, 1);
+        let err = read_context(&capture).expect_err("capture address must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{address}");
+
+        let sample = ENCRYPTED.replacen("swap-enc-1", address, 1);
+        let err = read_context(&sample).expect_err("sample address must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{address}");
+
+        let detail = ENCRYPTED.replacen(
+            "\"encryption\": \"encrypted\"",
+            &format!("\"encryption\": \"encrypted\", \"name\": \"{address}\""),
+            1,
+        );
+        let err = read_context(&detail).expect_err("detail address must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{address}");
+    }
+
+    let shaped = ENCRYPTED.replacen(
+        "\"encryption\": \"encrypted\"",
+        "\"encryption\": \"encrypted\", \"name\": \"trace-0x1f\"",
+        1,
+    );
+    let err = read_context(&shaped).expect_err("address-shaped label must refuse");
+    assert_eq!(err.message, "address-like value refused");
+}
+
+#[test]
 fn refusal_list_values_still_refuse_whole_read() {
     // Bare device-name tokens without separators refuse via
     // the retained fragment scan, in samples and in details.

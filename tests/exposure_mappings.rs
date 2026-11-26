@@ -221,7 +221,13 @@ fn path_variants_refuse_in_every_carrier() {
         let err = read_inventory(&capture).expect_err("capture variant must refuse");
         assert_eq!(err.message, "value outside token grammar", "{variant}");
 
-        let entry = MMIO.replacen("map-mmio-1", variant, 1);
+        // The needle names the `entry_id` field: a bare
+        // `map-mmio-1` would first match inside the capture id.
+        let entry = MMIO.replacen(
+            "\"entry_id\": \"map-mmio-1\"",
+            &format!("\"entry_id\": \"{variant}\""),
+            1,
+        );
         let err = read_inventory(&entry).expect_err("entry variant must refuse");
         assert_eq!(err.message, "value outside token grammar", "{variant}");
 
@@ -252,6 +258,46 @@ fn address_and_command_labels_refuse() {
     );
     let err = read_inventory(&command).expect_err("command label must refuse");
     assert_eq!(err.message, "value outside token grammar");
+}
+
+#[test]
+fn bare_address_labels_refuse_in_every_carrier() {
+    // Bare addresses carry no refusal-list fragment, so the
+    // leading-letter grammar must refuse each; a letter-led
+    // `0x…` token pins the address-shape rule itself.
+    for address in ["0xffff888012345000", "0xfe000000"] {
+        let capture = MMIO.replacen("cap-map-mmio-1", address, 1);
+        let err = read_inventory(&capture).expect_err("capture address must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{address}");
+
+        let entry = MMIO.replacen(
+            "\"entry_id\": \"map-mmio-1\"",
+            &format!("\"entry_id\": \"{address}\""),
+            1,
+        );
+        let err = read_inventory(&entry).expect_err("entry address must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{address}");
+
+        let boundary = MMIO.replacen("guest-device-bar0", address, 1);
+        let err = read_inventory(&boundary).expect_err("boundary address must refuse");
+        assert_eq!(err.message, "value outside token grammar", "{address}");
+    }
+
+    let shaped = MMIO.replacen("guest-device-bar0", "trace-0x1f", 1);
+    let err = read_inventory(&shaped).expect_err("address-shaped label must refuse");
+    assert_eq!(err.message, "address-like value refused");
+}
+
+#[test]
+fn unknown_dax_key_refuses() {
+    let probe = MMIO.replacen(
+        "\"presence\"",
+        "\"device_path\": \"/dev//mem\", \"presence\"",
+        1,
+    );
+    let err = read_inventory(&probe).expect_err("unknown dax key must refuse");
+    assert_eq!(err.what, "device_path", "{err}");
+    assert_eq!(err.message, "unknown field", "{err}");
 }
 
 #[test]
