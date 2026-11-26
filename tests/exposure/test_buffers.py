@@ -855,6 +855,30 @@ def validate_fixture(doc):
                         "dangling-reference: "
                         "release_witness[%d]=%r"
                         % (index, pair))
+        # Lifecycle coherence: a recorded
+        # destruction is terminal evidence for its
+        # lineage, so an object carrying
+        # destruction evidence cannot still be
+        # created.
+        destroyed = {(fact.get("object_token"),
+                      fact.get("generation"))
+                     for fact in doc["facts"]
+                     if isinstance(fact, dict)
+                     and fact.get("kind")
+                     == "destruction"}
+        for index, obj in enumerate(doc["objects"]):
+            if not isinstance(obj, dict):
+                continue
+            pair = (obj.get("object_token"),
+                    obj.get("generation"))
+            if obj.get("lifecycle_status") == "created" \
+                    and pair in destroyed:
+                errors.append(
+                    "lifecycle-coherence: "
+                    "objects[%d].lifecycle_status="
+                    "'created' contradicts recorded "
+                    "destruction for lineage %r"
+                    % (index, pair))
     return errors
 
 
