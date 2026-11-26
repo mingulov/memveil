@@ -498,6 +498,12 @@ def check_object(errors, where, obj, catalog_sources):
         errors.append("closed-enum-violation: "
                       "%s.origin_source=%r"
                       % (where, obj.get("origin_source")))
+    elif obj.get("origin_source") not in lane_sources():
+        errors.append("foreign-source: "
+                      "%s.origin_source=%r is outside "
+                      "this lane's sources %r"
+                      % (where, obj.get("origin_source"),
+                         lane_sources()))
     check_enum(errors, where + ".lifecycle_status",
                obj.get("lifecycle_status"),
                frozen("lifecycle_statuses"))
