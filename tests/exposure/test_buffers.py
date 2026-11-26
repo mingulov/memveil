@@ -1195,10 +1195,21 @@ def validate_fixture(doc):
                 continue
             if not is_u64(interval.get("end")):
                 continue
+            # The terminal key must stay hashable: an
+            # array-valued epoch or clock is a shape
+            # violation already reported by the fact
+            # checks, never a TypeError from the
+            # index. Skip such facts here.
+            epoch = fact.get("epoch")
+            clock = fact.get("clock_domain")
+            if not is_u64(epoch):
+                continue
+            if not isinstance(clock, str):
+                continue
             key = (fact.get("object_token"),
                    fact.get("generation"),
-                   fact.get("epoch"),
-                   fact.get("clock_domain"))
+                   epoch,
+                   clock)
             end = int(interval["end"])
             if key in terminal_ends:
                 errors.append(
@@ -1218,10 +1229,19 @@ def validate_fixture(doc):
             if not native_succeeded(
                     fact.get("native_result")):
                 continue
+            # Same hashability guard as the
+            # destruction pass: skip facts whose
+            # epoch or clock cannot key the index.
+            epoch = fact.get("epoch")
+            clock = fact.get("clock_domain")
+            if not is_u64(epoch):
+                continue
+            if not isinstance(clock, str):
+                continue
             key = (fact.get("object_token"),
                    fact.get("generation"),
-                   fact.get("epoch"),
-                   fact.get("clock_domain"))
+                   epoch,
+                   clock)
             if key not in terminal_ends:
                 continue
             interval = fact.get(
