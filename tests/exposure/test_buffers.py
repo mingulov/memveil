@@ -206,6 +206,25 @@ LIFECYCLE_SUPPORT = {
 # result).
 OUTCOME_SEMANTICS = ("result", "lifecycle")
 
+
+def lifecycle_outcome_agrees(lifecycle, native):
+    """Check a cited native result against the lifecycle claim.
+
+    A release claim needs a successful cited
+    outcome (native_result == 0); a quarantine
+    claim needs a failed one (native_result !=
+    0). An unobserved result (None) or a
+    non-integer agrees with nothing.
+    """
+    if not isinstance(native, int) \
+            or isinstance(native, bool):
+        return False
+    if lifecycle == "released":
+        return native == 0
+    if lifecycle == "quarantined":
+        return native != 0
+    return False
+
 # Lane capability pinned by the envelope: a fact
 # may only cite a catalog source carrying this
 # capability. Another lane's source id exists in
@@ -973,7 +992,7 @@ def validate_fixture(doc):
             if not isinstance(obj, dict):
                 continue
             cited_kinds = []
-            cited_pairs = []
+            cited_triples = []
             for ident in \
                     obj.get("state_evidence", []):
                 if ident not in evidence:
@@ -985,9 +1004,10 @@ def validate_fixture(doc):
                     cited = evidence[ident]
                     cited_kinds.append(
                         cited.get("kind"))
-                    cited_pairs.append(
+                    cited_triples.append(
                         (cited.get("kind"),
-                         cited.get("semantics")))
+                         cited.get("semantics"),
+                         cited.get("native_result")))
                     if (cited.get("object_token"),
                             cited.get("generation")) != \
                             (obj.get("object_token"),
@@ -1035,7 +1055,15 @@ def validate_fixture(doc):
             # semantics on the SAME record: a
             # destruction or callback-result fact
             # filed as a mere request cannot
-            # establish release or quarantine.
+            # establish release or quarantine. The
+            # cited outcome must also agree with
+            # the claimed status: a failed
+            # destruction cannot release a
+            # lineage, and a successful
+            # callback-result cannot quarantine
+            # one — the quarantine claim needs
+            # the actual failure cited, not a
+            # same-kind success.
             lifecycle = obj.get("lifecycle_status")
             if isinstance(lifecycle, str):
                 need_kinds = \
@@ -1046,8 +1074,11 @@ def validate_fixture(doc):
                     not any(kind in need_kinds
                             and semantics in
                             OUTCOME_SEMANTICS
-                            for kind, semantics
-                            in cited_pairs):
+                            and lifecycle_outcome_agrees(
+                                lifecycle, native)
+                            for kind, semantics,
+                            native
+                            in cited_triples):
                 errors.append(
                     "unsupported-state-evidence: "
                     "objects[%d] lifecycle_status=%r "
