@@ -26,8 +26,11 @@
 //!   object class. A refused allocation keeps the token
 //!   ambiguous: later joins stay unlinked, since an
 //!   untracked generation may exist.
-//! * Alias mappings resolve to one canonical identity, so
-//!   observations through an alias never double-count.
+//! * Alias mappings bind one canonical identity plus
+//!   one generation, so observations through an alias
+//!   never double-count and never follow address reuse
+//!   until the alias is rebound. An ambiguous or
+//!   loss-sealed target refuses the alias.
 //! * Rows that share an `atom` marker commit only as a
 //!   unit: when any leg cannot join, every leg resolves
 //!   UNKNOWN and the legs stay separate samples.
@@ -216,6 +219,7 @@ pub fn distinct_known_objects(outcome: &ReplayOutcome) -> usize {
 struct ObjState {
     source_id: String,
     object_class: String,
+    clock_domain: String,
     status: String,
     certainty: String,
     first_seq: u64,
@@ -227,7 +231,11 @@ struct ObjState {
 struct State {
     linked: BTreeMap<(String, u64), ObjState>,
     latest: BTreeMap<String, u64>,
-    alias: BTreeMap<String, String>,
+    /// Alias bindings: alias to (canonical token,
+    /// generation). A binding pins one exact generation,
+    /// so an alias never follows address reuse until it
+    /// is explicitly rebound.
+    alias: BTreeMap<String, (String, u64)>,
     temporal_bounded: BTreeSet<String>,
     sealed: BTreeSet<(String, u64)>,
     samples: Vec<(String, ObjState)>,
@@ -255,13 +263,13 @@ fn resolve(state: &State, virtual_id: &str) -> Option<String> {
     let mut seen = BTreeSet::new();
     seen.insert(current.clone());
     for _ in 0..MAX_ALIAS_HOPS {
-        match state.alias.get(&current) {
+        match state.alias.get(&current).map(|(token, _)| token.clone()) {
             None => return Some(current),
             Some(next) => {
                 if !seen.insert(next.clone()) {
                     return None;
                 }
-                current = next.clone();
+                current = next;
             }
         }
     }
@@ -454,6 +462,27 @@ fn join_pinned(
     Ok(generation)
 }
 
+/// Certainty shown for one line: a loss-sealed line shows
+/// unknown, an unknown line never upgrades, and a
+/// temporally bounded token shows bounded at best.
+fn shown_certainty(
+    state: &State,
+    token: &str,
+    generation: u64,
+    line_certainty: &str,
+) -> String {
+    if state.sealed.contains(&(token.to_string(), generation)) {
+        return "unknown".to_string();
+    }
+    if line_certainty == "unknown" {
+        return "unknown".to_string();
+    }
+    if state.temporal_bounded.contains(token) {
+        return "bounded".to_string();
+    }
+    line_certainty.to_string()
+}
+
 /// Identity shown by informational rows: the open line when
 /// exactly one exists, else the latest known line.
 fn shown_identity(state: &State, token: &str) -> Option<(QualifiedIdentity, String, String)> {
@@ -473,6 +502,7 @@ fn shown_identity(state: &State, token: &str) -> Option<(QualifiedIdentity, Stri
         .unwrap_or(ObjState {
             source_id: String::new(),
             object_class: String::new(),
+            clock_domain: String::new(),
             status: "unknown".to_string(),
             certainty: "unknown".to_string(),
             first_seq: 0,
@@ -507,10 +537,16 @@ fn apply_row(
             );
         }
     };
+    // A row addressed through a bound alias may join only
+    // the pinned generation.
+    let pinned = state
+        .alias
+        .get(row.virtual_id.as_str())
+        .map(|(_, generation)| *generation);
     match row.event.as_str() {
         "allocated" => apply_allocated(state, config, refusals, row, &canonical),
         "observed" => {
-            let generation = match join(state, refusals, row, &canonical, None, false) {
+            let generation = match join(state, refusals, row, &canonical, pinned, false) {
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
@@ -539,7 +575,7 @@ fn apply_row(
             }
         }
         "released" | "quarantined" | "revert_ok" => {
-            let generation = match join(state, refusals, row, &canonical, None, false) {
+            let generation = match join(state, refusals, row, &canonical, pinned, false) {
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
@@ -585,7 +621,7 @@ fn apply_row(
             }
         }
         "revert_failed" => {
-            let generation = match join(state, refusals, row, &canonical, None, false) {
+            let generation = match join(state, refusals, row, &canonical, pinned, false) {
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
@@ -615,7 +651,7 @@ fn apply_row(
                 failed: false,
             }
         }
-        "alias" => apply_alias(state, row),
+        "alias" => apply_alias(state, refusals, row),
         "capture_end" => apply_shown(
             state,
             row,
@@ -712,6 +748,7 @@ fn apply_allocated(
         ObjState {
             source_id: row.source_id.clone(),
             object_class: row.object_class.clone(),
+            clock_domain: row.clock_domain.clone(),
             status: "created".to_string(),
             certainty: "known".to_string(),
             first_seq: row.seq,
@@ -737,7 +774,7 @@ fn apply_allocated(
     }
 }
 
-fn apply_alias(state: &mut State, row: &LedgerRow) -> Applied {
+fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Applied {
     let target = match row.alias_of.as_deref() {
         Some(name) => name,
         None => return failed(row, format!("alias row '{}' names no target", row.row_id)),
@@ -751,12 +788,6 @@ fn apply_alias(state: &mut State, row: &LedgerRow) -> Applied {
             );
         }
     };
-    if !state.latest.contains_key(&target_canonical) {
-        return failed(
-            row,
-            format!("alias target '{target_canonical}' was never allocated"),
-        );
-    }
     if state.latest.contains_key(&row.virtual_id) {
         return failed(
             row,
@@ -771,24 +802,78 @@ fn apply_alias(state: &mut State, row: &LedgerRow) -> Applied {
         if probe == row.virtual_id {
             return failed(row, "alias would close a loop; alias refused".to_string());
         }
-        match state.alias.get(&probe) {
-            Some(next) => probe = next.clone(),
+        match state.alias.get(&probe).map(|(token, _)| token.clone()) {
+            Some(next) => probe = next,
             None => break,
         }
     }
-    state
-        .alias
-        .insert(row.virtual_id.clone(), target_canonical.clone());
-    let generation = state
-        .latest
-        .get(&target_canonical)
-        .copied()
-        .unwrap_or(0);
-    let status = state
+    // An alias of a bound alias inherits its exact
+    // binding; otherwise the target must offer exactly one
+    // joinable line through the shared lookup, so an
+    // ambiguous or loss-sealed target refuses the alias
+    // instead of selecting a generation.
+    let generation = match state.alias.get(target).map(|(_, generation)| *generation) {
+        Some(bound) => {
+            let key = (target_canonical.clone(), bound);
+            let obj = match state.linked.get(&key) {
+                Some(obj) => obj,
+                None => {
+                    return failed(
+                        row,
+                        format!(
+                            "alias target '{target}' names no tracked line; alias refused"
+                        ),
+                    );
+                }
+            };
+            if state.sealed.contains(&key) {
+                return failed(
+                    row,
+                    format!(
+                        "event-loss gap precedes row '{}'; alias stays unlinked",
+                        row.row_id
+                    ),
+                );
+            }
+            if !same_origin(obj, row) {
+                return failed(
+                    row,
+                    format!(
+                        "no open generation for '{target_canonical}' from source '{}' class '{}'",
+                        row.source_id, row.object_class
+                    ),
+                );
+            }
+            bound
+        }
+        None => match join(state, refusals, row, &target_canonical, None, false) {
+            Ok(generation) => generation,
+            Err(note) => return failed(row, note),
+        },
+    };
+    state.alias.insert(
+        row.virtual_id.clone(),
+        (target_canonical.clone(), generation),
+    );
+    let obj = state
         .linked
         .get(&(target_canonical.clone(), generation))
-        .map(|obj| obj.status.clone())
-        .unwrap_or_else(|| "unknown".to_string());
+        .expect("bound generation exists");
+    let mut certainty = shown_certainty(
+        state,
+        &target_canonical,
+        generation,
+        obj.certainty.as_str(),
+    );
+    // A binding claimed from a clock domain none of the
+    // target's lines shares is temporally bounded,
+    // without changing the target's own standing.
+    let shares_domain = state.linked.iter().any(|((name, _), line)| {
+        name == &target_canonical && line.clock_domain == row.clock_domain
+    });
+    if !shares_domain && certainty == "known" {
+        certainty = "bounded".to_string();
+    }
     Applied {
         resolved: ResolvedRow {
             row_id: row.row_id.clone(),
@@ -797,8 +882,8 @@ fn apply_alias(state: &mut State, row: &LedgerRow) -> Applied {
                 token: target_canonical.clone(),
                 generation: generation,
             }),
-            status,
-            certainty: "known".to_string(),
+            status: obj.status.clone(),
+            certainty,
             note: format!(
                 "token '{}' aliases '{target_canonical}' at generation {generation}",
                 row.virtual_id
@@ -939,6 +1024,7 @@ pub fn replay(
                     ObjState {
                         source_id: row.source_id.clone(),
                         object_class: row.object_class.clone(),
+                        clock_domain: row.clock_domain.clone(),
                         status: "unknown".to_string(),
                         certainty: "unknown".to_string(),
                         first_seq: row.seq,
