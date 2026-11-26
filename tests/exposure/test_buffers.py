@@ -281,6 +281,18 @@ EXPECTED_FAMILY_KEYS = {
     ),
 }
 
+# Integer counters among the family-specific
+# expectations. Every count field is strictly
+# typed, not just the shared `fact_count`:
+# Python `True == 1`, so plain equality would
+# let a boolean pass as a count.
+FAMILY_COUNT_KEYS = {
+    "two-holder-retention": ("puts", "destructions"),
+    "last-reference-teardown": (
+        "puts", "destructions",
+    ),
+}
+
 
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
@@ -968,6 +980,12 @@ def check_shared_expected(doc):
         assert got == value, \
             "%s: expected.%s=%r derived=%r" % (
                 doc["family"], name, got, value)
+    for name in FAMILY_COUNT_KEYS.get(
+            doc["family"], ()):
+        value = expected.get(name)
+        assert type(value) is int, \
+            "%s: expected.%s=%r is not an int" % (
+                doc["family"], name, value)
 
 
 def valid_fixtures():

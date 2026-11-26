@@ -220,6 +220,15 @@ EXPECTED_FAMILY_KEYS = {
     "pre-attach": (),
 }
 
+# Integer counters among the family-specific
+# expectations. No DMA family carries one today
+# (`bytes_transferred` is a decimal string, the
+# rest are flags, id lists, or lineages); the
+# map stays so a future counter is strictly
+# typed by construction, exactly like the
+# shared `fact_count`.
+FAMILY_COUNT_KEYS = {}
+
 
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
@@ -797,6 +806,12 @@ def check_shared_expected(doc):
         assert got == value, \
             "%s: expected.%s=%r derived=%r" % (
                 doc["family"], name, got, value)
+    for name in FAMILY_COUNT_KEYS.get(
+            doc["family"], ()):
+        value = expected.get(name)
+        assert type(value) is int, \
+            "%s: expected.%s=%r is not an int" % (
+                doc["family"], name, value)
 
 
 def valid_fixtures():
