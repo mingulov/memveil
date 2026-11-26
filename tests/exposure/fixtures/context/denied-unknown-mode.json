@@ -1,0 +1,69 @@
+{
+  "format": "exposure-context-fixture/0.1.0",
+  "provenance": "Hand-written resample inputs; timings and modes fixed here, never read back from a run.",
+  "capture_id": "cap-ctx-denied-1",
+  "source_id": "egress-controls",
+  "clock_domain": "guest_monotonic_active",
+  "resample": {
+    "interval_ticks": 10
+  },
+  "samples": [
+    {
+      "sample_id": "dump-1",
+      "tick": 0,
+      "control": "dump",
+      "native_result": -13,
+      "detail": {
+        "backing": "file"
+      }
+    },
+    {
+      "sample_id": "dev-1",
+      "tick": 5,
+      "control": "device",
+      "native_result": 0,
+      "detail": {
+        "mode": "unknown"
+      }
+    },
+    {
+      "sample_id": "future-1",
+      "tick": 8,
+      "control": "future-control",
+      "native_result": 0,
+      "detail": {}
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-ctx-denied-1:dump-1",
+        "tick": 0,
+        "control": "dump",
+        "status": "denied",
+        "backing": null,
+        "encryption": null,
+        "path_state": null,
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-denied-1:dev-1",
+        "tick": 5,
+        "control": "device",
+        "status": "observed",
+        "backing": null,
+        "encryption": "unknown",
+        "path_state": null,
+        "mode": "unknown",
+        "channel": null,
+        "name": null,
+        "writeback": null
+      }
+    ],
+    "gaps": [],
+    "refused_samples": 1
+  }
+}

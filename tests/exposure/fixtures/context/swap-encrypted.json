@@ -1,0 +1,66 @@
+{
+  "format": "exposure-context-fixture/0.1.0",
+  "provenance": "Hand-written resample inputs; timings and modes fixed here, never read back from a run.",
+  "capture_id": "cap-ctx-swap-1",
+  "source_id": "egress-controls",
+  "clock_domain": "guest_monotonic_active",
+  "resample": {
+    "interval_ticks": 10
+  },
+  "samples": [
+    {
+      "sample_id": "swap-enc-1",
+      "tick": 0,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "partition",
+        "encryption": "encrypted",
+        "path_state": "resolved"
+      }
+    },
+    {
+      "sample_id": "swap-enc-2",
+      "tick": 10,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "file",
+        "encryption": "encrypted",
+        "path_state": "resolved"
+      }
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-ctx-swap-1:swap-enc-1",
+        "tick": 0,
+        "control": "swap",
+        "status": "observed",
+        "backing": "partition",
+        "encryption": "encrypted",
+        "path_state": "resolved",
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      },
+      {
+        "evidence_id": "cap-ctx-swap-1:swap-enc-2",
+        "tick": 10,
+        "control": "swap",
+        "status": "observed",
+        "backing": "file",
+        "encryption": "encrypted",
+        "path_state": "resolved",
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      }
+    ],
+    "gaps": [],
+    "refused_samples": 0
+  }
+}

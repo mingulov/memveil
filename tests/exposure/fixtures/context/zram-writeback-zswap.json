@@ -1,0 +1,95 @@
+{
+  "format": "exposure-context-fixture/0.1.0",
+  "provenance": "Hand-written resample inputs; timings and modes fixed here, never read back from a run.",
+  "capture_id": "cap-ctx-zram-1",
+  "source_id": "egress-controls",
+  "clock_domain": "guest_monotonic_active",
+  "resample": {
+    "interval_ticks": 10
+  },
+  "samples": [
+    {
+      "sample_id": "zram-1",
+      "tick": 0,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "zram",
+        "writeback": "disabled",
+        "path_state": "resolved"
+      }
+    },
+    {
+      "sample_id": "zram-2",
+      "tick": 5,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "zram",
+        "writeback": "enabled",
+        "path_state": "resolved"
+      }
+    },
+    {
+      "sample_id": "zswap-1",
+      "tick": 50,
+      "control": "swap",
+      "native_result": 0,
+      "detail": {
+        "backing": "zswap",
+        "path_state": "resolved"
+      }
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-ctx-zram-1:zram-1",
+        "tick": 0,
+        "control": "swap",
+        "status": "observed",
+        "backing": "zram",
+        "encryption": "unknown",
+        "path_state": "resolved",
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": "disabled"
+      },
+      {
+        "evidence_id": "cap-ctx-zram-1:zram-2",
+        "tick": 5,
+        "control": "swap",
+        "status": "observed",
+        "backing": "zram",
+        "encryption": "unknown",
+        "path_state": "resolved",
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": "enabled"
+      },
+      {
+        "evidence_id": "cap-ctx-zram-1:zswap-1",
+        "tick": 50,
+        "control": "swap",
+        "status": "observed",
+        "backing": "zswap",
+        "encryption": "unknown",
+        "path_state": "resolved",
+        "mode": null,
+        "channel": null,
+        "name": null,
+        "writeback": null
+      }
+    ],
+    "gaps": [
+      {
+        "from_tick": 5,
+        "to_tick": 50,
+        "ticks": 45
+      }
+    ],
+    "refused_samples": 0
+  }
+}
