@@ -1,0 +1,37 @@
+{
+  "format": "mapping-inventory-fixture/0.1.0",
+  "provenance": "Hand-written inventory inputs; classes, peers and boundaries fixed here, never read back from a run.",
+  "capture_id": "cap-map-dax-1",
+  "source_id": "mapping-inventory-scan",
+  "entries": [
+    {
+      "entry_id": "map-dax-1",
+      "mapping_class": "dax",
+      "peer_class": "device",
+      "trust_boundary": "guest-dax-window",
+      "address_namespace": "guest_physical",
+      "native_result": -22
+    }
+  ],
+  "dax": {
+    "presence": "absent",
+    "support": "unsupported",
+    "access_proved": false,
+    "access_claim": null
+  },
+  "expected": {
+    "facts": [
+      {
+        "evidence_id": "cap-map-dax-1:map-dax-1",
+        "mapping_class": "dax",
+        "peer_class": "device",
+        "trust_boundary": "guest-dax-window",
+        "configuration": "unsupported"
+      }
+    ],
+    "dax_presence": "absent",
+    "dax_support": "unsupported",
+    "dax_access_claim": null,
+    "refused_entries": 0
+  }
+}
