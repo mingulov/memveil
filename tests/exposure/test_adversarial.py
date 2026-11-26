@@ -151,6 +151,8 @@ def verify_finalized(lines, integrity):
     if str(len(lines) - 1) != str(integrity["last_seq"]):
         raise TruncatedCapture("last seq differs from the checkpoint")
     literal = "".join(lines).encode("utf-8")
+    if len(literal) != int(integrity["events_bytes"]):
+        raise TruncatedCapture("sealed byte count differs from the checkpoint")
     if hashlib.sha256(literal).hexdigest() != integrity["events_sha256"]:
         raise TruncatedCapture("event bytes differ from the checkpoint")
     return True
@@ -169,6 +171,21 @@ def check_ordinals(events):
     return len(events)
 
 
+# ASCII whitespace for the shared blank definition:
+# space, tab, line feed, carriage return, vertical tab,
+# form feed. Mirrors the comparison contract so both sides
+# always agree on what counts as a blank clock domain.
+ASCII_WHITESPACE = " \t\n\r\x0b\x0c"
+
+
+def is_blank(value):
+    """A clock domain counts as blank when it is empty or every
+    character is ASCII whitespace. Mirrors the comparison
+    contract: a whitespace-only domain names no clock."""
+    return isinstance(value, str) and (
+        value == "" or all(char in ASCII_WHITESPACE for char in value))
+
+
 def clocks_compatible(left, right):
     """Independently decide whether two compare windows may compare.
 
@@ -185,7 +202,7 @@ def clocks_compatible(left, right):
             return False, "window-not-canonical"
         if int(end) < int(start):
             return False, "window-reversed"
-        if not isinstance(domain, str) or not domain:
+        if not isinstance(domain, str) or is_blank(domain):
             return False, "clock-blank"
     if left["window"]["clock_domain"] != right["window"]["clock_domain"]:
         return False, "clock-mismatch"
@@ -207,7 +224,12 @@ def check_denied_partial(case):
 
 
 def fixture_tree_files():
-    """List every consumed fixture file (read-only walk)."""
+    """List every consumed fixture file plus the frozen catalog.
+
+    The platform checks read the catalog, so the snapshot must
+    cover it: a post-snapshot catalog change is a hidden rebuild.
+    Read-only walk; nothing here is ever written.
+    """
     roots = [CASES, COMPARE, CONTRACTS,
              os.path.join(HERE, "fixtures", "policy")]
     found = []
@@ -216,6 +238,7 @@ def fixture_tree_files():
             path = os.path.join(root, name)
             if os.path.isfile(path):
                 found.append(path)
+    found.append(CATALOG)
     return found
 
 
@@ -363,6 +386,10 @@ def test_kill_recovery_checkpoint():
         moved["last_seq"] = "9"
         with pytest.raises(TruncatedCapture):
             verify_finalized(snapshot["event_lines"], moved)
+        resized = copy.deepcopy(integrity)
+        resized["events_bytes"] = "1"
+        with pytest.raises(TruncatedCapture):
+            verify_finalized(snapshot["event_lines"], resized)
 
     bounds.run_bounded("kill-recovery", body)
 
@@ -403,8 +430,17 @@ def test_lost_final_events():
     def body():
         case = oracle.load_case(
             os.path.join(CASES, "exposure-loss-and-bounds.json"))
-        expected = oracle.derive_events(case)
-        actual = proof_input("lost-final", list(expected), mutate)
+        actual = proof_input("lost-final", oracle.derive_events(case), mutate)
+        # The expectation is rebuilt straight from the control
+        # flow, never copied from the derived-event helper under
+        # test: a helper that drops the final event on every read
+        # must fail here instead of matching its own output.
+        expected = [{"ordinal": step["ordinal"],
+                     "operation_token": step["operation"],
+                     "object_token": step["object"],
+                     "pages": step["pages"],
+                     "native_result": step["native_result"]}
+                    for step in case["control_flow"]]
         assert oracle.compare_entries(expected, actual, "control") \
             == len(expected)
         with pytest.raises(oracle.LedgerMismatch):
@@ -425,6 +461,16 @@ def test_map_edge_exhaustion():
         for bad in ("257", "0", "0256", "1e2", ""):
             with pytest.raises(oracle.FixtureError):
                 oracle.check_pages(bad, "exhausted")
+        # The affected fixture state is evaluated too: the
+        # loss-and-bounds case records its exhausted bound as a
+        # failed final step, so success there must fail here.
+        case = oracle.load_case(
+            os.path.join(CASES, "exposure-loss-and-bounds.json"))
+        exhausted = [step for step in case["control_flow"]
+                     if step["action"] == "record-exhausted-bound"]
+        assert len(exhausted) == 1, "exhausted-bound step missing"
+        assert exhausted[0]["native_result"] == -12, \
+            "exhausted bound reported success"
 
     bounds.run_bounded("map-exhaustion", body)
 
@@ -441,6 +487,20 @@ def test_generation_wrap():
         assert int(generation) == 2 ** 64 - 1
         assert oracle.is_canonical_u64("18446744073709551616") is False
         assert oracle.is_canonical_u64("18446744073709551616x") is False
+        # The affected fixture state is evaluated too: the
+        # channel-lifetimes case reoffers its recycled token under
+        # a new generation, so reusing the prior generation must
+        # fail here.
+        case = oracle.load_case(
+            os.path.join(CASES, "exposure-channel-lifetimes.json"))
+        before = {entry["object_token"]: entry
+                  for entry in case["before_ledger"]}
+        after = {entry["object_token"]: entry
+                 for entry in case["after_ledger"]}
+        assert "obj-chl-peer-1" in case["expectation"]["transitioned"]
+        assert (before["obj-chl-peer-1"]["generation"],
+                after["obj-chl-peer-1"]["generation"]) == ("1", "2"), \
+            "recycled token reused the prior generation"
 
     bounds.run_bounded("generation-wrap", body)
 
@@ -467,6 +527,10 @@ def test_clocks():
         blank["window"]["clock_domain"] = ""
         assert clocks_compatible(fixture["left"], blank) == \
             (False, "clock-blank")
+        whitespace = copy.deepcopy(fixture["right"])
+        whitespace["window"]["clock_domain"] = " \t"
+        assert clocks_compatible(fixture["left"], whitespace) == \
+            (False, "clock-blank")
         skewed = copy.deepcopy(fixture["right"])
         skewed["window"]["start"], skewed["window"]["end"] = "2000", "1000"
         assert clocks_compatible(fixture["left"], skewed) == \
@@ -484,6 +548,13 @@ def test_concurrent_activity():
             os.path.join(CASES, "exposure-channel-lifetimes.json"))
         other = oracle.load_case(
             os.path.join(CASES, "exposure-loss-and-bounds.json"))
+        # The unanimous worker result must also equal the summary
+        # counted straight from the case: unanimous wrong summaries
+        # (for example zero events from every worker) must fail.
+        expected = {"scenario": main["scenario"],
+                    "events": len(main["control_flow"]),
+                    "before": len(main["before_ledger"]),
+                    "after": len(main["after_ledger"])}
         summaries, lock = [], threading.Lock()
 
         def worker():
@@ -504,6 +575,8 @@ def test_concurrent_activity():
             summaries[0] = dict(summaries[0], scenario="mutated-scenario")
         assert all(summary == summaries[0] for summary in summaries), \
             "concurrent evaluations diverged"
+        assert summaries[0] == expected, \
+            "concurrent evaluations agree on the wrong summary"
         merged = oracle.derive_events(oracle.load_case(
             os.path.join(CASES, "exposure-channel-lifetimes.json")))
         merged = merged + oracle.derive_events(other)
@@ -522,14 +595,18 @@ def test_denied_sources():
 
     def body():
         path = os.path.join(CASES, "exposure-loss-and-bounds.json")
-        raw = load_json(path)
-        assert {event["native_result"] for event in oracle.derive_events(
-            oracle.load_case(path))} >= {-13, -19}
-        case = proof_input("denied-sources", raw, mutate)
+        assert oracle.load_case(path)["scenario"] == "loss-and-bounds"
+        case = proof_input("denied-sources", load_json(path), mutate)
+        # The denial codes are asserted on the same evaluated
+        # input, never on a separate fixture read: erasing the
+        # denial from the evaluated input must fail here.
+        assert {event["native_result"] for event in
+                oracle.derive_events(case)} >= {-13, -19}, \
+            "denial codes missing from the evaluated input"
         assert check_denied_partial(case) is True
         assert case["after_ledger"][0]["status"] == "unknown"
         with pytest.raises(DeniedComplete):
-            check_denied_partial(mutate(copy.deepcopy(raw)))
+            check_denied_partial(mutate(copy.deepcopy(load_json(path))))
 
     bounds.run_bounded("denied-sources", body)
 
