@@ -22,6 +22,10 @@
 //!   never matched.
 //! * A reused address yields a NEW generation; the older
 //!   generation keeps its own terminal state.
+//! * A row joins only lines from its own source and
+//!   object class. A refused allocation keeps the token
+//!   ambiguous: later joins stay unlinked, since an
+//!   untracked generation may exist.
 //! * Alias mappings resolve to one canonical identity, so
 //!   observations through an alias never double-count.
 //! * Rows that share an `atom` marker commit only as a
@@ -230,11 +234,15 @@ struct State {
 }
 
 /// Refusal events survive group rollback: a refused row
-/// stays refused even when its group rolls back.
+/// stays refused even when its group rolls back, and a
+/// refused allocation keeps later joins to its token
+/// ambiguous, since an untracked generation may exist
+/// beside any tracked line.
 #[derive(Debug, Clone, Default)]
 struct Refusals {
     overflow: usize,
     bound: usize,
+    refused_alloc: BTreeSet<String>,
 }
 
 fn is_open(status: &str) -> bool {
@@ -304,41 +312,146 @@ fn failed(row: &LedgerRow, note: String) -> Applied {
     }
 }
 
-/// Shared lookup for state-changing observations: exactly
-/// one joinable line must exist. A line sealed by a loss
-/// gap keeps its last state but accepts no new joins, so a
-/// fresh post-loss allocation stays unambiguous.
-fn join_open(
+/// A row joins only lines from the same origin: token
+/// equality alone never crosses sources or object
+/// classes.
+fn same_origin(obj: &ObjState, row: &LedgerRow) -> bool {
+    obj.source_id == row.source_id && obj.object_class == row.object_class
+}
+
+/// Generations one lookup may join: open lines, plus
+/// restoration-uncertain lines when the caller allows
+/// them, restricted to the row's own origin and
+/// excluding loss-sealed lines. Oldest first.
+fn joinable(
     state: &State,
     row: &LedgerRow,
     token: &str,
+    unknown_ok: bool,
+) -> Vec<u64> {
+    let mut gens: Vec<u64> = state
+        .linked
+        .iter()
+        .filter(|((name, generation), obj)| {
+            name == token
+                && (is_open(obj.status.as_str()) || (unknown_ok && obj.status == "unknown"))
+                && !state.sealed.contains(&(token.to_string(), *generation))
+                && same_origin(obj, row)
+        })
+        .map(|((_, generation), _)| *generation)
+        .collect();
+    gens.sort();
+    gens.dedup();
+    gens
+}
+
+/// Shared lookup for state-changing rows and alias binds:
+/// exactly one joinable line must exist. A line sealed by
+/// a loss gap keeps its last state but accepts no new
+/// joins, so a fresh post-loss allocation stays
+/// unambiguous; a refused allocation keeps the token
+/// ambiguous, since an untracked generation may exist
+/// beside any tracked line.
+fn join(
+    state: &State,
+    refusals: &Refusals,
+    row: &LedgerRow,
+    token: &str,
+    pinned: Option<u64>,
+    unknown_ok: bool,
 ) -> Result<u64, String> {
     if !state.latest.contains_key(token) {
         return Err(format!("no allocated identity for '{token}'"));
     }
-    let candidates: Vec<u64> = open_generations(state, token)
-        .into_iter()
-        .filter(|generation| !state.sealed.contains(&(token.to_string(), *generation)))
-        .collect();
+    if let Some(generation) = pinned {
+        return join_pinned(state, row, token, generation, unknown_ok);
+    }
+    let candidates = joinable(state, row, token, unknown_ok);
     if candidates.len() > 1 {
         return Err(format!(
-            "ambiguous join: {} open generations for '{token}'",
+            "ambiguous join: {} joinable generations for '{token}'",
             candidates.len()
         ));
     }
     if let Some(generation) = candidates.into_iter().next() {
+        if refusals.refused_alloc.contains(token) {
+            return Err(format!(
+                "ambiguous join for '{token}': a refused allocation may hide \
+                 another generation beside open generation {generation}"
+            ));
+        }
         return Ok(generation);
     }
-    let sealed_open = open_generations(state, token)
-        .iter()
-        .any(|generation| state.sealed.contains(&(token.to_string(), *generation)));
+    let sealed_open = open_generations(state, token).iter().any(|generation| {
+        let key = (token.to_string(), *generation);
+        state.sealed.contains(&key)
+            && state
+                .linked
+                .get(&key)
+                .map(|obj| same_origin(obj, row))
+                .unwrap_or(false)
+    });
     if sealed_open {
         return Err(format!(
             "event-loss gap precedes row '{}'; observation stays a separate sample",
             row.row_id
         ));
     }
+    let foreign_open = open_generations(state, token).iter().any(|generation| {
+        state
+            .linked
+            .get(&(token.to_string(), *generation))
+            .map(|obj| !same_origin(obj, row))
+            .unwrap_or(false)
+    });
+    if foreign_open {
+        return Err(format!(
+            "no open generation for '{token}' from source '{}' class '{}'",
+            row.source_id, row.object_class
+        ));
+    }
     Err(format!("no open generation for '{token}'"))
+}
+
+/// A lookup through an alias binding: the binding pins one
+/// exact generation, so only that line may join. A binding
+/// left behind by release, reuse, or a loss gap stays
+/// unlinked until the alias is explicitly rebound.
+fn join_pinned(
+    state: &State,
+    row: &LedgerRow,
+    token: &str,
+    generation: u64,
+    unknown_ok: bool,
+) -> Result<u64, String> {
+    let key = (token.to_string(), generation);
+    let obj = match state.linked.get(&key) {
+        Some(obj) => obj,
+        None => {
+            return Err(format!(
+                "alias binding to '{token}' generation {generation} names no tracked line"
+            ));
+        }
+    };
+    if state.sealed.contains(&key) {
+        return Err(format!(
+            "event-loss gap precedes row '{}'; observation stays a separate sample",
+            row.row_id
+        ));
+    }
+    if !is_open(obj.status.as_str()) && !(unknown_ok && obj.status == "unknown") {
+        return Err(format!(
+            "alias binding to '{token}' generation {generation} is no longer open; \
+             rebind the alias before joining"
+        ));
+    }
+    if !same_origin(obj, row) {
+        return Err(format!(
+            "no open generation for '{token}' from source '{}' class '{}'",
+            row.source_id, row.object_class
+        ));
+    }
+    Ok(generation)
 }
 
 /// Identity shown by informational rows: the open line when
@@ -397,7 +510,7 @@ fn apply_row(
     match row.event.as_str() {
         "allocated" => apply_allocated(state, config, refusals, row, &canonical),
         "observed" => {
-            let generation = match join_open(state, row, &canonical) {
+            let generation = match join(state, refusals, row, &canonical, None, false) {
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
@@ -426,7 +539,7 @@ fn apply_row(
             }
         }
         "released" | "quarantined" | "revert_ok" => {
-            let generation = match join_open(state, row, &canonical) {
+            let generation = match join(state, refusals, row, &canonical, None, false) {
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
@@ -472,7 +585,7 @@ fn apply_row(
             }
         }
         "revert_failed" => {
-            let generation = match join_open(state, row, &canonical) {
+            let generation = match join(state, refusals, row, &canonical, None, false) {
                 Ok(generation) => generation,
                 Err(note) => return failed(row, note),
             };
@@ -563,6 +676,7 @@ fn apply_allocated(
         Some(generation) => generation,
         None => {
             refusals.overflow += 1;
+            refusals.refused_alloc.insert(canonical.to_string());
             return failed(
                 row,
                 format!("generation overflow at '{canonical}'; reuse refused"),
@@ -571,6 +685,7 @@ fn apply_allocated(
     };
     if generation > config.max_generation {
         refusals.overflow += 1;
+        refusals.refused_alloc.insert(canonical.to_string());
         return failed(
             row,
             format!("generation overflow at '{canonical}'; reuse refused"),
@@ -583,6 +698,7 @@ fn apply_allocated(
         .count();
     if open_here >= config.max_open_per_source {
         refusals.bound += 1;
+        refusals.refused_alloc.insert(canonical.to_string());
         return failed(
             row,
             format!(
