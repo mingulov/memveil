@@ -7,6 +7,7 @@
 //! escaping, and refusal lines.
 
 pub mod bind;
+pub mod compare;
 pub mod doctor;
 pub mod durations;
 pub mod qualify;

@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Egress-context reader checks over hand-written fixtures.
 //!
-//! The module compiles here through an explicit path include;
-//! the crate root wires it as `analysis::exposure_context`
-//! with no edits to the module file itself. Every expectation
+//! The module resolves through the wired library as
+//! `analysis::exposure_context`. Every expectation
 //! below is hand-written from the fixture inputs, never copied
 //! from reader output.
 
-#[path = "../src/analysis/exposure_context.rs"]
-mod exposure_context;
-
-use exposure_context::{ContextFact, Gap, read_context};
+use memveil::analysis::exposure_context::{ContextFact, Gap, read_context};
 
 const ENCRYPTED: &str = include_str!("exposure/fixtures/context/swap-encrypted.json");
 const MIXED: &str = include_str!("exposure/fixtures/context/swap-mixed-unresolved.json");

@@ -423,11 +423,7 @@ fn same_origin(obj: &ObjState, row: &LedgerRow) -> bool {
 /// Per-generation, per-origin key for gap state: the
 /// canonical token and generation plus the row's own
 /// source and object class.
-fn bound_key(
-    canonical: &str,
-    generation: u64,
-    row: &LedgerRow,
-) -> (String, u64, String, String) {
+fn bound_key(canonical: &str, generation: u64, row: &LedgerRow) -> (String, u64, String, String) {
     (
         canonical.to_string(),
         generation,
@@ -445,12 +441,7 @@ fn bound_key(
 /// generations recorded through the handle under another
 /// token and the generation an invalidated pin last
 /// bound. Other origins' lines stay unaffected either way.
-fn bound_token_lines(
-    state: &mut State,
-    row: &LedgerRow,
-    canonical: &str,
-    pinned: Option<u64>,
-) {
+fn bound_token_lines(state: &mut State, row: &LedgerRow, canonical: &str, pinned: Option<u64>) {
     let bound: Vec<(String, u64)> = match pinned {
         Some(generation) => state
             .linked
@@ -504,11 +495,7 @@ fn alias_key(handle: &str, row: &LedgerRow) -> (String, String, String) {
 /// pin last bound. Only lines still tracked in the row's
 /// own origin count; callers apply their own status and
 /// seal filters. Sorted and deduplicated.
-fn denoted_extras(
-    state: &State,
-    row: &LedgerRow,
-    handle: &str,
-) -> Vec<(String, u64)> {
+fn denoted_extras(state: &State, row: &LedgerRow, handle: &str) -> Vec<(String, u64)> {
     let mut lines: Vec<(String, u64)> = Vec::new();
     if let Some(recorded) = state.handle_alloc.get(&alias_key(handle, row)) {
         for (token, generation) in recorded {
@@ -522,8 +509,8 @@ fn denoted_extras(
             }
         }
     }
-    if let Some((token, generation)) = state.dropped_pin.get(&alias_key(handle, row)) {
-        if state
+    if let Some((token, generation)) = state.dropped_pin.get(&alias_key(handle, row))
+        && state
             .linked
             .get(&(token.clone(), *generation))
             .map(|obj| same_origin(obj, row))
@@ -531,7 +518,6 @@ fn denoted_extras(
         {
             lines.push((token.clone(), *generation));
         }
-    }
     lines.sort();
     lines.dedup();
     lines
@@ -571,10 +557,7 @@ fn refused_on_path(
 ) -> bool {
     let mut probe = start.to_string();
     for _ in 0..=MAX_ALIAS_HOPS {
-        if refusals
-            .refused_alloc
-            .contains(&refusal_key(&probe, row))
-        {
+        if refusals.refused_alloc.contains(&refusal_key(&probe, row)) {
             return true;
         }
         if probe == terminal {
@@ -589,21 +572,14 @@ fn refused_on_path(
             None => break,
         }
     }
-    refusals
-        .refused_alloc
-        .contains(&refusal_key(terminal, row))
+    refusals.refused_alloc.contains(&refusal_key(terminal, row))
 }
 
 /// Generations one lookup may join: open lines, plus
 /// restoration-uncertain lines when the caller allows
 /// them, restricted to the row's own origin and
 /// excluding loss-sealed lines. Oldest first.
-fn joinable(
-    state: &State,
-    row: &LedgerRow,
-    token: &str,
-    unknown_ok: bool,
-) -> Vec<u64> {
+fn joinable(state: &State, row: &LedgerRow, token: &str, unknown_ok: bool) -> Vec<u64> {
     let mut gens: Vec<u64> = state
         .linked
         .iter()
@@ -643,15 +619,17 @@ fn has_unsealed_unknown(state: &State, row: &LedgerRow, token: &str) -> bool {
 /// the row beside any open line, exactly like an
 /// uncertain line of the requested token.
 fn has_denoted_uncertain_extra(state: &State, row: &LedgerRow, handle: &str) -> bool {
-    denoted_extras(state, row, handle).iter().any(|(token, generation)| {
-        let key = (token.clone(), *generation);
-        !state.sealed.contains(&key)
-            && state
-                .linked
-                .get(&key)
-                .map(|obj| obj.status == "unknown")
-                .unwrap_or(false)
-    })
+    denoted_extras(state, row, handle)
+        .iter()
+        .any(|(token, generation)| {
+            let key = (token.clone(), *generation);
+            !state.sealed.contains(&key)
+                && state
+                    .linked
+                    .get(&key)
+                    .map(|obj| obj.status == "unknown")
+                    .unwrap_or(false)
+        })
 }
 
 /// Shared lookup for state-changing rows and alias binds:
@@ -714,9 +692,7 @@ fn join(
         ));
     }
     if let Some((joined_token, generation)) = candidates.into_iter().next() {
-        let refused = refusals
-            .refused_alloc
-            .contains(&refusal_key(token, row))
+        let refused = refusals.refused_alloc.contains(&refusal_key(token, row))
             || (joined_token != token
                 && refusals
                     .refused_alloc
@@ -870,28 +846,22 @@ fn shown_identity(
     if !state.latest.contains_key(token) && denoted_extras(state, row, token).is_empty() {
         return None;
     }
-    if refusals
-        .refused_alloc
-        .contains(&refusal_key(token, row))
-    {
+    if refusals.refused_alloc.contains(&refusal_key(token, row)) {
         return None;
     }
     if let Some(generation) = pinned {
         if refused_on_path(state, refusals, row, &row.virtual_id, token) {
             return None;
         }
-        let (status, line_certainty) =
-            match state.linked.get(&(token.to_string(), generation)) {
-                Some(obj) if same_origin(obj, row) => {
-                    (obj.status.clone(), obj.certainty.clone())
-                }
-                _ => return None,
-            };
+        let (status, line_certainty) = match state.linked.get(&(token.to_string(), generation)) {
+            Some(obj) if same_origin(obj, row) => (obj.status.clone(), obj.certainty.clone()),
+            _ => return None,
+        };
         note_domain(state, row, token, generation);
         return Some((
             QualifiedIdentity {
                 token: token.to_string(),
-                generation: generation,
+                generation,
             },
             status,
             shown_certainty(state, row, token, generation, &line_certainty),
@@ -945,16 +915,15 @@ fn shown_identity(
         {
             return None;
         }
-        let (status, line_certainty) =
-            match state.linked.get(&(shown_token.clone(), generation)) {
-                Some(obj) => (obj.status.clone(), obj.certainty.clone()),
-                None => return None,
-            };
+        let (status, line_certainty) = {
+            let obj = state.linked.get(&(shown_token.clone(), generation))?;
+            (obj.status.clone(), obj.certainty.clone())
+        };
         note_domain(state, row, &shown_token, generation);
         return Some((
             QualifiedIdentity {
                 token: shown_token.clone(),
-                generation: generation,
+                generation,
             },
             status,
             shown_certainty(state, row, &shown_token, generation, &line_certainty),
@@ -1020,15 +989,15 @@ fn shown_identity(
         {
             return None;
         }
-        let status = match state.linked.get(&(shown_token.clone(), generation)) {
-            Some(obj) => obj.status.clone(),
-            None => return None,
+        let status = {
+            let obj = state.linked.get(&(shown_token.clone(), generation))?;
+            obj.status.clone()
         };
         note_domain(state, row, &shown_token, generation);
         return Some((
             QualifiedIdentity {
                 token: shown_token.clone(),
-                generation: generation,
+                generation,
             },
             status,
             "unknown".to_string(),
@@ -1069,15 +1038,15 @@ fn shown_identity(
     {
         return None;
     }
-    let (status, line_certainty) = match state.linked.get(&(shown_token.clone(), generation)) {
-        Some(obj) => (obj.status.clone(), obj.certainty.clone()),
-        None => return None,
+    let (status, line_certainty) = {
+        let obj = state.linked.get(&(shown_token.clone(), generation))?;
+        (obj.status.clone(), obj.certainty.clone())
     };
     note_domain(state, row, &shown_token, generation);
     Some((
         QualifiedIdentity {
             token: shown_token.clone(),
-            generation: generation,
+            generation,
         },
         status,
         shown_certainty(state, row, &shown_token, generation, &line_certainty),
@@ -1187,8 +1156,7 @@ fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &Ledger
     // as a replayed quarantine row would; every other leg
     // joins open lines only.
     let unknown_ok = row.event == "quarantined";
-    let (joined, generation) = match join(state, refusals, row, &canonical, pinned, unknown_ok)
-    {
+    let (joined, generation) = match join(state, refusals, row, &canonical, pinned, unknown_ok) {
         Ok(joined) => joined,
         Err(_) => return,
     };
@@ -1229,18 +1197,17 @@ fn record_alias_evidence(state: &mut State, refusals: &Refusals, row: &LedgerRow
         Some(token) => token,
         None => return,
     };
-    let allocated_here = state.linked.iter().any(|((name, _), obj)| {
-        name == &row.virtual_id && same_origin(obj, row)
-    });
+    let allocated_here = state
+        .linked
+        .iter()
+        .any(|((name, _), obj)| name == &row.virtual_id && same_origin(obj, row));
     let recorded_here = state
         .handle_alloc
         .get(&alias_key(row.virtual_id.as_str(), row))
         .map(|lines| {
-            lines.iter().any(|(token, generation)| {
-                state
-                    .linked
-                    .contains_key(&(token.clone(), *generation))
-            })
+            lines
+                .iter()
+                .any(|(token, generation)| state.linked.contains_key(&(token.clone(), *generation)))
         })
         .unwrap_or(false);
     if allocated_here || recorded_here {
@@ -1308,12 +1275,7 @@ fn record_alias_evidence(state: &mut State, refusals: &Refusals, row: &LedgerRow
 /// including generations recorded through the handle
 /// under another token and the generation an invalidated
 /// pin last bound.
-fn record_gap_lines(
-    state: &mut State,
-    row: &LedgerRow,
-    canonical: &str,
-    pinned: Option<u64>,
-) {
+fn record_gap_lines(state: &mut State, row: &LedgerRow, canonical: &str, pinned: Option<u64>) {
     match row.event.as_str() {
         "loss_gap" => {
             let seal: Vec<(String, u64)> = match pinned {
@@ -1343,9 +1305,7 @@ fn record_gap_lines(
                         let usable = state
                             .linked
                             .get(&key)
-                            .map(|obj| {
-                                is_open(obj.status.as_str()) || obj.status == "unknown"
-                            })
+                            .map(|obj| is_open(obj.status.as_str()) || obj.status == "unknown")
                             .unwrap_or(false);
                         if usable {
                             seal.push((extra_token, extra_generation));
@@ -1415,22 +1375,20 @@ fn apply_row(
             // not answer later rows alone yet still keeps
             // them ambiguous while its line stays open. A
             // refusal changes nothing.
-            if !applied.failed {
-                if let Some(prior) = state.alias.remove(&alias_key(row.virtual_id.as_str(), row))
-                {
+            if !applied.failed
+                && let Some(prior) = state.alias.remove(&alias_key(row.virtual_id.as_str(), row)) {
                     state
                         .dropped_pin
                         .insert(alias_key(row.virtual_id.as_str(), row), prior);
                 }
-            }
             applied
         }
         "observed" => {
-            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
-            {
-                Ok(joined) => joined,
-                Err(note) => return failed(row, note),
-            };
+            let (canonical, generation) =
+                match join(state, refusals, row, &canonical, pinned, false) {
+                    Ok(joined) => joined,
+                    Err(note) => return failed(row, note),
+                };
             note_domain(state, row, &canonical, generation);
             let line_certainty = state
                 .linked
@@ -1453,7 +1411,7 @@ fn apply_row(
                     seq: row.seq,
                     identity: Some(QualifiedIdentity {
                         token: canonical.clone(),
-                        generation: generation,
+                        generation,
                     }),
                     status: "live".to_string(),
                     certainty,
@@ -1463,11 +1421,11 @@ fn apply_row(
             }
         }
         "released" => {
-            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
-            {
-                Ok(joined) => joined,
-                Err(note) => return failed(row, note),
-            };
+            let (canonical, generation) =
+                match join(state, refusals, row, &canonical, pinned, false) {
+                    Ok(joined) => joined,
+                    Err(note) => return failed(row, note),
+                };
             note_domain(state, row, &canonical, generation);
             let line_certainty = state
                 .linked
@@ -1490,7 +1448,7 @@ fn apply_row(
                     seq: row.seq,
                     identity: Some(QualifiedIdentity {
                         token: canonical.clone(),
-                        generation: generation,
+                        generation,
                     }),
                     status: "released".to_string(),
                     certainty,
@@ -1531,7 +1489,7 @@ fn apply_row(
                     seq: row.seq,
                     identity: Some(QualifiedIdentity {
                         token: canonical.clone(),
-                        generation: generation,
+                        generation,
                     }),
                     status: "quarantined".to_string(),
                     certainty,
@@ -1547,11 +1505,11 @@ fn apply_row(
             // A successful revert records the conversion
             // without ending the live allocation: the
             // lifecycle status is unchanged.
-            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
-            {
-                Ok(joined) => joined,
-                Err(note) => return failed(row, note),
-            };
+            let (canonical, generation) =
+                match join(state, refusals, row, &canonical, pinned, false) {
+                    Ok(joined) => joined,
+                    Err(note) => return failed(row, note),
+                };
             note_domain(state, row, &canonical, generation);
             let line_certainty = state
                 .linked
@@ -1574,7 +1532,7 @@ fn apply_row(
                     seq: row.seq,
                     identity: Some(QualifiedIdentity {
                         token: canonical.clone(),
-                        generation: generation,
+                        generation,
                     }),
                     status: status.clone(),
                     certainty,
@@ -1587,11 +1545,11 @@ fn apply_row(
             }
         }
         "revert_failed" => {
-            let (canonical, generation) = match join(state, refusals, row, &canonical, pinned, false)
-            {
-                Ok(joined) => joined,
-                Err(note) => return failed(row, note),
-            };
+            let (canonical, generation) =
+                match join(state, refusals, row, &canonical, pinned, false) {
+                    Ok(joined) => joined,
+                    Err(note) => return failed(row, note),
+                };
             note_domain(state, row, &canonical, generation);
             let obj = state
                 .linked
@@ -1607,7 +1565,7 @@ fn apply_row(
                     seq: row.seq,
                     identity: Some(QualifiedIdentity {
                         token: canonical.clone(),
-                        generation: generation,
+                        generation,
                     }),
                     status: "unknown".to_string(),
                     certainty: "unknown".to_string(),
@@ -1669,7 +1627,10 @@ fn apply_row(
                 "clock domain change; temporal claims bounded".to_string(),
             )
         }
-        other => failed(row, format!("unknown event '{other}' in row '{}'", row.row_id)),
+        other => failed(
+            row,
+            format!("unknown event '{other}' in row '{}'", row.row_id),
+        ),
     }
 }
 
@@ -1680,13 +1641,17 @@ fn apply_allocated(
     row: &LedgerRow,
     canonical: &str,
 ) -> Applied {
-    let generation = match state.latest.get(canonical).copied().unwrap_or(0).checked_add(1) {
+    let generation = match state
+        .latest
+        .get(canonical)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+    {
         Some(generation) => generation,
         None => {
             refusals.overflow += 1;
-            refusals
-                .refused_alloc
-                .insert(refusal_key(canonical, row));
+            refusals.refused_alloc.insert(refusal_key(canonical, row));
             return failed(
                 row,
                 format!("generation overflow at '{canonical}'; reuse refused"),
@@ -1695,9 +1660,7 @@ fn apply_allocated(
     };
     if generation > config.max_generation {
         refusals.overflow += 1;
-        refusals
-            .refused_alloc
-            .insert(refusal_key(canonical, row));
+        refusals.refused_alloc.insert(refusal_key(canonical, row));
         return failed(
             row,
             format!("generation overflow at '{canonical}'; reuse refused"),
@@ -1717,9 +1680,7 @@ fn apply_allocated(
         .count();
     if open_here >= config.max_open_per_source {
         refusals.bound += 1;
-        refusals
-            .refused_alloc
-            .insert(refusal_key(canonical, row));
+        refusals.refused_alloc.insert(refusal_key(canonical, row));
         return failed(
             row,
             format!(
@@ -1765,7 +1726,7 @@ fn apply_allocated(
             seq: row.seq,
             identity: Some(QualifiedIdentity {
                 token: canonical.to_string(),
-                generation: generation,
+                generation,
             }),
             status: "created".to_string(),
             certainty: "known".to_string(),
@@ -1813,24 +1774,26 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     // token counts as allocated too: the still-tracked
     // line was made at this handle, so rebinding would
     // hide it.
-    let allocated_here = state.linked.iter().any(|((name, _), obj)| {
-        name == &row.virtual_id && same_origin(obj, row)
-    });
+    let allocated_here = state
+        .linked
+        .iter()
+        .any(|((name, _), obj)| name == &row.virtual_id && same_origin(obj, row));
     let recorded_here = state
         .handle_alloc
         .get(&alias_key(row.virtual_id.as_str(), row))
         .map(|lines| {
-            lines.iter().any(|(token, generation)| {
-                state
-                    .linked
-                    .contains_key(&(token.clone(), *generation))
-            })
+            lines
+                .iter()
+                .any(|(token, generation)| state.linked.contains_key(&(token.clone(), *generation)))
         })
         .unwrap_or(false);
     if allocated_here || recorded_here {
         return failed(
             row,
-            format!("token '{}' already allocated; alias refused", row.virtual_id),
+            format!(
+                "token '{}' already allocated; alias refused",
+                row.virtual_id
+            ),
         );
     }
     if row.virtual_id == target_canonical {
@@ -1880,9 +1843,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
                 None => {
                     return failed(
                         row,
-                        format!(
-                            "alias target '{target}' names no tracked line; alias refused"
-                        ),
+                        format!("alias target '{target}' names no tracked line; alias refused"),
                     );
                 }
             };
@@ -1957,7 +1918,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
             seq: row.seq,
             identity: Some(QualifiedIdentity {
                 token: bound_token.clone(),
-                generation: generation,
+                generation,
             }),
             status: line_status,
             certainty,
@@ -2007,8 +1968,8 @@ fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
     if row.event != "observed" {
         return;
     }
-    let token = resolve(state, row, row.virtual_id.as_str())
-        .unwrap_or_else(|| row.virtual_id.clone());
+    let token =
+        resolve(state, row, row.virtual_id.as_str()).unwrap_or_else(|| row.virtual_id.clone());
     state.samples.push((
         token,
         ObjState {
@@ -2037,11 +1998,7 @@ fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
 /// its discontinuity legs recorded once replay passes
 /// their ledger positions, and output always follows
 /// ledger order.
-pub fn replay(
-    rows: &[LedgerRow],
-    capture_id: &str,
-    config: &ReplayConfig,
-) -> ReplayOutcome {
+pub fn replay(rows: &[LedgerRow], capture_id: &str, config: &ReplayConfig) -> ReplayOutcome {
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&left, &right| {
         (rows[left].seq, &rows[left].row_id).cmp(&(rows[right].seq, &rows[right].row_id))
@@ -2105,8 +2062,7 @@ pub fn replay(
         // other rows cannot commit as a unit: refuse every
         // leg without applying any, so replay never pulls
         // a later leg ahead of intervening evidence.
-        let contiguous =
-            group.len() < 2 || group[group.len() - 1] - group[0] + 1 == group.len();
+        let contiguous = group.len() < 2 || group[group.len() - 1] - group[0] + 1 == group.len();
         if !contiguous {
             for row in &legs {
                 resolved.push(unknown_row(
@@ -2267,9 +2223,8 @@ pub fn replay(
                 .iter()
                 .find(|applied| applied.resolved.row_id == row.row_id && applied.failed)
                 .map(|applied| applied.resolved.note.clone());
-            let note = specific.unwrap_or_else(|| {
-                "atomic group not proved; legs stay separate".to_string()
-            });
+            let note = specific
+                .unwrap_or_else(|| "atomic group not proved; legs stay separate".to_string());
             resolved.push(unknown_row(row, note));
             failed_joins.push(row.row_id.clone());
             push_unlinked_sample(&mut state, row);
@@ -2345,10 +2300,7 @@ pub fn replay(
 /// replay lines. The comparison is exact and read-only:
 /// it never repairs the replay, and unlinked samples stay
 /// outside it.
-pub fn reconcile(
-    baseline: &[BaselineEntry],
-    outcome: &ReplayOutcome,
-) -> Reconciliation {
+pub fn reconcile(baseline: &[BaselineEntry], outcome: &ReplayOutcome) -> Reconciliation {
     let mut confirmed = Vec::new();
     let mut status_mismatch = Vec::new();
     let mut missing_observation = Vec::new();

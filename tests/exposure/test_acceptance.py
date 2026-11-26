@@ -16,10 +16,11 @@ observable difference.
 Non-vacuity proof: setting ``EXPOSURE_OFFLINE_PROOF`` to a
 scenario id (``spec-01`` .. ``spec-10``) feeds that leg's
 stated mutation into its passing assertions, so the leg
-must FAIL. Live collection, live measurement, suite
-registration and real-guest legs are controller-owned and
-recorded here as explicit skips: BLOCKED-not-attempted in
-the offline slice, never PASS.
+must FAIL. Live collection, live measurement and real-guest
+legs are controller-owned and recorded here as explicit skips:
+BLOCKED-not-attempted in the offline slice, never PASS. Suite
+registration was the fourth handoff; it is complete, so its leg
+asserts the dispatch instead of skipping.
 """
 
 import copy
@@ -461,8 +462,17 @@ def test_live_perf_measurement_leg():
 
 
 def test_suite_registration_leg():
-    pytest.skip("controller-owned suite registration handoff: "
-                "BLOCKED-not-attempted in the offline slice")
+    # Controller-completed handoff: the offline suites this lane
+    # specified must be dispatched by tools/test (function + dispatch
+    # entry each). Live legs below stay skipped, never passing.
+    with open(os.path.join(ROOT, "tools", "test"),
+              encoding="utf-8") as stream:
+        runner = stream.read()
+    for name in ("exposure-adversarial", "exposure-acceptance"):
+        func = "suite_" + name.replace("-", "_")
+        assert (func + "() {") in runner, name
+        assert ("    " + name + ")\n"
+                "        " + func) in runner, name
 
 
 def test_real_guest_leg():

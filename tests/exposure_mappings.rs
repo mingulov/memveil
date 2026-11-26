@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Mapping-inventory reader checks over hand-written fixtures.
 //!
-//! The module compiles here through an explicit path include;
-//! the crate root wires it as `analysis::exposure_mappings`
-//! with no edits to the module file itself. Every expectation
+//! The module resolves through the wired library as
+//! `analysis::exposure_mappings`. Every expectation
 //! below is hand-written from the fixture inputs, never copied
 //! from reader output.
 
-#[path = "../src/analysis/exposure_mappings.rs"]
-mod exposure_mappings;
-
-use exposure_mappings::{DaxStatus, MappingFact, read_inventory};
+use memveil::analysis::exposure_mappings::{DaxStatus, MappingFact, read_inventory};
 
 const MMIO: &str = include_str!("exposure/fixtures/mappings/mmio-supported.json");
 const DAX: &str = include_str!("exposure/fixtures/mappings/dax-absent-unsupported.json");

@@ -13,6 +13,21 @@
     },
     {
       "count": 1,
+      "id": "tests/exposure/test_acceptance.py",
+      "reason": "controller-owned live collection: BLOCKED-not-attempted in the offline slice"
+    },
+    {
+      "count": 1,
+      "id": "tests/exposure/test_acceptance.py",
+      "reason": "controller-owned live perf measurement: BLOCKED-not-attempted in the offline slice"
+    },
+    {
+      "count": 1,
+      "id": "tests/exposure/test_acceptance.py",
+      "reason": "controller-owned real-guest leg: BLOCKED-not-attempted in the offline slice"
+    },
+    {
+      "count": 1,
       "id": "tests/vm/test_battery.py",
       "reason": "battery armed run needs MEMVEIL_VM_BATTERY=1"
     },

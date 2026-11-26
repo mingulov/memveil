@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Guest-view census snapshots: snapshot-contract tests.
 //!
-//! The census module compiles here through an explicit path
-//! include; the crate root wires it as `capture::exposure_census`
-//! at integration with no edits to the module file itself.
-//! Each test mirrors one golden fixture under
+//! The census module resolves through the wired library as
+//! `capture::exposure_census`. Each test mirrors one golden fixture under
 //! tests/exposure/fixtures/census/ and names its case id;
 //! the Python golden suite checks that coupling so the two
 //! sides cannot drift apart.
 
-#[path = "../src/capture/exposure_census.rs"]
-mod exposure_census;
-
-use exposure_census::{
+use memveil::capture::exposure_census::{
     Atomicity, CensusCount, CensusDelta, CensusSnapshot, CollectionRequirements, JournalScope,
     Observation, Quality, Window, check_collection_readiness, compare_snapshots, observe_window,
 };

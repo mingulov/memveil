@@ -4,10 +4,9 @@
 //! Each test replays one synthetic ledger under
 //! `tests/exposure/fixtures/lineage/` through the replay
 //! module and compares the full outcome against the
-//! hand-computed golden beside it. The module compiles
-//! through a `#[path]` include until the integration lane
-//! wires it into the library; the JSON reader below is the
-//! crate's own dependency-free policy reader.
+//! hand-computed golden beside it. The module resolves through
+//! the wired library as `analysis::exposure_lineage`; the JSON
+//! reader below is the crate's own dependency-free policy reader.
 //!
 //! Behavior contract: a reused address yields a new
 //! generation; alias mappings share one identity and never
@@ -18,12 +17,9 @@
 //! lineage stays bounded per source and per generation;
 //! baseline reconciliation is explicit and read-only.
 
-#[path = "../src/analysis/exposure_lineage.rs"]
-mod exposure_lineage;
-
-use exposure_lineage::{
-    BaselineEntry, LedgerRow, ReplayConfig, ReplayOutcome, distinct_known_objects,
-    reconcile, replay,
+use memveil::analysis::exposure_lineage::{
+    BaselineEntry, LedgerRow, ReplayConfig, ReplayOutcome, distinct_known_objects, reconcile,
+    replay,
 };
 use memveil::platform::policy_reader::{Json, parse_json};
 use std::path::PathBuf;
@@ -42,8 +38,7 @@ fn fixture_dir() -> PathBuf {
 
 fn load_json(name: &str) -> Json {
     let path = fixture_dir().join(name);
-    let text =
-        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {name}: {err}"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {name}: {err}"));
     parse_json(&text).unwrap_or_else(|err| panic!("parse {name}: {err}"))
 }
 
@@ -187,7 +182,11 @@ fn check_case(case: &str) -> ReplayOutcome {
     for (got, want) in outcome.resolved.iter().zip(want_resolved.iter()) {
         let row_id = as_str(field(want, "row_id"));
         assert_eq!(got.row_id, row_id, "case {case}");
-        assert_eq!(got.seq, as_u64(field(want, "seq")), "case {case} row {row_id}");
+        assert_eq!(
+            got.seq,
+            as_u64(field(want, "seq")),
+            "case {case} row {row_id}"
+        );
         match field(want, "identity") {
             Json::Null => assert!(
                 got.identity.is_none(),
@@ -237,7 +236,11 @@ fn check_case(case: &str) -> ReplayOutcome {
             "case {case} token {}",
             got.token
         );
-        assert_eq!(got.source_id, as_str(field(want, "source_id")), "case {case}");
+        assert_eq!(
+            got.source_id,
+            as_str(field(want, "source_id")),
+            "case {case}"
+        );
         assert_eq!(
             got.object_class,
             as_str(field(want, "object_class")),
@@ -249,7 +252,11 @@ fn check_case(case: &str) -> ReplayOutcome {
             as_str(field(want, "certainty")),
             "case {case}"
         );
-        assert_eq!(got.first_seq, as_u64(field(want, "first_seq")), "case {case}");
+        assert_eq!(
+            got.first_seq,
+            as_u64(field(want, "first_seq")),
+            "case {case}"
+        );
         assert_eq!(got.last_seq, as_u64(field(want, "last_seq")), "case {case}");
         assert_eq!(
             got.evidence,
@@ -321,7 +328,10 @@ fn check_case(case: &str) -> ReplayOutcome {
     outcome
 }
 
-fn resolved<'a>(outcome: &'a ReplayOutcome, row_id: &str) -> &'a exposure_lineage::ResolvedRow {
+fn resolved<'a>(
+    outcome: &'a ReplayOutcome,
+    row_id: &str,
+) -> &'a memveil::analysis::exposure_lineage::ResolvedRow {
     outcome
         .resolved
         .iter()
@@ -333,7 +343,7 @@ fn object<'a>(
     outcome: &'a ReplayOutcome,
     token: &str,
     generation: u64,
-) -> &'a exposure_lineage::LineageObject {
+) -> &'a memveil::analysis::exposure_lineage::LineageObject {
     outcome
         .objects
         .iter()

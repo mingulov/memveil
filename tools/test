@@ -9,6 +9,10 @@
 # confidential-inventory, confidential-real,
 # confidential-late-attach, exposure-oracle, exposure-contracts,
 # exposure-quality, exposure-policy, exposure-compare, iterator,
+# exposure-lineage, exposure-dma, exposure-buffers,
+# exposure-protocols, exposure-platforms, exposure-vmbus,
+# exposure-mappings, exposure-context, exposure-cli,
+# exposure-adversarial, exposure-acceptance, exposure-census,
 # top, oracle-ledger, vm-oracle,
 # profile-semantics, vm-lifecycle, vm-copy, vm-real-io,
 # vm-topwalk, vm-kernels, vm-scenarios, vm-stop,
@@ -1292,6 +1296,59 @@ suite_iterator() {
     fast_cargo test --locked --test iterator_transport
 }
 
+suite_exposure_lineage() {
+    python3 -m pytest "$ROOT/tests/exposure/test_lineage.py" -q || return 1
+    fast_cargo test --locked --test exposure_lineage
+}
+
+suite_exposure_dma() {
+    python3 -m pytest "$ROOT/tests/exposure/test_dma.py" -q
+}
+
+suite_exposure_buffers() {
+    python3 -m pytest "$ROOT/tests/exposure/test_buffers.py" -q
+}
+
+suite_exposure_protocols() {
+    python3 -m pytest "$ROOT/tests/exposure/test_protocols.py" -q
+}
+
+suite_exposure_platforms() {
+    python3 -m pytest "$ROOT/tests/exposure/test_platforms.py" -q
+}
+
+suite_exposure_vmbus() {
+    python3 -m pytest "$ROOT/tests/exposure/test_vmbus.py" -q
+}
+
+suite_exposure_mappings() {
+    python3 -m pytest "$ROOT/tests/exposure/test_mappings.py" -q || return 1
+    fast_cargo test --locked --test exposure_mappings
+}
+
+suite_exposure_context() {
+    python3 -m pytest "$ROOT/tests/exposure/test_context.py" -q || return 1
+    fast_cargo test --locked --test exposure_context
+}
+
+suite_exposure_cli() {
+    python3 -m pytest "$ROOT/tests/exposure/test_cli.py" -q || return 1
+    fast_cargo test --locked --test exposure_cli
+}
+
+suite_exposure_adversarial() {
+    python3 -m pytest "$ROOT/tests/exposure/test_adversarial.py" -q
+}
+
+suite_exposure_acceptance() {
+    python3 -m pytest "$ROOT/tests/exposure/test_acceptance.py" -q
+}
+
+suite_exposure_census() {
+    python3 -m pytest "$ROOT/tests/exposure/test_census.py" -q || return 1
+    fast_cargo test --locked --test exposure_census
+}
+
 suite_confidential_hooks() {
     python3 "$ROOT/tests/confidential/test_conversion_hooks.py"
 }
@@ -2363,6 +2420,42 @@ case "$1" in
         ;;
     iterator)
         suite_iterator
+        ;;
+    exposure-lineage)
+        suite_exposure_lineage
+        ;;
+    exposure-dma)
+        suite_exposure_dma
+        ;;
+    exposure-buffers)
+        suite_exposure_buffers
+        ;;
+    exposure-protocols)
+        suite_exposure_protocols
+        ;;
+    exposure-platforms)
+        suite_exposure_platforms
+        ;;
+    exposure-vmbus)
+        suite_exposure_vmbus
+        ;;
+    exposure-mappings)
+        suite_exposure_mappings
+        ;;
+    exposure-context)
+        suite_exposure_context
+        ;;
+    exposure-cli)
+        suite_exposure_cli
+        ;;
+    exposure-adversarial)
+        suite_exposure_adversarial
+        ;;
+    exposure-acceptance)
+        suite_exposure_acceptance
+        ;;
+    exposure-census)
+        suite_exposure_census
         ;;
     top)
         suite_top

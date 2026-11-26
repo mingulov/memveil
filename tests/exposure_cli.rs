@@ -1,17 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! CLI capability selection and compare-verb exits: contract tests.
 //!
-//! The module compiles here through an explicit path include;
-//! the crate root wires it as `cli::compare` with no edits to
-//! the module file itself. Each test mirrors one golden
+//! The module resolves through the wired library as
+//! `cli::compare`. Each test mirrors one golden
 //! fixture under tests/exposure/fixtures/cli/ and names its
 //! case id; the Python golden suite checks that coupling so
 //! the two sides cannot drift apart.
 
-#[path = "../src/cli/compare.rs"]
-mod compare;
-
-use compare::{
+use memveil::cli::compare::{
     CompareRequest, MetricVerdict, RunOutcome, SelectionOutcome, SelectionRequest,
     exit_for_outcome, resolve_cli_selection, resolve_compare,
 };
@@ -30,7 +26,7 @@ fn expect_selected(
     hook: bool,
     device: Option<&str>,
 ) {
-    assert_eq!(outcome.exit, compare::EXIT_OK);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_OK);
     assert_eq!(outcome.reason, None);
     assert_eq!(
         outcome.selected,
@@ -44,7 +40,7 @@ fn expect_selected(
 }
 
 fn expect_channel_refusal(outcome: &SelectionOutcome, selected: &[&str], hook: bool) {
-    assert_eq!(outcome.exit, compare::EXIT_REFUSAL);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_REFUSAL);
     assert_eq!(outcome.reason.as_deref(), Some("no-record-channel"));
     assert_eq!(
         outcome.selected,
@@ -57,7 +53,7 @@ fn expect_channel_refusal(outcome: &SelectionOutcome, selected: &[&str], hook: b
 }
 
 fn expect_parse_refusal(outcome: &SelectionOutcome, reason: &str) {
-    assert_eq!(outcome.exit, compare::EXIT_INVALID);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID);
     assert_eq!(outcome.reason.as_deref(), Some(reason));
     assert!(outcome.selected.is_empty());
     assert!(!outcome.requires_attempt_hook);
@@ -75,7 +71,7 @@ fn absent_list_selects_the_default_channel() {
 #[test]
 fn legacy_default_keeps_the_attempt_dependency() {
     let outcome = resolve_cli_selection(&request(None, None, true));
-    assert_eq!(outcome.exit, compare::EXIT_OK);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_OK);
     assert_eq!(outcome.selected, vec!["attempt-trace".to_string()]);
     assert!(outcome.requires_attempt_hook);
 }
@@ -224,7 +220,7 @@ fn every_planned_channel_refuses_as_unknown() {
         "exposure-context",
     ] {
         let outcome = resolve_cli_selection(&request(Some(id), None, false));
-        assert_eq!(outcome.exit, compare::EXIT_INVALID, "id {id}");
+        assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID, "id {id}");
         assert_eq!(
             outcome.reason.as_deref(),
             Some("unknown-capability"),
@@ -296,7 +292,7 @@ fn device_filter_refuses_journal_channels() {
 #[test]
 fn legacy_input_selects_ordinary_channels() {
     let outcome = resolve_cli_selection(&request(Some("attempt-trace"), None, true));
-    assert_eq!(outcome.exit, compare::EXIT_OK);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_OK);
     assert!(outcome.requires_attempt_hook);
 }
 
@@ -326,7 +322,10 @@ fn invalid_input_exits_two() {
         inputs_valid: false,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_INVALID);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_INVALID
+    );
 }
 
 // case: outcome-missing
@@ -336,7 +335,10 @@ fn missing_collection_exits_three() {
         collection_missing: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_REFUSAL);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_REFUSAL
+    );
 }
 
 // case: outcome-invalid-beats-missing
@@ -347,7 +349,10 @@ fn invalid_beats_missing() {
         collection_missing: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_INVALID);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_INVALID
+    );
 }
 
 // case: outcome-recovered
@@ -357,7 +362,10 @@ fn recovered_capture_exits_four() {
         recovered: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_PARTIAL);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_PARTIAL
+    );
 }
 
 // case: outcome-recovered-beats-strict
@@ -369,13 +377,19 @@ fn recovered_beats_a_strict_violation() {
         policy_violation_proved: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_PARTIAL);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_PARTIAL
+    );
 }
 
 // case: outcome-ordinary-valid
 #[test]
 fn ordinary_valid_report_exits_zero() {
-    assert_eq!(exit_for_outcome(&valid_outcome()), compare::EXIT_OK);
+    assert_eq!(
+        exit_for_outcome(&valid_outcome()),
+        memveil::cli::compare::EXIT_OK
+    );
 }
 
 // case: outcome-ordinary-policy-nonstrict
@@ -385,7 +399,7 @@ fn non_strict_policy_result_exits_zero() {
         policy_violation_proved: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_OK);
+    assert_eq!(exit_for_outcome(&outcome), memveil::cli::compare::EXIT_OK);
 }
 
 // case: outcome-strict-violation
@@ -396,7 +410,10 @@ fn strict_proved_violation_exits_five() {
         policy_violation_proved: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_POLICY_VIOLATION);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_POLICY_VIOLATION
+    );
 }
 
 // case: outcome-strict-incomplete
@@ -407,7 +424,10 @@ fn strict_incomplete_evidence_exits_four() {
         evidence_complete: false,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_PARTIAL);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_PARTIAL
+    );
 }
 
 // case: outcome-strict-violation-beats-incomplete
@@ -419,7 +439,10 @@ fn strict_violation_beats_incomplete_evidence() {
         evidence_complete: false,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_POLICY_VIOLATION);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_POLICY_VIOLATION
+    );
 }
 
 // case: outcome-strict-clean
@@ -429,7 +452,7 @@ fn strict_complete_clean_result_exits_zero() {
         strict: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_OK);
+    assert_eq!(exit_for_outcome(&outcome), memveil::cli::compare::EXIT_OK);
 }
 
 // case: outcome-missing-beats-recovered
@@ -440,7 +463,10 @@ fn missing_beats_recovered() {
         recovered: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_REFUSAL);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_REFUSAL
+    );
 }
 
 // case: outcome-refused-beats-violation
@@ -452,7 +478,10 @@ fn refused_metrics_beat_a_strict_violation() {
         policy_violation_proved: true,
         ..valid_outcome()
     };
-    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_PARTIAL);
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        memveil::cli::compare::EXIT_PARTIAL
+    );
 }
 
 fn verdicts(pairs: &[(&str, &str)]) -> Vec<MetricVerdict> {
@@ -486,7 +515,7 @@ fn compatible_rows_compare_clean() {
         ("queue-count", "compatible"),
     ]));
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_OK);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_OK);
     assert_eq!(outcome.reason, None);
 }
 
@@ -498,7 +527,7 @@ fn incompatible_row_makes_the_run_partial() {
         ("queue-count", "incompatible"),
     ]));
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_PARTIAL);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_PARTIAL);
     assert_eq!(outcome.reason, None);
 }
 
@@ -507,7 +536,7 @@ fn incompatible_row_makes_the_run_partial() {
 fn unavailable_row_makes_the_run_partial() {
     let request = compare_request(verdicts(&[("shared-bytes", "unavailable")]));
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_PARTIAL);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_PARTIAL);
     assert_eq!(outcome.reason, None);
 }
 
@@ -523,7 +552,7 @@ fn invalid_capture_beats_row_shape() {
         ..compare_request(Vec::new())
     };
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_INVALID);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID);
     assert_eq!(outcome.reason.as_deref(), Some("invalid-capture"));
 }
 
@@ -536,7 +565,7 @@ fn invalid_capture_beats_missing_collection() {
         ..compare_request(verdicts(&[("shared-bytes", "compatible")]))
     };
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_INVALID);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID);
     assert_eq!(outcome.reason.as_deref(), Some("invalid-capture"));
 }
 
@@ -548,7 +577,7 @@ fn missing_collection_beats_refused_rows() {
         ..compare_request(verdicts(&[("shared-bytes", "incompatible")]))
     };
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_REFUSAL);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_REFUSAL);
     assert_eq!(outcome.reason, None);
 }
 
@@ -561,7 +590,7 @@ fn strict_proved_violation_compares_to_five() {
         ..compare_request(verdicts(&[("shared-bytes", "compatible")]))
     };
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_POLICY_VIOLATION);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_POLICY_VIOLATION);
     assert_eq!(outcome.reason, None);
 }
 
@@ -569,7 +598,7 @@ fn strict_proved_violation_compares_to_five() {
 #[test]
 fn empty_request_refuses() {
     let outcome = resolve_compare(&compare_request(Vec::new()));
-    assert_eq!(outcome.exit, compare::EXIT_INVALID);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID);
     assert_eq!(outcome.reason.as_deref(), Some("no-requested-metrics"));
 }
 
@@ -581,7 +610,7 @@ fn repeated_metric_refuses() {
         ("shared-bytes", "compatible"),
     ]));
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_INVALID);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID);
     assert_eq!(outcome.reason.as_deref(), Some("duplicate-metric"));
 }
 
@@ -590,7 +619,7 @@ fn repeated_metric_refuses() {
 fn unknown_verdict_label_refuses() {
     let request = compare_request(verdicts(&[("shared-bytes", "close-enough")]));
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_INVALID);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID);
     assert_eq!(outcome.reason.as_deref(), Some("unknown-compatibility"));
 }
 
@@ -602,7 +631,7 @@ fn repeated_metric_beats_a_bad_label() {
         ("shared-bytes", "close-enough"),
     ]));
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_INVALID);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_INVALID);
     assert_eq!(outcome.reason.as_deref(), Some("duplicate-metric"));
 }
 
@@ -614,6 +643,6 @@ fn legacy_pair_reports_partial_through_its_rows() {
         ("queue-count", "incompatible"),
     ]));
     let outcome = resolve_compare(&request);
-    assert_eq!(outcome.exit, compare::EXIT_PARTIAL);
+    assert_eq!(outcome.exit, memveil::cli::compare::EXIT_PARTIAL);
     assert_eq!(outcome.reason, None);
 }

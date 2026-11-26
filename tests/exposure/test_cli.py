@@ -229,7 +229,7 @@ def expect_selection(sel):
                     "selected": [],
                     "requires_attempt_hook": False,
                     "device": None}
-    hook = has_ordinary or legacy
+    hook = has_ordinary
     if has_journal:
         return {"exit": 3, "reason": "no-record-channel",
                 "selected": ids, "requires_attempt_hook": hook,

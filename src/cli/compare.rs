@@ -185,10 +185,6 @@ fn is_journal(id: &str) -> bool {
     JOURNAL_CAPABILITIES.contains(&id)
 }
 
-fn is_planned(id: &str) -> bool {
-    PLANNED_CAPABILITIES.contains(&id)
-}
-
 /// Split a comma list strictly: no trimming, so a spaced
 /// item stays a distinct (unknown) name.
 fn split_list(text: &str) -> Vec<&str> {
@@ -228,9 +224,9 @@ pub fn resolve_cli_selection(request: &SelectionRequest) -> SelectionOutcome {
             }
             let mut ids = Vec::new();
             for item in items {
-                if is_planned(item) {
-                    return parse_refusal("unknown-capability");
-                }
+                // Planned ids refuse as unknown through the
+                // general check below (they are neither
+                // ordinary nor journal).
                 if !is_ordinary(item) && !is_journal(item) {
                     return parse_refusal("unknown-capability");
                 }
@@ -362,6 +358,10 @@ pub fn resolve_compare(request: &CompareRequest) -> CompareOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn is_planned(id: &str) -> bool {
+        PLANNED_CAPABILITIES.contains(&id)
+    }
 
     #[test]
     fn split_keeps_spacing_and_empties() {

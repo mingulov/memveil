@@ -176,7 +176,7 @@ pub struct Observation {
     pub ts: u64,
 }
 
-/// Collection prerequisites for the census probe.
+/// Collection prerequisites for census capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionRequirements {
     pub privileged: bool,
@@ -185,7 +185,7 @@ pub struct CollectionRequirements {
     pub bounds_sufficient: bool,
 }
 
-/// Collection refusal: the probe must not run.
+/// Collection refusal: capture must not run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectionRefusal {
     pub reason: String,
