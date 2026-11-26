@@ -1108,6 +1108,41 @@ fn record_gap(state: &mut State, row: &LedgerRow) {
     record_gap_lines(state, row, &canonical, pinned);
 }
 
+/// Re-derive one rolled-back leg's discontinuity evidence
+/// against restored state, without joining or displaying
+/// any identity. Gap legs record their seal or bound; an
+/// ordinary observation keeps a carried clock-domain change
+/// bounded, so a refused group drops no temporal evidence
+/// whatever leg order replayed first. Addressing mirrors
+/// `apply_row`: aliases resolve first, a looping chain
+/// records nothing, and a leg that joins no single line
+/// records nothing, exactly as a replayed row would. Only
+/// the discontinuity outlives the refused group: binds,
+/// fresh lines and lifecycle transitions never survive.
+fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &LedgerRow) {
+    match row.event.as_str() {
+        "loss_gap" | "suspend_gap" | "clock_change" => {
+            record_gap(state, row);
+            return;
+        }
+        "observed" => {}
+        _ => return,
+    }
+    let canonical = match resolve(state, row, row.virtual_id.as_str()) {
+        Some(token) => token,
+        None => return,
+    };
+    let pinned = state
+        .alias
+        .get(&alias_key(row.virtual_id.as_str(), row))
+        .map(|(_, generation)| *generation);
+    let (joined, generation) = match join(state, refusals, row, &canonical, pinned, false) {
+        Ok(joined) => joined,
+        Err(_) => return,
+    };
+    note_domain(state, row, &joined, generation);
+}
+
 /// Seal or bound the lines one gap row denotes. A loss
 /// gap seals only lines the gap's own origin observed: a
 /// foreign loss row never seals same-source identities.
@@ -1973,19 +2008,22 @@ pub fn replay(
             }
             continue;
         }
-        // Gap evidence survives group rollback, re-derived
-        // against the restored checkpoint: a loss seal or
-        // temporal bound records a discontinuity in the
-        // ledger stream, not a join claim, so continuity
-        // past the gap stays unproved even when the group
-        // as a unit is unproved. Tentative seals and bounds
+        // Discontinuity evidence survives group rollback,
+        // re-derived against the restored checkpoint: a loss
+        // seal, a temporal bound, or a clock-domain change an
+        // ordinary observation carried records a break in the
+        // ledger stream, not a join claim, so continuity past
+        // the break stays unproved even when the group as a
+        // unit is unproved. Tentative seals and bounds
         // survive only for lines the group did not create:
         // a later fresh allocation must not inherit a gap
-        // that struck a rolled-back object. Every gap leg —
+        // that struck a rolled-back object. Every leg —
         // applied or skipped past the first failure — then
         // records its discontinuity against proved state,
         // so a provisional release cannot suppress a loss
-        // seal and a skipped gap row still seals or bounds.
+        // seal, a skipped gap row still seals or bounds, and
+        // a skipped observation keeps its clock change
+        // bounded whatever leg order replayed first.
         let tentative_sealed = state.sealed.clone();
         let tentative_bounded = state.temporal_bounded.clone();
         state = checkpoint;
@@ -2000,7 +2038,7 @@ pub fn replay(
             }
         }
         for row in &legs {
-            record_gap(&mut state, row);
+            record_rollback_evidence(&mut state, &refusals, row);
         }
         resolved.truncate(resolved_len);
         failed_joins.truncate(failed_len);
