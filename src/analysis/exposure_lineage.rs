@@ -29,7 +29,8 @@
 //!   ambiguous: later joins stay unlinked, since an
 //!   untracked generation may exist.
 //! * Alias mappings bind one canonical identity plus
-//!   one generation, so observations through an alias
+//!   one generation per origin, so observations through
+//!   an alias
 //!   never double-count and never follow address reuse
 //!   until the alias is rebound. An ambiguous or
 //!   loss-sealed target refuses the alias.
@@ -235,11 +236,13 @@ struct ObjState {
 struct State {
     linked: BTreeMap<(String, u64), ObjState>,
     latest: BTreeMap<String, u64>,
-    /// Alias bindings: alias to (canonical token,
-    /// generation). A binding pins one exact generation,
-    /// so an alias never follows address reuse until it
-    /// is explicitly rebound.
-    alias: BTreeMap<String, (String, u64)>,
+    /// Alias bindings: (alias, source, class) to
+    /// (canonical token, generation). A binding pins
+    /// one exact generation for its own origin, so an
+    /// alias never follows address reuse until it is
+    /// explicitly rebound, and one source never
+    /// overwrites another source's binding.
+    alias: BTreeMap<(String, String, String), (String, u64)>,
     /// Tokens with temporally bounded claims, keyed per
     /// origin: a gap observed through one source and class
     /// never bounds another origin's claims.
@@ -267,13 +270,19 @@ fn is_open(status: &str) -> bool {
     OPEN_STATUSES.contains(&status)
 }
 
-/// Follow the alias map to the canonical token.
-fn resolve(state: &State, virtual_id: &str) -> Option<String> {
+/// Follow the alias map to the canonical token,
+/// staying inside the row's own origin: a binding from
+/// another source or class never redirects this lookup.
+fn resolve(state: &State, row: &LedgerRow, virtual_id: &str) -> Option<String> {
     let mut current = virtual_id.to_string();
     let mut seen = BTreeSet::new();
     seen.insert(current.clone());
     for _ in 0..MAX_ALIAS_HOPS {
-        match state.alias.get(&current).map(|(token, _)| token.clone()) {
+        match state
+            .alias
+            .get(&alias_key(&current, row))
+            .map(|(token, _)| token.clone())
+        {
             None => return Some(current),
             Some(next) => {
                 if !seen.insert(next.clone()) {
@@ -286,14 +295,15 @@ fn resolve(state: &State, virtual_id: &str) -> Option<String> {
     None
 }
 
-/// Token an allocation row names: a handle bound to a
-/// still-open unsealed line continues that address's
-/// reuse chain through the canonical token; a handle
-/// bound to a closed or loss-sealed line, or to no line,
-/// names its own fresh identity instead of following the
-/// stale binding.
-fn allocation_token(state: &State, handle: &str) -> Option<String> {
-    match state.alias.get(handle) {
+/// Token an allocation row names: a handle bound in
+/// the row's own origin to a still-open unsealed line
+/// continues that address's reuse chain through the
+/// canonical token; a handle bound to a closed or
+/// loss-sealed line, bound only in another origin, or
+/// bound to no line, names its own fresh identity
+/// instead of following the stale binding.
+fn allocation_token(state: &State, row: &LedgerRow, handle: &str) -> Option<String> {
+    match state.alias.get(&alias_key(handle, row)) {
         Some((token, generation)) => {
             let key = (token.clone(), *generation);
             let reusable = state
@@ -303,7 +313,7 @@ fn allocation_token(state: &State, handle: &str) -> Option<String> {
                 .unwrap_or(false)
                 && !state.sealed.contains(&key);
             if reusable {
-                resolve(state, handle)
+                resolve(state, row, handle)
             } else {
                 Some(handle.to_string())
             }
@@ -397,6 +407,16 @@ fn refusal_key(token: &str, row: &LedgerRow) -> (String, String, String) {
     )
 }
 
+/// Per-origin key for alias bindings: the alias handle
+/// plus the row's own source and object class.
+fn alias_key(handle: &str, row: &LedgerRow) -> (String, String, String) {
+    (
+        handle.to_string(),
+        row.source_id.clone(),
+        row.object_class.clone(),
+    )
+}
+
 /// Compare a row's clock domain against the generation it
 /// joined or shows: a mismatch crosses a clock-domain
 /// change, so the token's later claims in this origin stay
@@ -418,7 +438,8 @@ fn note_domain(state: &mut State, row: &LedgerRow, canonical: &str, generation: 
 /// row's origin: a refusal stored under an intermediate
 /// handle poisons every lookup that goes through it,
 /// since an untracked generation may sit beside the
-/// pinned one.
+/// pinned one. The walk stays inside the row's own
+/// origin, like every other alias lookup.
 fn refused_on_path(
     state: &State,
     refusals: &Refusals,
@@ -437,7 +458,11 @@ fn refused_on_path(
         if probe == terminal {
             break;
         }
-        match state.alias.get(&probe).map(|(token, _)| token.clone()) {
+        match state
+            .alias
+            .get(&alias_key(&probe, row))
+            .map(|(token, _)| token.clone())
+        {
             Some(next) => probe = next,
             None => break,
         }
@@ -787,9 +812,9 @@ fn apply_row(
     // starts its own identity.
     // Every other event resolves aliases before it joins.
     let addressed = if row.event == "allocated" {
-        allocation_token(state, row.virtual_id.as_str())
+        allocation_token(state, row, row.virtual_id.as_str())
     } else {
-        resolve(state, row.virtual_id.as_str())
+        resolve(state, row, row.virtual_id.as_str())
     };
     let canonical = match addressed {
         Some(token) => token,
@@ -809,7 +834,7 @@ fn apply_row(
     // generation the row actually joined or shows.
     let pinned = state
         .alias
-        .get(row.virtual_id.as_str())
+        .get(&alias_key(row.virtual_id.as_str(), row))
         .map(|(_, generation)| *generation);
     match row.event.as_str() {
         "allocated" => {
@@ -820,7 +845,9 @@ fn apply_row(
             // the binding pinned, and a refusal changes
             // nothing.
             if !applied.failed && canonical == row.virtual_id {
-                state.alias.remove(row.virtual_id.as_str());
+                state
+                    .alias
+                    .remove(&alias_key(row.virtual_id.as_str(), row));
             }
             applied
         }
@@ -1195,7 +1222,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
         Some(name) => name,
         None => return failed(row, format!("alias row '{}' names no target", row.row_id)),
     };
-    let target_canonical = match resolve(state, target) {
+    let target_canonical = match resolve(state, row, target) {
         Some(token) => token,
         None => {
             return failed(
@@ -1218,7 +1245,11 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
         if probe == row.virtual_id {
             return failed(row, "alias would close a loop; alias refused".to_string());
         }
-        match state.alias.get(&probe).map(|(token, _)| token.clone()) {
+        match state
+            .alias
+            .get(&alias_key(&probe, row))
+            .map(|(token, _)| token.clone())
+        {
             Some(next) => probe = next,
             None => break,
         }
@@ -1231,7 +1262,11 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
     // allocation poisons the inherited binding too, since
     // an untracked generation may sit beside the pinned
     // one.
-    let generation = match state.alias.get(target).map(|(_, generation)| *generation) {
+    let generation = match state
+        .alias
+        .get(&alias_key(target, row))
+        .map(|(_, generation)| *generation)
+    {
         Some(bound) => {
             if refused_on_path(state, refusals, row, target, &target_canonical) {
                 return failed(
@@ -1280,7 +1315,7 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
         },
     };
     state.alias.insert(
-        row.virtual_id.clone(),
+        alias_key(row.virtual_id.as_str(), row),
         (target_canonical.clone(), generation),
     );
     let bound = state
@@ -1366,8 +1401,8 @@ fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
     if row.event != "observed" {
         return;
     }
-    let token =
-        resolve(state, row.virtual_id.as_str()).unwrap_or_else(|| row.virtual_id.clone());
+    let token = resolve(state, row, row.virtual_id.as_str())
+        .unwrap_or_else(|| row.virtual_id.clone());
     state.samples.push((
         token,
         ObjState {
