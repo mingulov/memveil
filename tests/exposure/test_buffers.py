@@ -168,15 +168,35 @@ S64_MIN = -(2 ** 63)
 S64_MAX = 2 ** 63 - 1
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HEXADDR_RE = re.compile(r"0x[0-9a-fA-F]{3,}")
-# Witness affirmation frame: an optional "<name>
-# generation" prefix, then one event-kind token,
-# then the terminal "observed" marker. The claimed
-# kind and polarity come from these structural
-# slots; wording outside the frame affirms
-# nothing.
+# Witness affirmation frame: an optional "<ordinal>
+# generation" prefix naming the witnessed
+# generation, then one event-kind token, then the
+# terminal "observed" marker. The claimed kind,
+# generation, and polarity come from these
+# structural slots; wording outside the frame
+# affirms nothing.
 WITNESS_FRAME_RE = re.compile(
-    r"(?:[a-z]+ generation )?([a-z0-9]+"
+    r"(?:([a-z]+) generation )?([a-z0-9]+"
     r"(?:-[a-z0-9]+)*) observed")
+
+# Closed ordinal vocabulary for the named witness
+# generation: the prefix word must name a
+# generation number, and that number must match
+# the referenced fact's generation.
+WITNESS_GENERATIONS = {
+    "first": "1",
+    "second": "2",
+    "third": "3",
+    "fourth": "4",
+    "fifth": "5",
+    "sixth": "6",
+    "seventh": "7",
+    "eighth": "8",
+    "ninth": "9",
+    "tenth": "10",
+    "eleventh": "11",
+    "twelfth": "12",
+}
 
 # Strings that must never appear in a fixture: raw
 # addresses, payload/key material, buffer names, or
@@ -1082,11 +1102,13 @@ def test_concurrent_create_reuse_witness():
     # event kind for its lineage through the fixed
     # detail frame, and the claimed kind plus the
     # witnessed semantics must match one referenced
-    # fact for that token/generation. A detail
-    # outside the frame, or naming a kind with no
-    # such fact, describes no observed event —
-    # whatever words it shares with a recorded
-    # kind.
+    # fact for that token/generation. A named
+    # "<ordinal> generation" prefix must name the
+    # referenced fact's generation as well: a
+    # detail naming another generation, or no
+    # known generation, describes no observed
+    # event — whatever words it shares with a
+    # recorded kind.
     facts_by_lineage = {}
     for fact in doc["facts"]:
         facts_by_lineage.setdefault(
@@ -1103,11 +1125,20 @@ def test_concurrent_create_reuse_witness():
             "witness %r affirms no observed event " \
             "kind for lineage %r" % (
                 event["witness_id"], pair)
-        claimed = match.group(1)
+        named = match.group(1)
+        claimed = match.group(2)
         assert claimed in lane_kinds, \
             "witness %r names no observed event " \
             "kind for lineage %r" % (
                 event["witness_id"], pair)
+        want_generation = None
+        if named is not None:
+            assert named in WITNESS_GENERATIONS, \
+                "witness %r names no known " \
+                "generation for lineage %r" % (
+                    event["witness_id"], pair)
+            want_generation = \
+                WITNESS_GENERATIONS[named]
         lineage = facts_by_lineage.get(pair, [])
         kinds = {fact["kind"] for fact in lineage}
         assert claimed in kinds, \
@@ -1122,6 +1153,19 @@ def test_concurrent_create_reuse_witness():
             "%r fact for lineage %r" % (
                 event["witness_id"], claimed,
                 event["observed"], pair)
+        if want_generation is not None:
+            assert any(fact["kind"] == claimed
+                       and fact["semantics"]
+                       == event["observed"]
+                       and fact["generation"]
+                       == want_generation
+                       for fact in lineage), \
+                "witness %r names generation %r " \
+                "with no such %r %r fact for " \
+                "lineage %r" % (
+                    event["witness_id"],
+                    want_generation, claimed,
+                    event["observed"], pair)
     witnessed = sorted(
         {(event["object_token"],
           event["generation"])
