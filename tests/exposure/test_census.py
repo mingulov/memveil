@@ -160,7 +160,7 @@ ROW_FIELDS = {
 }
 
 QUALITY_CHANNELS = (
-    "Detail",
+    "detail",
     "aggregate",
     "identity",
     "baseline",
@@ -405,7 +405,7 @@ def expect_quality(compatibility, delta):
     else:
         channels = ("complete",) * 5
     detail, aggregate, identity, baseline, terminal = channels
-    return {"Detail": detail, "aggregate": aggregate,
+    return {"detail": detail, "aggregate": aggregate,
             "identity": identity, "baseline": baseline,
             "terminal": terminal}
 
