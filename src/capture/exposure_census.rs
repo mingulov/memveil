@@ -20,10 +20,12 @@
 //! A refused class carries no delta and no uncertainty.
 //!
 //! Compatible counts yield an exact delta with a stated
-//! uncertainty: the saturating sum of both sides' race
+//! uncertainty: the checked sum of both sides' race
 //! bounds, zero when neither side raced. Unknown or
 //! overflowing values stay compatible with a null delta
-//! plus a reason. A partial journal refuses every class:
+//! plus a reason, and an overflowing bound sum stays
+//! compatible with a null uncertainty plus a reason.
+//! A partial journal refuses every class:
 //! journal detail is never netted into snapshot state.
 //!
 //! The module is self-contained on purpose: it declares no
@@ -160,6 +162,7 @@ pub struct CensusDelta {
     pub delta: Option<i64>,
     pub delta_reason: Option<String>,
     pub uncertainty: Option<u64>,
+    pub uncertainty_reason: Option<String>,
     pub unit: String,
     pub scope: String,
     pub quality: Quality,
@@ -210,6 +213,7 @@ fn refused(
         delta: None,
         delta_reason: None,
         uncertainty: None,
+        uncertainty_reason: None,
         unit: unit.to_string(),
         scope: left.scope.clone(),
         quality,
@@ -377,8 +381,16 @@ fn race_bound(snapshot: &CensusSnapshot) -> u64 {
     }
 }
 
-fn stated_uncertainty(left: &CensusSnapshot, right: &CensusSnapshot) -> u64 {
-    race_bound(left).saturating_add(race_bound(right))
+/// Stated race uncertainty: the checked sum of both
+/// sides' bounds. An overflowing sum is null plus the
+/// `uncertainty-overflow` reason, never a silent clamp:
+/// a saturated bound must stay distinguishable from an
+/// exact one.
+fn stated_uncertainty(left: &CensusSnapshot, right: &CensusSnapshot) -> (Option<u64>, Option<String>) {
+    match race_bound(left).checked_add(race_bound(right)) {
+        Some(bound) => (Some(bound), None),
+        None => (None, Some("uncertainty-overflow".to_string())),
+    }
 }
 
 fn result_unit(left_count: Option<&CensusCount>, right_count: Option<&CensusCount>) -> String {
@@ -595,15 +607,21 @@ fn compare_class(left: &CensusSnapshot, right: &CensusSnapshot, id: &str) -> Cen
             &left_count.unit,
         );
     }
-    let (delta, delta_reason, quality) = match (left_count.value, right_count.value) {
+    let (delta, delta_reason) = match (left_count.value, right_count.value) {
         (Some(before), Some(after)) => {
             let wide = (after as i128) - (before as i128);
             match i64::try_from(wide).ok() {
-                Some(exact) => (Some(exact), None, Quality::complete()),
-                None => (None, Some("delta-overflow".to_string()), Quality::unknown()),
+                Some(exact) => (Some(exact), None),
+                None => (None, Some("delta-overflow".to_string())),
             }
         }
-        (None, _) | (_, None) => (None, Some("value-unknown".to_string()), Quality::unknown()),
+        (None, _) | (_, None) => (None, Some("value-unknown".to_string())),
+    };
+    let (uncertainty, uncertainty_reason) = stated_uncertainty(left, right);
+    let quality = if delta.is_none() || uncertainty.is_none() {
+        Quality::unknown()
+    } else {
+        Quality::complete()
     };
     CensusDelta {
         class_id: id.to_string(),
@@ -613,7 +631,8 @@ fn compare_class(left: &CensusSnapshot, right: &CensusSnapshot, id: &str) -> Cen
         right_evidence: right.evidence_id.clone(),
         delta,
         delta_reason,
-        uncertainty: Some(stated_uncertainty(left, right)),
+        uncertainty,
+        uncertainty_reason,
         unit: left_count.unit.clone(),
         scope: left.scope.clone(),
         quality,

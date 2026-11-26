@@ -79,6 +79,7 @@ fn expect_row(
     delta: Option<i64>,
     delta_reason: Option<&str>,
     uncertainty: Option<u64>,
+    uncertainty_reason: Option<&str>,
     unit: &str,
     scope: &str,
     quality: Quality,
@@ -95,6 +96,11 @@ fn expect_row(
         "delta reason"
     );
     assert_eq!(actual.uncertainty, uncertainty, "uncertainty");
+    assert_eq!(
+        actual.uncertainty_reason,
+        uncertainty_reason.map(str::to_string),
+        "uncertainty reason"
+    );
     assert_eq!(actual.unit, unit, "unit");
     assert_eq!(actual.scope, scope, "scope");
     assert_eq!(actual.quality, quality, "quality");
@@ -124,6 +130,7 @@ fn compatible_golden_reports_exact_known_deltas() {
         Some(8),
         None,
         Some(0),
+        None,
         "unknown",
         "guest-view",
         Quality::complete(),
@@ -138,6 +145,7 @@ fn compatible_golden_reports_exact_known_deltas() {
         Some(-9),
         None,
         Some(0),
+        None,
         "unknown",
         "guest-view",
         Quality::complete(),
@@ -162,6 +170,7 @@ fn missing_class_is_unavailable_without_numbers() {
         None,
         None,
         None,
+        None,
         "unknown",
         "guest-view",
         Quality::unavailable(),
@@ -173,6 +182,7 @@ fn missing_class_is_unavailable_without_numbers() {
         "class-missing",
         "snap-left-002",
         "snap-right-002",
+        None,
         None,
         None,
         None,
@@ -210,6 +220,7 @@ fn races_state_exact_delta_plus_uncertainty() {
         Some(50),
         None,
         Some(10),
+        None,
         "unknown",
         "guest-view",
         Quality::complete(),
@@ -224,6 +235,7 @@ fn races_state_exact_delta_plus_uncertainty() {
         Some(0),
         None,
         Some(10),
+        None,
         "unknown",
         "guest-view",
         Quality::complete(),
@@ -231,7 +243,7 @@ fn races_state_exact_delta_plus_uncertainty() {
 }
 
 #[test]
-fn uncertainty_saturates_at_u64_max() {
+fn uncertainty_overflow_is_null_with_a_reason() {
     // Fixture case "uncertainty-saturating".
     let (mut left, mut right) = pair();
     left.evidence_id = "snap-left-015".to_string();
@@ -250,10 +262,11 @@ fn uncertainty_saturates_at_u64_max() {
         "snap-right-015",
         Some(4),
         None,
-        Some(u64::MAX),
+        None,
+        Some("uncertainty-overflow"),
         "unknown",
         "guest-view",
-        Quality::complete(),
+        Quality::unknown(),
     );
 }
 
@@ -261,7 +274,7 @@ fn uncertainty_saturates_at_u64_max() {
 fn one_sided_races_state_that_side_bound() {
     // Only the right side raced: the stated uncertainty
     // is the right bound alone. No fixture: bound
-    // addition is covered by the saturating golden.
+    // addition is covered by the overflowing golden.
     let (left, mut right) = pair();
     right.atomicity = atomicity("interval", true, Some(3));
     let mut left = left;
@@ -269,6 +282,7 @@ fn one_sided_races_state_that_side_bound() {
     let rows = compare_snapshots(&left, &right).expect("pair compares");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].uncertainty, Some(3));
+    assert_eq!(rows[0].uncertainty_reason, None);
     assert_eq!(rows[0].delta, Some(8));
 }
 
@@ -288,6 +302,7 @@ fn clock_mismatch_refuses_comparison() {
         "clock-mismatch",
         "snap-left-016",
         "snap-right-016",
+        None,
         None,
         None,
         None,
@@ -316,6 +331,7 @@ fn blank_clock_is_unknown() {
         None,
         None,
         None,
+        None,
         "unknown",
         "guest-view",
         Quality::refused(),
@@ -338,6 +354,7 @@ fn window_mismatch_refuses_comparison() {
         "window-mismatch",
         "snap-left-018",
         "snap-right-018",
+        None,
         None,
         None,
         None,
@@ -366,6 +383,7 @@ fn journal_scope_mismatch_refuses_comparison() {
         None,
         None,
         None,
+        None,
         "unknown",
         "guest-view",
         Quality::refused(),
@@ -388,6 +406,7 @@ fn partial_journal_refuses_and_never_nets() {
         "partial-journal",
         "snap-left-020",
         "snap-right-020",
+        None,
         None,
         None,
         None,
@@ -423,6 +442,7 @@ fn unknown_value_stays_compatible_with_null_delta() {
         None,
         Some("value-unknown"),
         Some(0),
+        None,
         "unknown",
         "guest-view",
         Quality::unknown(),
@@ -437,6 +457,7 @@ fn unknown_value_stays_compatible_with_null_delta() {
         None,
         Some("value-unknown"),
         Some(0),
+        None,
         "unknown",
         "guest-view",
         Quality::unknown(),
@@ -469,6 +490,7 @@ fn delta_overflow_stays_compatible_with_null_delta() {
         None,
         Some("delta-overflow"),
         Some(0),
+        None,
         "unknown",
         "guest-view",
         Quality::unknown(),
@@ -483,6 +505,7 @@ fn delta_overflow_stays_compatible_with_null_delta() {
         None,
         Some("delta-overflow"),
         Some(0),
+        None,
         "unknown",
         "guest-view",
         Quality::unknown(),
@@ -506,6 +529,7 @@ fn unknown_unit_refuses_without_copying_the_label() {
         "unit-unknown",
         "snap-left-003",
         "snap-right-003",
+        None,
         None,
         None,
         None,
@@ -534,6 +558,7 @@ fn blank_scope_is_unknown_never_equal() {
         None,
         None,
         None,
+        None,
         "unknown",
         "",
         Quality::refused(),
@@ -556,6 +581,7 @@ fn scope_mismatch_refuses_comparison() {
         "scope-mismatch",
         "snap-left-006",
         "snap-right-006",
+        None,
         None,
         None,
         None,
@@ -584,6 +610,7 @@ fn profile_mismatch_refuses_comparison() {
         None,
         None,
         None,
+        None,
         "unknown",
         "guest-view",
         Quality::refused(),
@@ -606,6 +633,7 @@ fn workload_mismatch_refuses_comparison() {
         "workload-mismatch",
         "snap-left-008",
         "snap-right-008",
+        None,
         None,
         None,
         None,
@@ -634,6 +662,7 @@ fn epoch_mismatch_refuses_comparison() {
         None,
         None,
         None,
+        None,
         "unknown",
         "guest-view",
         Quality::refused(),
@@ -659,6 +688,7 @@ fn device_binding_mismatch_refuses_comparison() {
         None,
         None,
         None,
+        None,
         "unknown",
         "guest-view",
         Quality::refused(),
@@ -681,6 +711,7 @@ fn coverage_mismatch_refuses_comparison() {
         "coverage-mismatch",
         "snap-left-011",
         "snap-right-011",
+        None,
         None,
         None,
         None,
@@ -720,6 +751,7 @@ fn unknown_atomicity_refuses_comparison() {
         "atomicity-unknown",
         "snap-left-012",
         "snap-right-012",
+        None,
         None,
         None,
         None,
@@ -1051,6 +1083,7 @@ fn atomicity_mismatch_refuses_comparison() {
         None,
         None,
         None,
+        None,
         "unknown",
         "guest-view",
         Quality::refused(),
@@ -1074,6 +1107,7 @@ fn unit_mismatch_refuses_comparison() {
         "unit-mismatch",
         "snap-left-004",
         "snap-right-004",
+        None,
         None,
         None,
         None,

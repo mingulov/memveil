@@ -114,6 +114,7 @@ REASONS = (
     "partial-journal",
     "value-unknown",
     "delta-overflow",
+    "uncertainty-overflow",
     "duplicate-class",
     "invalid-window",
     "invalid-count",
@@ -147,8 +148,9 @@ FORBIDDEN_MEANINGS = (
 )
 
 # Frozen CensusDelta row fields. Refused rows omit the
-# delta triple and the uncertainty; compatible rows with a
-# null delta add the delta reason.
+# delta triple and the uncertainty pair; compatible rows
+# with a null delta or a null uncertainty add the matching
+# reason.
 ROW_FIELDS = {
     "class_id",
     "compatibility",
@@ -158,6 +160,7 @@ ROW_FIELDS = {
     "delta",
     "delta_reason",
     "uncertainty",
+    "uncertainty_reason",
     "unit",
     "scope",
     "quality",
@@ -306,11 +309,16 @@ def bound_of(snapshot):
 
 
 def expect_uncertainty(left, right):
-    """Independent uncertainty oracle: the saturating sum
-    of both sides' stated race bounds, as a canonical u64
-    decimal string. A pair observed without races states
-    zero; saturation keeps the bound representable."""
-    return str(min(bound_of(left) + bound_of(right), U64_MAX))
+    """Independent uncertainty oracle: the checked sum of
+    both sides' stated race bounds. An exact sum returns
+    the canonical u64 decimal string plus no reason; an
+    overflowing sum returns a null plus the overflow
+    reason, never a silent clamp. A pair observed without
+    races states zero."""
+    total = bound_of(left) + bound_of(right)
+    if total > U64_MAX:
+        return None, "uncertainty-overflow"
+    return str(total), None
 
 
 # Frozen census unit vocabulary from the exposure
@@ -400,19 +408,20 @@ def expect_row(case, left, right, class_id):
     return ("compatible", "compatible", ("delta", delta))
 
 
-def expect_quality(compatibility, delta):
+def expect_quality(compatibility, delta, stated):
     """Independent quality oracle: quality derives from the row.
 
-    Only a row with an exact delta claims complete quality.
-    Compatible rows with a null delta report unknown on all
-    five channels; refused rows report refused, except an
-    unavailable row reports unknown identity.
+    Only a row with an exact delta and an exact stated
+    uncertainty claims complete quality. Compatible rows
+    with a null delta or a null uncertainty report unknown
+    on all five channels; refused rows report refused,
+    except an unavailable row reports unknown identity.
     """
     if compatibility == "incompatible":
         channels = ("refused",) * 5
     elif compatibility == "unavailable":
         channels = ("refused", "refused", "unknown", "refused", "refused")
-    elif delta[0] == "null":
+    elif delta[0] == "null" or stated[1] is not None:
         channels = ("unknown",) * 5
     else:
         channels = ("complete",) * 5
@@ -456,6 +465,8 @@ def test_fixture_expectations_match_oracle():
             seen.add(class_id)
             compatibility, reason, delta = expect_row(
                 fixture["case"], left, right, class_id)
+            stated = expect_uncertainty(left, right) \
+                if delta != "absent" else (None, None)
             assert row["compatibility"] == compatibility, \
                 "%s/%s: want %s got %s" % (
                     name, class_id, compatibility,
@@ -471,24 +482,33 @@ def test_fixture_expectations_match_oracle():
                 assert "uncertainty" not in row, \
                     "%s/%s: refused class states uncertainty" % (
                         name, class_id)
-            elif delta[0] == "null":
-                assert row.get("delta") is None, \
-                    "%s/%s: want null delta" % (name, class_id)
-                assert row.get("delta_reason") == delta[1], \
-                    "%s/%s: want %s" % (name, class_id, delta[1])
-                assert row["uncertainty"] == expect_uncertainty(
-                    left, right), \
-                    "%s/%s: uncertainty follows the oracle" % (
-                        name, class_id)
+                assert "uncertainty_reason" not in row
             else:
-                assert row["delta"] == delta[1], \
-                    "%s/%s: want %d got %r" % (
-                        name, class_id, delta[1],
-                        row.get("delta"))
-                assert row["uncertainty"] == expect_uncertainty(
-                    left, right), \
-                    "%s/%s: uncertainty follows the oracle" % (
-                        name, class_id)
+                if stated[0] is None:
+                    assert row.get("uncertainty") is None, \
+                        "%s/%s: want null uncertainty" % (
+                            name, class_id)
+                    assert row.get("uncertainty_reason") == stated[1], \
+                        "%s/%s: want %s" % (
+                            name, class_id, stated[1])
+                else:
+                    assert row["uncertainty"] == stated[0], \
+                        "%s/%s: uncertainty follows the oracle" % (
+                            name, class_id)
+                    assert "uncertainty_reason" not in row, \
+                        "%s/%s: exact uncertainty carries a reason" % (
+                            name, class_id)
+                if delta[0] == "null":
+                    assert row.get("delta") is None, \
+                        "%s/%s: want null delta" % (name, class_id)
+                    assert row.get("delta_reason") == delta[1], \
+                        "%s/%s: want %s" % (
+                            name, class_id, delta[1])
+                else:
+                    assert row["delta"] == delta[1], \
+                        "%s/%s: want %d got %r" % (
+                            name, class_id, delta[1],
+                            row.get("delta"))
             assert row["left_evidence"] == left["evidence_id"]
             assert row["right_evidence"] == right["evidence_id"]
             assert row["unit"] == expect_unit(
@@ -499,7 +519,7 @@ def test_fixture_expectations_match_oracle():
                 "%s/%s: scope follows the left snapshot" % (
                     name, class_id)
             assert row["quality"] == expect_quality(
-                compatibility, delta), \
+                compatibility, delta, stated), \
                 "%s/%s: quality derives from the row" % (
                     name, class_id)
         ids = {c["class_id"] for c in left["counts"]}
@@ -525,6 +545,7 @@ def test_refused_rows_carry_no_numbers():
                     "%s/%s: uncertainty on %s" % (
                         name, row["class_id"],
                         row["compatibility"])
+                assert "uncertainty_reason" not in row
 
 
 def test_expected_rows_match_contract_fields():
@@ -538,7 +559,8 @@ def test_expected_rows_match_contract_fields():
                     name, row["class_id"],
                     sorted(set(row) - ROW_FIELDS))
             required = ROW_FIELDS - {"delta", "delta_reason",
-                                     "uncertainty"}
+                                     "uncertainty",
+                                     "uncertainty_reason"}
             for field in required:
                 assert field in row, \
                     "%s/%s: missing %s" % (
