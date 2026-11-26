@@ -123,6 +123,31 @@ def check_defining_outcome(case_id, case, summary, events):
         assert groups["transitioned"] == [] and groups["added"] == [] \
             and groups["removed"] == [], "zero new conversions expected"
         assert "confirm-zero-new-conversions" in actions
+        assert "drive-steady-queue-traffic" in actions
+        assert "drive-steady-control-traffic" in actions
+        # The zero-conversion confirmation is only
+        # meaningful after the sustained traffic it
+        # reports on: a confirmation recorded before
+        # either traffic step ran cannot establish that
+        # the traffic completed with zero new
+        # conversions. Both the sequence position and
+        # the authored ordinal must put both traffic
+        # steps first.
+        flow = case["control_flow"]
+        traffic_pos = [index for index, step in enumerate(flow)
+                       if step["action"] in ("drive-steady-queue-traffic",
+                                             "drive-steady-control-traffic")]
+        confirm_pos = [index for index, step in enumerate(flow)
+                       if step["action"] == "confirm-zero-new-conversions"]
+        assert max(traffic_pos) < min(confirm_pos), \
+            "sustained traffic must precede the zero-conversion confirmation"
+        traffic_ord = [int(step["ordinal"]) for step in flow
+                       if step["action"] in ("drive-steady-queue-traffic",
+                                             "drive-steady-control-traffic")]
+        confirm_ord = [int(step["ordinal"]) for step in flow
+                       if step["action"] == "confirm-zero-new-conversions"]
+        assert max(traffic_ord) < min(confirm_ord), \
+            "sustained-traffic ordinal must precede the confirmation ordinal"
     elif case_id == "conversion-request-result":
         assert case["before_ledger"] == [] and case["after_ledger"] == []
         assert all(step["object"] == "none"
@@ -166,6 +191,27 @@ def check_defining_outcome(case_id, case, summary, events):
         assert "complete-bounced-segment" in actions
         assert "complete-admitted-direct-segment" in actions
         assert "confirm-outer-completion" in actions
+        # The outer-completion confirmation is only
+        # meaningful after both segments it confirms: a
+        # confirmation recorded before either segment
+        # completed cannot establish that both paths
+        # finished. Both the sequence position and the
+        # authored ordinal must put both segments first.
+        flow = case["control_flow"]
+        segment_pos = [index for index, step in enumerate(flow)
+                       if step["action"] in ("complete-bounced-segment",
+                                             "complete-admitted-direct-segment")]
+        confirm_pos = [index for index, step in enumerate(flow)
+                       if step["action"] == "confirm-outer-completion"]
+        assert max(segment_pos) < min(confirm_pos), \
+            "both segments must precede the outer-completion confirmation"
+        segment_ord = [int(step["ordinal"]) for step in flow
+                       if step["action"] in ("complete-bounced-segment",
+                                             "complete-admitted-direct-segment")]
+        confirm_ord = [int(step["ordinal"]) for step in flow
+                       if step["action"] == "confirm-outer-completion"]
+        assert max(segment_ord) < min(confirm_ord), \
+            "segment ordinals must precede the confirmation ordinal"
     elif case_id == "authored-policy-finding":
         assert "trip-authored-rule" in actions
         assert "prove-lifecycle-violation" in actions
