@@ -734,6 +734,26 @@ def validate_fixture(doc):
         evidence = {fact.get("evidence_id")
                     for fact in doc["facts"]
                     if isinstance(fact, dict)}
+        # Evidence ids are session-unique: a
+        # duplicated fact record must be rejected
+        # even when the expected counts were
+        # adjusted to match, so the lookup index
+        # above must not silently collapse
+        # duplicates.
+        seen = set()
+        for fact in doc["facts"]:
+            if not isinstance(fact, dict):
+                continue
+            ident = fact.get("evidence_id")
+            if not isinstance(ident, str):
+                continue
+            if ident in seen:
+                errors.append(
+                    "duplicate-evidence-id: "
+                    "facts evidence_id=%r is not "
+                    "session-unique" % (ident,))
+            else:
+                seen.add(ident)
         lineages = {(obj.get("object_token"),
                      obj.get("generation"))
                     for obj in doc["objects"]
