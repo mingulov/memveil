@@ -2198,12 +2198,27 @@ pub fn replay(
         // records its discontinuity against proved state,
         // so a provisional release cannot suppress a loss
         // seal, a skipped gap row still seals or bounds, a
-        // skipped observation, release, quarantine, or
-        // conversion keeps its clock change bounded whatever
-        // leg order replayed first, and a failed revert keeps
-        // the restoration uncertainty it recorded.
+        // skipped observation, release, quarantine,
+        // conversion, informational display, or alias bind
+        // keeps its clock change bounded whatever leg order
+        // replayed first, and a failed revert keeps the
+        // restoration uncertainty it recorded — including
+        // the tentative mark when re-resolution below turns
+        // ambiguous.
         let tentative_sealed = state.sealed.clone();
         let tentative_bounded = state.temporal_bounded.clone();
+        // Lines a tentative revert leg left
+        // restoration-uncertain: re-resolution below may
+        // see every candidate open again and record
+        // nothing, so the tentative uncertainty outlives
+        // the rollback exactly like a seal or bound, and
+        // only for lines the group did not create.
+        let tentative_unknown: Vec<(String, u64)> = state
+            .linked
+            .iter()
+            .filter(|(_, obj)| obj.status == "unknown" && obj.certainty == "unknown")
+            .map(|((token, generation), _)| (token.clone(), *generation))
+            .collect();
         state = checkpoint;
         for key in &tentative_sealed {
             if state.linked.contains_key(key) {
@@ -2213,6 +2228,12 @@ pub fn replay(
         for key in &tentative_bounded {
             if state.linked.contains_key(&(key.0.clone(), key.1)) {
                 state.temporal_bounded.insert(key.clone());
+            }
+        }
+        for key in &tentative_unknown {
+            if let Some(obj) = state.linked.get_mut(key) {
+                obj.status = "unknown".to_string();
+                obj.certainty = "unknown".to_string();
             }
         }
         // Each leg re-resolves against its own ledger
