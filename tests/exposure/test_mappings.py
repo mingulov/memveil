@@ -66,6 +66,13 @@ SOURCE_NO_IO = (
     "std::fs", "std::process", "std::net", "std::env", "std::io",
 )
 
+# The capture identifier itself is scanned: a poisoned
+# top-level capture refuses before entering any evidence handle.
+SOURCE_CAPTURE_REFUSAL = '"capture_id", "forbidden value refused"'
+
+# Capture values the oracle and the reader must both refuse.
+POISONED_CAPTURES = ("/dev/mem", "/proc/kcore", "kcore-view-1")
+
 ENTRY_REQUIRED = (
     "entry_id", "mapping_class", "peer_class",
     "trust_boundary", "address_namespace", "native_result",
@@ -88,6 +95,9 @@ def oracle(document):
     """Re-derive facts, DAX status and refusal count by hand rules."""
     assert document["format"] == FORMAT
     assert document["source_id"] == SOURCE_ID
+    for token in ("dev/mem", "kcore", "/proc/"):
+        assert token not in document["capture_id"], \
+            document["capture_id"]
     facts = []
     refused = 0
     frozen = catalog()["vocabularies"]["frozen"]
@@ -237,11 +247,20 @@ def test_fixtures_carry_no_forbidden_source():
             assert token not in text, (name, token)
 
 
+def test_poisoned_capture_id_refuses():
+    for poison in POISONED_CAPTURES:
+        document = load("mmio-supported.json")
+        document["capture_id"] = poison
+        with pytest.raises(AssertionError):
+            oracle(document)
+
+
 def test_reader_source_refuses_and_stays_offline():
     with open(MODEL, encoding="utf-8") as handle:
         text = handle.read()
     for token in SOURCE_REFUSAL_PRESENT:
         assert token in text, token
+    assert SOURCE_CAPTURE_REFUSAL in text
     for token in SOURCE_ABSENT + SOURCE_NO_IO:
         assert token not in text, token
 

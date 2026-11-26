@@ -191,3 +191,17 @@ fn unknown_native_result_refuses_entry_without_guessing() {
     assert_eq!(inventory.refused_entries, 1);
     assert_eq!(inventory.facts.len(), 1);
 }
+
+#[test]
+fn poisoned_capture_id_refuses() {
+    for poison in ["/dev/mem", "/proc/kcore", "kcore-view-1"] {
+        let text = MMIO.replacen(
+            "\"capture_id\": \"cap-map-mmio-1\"",
+            &format!("\"capture_id\": \"{poison}\""),
+            1,
+        );
+        let err = read_inventory(&text).expect_err("poisoned capture must refuse");
+        assert_eq!(err.what, "capture_id", "{poison}");
+        assert!(err.to_string().contains("forbidden"), "{poison}: {err}");
+    }
+}
