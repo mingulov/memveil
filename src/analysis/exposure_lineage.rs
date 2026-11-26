@@ -514,6 +514,9 @@ fn shown_identity(
     }
     if let Some(generation) = pinned {
         let obj = state.linked.get(&(token.to_string(), generation))?;
+        if !same_origin(obj, row) {
+            return None;
+        }
         return Some((
             QualifiedIdentity {
                 token: token.to_string(),
@@ -829,7 +832,20 @@ fn apply_row(
             "baseline declaration; reconciled explicitly".to_string(),
         ),
         "loss_gap" => {
-            for generation in open_generations(state, &canonical) {
+            // A loss gap seals only lines the gap's own
+            // origin observed: a foreign loss row never
+            // seals same-source identities.
+            let seal: Vec<u64> = open_generations(state, &canonical)
+                .into_iter()
+                .filter(|generation| {
+                    state
+                        .linked
+                        .get(&(canonical.clone(), *generation))
+                        .map(|obj| same_origin(obj, row))
+                        .unwrap_or(false)
+                })
+                .collect();
+            for generation in seal {
                 state.sealed.insert((canonical.clone(), generation));
             }
             apply_shown(
