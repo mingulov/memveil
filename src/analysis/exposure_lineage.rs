@@ -1307,13 +1307,14 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
         }
     }
     // An alias of a bound alias inherits its exact
-    // binding; otherwise the target must offer exactly one
+    // binding when the bound line is still open;
+    // otherwise the target must offer exactly one
     // joinable line through the shared lookup, so an
-    // ambiguous or loss-sealed target refuses the alias
-    // instead of selecting a generation. A refused
-    // allocation poisons the inherited binding too, since
-    // an untracked generation may sit beside the pinned
-    // one.
+    // ambiguous, closed, or loss-sealed target refuses
+    // the alias instead of selecting a generation. A
+    // refused allocation poisons the inherited binding
+    // too, since an untracked generation may sit beside
+    // the pinned one.
     let generation = match state
         .alias
         .get(&alias_key(target, row))
@@ -1347,6 +1348,15 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
                     format!(
                         "event-loss gap precedes row '{}'; alias stays unlinked",
                         row.row_id
+                    ),
+                );
+            }
+            if !is_open(obj.status.as_str()) {
+                return failed(
+                    row,
+                    format!(
+                        "alias target '{target}' generation {bound} is no longer open; \
+                         alias refused"
                     ),
                 );
             }
