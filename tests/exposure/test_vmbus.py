@@ -101,15 +101,17 @@ QUALITY_CHANNELS = ("detail", "aggregate", "identity", "baseline",
                     "terminal")
 
 # Verdict discipline: no fixture may label an outcome as an
-# exploit success or an attack. Matched case-insensitively on
-# word starts so frozen labels such as `native_rejection`
-# stay usable.
+# exploit success or an attack. Matched case-insensitively
+# after any non-alphanumeric separator so underscore-joined
+# labels such as `host_exploit_success` trip while frozen
+# labels such as `native_rejection` stay usable.
 FORBIDDEN = (
     "exploit", "attack", "success", "succeed", "compromis",
     "malicious", "vulnerab", "verdict", "escape", "payload",
 )
 FORBIDDEN_RE = re.compile(
-    r"\b(?:" + "|".join(FORBIDDEN) + r")\w*", re.IGNORECASE)
+    r"(?<![A-Za-z0-9])(?:" + "|".join(FORBIDDEN) + r")\w*",
+    re.IGNORECASE)
 
 U64MAX = 18446744073709551615
 U64RE = re.compile(r"(0|[1-9][0-9]{0,19})")
