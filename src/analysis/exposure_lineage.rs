@@ -837,7 +837,8 @@ fn shown_certainty(
 /// identity. The candidates are the same lines an
 /// ordinary join could take: the handle's own token plus
 /// the generations it recorded under another token and
-/// the generation an invalidated pin last bound. A
+/// the generation an invalidated pin last bound, even
+/// when the handle never allocated its own token. A
 /// restoration-uncertain line beside that one
 /// candidate keeps the display ambiguous, as with ordinary
 /// joins. One sealed line shows its last state with
@@ -851,7 +852,12 @@ fn shown_identity(
     token: &str,
     pinned: Option<u64>,
 ) -> Option<(QualifiedIdentity, String, String)> {
-    if !state.latest.contains_key(token) {
+    // A handle with no allocation of its own still
+    // denotes the generations it recorded under another
+    // token and the generation an invalidated pin last
+    // bound: consult those before giving up, as ordinary
+    // joins do.
+    if !state.latest.contains_key(token) && denoted_extras(state, row, token).is_empty() {
         return None;
     }
     if refusals
