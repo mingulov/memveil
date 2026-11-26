@@ -1308,6 +1308,15 @@ pub fn replay(
             if applied.failed {
                 group_failed = true;
             }
+            // A shared group commits only as a unit: a leg
+            // that joins no identity — including an
+            // informational leg that merely shows nothing —
+            // leaves the unit unproved, so the group rolls
+            // back. Standalone rows keep their own
+            // informational behavior.
+            if !group_failed && legs.len() > 1 && applied.resolved.identity.is_none() {
+                group_failed = true;
+            }
             tentative.push(applied);
             if group_failed {
                 break;
