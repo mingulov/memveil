@@ -142,6 +142,25 @@ def check_defining_outcome(case_id, case, summary, events):
             "conversion request/result steps must both succeed"
         assert "sustain-io-no-conversion" in actions
         assert "observe-zero-new-conversions" in actions
+        # The zero-conversion observation is only meaningful
+        # after the sustained I/O it reports on: an
+        # observation recorded before the I/O ran cannot
+        # establish that the I/O completed with zero new
+        # conversions. Both the sequence position and the
+        # authored ordinal must put the sustained I/O first.
+        flow = case["control_flow"]
+        sustain_pos = [index for index, step in enumerate(flow)
+                       if step["action"] == "sustain-io-no-conversion"]
+        observe_pos = [index for index, step in enumerate(flow)
+                       if step["action"] == "observe-zero-new-conversions"]
+        assert max(sustain_pos) < min(observe_pos), \
+            "sustained I/O must precede the zero-conversion observation"
+        sustain_ord = [int(step["ordinal"]) for step in flow
+                       if step["action"] == "sustain-io-no-conversion"]
+        observe_ord = [int(step["ordinal"]) for step in flow
+                       if step["action"] == "observe-zero-new-conversions"]
+        assert max(sustain_ord) < min(observe_ord), \
+            "sustained-I/O ordinal must precede the observation ordinal"
     elif case_id == "bounced-and-direct-paths":
         assert results == [0, 0, 0]
         assert "complete-bounced-segment" in actions
