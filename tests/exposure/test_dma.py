@@ -602,6 +602,28 @@ def check_coverage(errors, where, record,
                 "source %r"
                 % (where, record.get("capability"),
                    want, record["source_id"]))
+    # A coverage record must pair its source with
+    # that source's catalog address namespace: a
+    # kept source id with the other lane's
+    # namespace claims coverage in an address
+    # space the source never observes.
+    if record.get("source_id") in lane_sources():
+        want_namespace = {
+            entry["source_id"]:
+            entry["address_namespace"]
+            for entry in catalog()["sources"]}[
+                record["source_id"]]
+        if record.get("address_namespace") != \
+                want_namespace:
+            errors.append(
+                "namespace-mismatch: "
+                "%s.address_namespace=%r contradicts "
+                "catalog address namespace %r for "
+                "source %r"
+                % (where,
+                   record.get("address_namespace"),
+                   want_namespace,
+                   record["source_id"]))
     if not isinstance(record.get("profile_id"), str) \
             or not record.get("profile_id"):
         errors.append("bad-label: %s.profile_id" % where)
