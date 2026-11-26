@@ -875,12 +875,14 @@ fn apply_row(
     match row.event.as_str() {
         "allocated" => {
             let applied = apply_allocated(state, config, refusals, row, &canonical);
-            // A fresh identity for the handle drops its
-            // stale binding, so later rows address the new
-            // line; a reuse through a live binding keeps
-            // the binding pinned, and a refusal changes
-            // nothing.
-            if !applied.failed && canonical == row.virtual_id {
+            // A successful allocation drops the handle's
+            // stale binding: a fresh identity addresses
+            // the new line, and a reuse through a live
+            // binding leaves both generations plausible,
+            // so the old pin must not answer later rows
+            // until the alias is explicitly rebound. A
+            // refusal changes nothing.
+            if !applied.failed {
                 state
                     .alias
                     .remove(&alias_key(row.virtual_id.as_str(), row));
