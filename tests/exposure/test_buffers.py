@@ -1213,15 +1213,21 @@ def validate_fixture(doc):
                 continue
             if not is_u64(generation):
                 continue
-            lineage = (token, generation)
-            if lineage in destroyed_lineages:
-                errors.append(
-                    "contradictory-destruction: "
-                    "facts[%d] is a second "
-                    "successful destruction for "
-                    "lineage %r" % (dindex, lineage))
-            else:
-                destroyed_lineages.add(lineage)
+            # Unknown lineages never join: a
+            # null token carries no identity, so
+            # it cannot contradict another
+            # destruction. Only a known lineage
+            # refuses a second success.
+            if token is not None:
+                lineage = (token, generation)
+                if lineage in destroyed_lineages:
+                    errors.append(
+                        "contradictory-destruction: "
+                        "facts[%d] is a second "
+                        "successful destruction for "
+                        "lineage %r" % (dindex, lineage))
+                else:
+                    destroyed_lineages.add(lineage)
             # The ordering key must stay hashable:
             # an array-valued epoch or clock is a
             # shape violation already reported by
