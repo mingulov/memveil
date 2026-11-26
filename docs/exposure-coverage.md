@@ -219,15 +219,17 @@ journal selection refuses. Legacy input refuses journal
 selections, which need integrity metadata.
 
 Stage exits follow one precedence, earliest first:
-invalid input (2), missing collection (3), every partial
-shape (4), strict proved violation (5), else 0. Recovery
-stays partial regardless of policy flags; a comparison
-with refused requested metrics is partial for the same
-reason. A non-strict valid report stays 0 with its policy
-field shown independently. The comparison skeleton reads
-the comparator verdict rows and refuses malformed
-requests; per-metric reasons stay attached to their
-metrics, and no summary claims the pair is healthy.
+invalid input (2), missing collection (3), recovered
+capture (4), refused requested metrics (4), strict
+proved violation (5), strict incomplete evidence (4),
+else 0. Recovery stays partial regardless of policy
+flags; a comparison with refused requested metrics is
+partial for the same reason. A non-strict valid report
+stays 0 with its policy field shown independently. The
+comparison skeleton reads the comparator verdict rows
+and refuses malformed requests; per-metric reasons
+stay attached to their metrics, and no summary claims
+the pair is healthy.
 
 Refusal reasons:
 

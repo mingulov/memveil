@@ -83,6 +83,7 @@ FAMILIES = {
         "out_ordinary_policy_nonstrict.json",
         "out_strict_violation.json",
         "out_strict_incomplete.json",
+        "out_strict_violation_beats_incomplete.json",
         "out_strict_clean.json",
         "out_missing_beats_recovered.json",
         "out_refused_beats_violation.json",
@@ -242,10 +243,11 @@ def expect_exit(outcome):
     """Independent exit-table oracle, in precedence order.
 
     Invalid input beats missing collection, missing beats
-    every partial shape, partial beats a strict proved
-    violation, and only then does the strict violation
-    exit apply. A non-strict valid report stays 0 with
-    its policy field shown independently.
+    recovery and refused requested metrics, those partial
+    shapes beat a strict proved violation, and the
+    violation beats strict incomplete evidence. A
+    non-strict valid report stays 0 with its policy field
+    shown independently.
     """
     if not outcome["inputs_valid"]:
         return 2

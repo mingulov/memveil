@@ -25,12 +25,13 @@
 //! input, keeps the attempt dependency.
 //!
 //! Exit precedence: invalid input (2) beats missing
-//! collection (3), missing beats every partial shape (4),
-//! partial beats a strict proved violation (5), and an
-//! ordinary valid report stays 0 with its policy field
-//! shown independently. Recovery stays partial regardless
-//! of policy flags; a comparison with refused requested
-//! metrics is partial for the same reason.
+//! collection (3), missing beats recovery and refused
+//! requested metrics (4), those partial shapes beat a
+//! strict proved violation (5), the violation beats
+//! strict incomplete evidence (4), and an ordinary valid
+//! report stays 0 with its policy field shown
+//! independently. Recovery stays partial regardless of
+//! policy flags.
 //!
 //! The module is self-contained on purpose: it declares no
 //! parent items, so it compiles both under its public

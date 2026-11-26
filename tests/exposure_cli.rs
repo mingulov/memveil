@@ -410,6 +410,21 @@ fn strict_incomplete_evidence_exits_four() {
     assert_eq!(exit_for_outcome(&outcome), compare::EXIT_PARTIAL);
 }
 
+// case: outcome-strict-violation-beats-incomplete
+#[test]
+fn strict_violation_beats_incomplete_evidence() {
+    let outcome = RunOutcome {
+        strict: true,
+        policy_violation_proved: true,
+        evidence_complete: false,
+        ..valid_outcome()
+    };
+    assert_eq!(
+        exit_for_outcome(&outcome),
+        compare::EXIT_POLICY_VIOLATION
+    );
+}
+
 // case: outcome-strict-clean
 #[test]
 fn strict_complete_clean_result_exits_zero() {
