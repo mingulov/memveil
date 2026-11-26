@@ -515,9 +515,9 @@ fn denoted_extras(state: &State, row: &LedgerRow, handle: &str) -> Vec<(String, 
             .get(&(token.clone(), *generation))
             .map(|obj| same_origin(obj, row))
             .unwrap_or(false)
-        {
-            lines.push((token.clone(), *generation));
-        }
+    {
+        lines.push((token.clone(), *generation));
+    }
     lines.sort();
     lines.dedup();
     lines
@@ -1376,11 +1376,12 @@ fn apply_row(
             // them ambiguous while its line stays open. A
             // refusal changes nothing.
             if !applied.failed
-                && let Some(prior) = state.alias.remove(&alias_key(row.virtual_id.as_str(), row)) {
-                    state
-                        .dropped_pin
-                        .insert(alias_key(row.virtual_id.as_str(), row), prior);
-                }
+                && let Some(prior) = state.alias.remove(&alias_key(row.virtual_id.as_str(), row))
+            {
+                state
+                    .dropped_pin
+                    .insert(alias_key(row.virtual_id.as_str(), row), prior);
+            }
             applied
         }
         "observed" => {
