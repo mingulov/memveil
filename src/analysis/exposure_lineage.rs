@@ -35,7 +35,9 @@
 //!   loss-sealed target refuses the alias.
 //! * Rows that share an `atom` marker commit only as a
 //!   unit: when any leg cannot join, every leg resolves
-//!   UNKNOWN and the legs stay separate samples.
+//!   UNKNOWN and the legs stay separate samples. A group
+//!   interleaved with other rows is refused outright, and
+//!   output always follows ledger order.
 //! * Lineage is bounded per source and per generation.
 //!   Past either bound the replay refuses the new
 //!   identity instead of wrapping or growing without
@@ -168,11 +170,11 @@ pub struct LineageObject {
 pub struct ReplayOutcome {
     /// Capture that was replayed.
     pub capture_id: String,
-    /// Admitted rows in replay order.
+    /// Admitted rows in ledger order.
     pub resolved: Vec<ResolvedRow>,
     /// Lineage lines sorted by `(token, generation, first_seq)`.
     pub objects: Vec<LineageObject>,
-    /// Admitted rows whose join failed, in replay order.
+    /// Admitted rows whose join failed, in ledger order.
     pub failed_joins: Vec<String>,
     /// Rows refused for belonging to another capture.
     pub refused_cross_capture: usize,
@@ -1085,13 +1087,38 @@ fn apply_shown(
     }
 }
 
+/// Record a refused observation as an unlinked sample,
+/// so it stays visible without joining any identity.
+fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
+    if row.event != "observed" {
+        return;
+    }
+    let token =
+        resolve(state, row.virtual_id.as_str()).unwrap_or_else(|| row.virtual_id.clone());
+    state.samples.push((
+        token,
+        ObjState {
+            source_id: row.source_id.clone(),
+            object_class: row.object_class.clone(),
+            clock_domain: row.clock_domain.clone(),
+            status: "unknown".to_string(),
+            certainty: "unknown".to_string(),
+            first_seq: row.seq,
+            last_seq: row.seq,
+            evidence: vec![row.row_id.clone()],
+        },
+    ));
+}
+
 /// Replay one capture of ledger rows.
 ///
 /// Rows normalize by `(seq, row_id)`; rows from another
 /// capture and duplicated row handles are refused before
 /// replay. Rows sharing an `atom` marker commit as a unit:
 /// when any leg fails, the group rolls back and every leg
-/// resolves UNKNOWN with the legs left separate.
+/// resolves UNKNOWN with the legs left separate. A group
+/// whose legs are interleaved with other rows is refused
+/// outright, and output always follows ledger order.
 pub fn replay(
     rows: &[LedgerRow],
     capture_id: &str,
@@ -1119,15 +1146,15 @@ pub fn replay(
     }
 
     let mut atom_group: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut groups: Vec<Vec<&LedgerRow>> = Vec::new();
-    for row in admitted {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (position, row) in admitted.iter().enumerate() {
         match row.atom.as_deref() {
-            None => groups.push(vec![row]),
+            None => groups.push(vec![position]),
             Some(atom) => match atom_group.get(atom) {
-                Some(&group) => groups[group].push(row),
+                Some(&group) => groups[group].push(position),
                 None => {
                     atom_group.insert(atom, groups.len());
-                    groups.push(vec![row]);
+                    groups.push(vec![position]);
                 }
             },
         }
@@ -1138,12 +1165,32 @@ pub fn replay(
     let mut resolved = Vec::new();
     let mut failed_joins = Vec::new();
     for group in &groups {
+        let legs: Vec<&LedgerRow> = group.iter().map(|&position| admitted[position]).collect();
+        // An atomic group whose legs are interleaved with
+        // other rows cannot commit as a unit: refuse every
+        // leg without applying any, so replay never pulls
+        // a later leg ahead of intervening evidence.
+        let contiguous =
+            group.len() < 2 || group[group.len() - 1] - group[0] + 1 == group.len();
+        if !contiguous {
+            for row in &legs {
+                resolved.push(unknown_row(
+                    row,
+                    "atomic group interleaved with other rows; atomicity not proved, \
+                     legs stay separate"
+                        .to_string(),
+                ));
+                failed_joins.push(row.row_id.clone());
+                push_unlinked_sample(&mut state, row);
+            }
+            continue;
+        }
         let checkpoint = state.clone();
         let resolved_len = resolved.len();
         let failed_len = failed_joins.len();
         let mut tentative = Vec::new();
         let mut group_failed = false;
-        for row in group {
+        for row in &legs {
             let applied = apply_row(&mut state, config, &mut refusals, row);
             if applied.failed {
                 group_failed = true;
@@ -1162,7 +1209,7 @@ pub fn replay(
         state = checkpoint;
         resolved.truncate(resolved_len);
         failed_joins.truncate(failed_len);
-        for row in group {
+        for row in &legs {
             let specific = tentative
                 .iter()
                 .find(|applied| applied.resolved.row_id == row.row_id && applied.failed)
@@ -1172,25 +1219,17 @@ pub fn replay(
             });
             resolved.push(unknown_row(row, note));
             failed_joins.push(row.row_id.clone());
-            if row.event == "observed" {
-                let token = resolve(&state, row.virtual_id.as_str())
-                    .unwrap_or_else(|| row.virtual_id.clone());
-                state.samples.push((
-                    token,
-                    ObjState {
-                        source_id: row.source_id.clone(),
-                        object_class: row.object_class.clone(),
-                        clock_domain: row.clock_domain.clone(),
-                        status: "unknown".to_string(),
-                        certainty: "unknown".to_string(),
-                        first_seq: row.seq,
-                        last_seq: row.seq,
-                        evidence: vec![row.row_id.clone()],
-                    },
-                ));
-            }
+            push_unlinked_sample(&mut state, row);
         }
     }
+    // Groups replay at their first leg; restore ledger
+    // order so output always follows (seq, row_id).
+    resolved.sort_by(|left, right| (left.seq, &left.row_id).cmp(&(right.seq, &right.row_id)));
+    let admission: BTreeMap<&str, (u64, &str)> = admitted
+        .iter()
+        .map(|row| (row.row_id.as_str(), (row.seq, row.row_id.as_str())))
+        .collect();
+    failed_joins.sort_by(|left, right| admission[left.as_str()].cmp(&admission[right.as_str()]));
 
     let mut objects: Vec<LineageObject> = Vec::new();
     for ((token, generation), obj) in &state.linked {
