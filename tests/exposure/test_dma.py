@@ -679,8 +679,14 @@ def test_steady_io_no_new_conversions():
     uses = [fact for fact in doc["facts"]
             if fact["kind"] == "queue-use"]
     assert uses, "steady I/O needs transfer facts"
+    # Requested length is not transferred length: a
+    # failed queue use moves no bytes, so only uses
+    # with a successful native result contribute to
+    # the transferred total.
+    succeeded = [fact for fact in uses
+                 if fact["native_result"] == 0]
     derived = sum(int(fact["length_bytes"])
-                  for fact in uses)
+                  for fact in succeeded)
     assert derived > 0
     assert doc["expected"]["bytes_transferred"] == \
         str(derived)
@@ -730,6 +736,21 @@ def test_nested_mixed_sg_segments():
     assert sum(end - start
                for start, end in extents) == \
         outer_length
+    # Every segment must lie inside the outer extent;
+    # disjoint cover alone would also accept a
+    # segment moved past the outer end.
+    outer_start = int(results[0]["offset"])
+    outer_end = outer_start + outer_length
+    for start, end in extents:
+        assert outer_start <= start and end <= outer_end, \
+            "segment outside outer extent: %r not in " \
+            "[%r, %r]" % ((start, end),
+                           outer_start, outer_end)
+    # The envelope total is the outer transfer length,
+    # not an independent number.
+    assert doc["bytes_transferred"] == str(outer_length), \
+        "bytes_transferred=%r outer=%r" % (
+            doc["bytes_transferred"], outer_length)
     assert doc["expected"]["outer_complete"] is True
 
 
