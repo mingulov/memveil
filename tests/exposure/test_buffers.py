@@ -225,6 +225,32 @@ def lifecycle_outcome_agrees(lifecycle, native):
         return native != 0
     return False
 
+
+def native_succeeded(native):
+    """Check a native result for recorded success.
+
+    Success is the integer zero; an
+    unobserved result (None), a failure,
+    or a non-integer records no success.
+    """
+    return isinstance(native, int) \
+        and not isinstance(native, bool) \
+        and native == 0
+
+
+# Kinds whose successful record evidences a
+# live object: a successful creation,
+# attachment, mapping, or scan hold. A put
+# releases a reference rather than evidencing
+# liveness, a callback reports an async
+# outcome, and an inventory lists rather than
+# reviving — none of those contradicts a
+# terminal destruction.
+TERMINAL_LIVENESS_KINDS = (
+    "creation", "attachment",
+    "mapping-entry", "scan-hold",
+)
+
 # Lane capability pinned by the envelope: a fact
 # may only cite a catalog source carrying this
 # capability. Another lane's source id exists in
@@ -1141,6 +1167,74 @@ def validate_fixture(doc):
                     "%r contradicts recorded "
                     "destruction for lineage %r"
                     % (index, status, pair))
+        # Terminal destruction ordering: a
+        # successful outcome-class destruction
+        # ends its token+generation+epoch+clock
+        # lineage, so no successful liveness
+        # record for the same key may start
+        # after the destruction window ends. A
+        # failed, unobserved, or requested
+        # destruction establishes no terminal
+        # event, and timestamps order only
+        # within one epoch and clock domain.
+        terminal_ends = {}
+        for fact in doc["facts"]:
+            if not isinstance(fact, dict):
+                continue
+            if fact.get("kind") != "destruction":
+                continue
+            if fact.get("semantics") not in \
+                    OUTCOME_SEMANTICS:
+                continue
+            if not native_succeeded(
+                    fact.get("native_result")):
+                continue
+            interval = fact.get(
+                "observed_interval")
+            if not isinstance(interval, dict):
+                continue
+            if not is_u64(interval.get("end")):
+                continue
+            key = (fact.get("object_token"),
+                   fact.get("generation"),
+                   fact.get("epoch"),
+                   fact.get("clock_domain"))
+            end = int(interval["end"])
+            if key not in terminal_ends \
+                    or end < terminal_ends[key]:
+                terminal_ends[key] = end
+        for index, fact in enumerate(doc["facts"]):
+            if not isinstance(fact, dict):
+                continue
+            if fact.get("kind") not in \
+                    TERMINAL_LIVENESS_KINDS:
+                continue
+            if not native_succeeded(
+                    fact.get("native_result")):
+                continue
+            key = (fact.get("object_token"),
+                   fact.get("generation"),
+                   fact.get("epoch"),
+                   fact.get("clock_domain"))
+            if key not in terminal_ends:
+                continue
+            interval = fact.get(
+                "observed_interval")
+            if not isinstance(interval, dict):
+                continue
+            if not is_u64(interval.get("start")):
+                continue
+            if int(interval["start"]) > \
+                    terminal_ends[key]:
+                errors.append(
+                    "terminal-destruction-order: "
+                    "facts[%d] kind=%r starts at "
+                    "%r after terminal "
+                    "destruction ends at %r for "
+                    "key %r"
+                    % (index, fact.get("kind"),
+                       interval["start"],
+                       terminal_ends[key], key))
     return errors
 
 
@@ -1341,6 +1435,37 @@ def test_last_reference_teardown():
     assert first_destroy_start >= last_put_end, \
         "destruction before last put: %r < %r" % (
             first_destroy_start, last_put_end)
+    # Destruction is terminal for the
+    # lineage: no successful attachment for
+    # the same token, generation, epoch, and
+    # clock may start after the destruction
+    # window ends. A failed or unobserved
+    # attachment records no success and is
+    # not ordered here.
+    destroy = destroys[0]
+    destroy_key = (destroy["object_token"],
+                   destroy["generation"],
+                   destroy["epoch"],
+                   destroy["clock_domain"])
+    destroy_end = int(
+        destroy["observed_interval"]["end"])
+    for fact in attaches:
+        key = (fact["object_token"],
+               fact["generation"],
+               fact["epoch"],
+               fact["clock_domain"])
+        if key != destroy_key:
+            continue
+        native = fact["native_result"]
+        if not isinstance(native, int) \
+                or native != 0:
+            continue
+        start = int(
+            fact["observed_interval"]["start"])
+        assert start <= destroy_end, \
+            "attachment after destruction: " \
+            "%r starts after %r" % (
+                start, destroy_end)
     assert doc["expected"]["puts"] == len(puts)
     assert doc["expected"]["destructions"] == 1
     assert doc["expected"]["live_tokens"] == []
