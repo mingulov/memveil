@@ -121,14 +121,22 @@ fn repeated_names_collapse_to_first_order() {
         None,
         false,
     ));
-    expect_selected(&outcome, &["attempt-trace", "mapping-lifecycle"], true, None);
+    expect_selected(
+        &outcome,
+        &["attempt-trace", "mapping-lifecycle"],
+        true,
+        None,
+    );
 }
 
 // case: strict-no-spaces
 #[test]
 fn spaced_items_are_unknown() {
-    let outcome =
-        resolve_cli_selection(&request(Some("attempt-trace, mapping-lifecycle"), None, false));
+    let outcome = resolve_cli_selection(&request(
+        Some("attempt-trace, mapping-lifecycle"),
+        None,
+        false,
+    ));
     expect_parse_refusal(&outcome, "unknown-capability");
 }
 
@@ -154,7 +162,11 @@ fn journal_pair_parses_without_the_hook() {
         None,
         false,
     ));
-    expect_channel_refusal(&outcome, &["conversion-journal", "conversion-observe"], false);
+    expect_channel_refusal(
+        &outcome,
+        &["conversion-journal", "conversion-observe"],
+        false,
+    );
 }
 
 // case: mixed-ordinary-journal
@@ -213,7 +225,11 @@ fn every_planned_channel_refuses_as_planned() {
     ] {
         let outcome = resolve_cli_selection(&request(Some(id), None, false));
         assert_eq!(outcome.exit, compare::EXIT_INVALID, "id {id}");
-        assert_eq!(outcome.reason.as_deref(), Some("planned-capability"), "id {id}");
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("planned-capability"),
+            "id {id}"
+        );
     }
 }
 
@@ -241,7 +257,8 @@ fn unknown_name_beats_a_bad_device() {
 // case: device-accepted
 #[test]
 fn device_filter_selects_with_ordinary_channels() {
-    let outcome = resolve_cli_selection(&request(Some("attempt-trace"), Some("0000:00:1f.2"), false));
+    let outcome =
+        resolve_cli_selection(&request(Some("attempt-trace"), Some("0000:00:1f.2"), false));
     expect_selected(&outcome, &["attempt-trace"], true, Some("0000:00:1f.2"));
 }
 
