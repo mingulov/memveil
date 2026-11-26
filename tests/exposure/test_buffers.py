@@ -308,6 +308,16 @@ def check_interval(errors, where, value):
         if name not in ("start", "end", "clock_domain"):
             errors.append("unknown-field: %s.%s"
                           % (where, name))
+    # Intervals are well-formed only when start
+    # precedes end; a reversed interval overlaps
+    # nothing and proves no observation window.
+    if is_u64(value.get("start")) and \
+            is_u64(value.get("end")) and \
+            int(value["start"]) > int(value["end"]):
+        errors.append("bad-interval: %s start=%r is "
+                      "after end=%r"
+                      % (where, value["start"],
+                         value["end"]))
 
 
 def check_fact(errors, where, fact, catalog_sources):
@@ -512,6 +522,14 @@ def check_scan(errors, where, scan, catalog_sources):
               scan.get("start_time"))
     check_u64(errors, where + ".end_time",
               scan.get("end_time"))
+    if is_u64(scan.get("start_time")) and \
+            is_u64(scan.get("end_time")) and \
+            int(scan["start_time"]) > \
+            int(scan["end_time"]):
+        errors.append("bad-interval: %s start_time=%r "
+                      "is after end_time=%r"
+                      % (where, scan["start_time"],
+                         scan["end_time"]))
     check_enum(errors, where + ".scope",
                scan.get("scope"), LANE_SCAN_SCOPES)
     counts = scan.get("counts")

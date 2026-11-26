@@ -286,6 +286,16 @@ def check_interval(errors, where, value):
         if name not in ("start", "end", "clock_domain"):
             errors.append("unknown-field: %s.%s"
                           % (where, name))
+    # Intervals are well-formed only when start
+    # precedes end; a reversed interval overlaps
+    # nothing and proves no observation window.
+    if is_u64(value.get("start")) and \
+            is_u64(value.get("end")) and \
+            int(value["start"]) > int(value["end"]):
+        errors.append("bad-interval: %s start=%r is "
+                      "after end=%r"
+                      % (where, value["start"],
+                         value["end"]))
 
 
 def check_window(errors, where, value):
