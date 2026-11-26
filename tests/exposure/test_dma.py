@@ -179,6 +179,19 @@ DISCLOSURE_KEYS = frozenset(
     disclosure_key(field)
     for field in DISCLOSURE_FIELDS)
 
+# Closed expected-boundary shape: an admitted revert
+# boundary or declared duration carries exactly a
+# boundary type and a reference label; no payload
+# field belongs here.
+BOUNDARY_REQUIRED = (
+    "boundary_type", "reference",
+)
+BOUNDARY_TYPES = (
+    "revert_boundary", "declared_duration",
+)
+BOUNDARY_REF_RE = re.compile(
+    r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+
 
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
@@ -446,6 +459,25 @@ def check_object(errors, where, obj, catalog_sources):
                 "bad-boundary: "
                 "%s.expected_boundary is not an "
                 "object" % where)
+        else:
+            check_keys(
+                errors,
+                "%s.expected_boundary" % where,
+                boundary, BOUNDARY_REQUIRED)
+            check_enum(
+                errors,
+                "%s.expected_boundary.boundary_type"
+                % where,
+                boundary.get("boundary_type"),
+                BOUNDARY_TYPES)
+            reference = boundary.get("reference")
+            if not isinstance(reference, str) \
+                    or BOUNDARY_REF_RE.fullmatch(
+                        reference) is None:
+                errors.append(
+                    "bad-label: "
+                    "%s.expected_boundary.reference=%r"
+                    % (where, reference))
     gaps = obj.get("uncertainty")
     if not isinstance(gaps, dict):
         errors.append("missing-required-key: "
