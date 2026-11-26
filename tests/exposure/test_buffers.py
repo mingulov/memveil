@@ -248,6 +248,33 @@ BOUNDARY_TYPES = (
 BOUNDARY_REF_RE = re.compile(
     r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 
+# Closed expected-block shape per family: the
+# shared derived keys plus that family's
+# hand-computed expectations. Anything else in
+# `expected` is refused, exactly like
+# expected_boundary.
+EXPECTED_FAMILY_KEYS = {
+    "generic-nonshared-negative": (
+        "complete_graph", "shared_origin_proved",
+    ),
+    "two-holder-retention": (
+        "puts", "destructions", "observer_retention",
+    ),
+    "last-reference-teardown": (
+        "puts", "destructions", "mapping_success",
+    ),
+    "callback-failure": (
+        "failed_callbacks",
+    ),
+    "scan-held-reference": (
+        "scan_complete", "scan_bounded",
+        "observer_retention",
+    ),
+    "concurrent-create-reuse": (
+        "lineages", "witness_agrees",
+    ),
+}
+
 
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
@@ -867,6 +894,12 @@ def expected_counts(doc):
 def check_shared_expected(doc):
     derived = expected_counts(doc)
     expected = doc["expected"]
+    allowed = set(derived) | set(
+        EXPECTED_FAMILY_KEYS[doc["family"]])
+    assert set(expected) == allowed, \
+        "%s: expected keys=%r allowed=%r" % (
+            doc["family"], sorted(expected),
+            sorted(allowed))
     for name, value in derived.items():
         assert expected.get(name) == value, \
             "%s: expected.%s=%r derived=%r" % (
