@@ -1240,6 +1240,13 @@ def validate_fixture(doc):
                 continue
             if not isinstance(clock, str):
                 continue
+            # Unknown lineages never join the
+            # ordering index either: a null
+            # token carries no identity, so a
+            # destruction without one ends no
+            # keyed window.
+            if token is None:
+                continue
             key = (token, generation, epoch, clock)
             end = int(interval["end"])
             if key not in terminal_ends \
@@ -1262,6 +1269,13 @@ def validate_fixture(doc):
             if not is_u64(epoch):
                 continue
             if not isinstance(clock, str):
+                continue
+            # Unknown lineages never join the
+            # ordering index either: a null
+            # token carries no identity, so a
+            # liveness record without one
+            # looks up no keyed window.
+            if fact.get("object_token") is None:
                 continue
             key = (fact.get("object_token"),
                    fact.get("generation"),
