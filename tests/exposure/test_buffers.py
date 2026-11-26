@@ -878,7 +878,8 @@ def validate_fixture(doc):
         # destruction is terminal evidence for its
         # lineage, so an object carrying
         # destruction evidence cannot still be
-        # created.
+        # alive: neither `created` nor `live`
+        # coheres with recorded destruction.
         destroyed = {(fact.get("object_token"),
                       fact.get("generation"))
                      for fact in doc["facts"]
@@ -890,14 +891,15 @@ def validate_fixture(doc):
                 continue
             pair = (obj.get("object_token"),
                     obj.get("generation"))
-            if obj.get("lifecycle_status") == "created" \
+            status = obj.get("lifecycle_status")
+            if status in ("created", "live") \
                     and pair in destroyed:
                 errors.append(
                     "lifecycle-coherence: "
                     "objects[%d].lifecycle_status="
-                    "'created' contradicts recorded "
+                    "%r contradicts recorded "
                     "destruction for lineage %r"
-                    % (index, pair))
+                    % (index, status, pair))
     return errors
 
 
