@@ -1111,10 +1111,11 @@ fn record_gap(state: &mut State, row: &LedgerRow) {
 /// Re-derive one rolled-back leg's discontinuity evidence
 /// against restored state, without joining or displaying
 /// any identity. Gap legs record their seal or bound; an
-/// observation, release, quarantine, or recorded conversion
-/// keeps a carried clock-domain change bounded, so a refused
-/// group drops no temporal evidence whatever leg order
-/// replayed first; a failed revert keeps the restoration
+/// observation, release, quarantine, recorded conversion,
+/// informational display, or alias bind keeps a carried
+/// clock-domain change bounded, so a refused group drops no
+/// temporal evidence whatever leg order replayed first; a
+/// failed revert keeps the restoration
 /// uncertainty it recorded, so a later row can no longer
 /// claim the line is known. Addressing mirrors `apply_row`:
 /// aliases resolve first, a looping chain records nothing,
@@ -1123,8 +1124,9 @@ fn record_gap(state: &mut State, row: &LedgerRow) {
 /// outlives the refused group: binds, fresh lines and other
 /// lifecycle transitions never survive.
 /// Events whose discontinuity evidence outlives a refused
-/// group: explicit gaps plus the state-changing rows that
-/// join a line and note its clock domain. Rollback
+/// group: explicit gaps plus the rows that join or show a
+/// line and note its clock domain — state-changing rows,
+/// informational rows, and alias binds. Rollback
 /// re-derivation handles exactly this set, and the
 /// interleaved-group deferral filter reuses it, so neither
 /// path drops a carried clock change or a failed revert's
@@ -1140,6 +1142,9 @@ fn preserves_discontinuity(event: &str) -> bool {
             | "quarantined"
             | "revert_ok"
             | "revert_failed"
+            | "capture_end"
+            | "baseline"
+            | "alias"
     )
 }
 
@@ -1162,6 +1167,22 @@ fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &Ledger
         .alias
         .get(&alias_key(row.virtual_id.as_str(), row))
         .map(|(_, generation)| *generation);
+    // An informational leg shows the current line exactly
+    // as a replayed row would, keeping only the clock
+    // evidence its display records; an alias leg notes the
+    // bound line's clock domain without installing the
+    // binding, which never survives a refused group.
+    match row.event.as_str() {
+        "capture_end" | "baseline" => {
+            let _ = shown_identity(state, refusals, row, &canonical, pinned);
+            return;
+        }
+        "alias" => {
+            record_alias_evidence(state, refusals, row);
+            return;
+        }
+        _ => {}
+    }
     // Quarantine sees restoration-uncertain lines, exactly
     // as a replayed quarantine row would; every other leg
     // joins open lines only.
@@ -1184,6 +1205,95 @@ fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &Ledger
         obj.status = "unknown".to_string();
         obj.certainty = "unknown".to_string();
     }
+}
+
+/// Re-derive one rolled-back alias leg's clock evidence
+/// against restored state, without joining or displaying
+/// any identity and without installing the binding. The
+/// resolution mirrors `apply_alias` check for check: a
+/// leg the replayed row would refuse records nothing,
+/// while a bindable leg notes the bound line's clock
+/// domain exactly as the replayed bind would.
+fn record_alias_evidence(state: &mut State, refusals: &Refusals, row: &LedgerRow) {
+    let target = match row.alias_of.as_deref() {
+        Some(name) => name,
+        None => return,
+    };
+    if refusals
+        .refused_alloc
+        .contains(&refusal_key(&row.virtual_id, row))
+    {
+        return;
+    }
+    let target_canonical = match resolve(state, row, target) {
+        Some(token) => token,
+        None => return,
+    };
+    let allocated_here = state.linked.iter().any(|((name, _), obj)| {
+        name == &row.virtual_id && same_origin(obj, row)
+    });
+    let recorded_here = state
+        .handle_alloc
+        .get(&alias_key(row.virtual_id.as_str(), row))
+        .map(|lines| {
+            lines.iter().any(|(token, generation)| {
+                state
+                    .linked
+                    .contains_key(&(token.clone(), *generation))
+            })
+        })
+        .unwrap_or(false);
+    if allocated_here || recorded_here {
+        return;
+    }
+    if row.virtual_id == target_canonical {
+        return;
+    }
+    let mut probe = target_canonical.clone();
+    for _ in 0..=MAX_ALIAS_HOPS {
+        if probe == row.virtual_id {
+            return;
+        }
+        match state
+            .alias
+            .get(&alias_key(&probe, row))
+            .map(|(token, _)| token.clone())
+        {
+            Some(next) => probe = next,
+            None => break,
+        }
+    }
+    let (bound_token, generation) = match state
+        .alias
+        .get(&alias_key(target, row))
+        .map(|(_, generation)| *generation)
+    {
+        Some(bound) => {
+            if refused_on_path(state, refusals, row, target, &target_canonical) {
+                return;
+            }
+            let key = (target_canonical.clone(), bound);
+            let obj = match state.linked.get(&key) {
+                Some(obj) => obj,
+                None => return,
+            };
+            if state.sealed.contains(&key) {
+                return;
+            }
+            if !is_open(obj.status.as_str()) {
+                return;
+            }
+            if !same_origin(obj, row) {
+                return;
+            }
+            (target_canonical.clone(), bound)
+        }
+        None => match join(state, refusals, row, &target_canonical, None, false) {
+            Ok(joined) => joined,
+            Err(_) => return,
+        },
+    };
+    note_domain(state, row, &bound_token, generation);
 }
 
 /// Seal or bound the lines one gap row denotes. A loss
