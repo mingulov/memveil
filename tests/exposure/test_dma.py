@@ -873,6 +873,44 @@ def test_nested_mixed_sg_segments():
             "outer request/result extent mismatch " \
             "for %r: %r" % (
                 operation, sorted(extents))
+    # Every required segment must sit inside the
+    # outer completion window: a segment observed
+    # after the outer result ends is not part of
+    # this complete transfer. Bounds come from the
+    # parent operation's request start and result
+    # end; order compares only within one clock
+    # domain.
+    for fact in children:
+        parent = fact["parent_operation_id"]
+        group = by_operation.get(parent, [])
+        assert group, \
+            "segment %r names no outer operation " \
+            "%r" % (fact["evidence_id"], parent)
+        domains = {entry["clock_domain"]
+                   for entry in group}
+        domains.add(fact["clock_domain"])
+        assert len(domains) == 1, \
+            "segment %r order needs one clock " \
+            "domain: %r" % (
+                fact["evidence_id"],
+                sorted(domains))
+        window_start = min(
+            int(entry["observed_interval"]["start"])
+            for entry in group
+            if entry["semantics"] == "request")
+        window_end = max(
+            int(entry["observed_interval"]["end"])
+            for entry in group
+            if entry["semantics"] == "result")
+        start = int(
+            fact["observed_interval"]["start"])
+        end = int(fact["observed_interval"]["end"])
+        assert window_start <= start \
+            and end <= window_end, \
+            "segment %r outside the outer " \
+            "completion window [%r, %r]: %r" % (
+                fact["evidence_id"], window_start,
+                window_end, (start, end))
     # Every child segment must have succeeded: a
     # failed segment while claiming complete
     # transfer is not a complete transfer.
