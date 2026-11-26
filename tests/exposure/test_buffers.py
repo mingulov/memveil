@@ -837,12 +837,13 @@ def validate_fixture(doc):
                       "object")
     check_no_disclosure(errors, "envelope", doc)
     # Cross references: every state-evidence id names a
-    # fact, every fact token/generation names an object
-    # lineage, every parent names an operation, and every
-    # witness event names an object lineage.
+    # fact for that object's own lineage, every fact
+    # token/generation names an object lineage, every
+    # parent names an operation, and every witness event
+    # names an object lineage.
     if isinstance(doc.get("facts"), list) and \
             isinstance(doc.get("objects"), list):
-        evidence = {fact.get("evidence_id")
+        evidence = {fact.get("evidence_id"): fact
                     for fact in doc["facts"]
                     if isinstance(fact, dict)}
         lineages = {(obj.get("object_token"),
@@ -862,6 +863,22 @@ def validate_fixture(doc):
                         "dangling-reference: "
                         "objects[%d].state_evidence=%r"
                         % (index, ident))
+                else:
+                    cited = evidence[ident]
+                    if (cited.get("object_token"),
+                            cited.get("generation")) != \
+                            (obj.get("object_token"),
+                             obj.get("generation")):
+                        errors.append(
+                            "unsupported-state-evidence: "
+                            "objects[%d].state_evidence="
+                            "%r names a fact for lineage "
+                            "%r, not %r"
+                            % (index, ident,
+                               (cited.get("object_token"),
+                                cited.get("generation")),
+                               (obj.get("object_token"),
+                                obj.get("generation"))))
         for index, fact in enumerate(doc["facts"]):
             if not isinstance(fact, dict):
                 continue
