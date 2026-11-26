@@ -665,9 +665,7 @@ pub fn read_context(text: &str) -> Result<Context, ReadError> {
     gaps.sort_by(|left, right| {
         (left.from_tick, left.to_tick).cmp(&(right.from_tick, right.to_tick))
     });
-    gaps.dedup_by(|left, right| {
-        left.from_tick == right.from_tick && left.to_tick == right.to_tick
-    });
+    gaps.dedup_by(|left, right| left.from_tick == right.from_tick && left.to_tick == right.to_tick);
     Ok(Context {
         capture_id: capture.to_string(),
         facts,
