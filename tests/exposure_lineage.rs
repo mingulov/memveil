@@ -49,11 +49,13 @@ fn load_json(name: &str) -> Json {
 
 fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
     match value {
-        Json::Obj(entries) => &entries
-            .iter()
-            .find(|(name, _)| name == key)
-            .unwrap_or_else(|| panic!("missing field '{key}'")),
-            .1,
+        Json::Obj(entries) => {
+            &entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .unwrap_or_else(|| panic!("missing field '{key}'"))
+                .1
+        }
         other => panic!("want object for field '{key}', have {other:?}"),
     }
 }

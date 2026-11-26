@@ -145,7 +145,10 @@ def test_vocab_pinned_to_catalog():
 
 
 def test_no_byte_totals_or_claims():
-    paths = [MODEL, RUST_TEST, os.path.abspath(__file__)]
+    # This file defines the forbidden list, so it stays
+    # outside the scan; everything else the lane ships is
+    # scanned.
+    paths = [MODEL, RUST_TEST]
     paths.extend(os.path.join(FIX, name)
                  for name in sorted(os.listdir(FIX))
                  if name.endswith(".json"))
