@@ -1113,19 +1113,22 @@ fn record_gap(state: &mut State, row: &LedgerRow) {
 /// any identity. Gap legs record their seal or bound; an
 /// ordinary observation keeps a carried clock-domain change
 /// bounded, so a refused group drops no temporal evidence
-/// whatever leg order replayed first. Addressing mirrors
+/// whatever leg order replayed first; a failed revert keeps
+/// the restoration uncertainty it recorded, so a later row
+/// can no longer claim the line is known. Addressing mirrors
 /// `apply_row`: aliases resolve first, a looping chain
 /// records nothing, and a leg that joins no single line
 /// records nothing, exactly as a replayed row would. Only
 /// the discontinuity outlives the refused group: binds,
-/// fresh lines and lifecycle transitions never survive.
+/// fresh lines and other lifecycle transitions never
+/// survive.
 fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &LedgerRow) {
     match row.event.as_str() {
         "loss_gap" | "suspend_gap" | "clock_change" => {
             record_gap(state, row);
             return;
         }
-        "observed" => {}
+        "observed" | "revert_failed" => {}
         _ => return,
     }
     let canonical = match resolve(state, row, row.virtual_id.as_str()) {
@@ -1140,7 +1143,19 @@ fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &Ledger
         Ok(joined) => joined,
         Err(_) => return,
     };
-    note_domain(state, row, &joined, generation);
+    if row.event == "observed" {
+        note_domain(state, row, &joined, generation);
+        return;
+    }
+    // A failed revert inside a refused group still observed
+    // that the prior state was not restored: the joined line
+    // keeps unknown state and certainty, exactly as a
+    // replayed revert would record, while its other
+    // bookkeeping stays at the checkpoint.
+    if let Some(obj) = state.linked.get_mut(&(joined, generation)) {
+        obj.status = "unknown".to_string();
+        obj.certainty = "unknown".to_string();
+    }
 }
 
 /// Seal or bound the lines one gap row denotes. A loss
@@ -2021,9 +2036,11 @@ pub fn replay(
         // applied or skipped past the first failure — then
         // records its discontinuity against proved state,
         // so a provisional release cannot suppress a loss
-        // seal, a skipped gap row still seals or bounds, and
-        // a skipped observation keeps its clock change
-        // bounded whatever leg order replayed first.
+        // seal, a skipped gap row still seals or bounds, a
+        // skipped observation keeps its clock change bounded
+        // whatever leg order replayed first, and a failed
+        // revert keeps the restoration uncertainty it
+        // recorded.
         let tentative_sealed = state.sealed.clone();
         let tentative_bounded = state.temporal_bounded.clone();
         state = checkpoint;
