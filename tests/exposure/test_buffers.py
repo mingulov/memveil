@@ -1178,7 +1178,7 @@ def validate_fixture(doc):
         # event, and timestamps order only
         # within one epoch and clock domain.
         terminal_ends = {}
-        for fact in doc["facts"]:
+        for dindex, fact in enumerate(doc["facts"]):
             if not isinstance(fact, dict):
                 continue
             if fact.get("kind") != "destruction":
@@ -1200,6 +1200,12 @@ def validate_fixture(doc):
                    fact.get("epoch"),
                    fact.get("clock_domain"))
             end = int(interval["end"])
+            if key in terminal_ends:
+                errors.append(
+                    "contradictory-destruction: "
+                    "facts[%d] is a second "
+                    "successful destruction for "
+                    "key %r" % (dindex, key))
             if key not in terminal_ends \
                     or end < terminal_ends[key]:
                 terminal_ends[key] = end
