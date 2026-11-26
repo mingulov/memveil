@@ -1167,17 +1167,22 @@ def validate_fixture(doc):
                     "%r contradicts recorded "
                     "destruction for lineage %r"
                     % (index, status, pair))
-        # Terminal destruction ordering: a
-        # successful outcome-class destruction
-        # ends its token+generation+epoch+clock
-        # lineage, so no successful liveness
-        # record for the same key may start
-        # after the destruction window ends. A
-        # failed, unobserved, or requested
-        # destruction establishes no terminal
-        # event, and timestamps order only
-        # within one epoch and clock domain.
+        # Terminal destruction: a successful
+        # outcome-class destruction ends its
+        # token+generation lineage, so a second
+        # one for the same lineage contradicts
+        # the first whatever epoch or clock it
+        # cites. Ordering stays scoped: no
+        # successful liveness record for the
+        # same token+generation+epoch+clock key
+        # may start after the destruction
+        # window ends. A failed, unobserved, or
+        # requested destruction establishes no
+        # terminal event, and timestamps order
+        # only within one epoch and clock
+        # domain.
         terminal_ends = {}
+        destroyed_lineages = set()
         for dindex, fact in enumerate(doc["facts"]):
             if not isinstance(fact, dict):
                 continue
@@ -1195,28 +1200,42 @@ def validate_fixture(doc):
                 continue
             if not is_u64(interval.get("end")):
                 continue
-            # The terminal key must stay hashable: an
-            # array-valued epoch or clock is a shape
-            # violation already reported by the fact
-            # checks, never a TypeError from the
-            # index. Skip such facts here.
+            # The lineage key must stay hashable:
+            # an array-valued token or generation
+            # is a shape violation already
+            # reported by the fact checks, never
+            # a TypeError from the index. Skip
+            # such facts here.
+            token = fact.get("object_token")
+            generation = fact.get("generation")
+            if token is not None \
+                    and not isinstance(token, str):
+                continue
+            if not is_u64(generation):
+                continue
+            lineage = (token, generation)
+            if lineage in destroyed_lineages:
+                errors.append(
+                    "contradictory-destruction: "
+                    "facts[%d] is a second "
+                    "successful destruction for "
+                    "lineage %r" % (dindex, lineage))
+            else:
+                destroyed_lineages.add(lineage)
+            # The ordering key must stay hashable:
+            # an array-valued epoch or clock is a
+            # shape violation already reported by
+            # the fact checks, never a TypeError
+            # from the index. Skip such facts
+            # here.
             epoch = fact.get("epoch")
             clock = fact.get("clock_domain")
             if not is_u64(epoch):
                 continue
             if not isinstance(clock, str):
                 continue
-            key = (fact.get("object_token"),
-                   fact.get("generation"),
-                   epoch,
-                   clock)
+            key = (token, generation, epoch, clock)
             end = int(interval["end"])
-            if key in terminal_ends:
-                errors.append(
-                    "contradictory-destruction: "
-                    "facts[%d] is a second "
-                    "successful destruction for "
-                    "key %r" % (dindex, key))
             if key not in terminal_ends \
                     or end < terminal_ends[key]:
                 terminal_ends[key] = end
