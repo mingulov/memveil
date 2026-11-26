@@ -1111,24 +1111,24 @@ fn record_gap(state: &mut State, row: &LedgerRow) {
 /// Re-derive one rolled-back leg's discontinuity evidence
 /// against restored state, without joining or displaying
 /// any identity. Gap legs record their seal or bound; an
-/// ordinary observation keeps a carried clock-domain change
-/// bounded, so a refused group drops no temporal evidence
-/// whatever leg order replayed first; a failed revert keeps
-/// the restoration uncertainty it recorded, so a later row
-/// can no longer claim the line is known. Addressing mirrors
-/// `apply_row`: aliases resolve first, a looping chain
-/// records nothing, and a leg that joins no single line
-/// records nothing, exactly as a replayed row would. Only
-/// the discontinuity outlives the refused group: binds,
-/// fresh lines and other lifecycle transitions never
-/// survive.
+/// observation, release, quarantine, or recorded conversion
+/// keeps a carried clock-domain change bounded, so a refused
+/// group drops no temporal evidence whatever leg order
+/// replayed first; a failed revert keeps the restoration
+/// uncertainty it recorded, so a later row can no longer
+/// claim the line is known. Addressing mirrors `apply_row`:
+/// aliases resolve first, a looping chain records nothing,
+/// and a leg that joins no single line records nothing,
+/// exactly as a replayed row would. Only the discontinuity
+/// outlives the refused group: binds, fresh lines and other
+/// lifecycle transitions never survive.
 fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &LedgerRow) {
     match row.event.as_str() {
         "loss_gap" | "suspend_gap" | "clock_change" => {
             record_gap(state, row);
             return;
         }
-        "observed" | "revert_failed" => {}
+        "observed" | "released" | "quarantined" | "revert_ok" | "revert_failed" => {}
         _ => return,
     }
     let canonical = match resolve(state, row, row.virtual_id.as_str()) {
@@ -1139,11 +1139,16 @@ fn record_rollback_evidence(state: &mut State, refusals: &Refusals, row: &Ledger
         .alias
         .get(&alias_key(row.virtual_id.as_str(), row))
         .map(|(_, generation)| *generation);
-    let (joined, generation) = match join(state, refusals, row, &canonical, pinned, false) {
+    // Quarantine sees restoration-uncertain lines, exactly
+    // as a replayed quarantine row would; every other leg
+    // joins open lines only.
+    let unknown_ok = row.event == "quarantined";
+    let (joined, generation) = match join(state, refusals, row, &canonical, pinned, unknown_ok)
+    {
         Ok(joined) => joined,
         Err(_) => return,
     };
-    if row.event == "observed" {
+    if row.event != "revert_failed" {
         note_domain(state, row, &joined, generation);
         return;
     }
@@ -2025,8 +2030,8 @@ pub fn replay(
         }
         // Discontinuity evidence survives group rollback,
         // re-derived against the restored checkpoint: a loss
-        // seal, a temporal bound, or a clock-domain change an
-        // ordinary observation carried records a break in the
+        // seal, a temporal bound, or a clock-domain change a
+        // state-changing row carried records a break in the
         // ledger stream, not a join claim, so continuity past
         // the break stays unproved even when the group as a
         // unit is unproved. Tentative seals and bounds
@@ -2037,10 +2042,10 @@ pub fn replay(
         // records its discontinuity against proved state,
         // so a provisional release cannot suppress a loss
         // seal, a skipped gap row still seals or bounds, a
-        // skipped observation keeps its clock change bounded
-        // whatever leg order replayed first, and a failed
-        // revert keeps the restoration uncertainty it
-        // recorded.
+        // skipped observation, release, quarantine, or
+        // conversion keeps its clock change bounded whatever
+        // leg order replayed first, and a failed revert keeps
+        // the restoration uncertainty it recorded.
         let tentative_sealed = state.sealed.clone();
         let tentative_bounded = state.temporal_bounded.clone();
         state = checkpoint;
