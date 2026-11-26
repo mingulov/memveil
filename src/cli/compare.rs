@@ -257,7 +257,7 @@ pub fn resolve_cli_selection(request: &SelectionRequest) -> SelectionOutcome {
             return parse_refusal("device-hides-global-evidence");
         }
     }
-    let hook = has_ordinary || request.legacy;
+    let hook = has_ordinary;
     if has_journal {
         return SelectionOutcome {
             exit: EXIT_REFUSAL,
