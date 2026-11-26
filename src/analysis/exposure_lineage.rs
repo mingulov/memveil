@@ -406,16 +406,33 @@ fn bound_key(
     )
 }
 
-/// Bound every tracked line of one token in the row's
-/// own origin: a gap row bounds the generations it can
-/// see without touching other origins' lines.
-fn bound_token_lines(state: &mut State, row: &LedgerRow, canonical: &str) {
-    let bound: Vec<u64> = state
-        .linked
-        .iter()
-        .filter(|((name, _), obj)| name == canonical && same_origin(obj, row))
-        .map(|((_, generation), _)| *generation)
-        .collect();
+/// Bound the lines a gap row can see in the row's
+/// own origin: a row addressed through a pinned alias
+/// bounds only that generation, so a suspend or clock
+/// marker never bounds a newer generation the pin does
+/// not address; an unpinned row bounds every
+/// same-origin line of its token. Other origins' lines
+/// stay unaffected either way.
+fn bound_token_lines(
+    state: &mut State,
+    row: &LedgerRow,
+    canonical: &str,
+    pinned: Option<u64>,
+) {
+    let bound: Vec<u64> = match pinned {
+        Some(generation) => state
+            .linked
+            .get(&(canonical.to_string(), generation))
+            .filter(|obj| same_origin(obj, row))
+            .map(|_| vec![generation])
+            .unwrap_or_default(),
+        None => state
+            .linked
+            .iter()
+            .filter(|((name, _), obj)| name == canonical && same_origin(obj, row))
+            .map(|((_, generation), _)| *generation)
+            .collect(),
+    };
     for generation in bound {
         state
             .temporal_bounded
@@ -1144,7 +1161,7 @@ fn apply_row(
             )
         }
         "suspend_gap" => {
-            bound_token_lines(state, row, &canonical);
+            bound_token_lines(state, row, &canonical, pinned);
             apply_shown(
                 state,
                 refusals,
@@ -1155,7 +1172,7 @@ fn apply_row(
             )
         }
         "clock_change" => {
-            bound_token_lines(state, row, &canonical);
+            bound_token_lines(state, row, &canonical, pinned);
             apply_shown(
                 state,
                 refusals,
