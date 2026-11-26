@@ -167,11 +167,13 @@ LANE_SCAN_SCOPES = (
 # whose kind observes the claim. Same lineage
 # alone is not support: a creation fact proves
 # the object existed, never that it was
-# released, quarantined, or held.
+# released, quarantined, or held. A put is not
+# destruction: a release claim needs
+# destruction-kind evidence, never a lone put.
 STATE_SUPPORT = {
     "inventoried": ("inventory",),
     "shared-live": ("attachment",),
-    "released": ("release-put", "destruction"),
+    "released": ("destruction",),
     "quarantined": ("callback-result",),
     "scan-held": ("scan-hold",),
     "reused": ("creation", "destruction"),
