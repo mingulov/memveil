@@ -364,20 +364,23 @@ def test_expected_ids_match_catalog():
 def test_stage_exits_stay_closed():
     for name in all_fixtures():
         fixture = load_fixture(name)
-        code = fixture["expected"]["exit"]
+        expected = fixture["expected"]
+        code = expected["exit"]
+        reason = expected.get("reason")
         if "selection" in fixture:
             assert code in (0, 2, 3), \
                 "%s: selection stage exit %r" % (name, code)
         else:
             assert code in (0, 2, 3, 4, 5), \
                 "%s: run exit %r" % (name, code)
+        assert reason is None or reason in REASONS, \
+            "%s: undocumented reason %r" % (name, reason)
         if code == 0:
-            assert fixture["expected"]["reason"] is None, \
+            assert reason is None, \
                 "%s: clean exit carries a reason" % name
-        else:
-            assert fixture["expected"]["reason"] in REASONS, \
-                "%s: undocumented reason %r" % (
-                    name, fixture["expected"]["reason"])
+        if code == 2 and "outcome" not in fixture:
+            assert reason in REASONS, \
+                "%s: refusal without a reason" % name
 
 
 # Precedence order, earliest first. The order test walks
