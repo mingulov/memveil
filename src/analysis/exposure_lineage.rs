@@ -47,10 +47,11 @@
 //!   still records at its ledger position: rollback
 //!   re-derives each gap leg against proved state and
 //!   keeps tentative seals and bounds only for lines the
-//!   group did not create. Continuity past a gap stays
-//!   unproved even when the group as a unit is unproved,
-//!   and a fresh allocation never inherits a gap that
-//!   struck a rolled-back object.
+//!   group did not create, while a refused group's gap
+//!   rows record once replay passes them. Continuity past
+//!   a gap stays unproved even when the group as a unit is
+//!   unproved, and a fresh allocation never inherits a gap
+//!   that struck a rolled-back object.
 //! * Lineage is bounded per source and per generation.
 //!   Past either bound the replay refuses the new
 //!   identity instead of wrapping or growing without
@@ -1844,8 +1845,9 @@ fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
 /// resolves UNKNOWN with the legs left separate, while
 /// each gap leg still records its discontinuity against
 /// proved state. A group whose legs are interleaved with
-/// other rows is refused outright, and output always
-/// follows ledger order.
+/// other rows is refused outright, with its gap rows
+/// recorded once replay passes their ledger positions,
+/// and output always follows ledger order.
 pub fn replay(
     rows: &[LedgerRow],
     capture_id: &str,
@@ -1891,8 +1893,24 @@ pub fn replay(
     let mut refusals = Refusals::default();
     let mut resolved = Vec::new();
     let mut failed_joins = Vec::new();
+    // Ledger positions of gap rows deferred from refused
+    // interleaved groups, recorded once replay passes them.
+    let mut pending_gaps: Vec<usize> = Vec::new();
     for group in &groups {
         let legs: Vec<&LedgerRow> = group.iter().map(|&position| admitted[position]).collect();
+        // Record deferred gaps whose ledger position
+        // replay has passed, oldest first: every earlier
+        // row already applied, so each gap records against
+        // its exact prefix while rows before it replayed
+        // unaffected.
+        pending_gaps.sort();
+        let mut due = 0;
+        while due < pending_gaps.len() && pending_gaps[due] < group[0] {
+            due += 1;
+        }
+        for position in pending_gaps.drain(..due) {
+            record_gap(&mut state, admitted[position]);
+        }
         // An atomic group whose legs are interleaved with
         // other rows cannot commit as a unit: refuse every
         // leg without applying any, so replay never pulls
@@ -1909,6 +1927,19 @@ pub fn replay(
                 ));
                 failed_joins.push(row.row_id.clone());
                 push_unlinked_sample(&mut state, row);
+            }
+            // A refused group's gap rows still observed a
+            // discontinuity in the ledger stream: defer
+            // each gap to its own ledger position so rows
+            // before it replay unaffected while later rows
+            // see the seal or bound.
+            for &position in group {
+                match admitted[position].event.as_str() {
+                    "loss_gap" | "suspend_gap" | "clock_change" => {
+                        pending_gaps.push(position);
+                    }
+                    _ => {}
+                }
             }
             continue;
         }
@@ -1985,6 +2016,13 @@ pub fn replay(
             failed_joins.push(row.row_id.clone());
             push_unlinked_sample(&mut state, row);
         }
+    }
+    // Gaps deferred past the last group still record,
+    // against final state: no later row can observe them,
+    // but the evidence stays total.
+    pending_gaps.sort();
+    for position in pending_gaps {
+        record_gap(&mut state, admitted[position]);
     }
     // Groups replay at their first leg; restore ledger
     // order so output always follows (seq, row_id).
