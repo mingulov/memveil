@@ -1283,7 +1283,14 @@ fn apply_alias(state: &mut State, refusals: &Refusals, row: &LedgerRow) -> Appli
             );
         }
     };
-    if state.latest.contains_key(&row.virtual_id) {
+    // Admission is per origin: a handle allocated only
+    // in another source or class stays bindable here,
+    // while a handle already allocated in this origin
+    // refuses the alias instead of binding over it.
+    let allocated_here = state.linked.iter().any(|((name, _), obj)| {
+        name == &row.virtual_id && same_origin(obj, row)
+    });
+    if allocated_here {
         return failed(
             row,
             format!("token '{}' already allocated; alias refused", row.virtual_id),
