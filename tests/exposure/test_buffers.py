@@ -192,6 +192,20 @@ LIFECYCLE_SUPPORT = {
     "quarantined": ("callback-result",),
 }
 
+# Outcome-class evidence: the cited fact must
+# record that the claimed transition happened,
+# not merely ask for it. A request asks, an
+# inventory lists, a state observes, and a
+# rejection refuses — none establishes the
+# claimed outcome. Only a result or lifecycle
+# record does, matching the catalog
+# ExposureFact contract (a weaker class never
+# promotes a record to a stronger one) and the
+# fixtures' own coherence (transition kinds
+# carry lifecycle, callback results carry
+# result).
+OUTCOME_SEMANTICS = ("result", "lifecycle")
+
 # Lane capability pinned by the envelope: a fact
 # may only cite a catalog source carrying this
 # capability. Another lane's source id exists in
@@ -959,6 +973,7 @@ def validate_fixture(doc):
             if not isinstance(obj, dict):
                 continue
             cited_kinds = []
+            cited_pairs = []
             for ident in \
                     obj.get("state_evidence", []):
                 if ident not in evidence:
@@ -970,6 +985,9 @@ def validate_fixture(doc):
                     cited = evidence[ident]
                     cited_kinds.append(
                         cited.get("kind"))
+                    cited_pairs.append(
+                        (cited.get("kind"),
+                         cited.get("semantics")))
                     if (cited.get("object_token"),
                             cited.get("generation")) != \
                             (obj.get("object_token"),
@@ -1012,7 +1030,12 @@ def validate_fixture(doc):
             # accept creation. The status value must
             # be text before the support-table
             # lookup, mirroring the state guard
-            # above.
+            # above. The supporting fact must carry
+            # the required kind with outcome-class
+            # semantics on the SAME record: a
+            # destruction or callback-result fact
+            # filed as a mere request cannot
+            # establish release or quarantine.
             lifecycle = obj.get("lifecycle_status")
             if isinstance(lifecycle, str):
                 need_kinds = \
@@ -1021,7 +1044,10 @@ def validate_fixture(doc):
                 need_kinds = None
             if need_kinds is not None and \
                     not any(kind in need_kinds
-                            for kind in cited_kinds):
+                            and semantics in
+                            OUTCOME_SEMANTICS
+                            for kind, semantics
+                            in cited_pairs):
                 errors.append(
                     "unsupported-state-evidence: "
                     "objects[%d] lifecycle_status=%r "
