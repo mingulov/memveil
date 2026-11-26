@@ -127,13 +127,19 @@ def check_defining_outcome(case_id, case, summary, events):
         assert case["before_ledger"] == [] and case["after_ledger"] == []
         assert all(step["object"] == "none"
                    for step in case["control_flow"])
-        # The case must show actual successful I/O
-        # observation, not just empty ledgers: at least one
-        # successful step plus the defining observation
-        # actions.
-        assert any(step["native_result"] == 0
-                   for step in case["control_flow"]), \
-            "conversion request/result shows no successful I/O"
+        # The case must show actually successful sustained
+        # I/O, not just empty ledgers: the sustained-I/O step
+        # itself must succeed, and so must the defining
+        # observation. Success is per step, never pooled: a
+        # failed sustain step with a clean observation (or the
+        # reverse) is a failed leg, not a pass.
+        sustain = [step for step in case["control_flow"]
+                   if step["action"] == "sustain-io-no-conversion"]
+        assert sustain and all(step["native_result"] == 0
+                               for step in sustain), \
+            "conversion request/result shows no successful sustained I/O"
+        assert results == [0, 0], \
+            "conversion request/result steps must both succeed"
         assert "sustain-io-no-conversion" in actions
         assert "observe-zero-new-conversions" in actions
     elif case_id == "bounced-and-direct-paths":
