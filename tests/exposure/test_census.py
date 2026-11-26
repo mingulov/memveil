@@ -309,10 +309,13 @@ def expect_uncertainty(left, right):
     return str(min(bound_of(left) + bound_of(right), U64_MAX))
 
 
-# Frozen census unit vocabulary: observed event counts
+# Frozen census unit vocabulary from the exposure
+# catalog (units ["bytes", "unknown"]): only these labels
 # compare; anything else (a blank label included) refuses
-# as unknown and records the unknown result unit.
-KNOWN_UNITS = ("events", "unknown")
+# as unknown and records the unknown result unit. Count
+# metrics use "unknown": no admitted source freezes an
+# event-count unit, and only a catalog revision may add one.
+KNOWN_UNITS = ("bytes", "unknown")
 
 
 def expect_unit(left, right, class_id, reason):
@@ -620,7 +623,7 @@ def base_pair():
                          "races_observed": False},
             "counts": [{
                 "class_id": "x",
-                "unit": "events",
+                "unit": "unknown",
                 "value": "1",
             }],
             "coverage": ["census-sweep"],
@@ -650,7 +653,7 @@ def break_check(reason, left, right):
     elif reason == "unit-unknown":
         left["counts"][0]["unit"] = ""
     elif reason == "unit-mismatch":
-        count["unit"] = "unknown"
+        count["unit"] = "bytes"
     elif reason == "scope-unknown":
         left["scope"] = ""
     elif reason == "scope-mismatch":

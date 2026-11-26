@@ -29,7 +29,7 @@
 //! path and through a direct path include in tests. It takes
 //! no live input and performs no I/O. Snapshots record
 //! guest-view counts only; every count is an observed
-//! event total with a unit, never an interpreted verdict.
+//! count total with a unit, never an interpreted verdict.
 
 /// One observed class inside a census snapshot.
 ///
@@ -230,7 +230,7 @@ fn find_count<'m>(snapshot: &'m CensusSnapshot, id: &str) -> Option<&'m CensusCo
 /// missing where its content is interpreted, so a blank scope
 /// refuses its row as unknown while a non-blank scope with a
 /// control character refuses the whole input. A unit outside
-/// the frozen vocabulary (`events`, `unknown`) — a blank unit
+/// the frozen vocabulary (`bytes`, `unknown`) — a blank unit
 /// included — refuses its row as `unit-unknown` with no delta
 /// and records the result unit as `unknown`. A one-sided class
 /// keeps reason `class-missing` but records `unknown` when its
@@ -293,9 +293,13 @@ fn has_control(value: &str) -> bool {
         .any(|c| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
 }
 
-/// Frozen census unit vocabulary: observed event counts
-/// compare; anything else refuses as unknown.
-const KNOWN_UNITS: [&str; 2] = ["events", "unknown"];
+/// Frozen census unit vocabulary from the exposure
+/// catalog (`units: ["bytes", "unknown"]`): only these
+/// labels compare; anything else refuses as unknown.
+/// Count metrics use `unknown`: no admitted source
+/// freezes an event-count unit, and only a catalog
+/// revision may add one.
+const KNOWN_UNITS: [&str; 2] = ["bytes", "unknown"];
 
 fn is_known_unit(unit: &str) -> bool {
     KNOWN_UNITS.contains(&unit)

@@ -57,7 +57,7 @@ fn snapshot(evidence: &str, value: Option<u64>) -> CensusSnapshot {
         coverage: vec!["census-sweep".to_string()],
         atomicity: atomicity("atomic", false, None),
         journal: journal("journal-main", true),
-        counts: vec![count("x", "events", value, None)],
+        counts: vec![count("x", "unknown", value, None)],
     }
 }
 
@@ -105,12 +105,12 @@ fn compatible_golden_reports_exact_known_deltas() {
     // Fixture case "compatible-golden".
     let mut left = snapshot("snap-left-001", Some(120));
     left.counts
-        .push(count("class-b", "events", Some(50), None));
+        .push(count("class-b", "unknown", Some(50), None));
     left.counts[0].class_id = "class-a".to_string();
     let mut right = snapshot("snap-right-001", Some(128));
     right
         .counts
-        .push(count("class-b", "events", Some(41), None));
+        .push(count("class-b", "unknown", Some(41), None));
     right.counts[0].class_id = "class-a".to_string();
     let rows = compare_snapshots(&left, &right).expect("compatible pair compares");
     assert_eq!(rows.len(), 2);
@@ -124,7 +124,7 @@ fn compatible_golden_reports_exact_known_deltas() {
         Some(8),
         None,
         Some(0),
-        "events",
+        "unknown",
         "guest-view",
         Quality::complete(),
     );
@@ -138,7 +138,7 @@ fn compatible_golden_reports_exact_known_deltas() {
         Some(-9),
         None,
         Some(0),
-        "events",
+        "unknown",
         "guest-view",
         Quality::complete(),
     );
@@ -162,7 +162,7 @@ fn missing_class_is_unavailable_without_numbers() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::unavailable(),
     );
@@ -176,7 +176,7 @@ fn missing_class_is_unavailable_without_numbers() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::unavailable(),
     );
@@ -189,14 +189,14 @@ fn races_state_exact_delta_plus_uncertainty() {
     left.evidence_id = "snap-left-014".to_string();
     left.atomicity = atomicity("interval", true, Some(4));
     left.counts = vec![
-        count("x", "events", Some(100), None),
-        count("y", "events", Some(7), None),
+        count("x", "unknown", Some(100), None),
+        count("y", "unknown", Some(7), None),
     ];
     right.evidence_id = "snap-right-014".to_string();
     right.atomicity = atomicity("interval", true, Some(6));
     right.counts = vec![
-        count("x", "events", Some(150), None),
-        count("y", "events", Some(7), None),
+        count("x", "unknown", Some(150), None),
+        count("y", "unknown", Some(7), None),
     ];
     let rows = compare_snapshots(&left, &right).expect("racy pair compares");
     assert_eq!(rows.len(), 2);
@@ -210,7 +210,7 @@ fn races_state_exact_delta_plus_uncertainty() {
         Some(50),
         None,
         Some(10),
-        "events",
+        "unknown",
         "guest-view",
         Quality::complete(),
     );
@@ -224,7 +224,7 @@ fn races_state_exact_delta_plus_uncertainty() {
         Some(0),
         None,
         Some(10),
-        "events",
+        "unknown",
         "guest-view",
         Quality::complete(),
     );
@@ -236,7 +236,7 @@ fn uncertainty_saturates_at_u64_max() {
     let (mut left, mut right) = pair();
     left.evidence_id = "snap-left-015".to_string();
     left.atomicity = atomicity("interval", true, Some(u64::MAX));
-    left.counts = vec![count("x", "events", Some(5), None)];
+    left.counts = vec![count("x", "unknown", Some(5), None)];
     right.evidence_id = "snap-right-015".to_string();
     right.atomicity = atomicity("interval", true, Some(1));
     let rows = compare_snapshots(&left, &right).expect("pair compares");
@@ -251,7 +251,7 @@ fn uncertainty_saturates_at_u64_max() {
         Some(4),
         None,
         Some(u64::MAX),
-        "events",
+        "unknown",
         "guest-view",
         Quality::complete(),
     );
@@ -291,7 +291,7 @@ fn clock_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -316,7 +316,7 @@ fn blank_clock_is_unknown() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -341,7 +341,7 @@ fn window_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -366,7 +366,7 @@ fn journal_scope_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -391,7 +391,7 @@ fn partial_journal_refuses_and_never_nets() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -403,13 +403,13 @@ fn unknown_value_stays_compatible_with_null_delta() {
     let (mut left, mut right) = pair();
     left.evidence_id = "snap-left-021".to_string();
     left.counts = vec![
-        count("x", "events", None, Some("source-unavailable")),
-        count("y", "events", Some(3), None),
+        count("x", "unknown", None, Some("source-unavailable")),
+        count("y", "unknown", Some(3), None),
     ];
     right.evidence_id = "snap-right-021".to_string();
     right.counts = vec![
-        count("x", "events", Some(9), None),
-        count("y", "events", None, Some("drain-incomplete")),
+        count("x", "unknown", Some(9), None),
+        count("y", "unknown", None, Some("drain-incomplete")),
     ];
     let rows = compare_snapshots(&left, &right).expect("pair compares");
     assert_eq!(rows.len(), 2);
@@ -423,7 +423,7 @@ fn unknown_value_stays_compatible_with_null_delta() {
         None,
         Some("value-unknown"),
         Some(0),
-        "events",
+        "unknown",
         "guest-view",
         Quality::unknown(),
     );
@@ -437,7 +437,7 @@ fn unknown_value_stays_compatible_with_null_delta() {
         None,
         Some("value-unknown"),
         Some(0),
-        "events",
+        "unknown",
         "guest-view",
         Quality::unknown(),
     );
@@ -449,13 +449,13 @@ fn delta_overflow_stays_compatible_with_null_delta() {
     let (mut left, mut right) = pair();
     left.evidence_id = "snap-left-022".to_string();
     left.counts = vec![
-        count("x", "events", Some(u64::MAX), None),
-        count("y", "events", Some(0), None),
+        count("x", "unknown", Some(u64::MAX), None),
+        count("y", "unknown", Some(0), None),
     ];
     right.evidence_id = "snap-right-022".to_string();
     right.counts = vec![
-        count("x", "events", Some(0), None),
-        count("y", "events", Some(u64::MAX), None),
+        count("x", "unknown", Some(0), None),
+        count("y", "unknown", Some(u64::MAX), None),
     ];
     let rows = compare_snapshots(&left, &right).expect("pair compares");
     assert_eq!(rows.len(), 2);
@@ -469,7 +469,7 @@ fn delta_overflow_stays_compatible_with_null_delta() {
         None,
         Some("delta-overflow"),
         Some(0),
-        "events",
+        "unknown",
         "guest-view",
         Quality::unknown(),
     );
@@ -483,7 +483,7 @@ fn delta_overflow_stays_compatible_with_null_delta() {
         None,
         Some("delta-overflow"),
         Some(0),
-        "events",
+        "unknown",
         "guest-view",
         Quality::unknown(),
     );
@@ -534,7 +534,7 @@ fn blank_scope_is_unknown_never_equal() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "",
         Quality::refused(),
     );
@@ -559,7 +559,7 @@ fn scope_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -584,7 +584,7 @@ fn profile_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -609,7 +609,7 @@ fn workload_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -634,7 +634,7 @@ fn epoch_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -659,7 +659,7 @@ fn device_binding_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -684,7 +684,7 @@ fn coverage_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -723,7 +723,7 @@ fn unknown_atomicity_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -734,7 +734,7 @@ fn duplicate_class_refuses_the_whole_input() {
     // Fixture case "duplicate-class".
     let (mut left, right) = pair();
     left.evidence_id = "snap-left-023".to_string();
-    left.counts.push(count("x", "events", Some(5), None));
+    left.counts.push(count("x", "unknown", Some(5), None));
     let mut right = right;
     right.evidence_id = "snap-right-023".to_string();
     let refusal = compare_snapshots(&left, &right).expect_err("duplicates refuse");
@@ -838,7 +838,7 @@ fn left_snapshot_validates_before_right() {
     let (mut left, mut right) = pair();
     left.window.start = 3000;
     left.window.end = 2000;
-    right.counts.push(count("x", "events", Some(5), None));
+    right.counts.push(count("x", "unknown", Some(5), None));
     let refusal = compare_snapshots(&left, &right).expect_err("invalid pair refuses");
     assert_eq!(refusal.reason, "invalid-window");
 }
@@ -850,13 +850,13 @@ fn rows_follow_left_order_then_right_only() {
     // struct-level property, not a golden row.
     let (mut left, mut right) = pair();
     left.counts = vec![
-        count("b", "events", Some(1), None),
-        count("a", "events", Some(2), None),
+        count("b", "unknown", Some(1), None),
+        count("a", "unknown", Some(2), None),
     ];
     right.counts = vec![
-        count("a", "events", Some(3), None),
-        count("c", "events", Some(4), None),
-        count("b", "events", Some(5), None),
+        count("a", "unknown", Some(3), None),
+        count("c", "unknown", Some(4), None),
+        count("b", "unknown", Some(5), None),
     ];
     let rows = compare_snapshots(&left, &right).expect("pair compares");
     let ids: Vec<&str> = rows.iter().map(|row| row.class_id.as_str()).collect();
@@ -877,7 +877,7 @@ fn checks_run_in_documented_order() {
         for reason in [first, second] {
             match reason {
                 "unit-unknown" => left.counts[0].unit = String::new(),
-                "unit-mismatch" => right.counts[0].unit = "unknown".to_string(),
+                "unit-mismatch" => right.counts[0].unit = "bytes".to_string(),
                 "scope-unknown" => left.scope = String::new(),
                 "scope-mismatch" => right.scope = "guest-view-narrow".to_string(),
                 "profile-mismatch" => {
@@ -1043,7 +1043,7 @@ fn atomicity_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "unknown",
         "guest-view",
         Quality::refused(),
     );
@@ -1056,7 +1056,7 @@ fn unit_mismatch_refuses_comparison() {
     let mut left = left;
     left.evidence_id = "snap-left-004".to_string();
     right.evidence_id = "snap-right-004".to_string();
-    right.counts[0].unit = "unknown".to_string();
+    left.counts[0].unit = "bytes".to_string();
     let rows = compare_snapshots(&left, &right).expect("pair compares");
     assert_eq!(rows.len(), 1);
     expect_row(
@@ -1069,7 +1069,7 @@ fn unit_mismatch_refuses_comparison() {
         None,
         None,
         None,
-        "events",
+        "bytes",
         "guest-view",
         Quality::refused(),
     );
