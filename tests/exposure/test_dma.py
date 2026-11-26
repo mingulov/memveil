@@ -584,6 +584,24 @@ def check_coverage(errors, where, record,
                          lane_sources()))
     check_slug(errors, where + ".capability",
                record.get("capability"))
+    # A coverage record must pair its source with
+    # that source's catalog capability: a kept
+    # source id with the other lane's capability
+    # claims coverage the source never backs.
+    if record.get("source_id") in lane_sources():
+        want = {entry["source_id"]:
+                entry["capability"]
+                for entry in
+                catalog()["sources"]}[
+                    record["source_id"]]
+        if record.get("capability") != want:
+            errors.append(
+                "capability-mismatch: "
+                "%s.capability=%r contradicts "
+                "catalog capability %r for "
+                "source %r"
+                % (where, record.get("capability"),
+                   want, record["source_id"]))
     if not isinstance(record.get("profile_id"), str) \
             or not record.get("profile_id"):
         errors.append("bad-label: %s.profile_id" % where)
