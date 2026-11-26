@@ -979,6 +979,32 @@ def test_concurrent_create_reuse_witness():
             "fact for lineage %r" % (
                 event["witness_id"],
                 event["observed"], pair)
+    # Each witness event must also cohere with the
+    # lineage's observed events: a witness claiming
+    # teardown for a generation whose only fact is
+    # creation describes no observed event.
+    kinds_by_lineage = {}
+    for fact in doc["facts"]:
+        kinds_by_lineage.setdefault(
+            (fact.get("object_token"),
+             fact.get("generation")),
+            set()).add(fact["kind"])
+    for event in doc["release_witness"]:
+        pair = (event["object_token"],
+                event["generation"])
+        kinds = kinds_by_lineage.get(pair, set())
+        detail = event["detail"].lower()
+        if "teardown" in detail or \
+                "destruction" in detail:
+            assert "destruction" in kinds, \
+                "witness %r claims teardown with no " \
+                "destruction fact for lineage %r" % (
+                    event["witness_id"], pair)
+        if "creation" in detail:
+            assert "creation" in kinds, \
+                "witness %r claims creation with no " \
+                "creation fact for lineage %r" % (
+                    event["witness_id"], pair)
     witnessed = sorted(
         {(event["object_token"],
           event["generation"])
