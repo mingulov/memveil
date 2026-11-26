@@ -1014,32 +1014,36 @@ def test_concurrent_create_reuse_witness():
             "fact for lineage %r" % (
                 event["witness_id"],
                 event["observed"], pair)
-    # Each witness event must also cohere with the
-    # lineage's observed events: a witness claiming
-    # teardown for a generation whose only fact is
-    # creation describes no observed event.
+    # Each witness event must name an observed
+    # event kind for its lineage, and every named
+    # kind must exist in the facts for that
+    # generation. A witness naming no event kind,
+    # or one observed nowhere in the lineage,
+    # describes no observed event.
     kinds_by_lineage = {}
     for fact in doc["facts"]:
         kinds_by_lineage.setdefault(
             (fact.get("object_token"),
              fact.get("generation")),
             set()).add(fact["kind"])
+    lane_kinds = set(LANE_KINDS)
     for event in doc["release_witness"]:
         pair = (event["object_token"],
                 event["generation"])
         kinds = kinds_by_lineage.get(pair, set())
-        detail = event["detail"].lower()
-        if "teardown" in detail or \
-                "destruction" in detail:
-            assert "destruction" in kinds, \
-                "witness %r claims teardown with no " \
-                "destruction fact for lineage %r" % (
-                    event["witness_id"], pair)
-        if "creation" in detail:
-            assert "creation" in kinds, \
-                "witness %r claims creation with no " \
-                "creation fact for lineage %r" % (
-                    event["witness_id"], pair)
+        words = set(re.findall(
+            r"[a-z0-9]+(?:-[a-z0-9]+)*",
+            event["detail"].lower()))
+        claimed = words & lane_kinds
+        assert claimed, \
+            "witness %r names no observed event " \
+            "kind for lineage %r" % (
+                event["witness_id"], pair)
+        assert claimed <= kinds, \
+            "witness %r claims %r with no such " \
+            "fact for lineage %r" % (
+                event["witness_id"],
+                sorted(claimed), pair)
     witnessed = sorted(
         {(event["object_token"],
           event["generation"])
