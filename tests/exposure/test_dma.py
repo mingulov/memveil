@@ -139,6 +139,8 @@ LANE_SCOPES = (
 
 U64_MAX = 18446744073709551615
 U64_RE = re.compile(r"^(0|[1-9][0-9]{0,19})$")
+S64_MIN = -(2 ** 63)
+S64_MAX = 2 ** 63 - 1
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HEXADDR_RE = re.compile(r"0x[0-9a-fA-F]{3,}")
 
@@ -164,8 +166,10 @@ def frozen(name):
 
 
 def is_u64(value):
+    # fullmatch: `$` alone would still accept a
+    # trailing newline before the end of string.
     return (isinstance(value, str)
-            and U64_RE.match(value) is not None
+            and U64_RE.fullmatch(value) is not None
             and int(value) <= U64_MAX)
 
 
@@ -189,7 +193,7 @@ def check_enum(errors, where, value, allowed):
 
 
 def check_keys(errors, where, record, required,
-               optional=()):
+               optional=(), reason_bases=()):
     if not isinstance(record, dict):
         errors.append("missing-required-key: %s is not "
                       "an object" % where)
@@ -199,9 +203,10 @@ def check_keys(errors, where, record, required,
             errors.append("missing-required-key: %s.%s"
                           % (where, name))
     allowed = set(required) | set(optional)
+    allowed |= {base + "_reason"
+                for base in reason_bases}
     for name in record:
-        if name not in allowed and \
-                not name.endswith("_reason"):
+        if name not in allowed:
             errors.append("unknown-field: %s.%s"
                           % (where, name))
     return True
@@ -267,9 +272,11 @@ def check_window(errors, where, value):
 
 
 def check_fact(errors, where, fact, catalog_sources):
-    if not check_keys(errors, where, fact,
-                      FACT_REQUIRED,
-                      FACT_OPTIONAL_NULLABLE):
+    if not check_keys(
+            errors, where, fact, FACT_REQUIRED,
+            FACT_OPTIONAL_NULLABLE,
+            tuple(FACT_OPTIONAL_NULLABLE)
+            + ("native_result",)):
         return
     check_slug(errors, where + ".evidence_id",
                fact.get("evidence_id"))
@@ -299,6 +306,9 @@ def check_fact(errors, where, fact, catalog_sources):
             or isinstance(native, bool):
         errors.append("bad-s64: %s.native_result=%r"
                       % (where, native))
+    elif not S64_MIN <= native <= S64_MAX:
+        errors.append("bad-s64: %s.native_result=%r "
+                      "outside s64" % (where, native))
     check_enum(errors, where + ".caller_class",
                fact.get("caller_class"), LANE_CALLERS)
     check_enum(errors, where + ".peer_class",
@@ -361,11 +371,26 @@ def check_object(errors, where, obj, catalog_sources):
                       "%s.expected_boundary must never "
                       "be null" % where)
     gaps = obj.get("uncertainty")
-    if not isinstance(gaps, dict) \
-            or "gaps" not in gaps \
-            or not isinstance(gaps["gaps"], list):
+    if not isinstance(gaps, dict):
         errors.append("missing-required-key: "
-                      "%s.uncertainty.gaps" % where)
+                      "%s.uncertainty is not an object"
+                      % where)
+    else:
+        for name in gaps:
+            if name != "gaps":
+                errors.append("unknown-field: "
+                              "%s.uncertainty.%s"
+                              % (where, name))
+        if "gaps" not in gaps \
+                or not isinstance(gaps["gaps"], list):
+            errors.append("missing-required-key: "
+                          "%s.uncertainty.gaps" % where)
+        else:
+            for entry in gaps["gaps"]:
+                check_slug(
+                    errors,
+                    where + ".uncertainty.gaps[]",
+                    entry)
 
 
 def check_coverage(errors, where, record,
@@ -651,7 +676,15 @@ def test_steady_io_no_new_conversions():
         "persistent_queue_steady_io.json")
     assert doc["family"] == "persistent-queue-steady-io"
     assert doc["conversions_observed"] == "0"
-    assert int(doc["bytes_transferred"]) > 0
+    uses = [fact for fact in doc["facts"]
+            if fact["kind"] == "queue-use"]
+    assert uses, "steady I/O needs transfer facts"
+    derived = sum(int(fact["length_bytes"])
+                  for fact in uses)
+    assert derived > 0
+    assert doc["expected"]["bytes_transferred"] == \
+        str(derived)
+    assert doc["bytes_transferred"] == str(derived)
     assert doc["expected"]["informational_only"] is True
     kinds = {fact["kind"] for fact in doc["facts"]}
     assert kinds <= {"queue-create", "queue-use"}, kinds
@@ -675,6 +708,28 @@ def test_nested_mixed_sg_segments():
     outer = [fact for fact in doc["facts"]
              if fact["kind"] == "operation-outer"]
     assert outer, "outer operation fact required"
+    results = [fact for fact in outer
+               if fact["semantics"] == "result"]
+    assert results, "outer result fact required"
+    for fact in results:
+        assert fact["native_result"] == 0, \
+            "failed outer is not complete: %r" % (
+                fact["evidence_id"],)
+    # Segment extents must be disjoint and jointly
+    # cover the outer transfer length.
+    extents = sorted(
+        (int(fact["offset"]),
+         int(fact["offset"])
+         + int(fact["length_bytes"]))
+        for fact in children)
+    for first, second in zip(extents, extents[1:]):
+        assert first[1] <= second[0], \
+            "overlapping segment extents: %r" % (
+                extents,)
+    outer_length = int(results[0]["length_bytes"])
+    assert sum(end - start
+               for start, end in extents) == \
+        outer_length
     assert doc["expected"]["outer_complete"] is True
 
 
@@ -696,6 +751,16 @@ def test_failure_after_internal_allocation():
     assert failed, "a failed native result is required"
     assert sorted(doc["expected"][
         "failed_operations"]) == sorted(failed)
+    # No bytes may be attributed to the failed
+    # allocation: the envelope total is zero and each
+    # failed result carries a zero transfer length.
+    assert doc["expected"]["bytes_transferred"] == "0"
+    assert doc["bytes_transferred"] == "0"
+    for fact in doc["facts"]:
+        if fact["operation_id"] in failed \
+                and fact["semantics"] == "result":
+            assert fact["length_bytes"] == "0", \
+                fact["evidence_id"]
     statuses = {obj["lifecycle_status"]
                 for obj in doc["objects"]}
     assert statuses <= {"quarantined", "released"}, \
