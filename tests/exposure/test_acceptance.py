@@ -127,6 +127,15 @@ def check_defining_outcome(case_id, case, summary, events):
         assert case["before_ledger"] == [] and case["after_ledger"] == []
         assert all(step["object"] == "none"
                    for step in case["control_flow"])
+        # The case must show actual successful I/O
+        # observation, not just empty ledgers: at least one
+        # successful step plus the defining observation
+        # actions.
+        assert any(step["native_result"] == 0
+                   for step in case["control_flow"]), \
+            "conversion request/result shows no successful I/O"
+        assert "sustain-io-no-conversion" in actions
+        assert "observe-zero-new-conversions" in actions
     elif case_id == "bounced-and-direct-paths":
         assert results == [0, 0, 0]
         assert "complete-bounced-segment" in actions
