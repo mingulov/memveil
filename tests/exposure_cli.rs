@@ -419,10 +419,7 @@ fn strict_violation_beats_incomplete_evidence() {
         evidence_complete: false,
         ..valid_outcome()
     };
-    assert_eq!(
-        exit_for_outcome(&outcome),
-        compare::EXIT_POLICY_VIOLATION
-    );
+    assert_eq!(exit_for_outcome(&outcome), compare::EXIT_POLICY_VIOLATION);
 }
 
 // case: outcome-strict-clean
