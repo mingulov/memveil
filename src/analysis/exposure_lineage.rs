@@ -2002,8 +2002,14 @@ pub fn replay(
         let resolved_len = resolved.len();
         let failed_len = failed_joins.len();
         let mut tentative = Vec::new();
+        // Refusal set at each leg's ledger position, taken
+        // before its tentative replay: rollback re-resolves
+        // every leg against the refusals proved when replay
+        // reached it, never against a later leg's refusal.
+        let mut leg_refusals = Vec::new();
         let mut group_failed = false;
         for row in &legs {
+            leg_refusals.push(refusals.clone());
             let applied = apply_row(&mut state, config, &mut refusals, row);
             if applied.failed {
                 group_failed = true;
@@ -2059,8 +2065,15 @@ pub fn replay(
                 state.temporal_bounded.insert(key.clone());
             }
         }
-        for row in &legs {
-            record_rollback_evidence(&mut state, &refusals, row);
+        // Each leg re-resolves against its own ledger
+        // position: a leg that replayed tentatively sees the
+        // refusals proved before it ran, so a later leg's
+        // refusal never suppresses its evidence; a leg past
+        // the first failure sees the tentative set, since its
+        // position follows every leg that ran.
+        for (index, row) in legs.iter().enumerate() {
+            let at_position = leg_refusals.get(index).unwrap_or(&refusals);
+            record_rollback_evidence(&mut state, at_position, row);
         }
         resolved.truncate(resolved_len);
         failed_joins.truncate(failed_len);
