@@ -43,7 +43,10 @@
 //!   unit: when any leg cannot join, every leg resolves
 //!   UNKNOWN and the legs stay separate samples. A group
 //!   interleaved with other rows is refused outright, and
-//!   output always follows ledger order.
+//!   output always follows ledger order. Loss seals and
+//!   temporal bounds the legs observed still survive the
+//!   rollback, since continuity past a gap stays unproved
+//!   even when the group as a unit is unproved.
 //! * Lineage is bounded per source and per generation.
 //!   Past either bound the replay refuses the new
 //!   identity instead of wrapping or growing without
@@ -1794,9 +1797,11 @@ fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
 /// capture and duplicated row handles are refused before
 /// replay. Rows sharing an `atom` marker commit as a unit:
 /// when any leg fails, the group rolls back and every leg
-/// resolves UNKNOWN with the legs left separate. A group
-/// whose legs are interleaved with other rows is refused
-/// outright, and output always follows ledger order.
+/// resolves UNKNOWN with the legs left separate, while the
+/// loss seals and temporal bounds the legs observed
+/// survive the rollback. A group whose legs are
+/// interleaved with other rows is refused outright, and
+/// output always follows ledger order.
 pub fn replay(
     rows: &[LedgerRow],
     capture_id: &str,
@@ -1893,7 +1898,20 @@ pub fn replay(
             }
             continue;
         }
+        // Gap evidence survives group rollback: a loss
+        // seal or temporal bound records a discontinuity
+        // in the ledger stream, not a join claim, so
+        // restoring the checkpoint must not erase it.
+        // Continuity past the gap stays unproved even
+        // when the group as a unit is unproved. Both
+        // sets only grow during replay, so unioning the
+        // tentative sets keeps exactly the gaps this
+        // group observed.
+        let kept_sealed = state.sealed.clone();
+        let kept_bounded = state.temporal_bounded.clone();
         state = checkpoint;
+        state.sealed.extend(kept_sealed);
+        state.temporal_bounded.extend(kept_bounded);
         resolved.truncate(resolved_len);
         failed_joins.truncate(failed_len);
         for row in &legs {
