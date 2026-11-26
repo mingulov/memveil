@@ -43,10 +43,14 @@
 //!   unit: when any leg cannot join, every leg resolves
 //!   UNKNOWN and the legs stay separate samples. A group
 //!   interleaved with other rows is refused outright, and
-//!   output always follows ledger order. Loss seals and
-//!   temporal bounds the legs observed still survive the
-//!   rollback, since continuity past a gap stays unproved
-//!   even when the group as a unit is unproved.
+//!   output always follows ledger order. Gap evidence
+//!   still records at its ledger position: rollback
+//!   re-derives each gap leg against proved state and
+//!   keeps tentative seals and bounds only for lines the
+//!   group did not create. Continuity past a gap stays
+//!   unproved even when the group as a unit is unproved,
+//!   and a fresh allocation never inherits a gap that
+//!   struck a rolled-back object.
 //! * Lineage is bounded per source and per generation.
 //!   Past either bound the replay refuses the new
 //!   identity instead of wrapping or growing without
@@ -1079,6 +1083,101 @@ fn shown_identity(
     ))
 }
 
+/// Record only the gap evidence of one gap row —
+/// the loss seal or temporal bound — without displaying
+/// any identity. Rollback and refused-group paths reuse
+/// this so a gap row records its discontinuity even when
+/// its own leg never applied or its group never proved.
+/// Addressing mirrors `apply_row`: aliases resolve first
+/// and a looping chain records nothing, exactly as a
+/// replayed row would. Other events are a no-op.
+fn record_gap(state: &mut State, row: &LedgerRow) {
+    match row.event.as_str() {
+        "loss_gap" | "suspend_gap" | "clock_change" => {}
+        _ => return,
+    }
+    let canonical = match resolve(state, row, row.virtual_id.as_str()) {
+        Some(token) => token,
+        None => return,
+    };
+    let pinned = state
+        .alias
+        .get(&alias_key(row.virtual_id.as_str(), row))
+        .map(|(_, generation)| *generation);
+    record_gap_lines(state, row, &canonical, pinned);
+}
+
+/// Seal or bound the lines one gap row denotes. A loss
+/// gap seals only lines the gap's own origin observed: a
+/// foreign loss row never seals same-source identities.
+/// Open lines and restoration-uncertain lines both seal,
+/// so a failed revert followed by loss accepts no later
+/// joins. A row addressed through a pinned alias seals or
+/// bounds only that generation; loss through an old pin
+/// never seals a newer generation. An unpinned row seals
+/// or bounds every same-origin line its handle denotes,
+/// including generations recorded through the handle
+/// under another token and the generation an invalidated
+/// pin last bound.
+fn record_gap_lines(
+    state: &mut State,
+    row: &LedgerRow,
+    canonical: &str,
+    pinned: Option<u64>,
+) {
+    match row.event.as_str() {
+        "loss_gap" => {
+            let seal: Vec<(String, u64)> = match pinned {
+                Some(generation) => state
+                    .linked
+                    .get(&(canonical.to_string(), generation))
+                    .filter(|obj| {
+                        (is_open(obj.status.as_str()) || obj.status == "unknown")
+                            && same_origin(obj, row)
+                    })
+                    .map(|_| vec![(canonical.to_string(), generation)])
+                    .unwrap_or_default(),
+                None => {
+                    let mut seal: Vec<(String, u64)> = state
+                        .linked
+                        .iter()
+                        .filter(|((name, _), obj)| {
+                            name == canonical
+                                && (is_open(obj.status.as_str()) || obj.status == "unknown")
+                                && same_origin(obj, row)
+                        })
+                        .map(|((name, generation), _)| (name.clone(), *generation))
+                        .collect();
+                    let extras = denoted_extras(state, row, canonical);
+                    for (extra_token, extra_generation) in extras {
+                        let key = (extra_token.clone(), extra_generation);
+                        let usable = state
+                            .linked
+                            .get(&key)
+                            .map(|obj| {
+                                is_open(obj.status.as_str()) || obj.status == "unknown"
+                            })
+                            .unwrap_or(false);
+                        if usable {
+                            seal.push((extra_token, extra_generation));
+                        }
+                    }
+                    seal.sort();
+                    seal.dedup();
+                    seal
+                }
+            };
+            for (token, generation) in seal {
+                state.sealed.insert((token, generation));
+            }
+        }
+        "suspend_gap" | "clock_change" => {
+            bound_token_lines(state, row, canonical, pinned);
+        }
+        _ => {}
+    }
+}
+
 fn apply_row(
     state: &mut State,
     config: &ReplayConfig,
@@ -1349,62 +1448,7 @@ fn apply_row(
             "baseline declaration; reconciled explicitly".to_string(),
         ),
         "loss_gap" => {
-            // A loss gap seals only lines the gap's own
-            // origin observed: a foreign loss row never
-            // seals same-source identities. Open lines and
-            // restoration-uncertain lines both seal, so a
-            // failed revert followed by loss accepts no
-            // later joins. A row addressed through a pinned
-            // alias seals only that generation; loss through
-            // an old pin never seals a newer generation. An
-            // unpinned row seals every same-origin line its
-            // handle denotes, including generations
-            // recorded through the handle under another
-            // token and the generation an invalidated pin
-            // last bound.
-            let seal: Vec<(String, u64)> = match pinned {
-                Some(generation) => state
-                    .linked
-                    .get(&(canonical.clone(), generation))
-                    .filter(|obj| {
-                        (is_open(obj.status.as_str()) || obj.status == "unknown")
-                            && same_origin(obj, row)
-                    })
-                    .map(|_| vec![(canonical.clone(), generation)])
-                    .unwrap_or_default(),
-                None => {
-                    let mut seal: Vec<(String, u64)> = state
-                        .linked
-                        .iter()
-                        .filter(|((name, _), obj)| {
-                            name == &canonical
-                                && (is_open(obj.status.as_str()) || obj.status == "unknown")
-                                && same_origin(obj, row)
-                        })
-                        .map(|((name, generation), _)| (name.clone(), *generation))
-                        .collect();
-                    let extras = denoted_extras(state, row, &canonical);
-                    for (extra_token, extra_generation) in extras {
-                        let key = (extra_token.clone(), extra_generation);
-                        let usable = state
-                            .linked
-                            .get(&key)
-                            .map(|obj| {
-                                is_open(obj.status.as_str()) || obj.status == "unknown"
-                            })
-                            .unwrap_or(false);
-                        if usable {
-                            seal.push((extra_token, extra_generation));
-                        }
-                    }
-                    seal.sort();
-                    seal.dedup();
-                    seal
-                }
-            };
-            for (token, generation) in seal {
-                state.sealed.insert((token, generation));
-            }
+            record_gap_lines(state, row, &canonical, pinned);
             apply_shown(
                 state,
                 refusals,
@@ -1415,7 +1459,7 @@ fn apply_row(
             )
         }
         "suspend_gap" => {
-            bound_token_lines(state, row, &canonical, pinned);
+            record_gap_lines(state, row, &canonical, pinned);
             apply_shown(
                 state,
                 refusals,
@@ -1426,7 +1470,7 @@ fn apply_row(
             )
         }
         "clock_change" => {
-            bound_token_lines(state, row, &canonical, pinned);
+            record_gap_lines(state, row, &canonical, pinned);
             apply_shown(
                 state,
                 refusals,
@@ -1797,11 +1841,11 @@ fn push_unlinked_sample(state: &mut State, row: &LedgerRow) {
 /// capture and duplicated row handles are refused before
 /// replay. Rows sharing an `atom` marker commit as a unit:
 /// when any leg fails, the group rolls back and every leg
-/// resolves UNKNOWN with the legs left separate, while the
-/// loss seals and temporal bounds the legs observed
-/// survive the rollback. A group whose legs are
-/// interleaved with other rows is refused outright, and
-/// output always follows ledger order.
+/// resolves UNKNOWN with the legs left separate, while
+/// each gap leg still records its discontinuity against
+/// proved state. A group whose legs are interleaved with
+/// other rows is refused outright, and output always
+/// follows ledger order.
 pub fn replay(
     rows: &[LedgerRow],
     capture_id: &str,
@@ -1898,20 +1942,35 @@ pub fn replay(
             }
             continue;
         }
-        // Gap evidence survives group rollback: a loss
-        // seal or temporal bound records a discontinuity
-        // in the ledger stream, not a join claim, so
-        // restoring the checkpoint must not erase it.
-        // Continuity past the gap stays unproved even
-        // when the group as a unit is unproved. Both
-        // sets only grow during replay, so unioning the
-        // tentative sets keeps exactly the gaps this
-        // group observed.
-        let kept_sealed = state.sealed.clone();
-        let kept_bounded = state.temporal_bounded.clone();
+        // Gap evidence survives group rollback, re-derived
+        // against the restored checkpoint: a loss seal or
+        // temporal bound records a discontinuity in the
+        // ledger stream, not a join claim, so continuity
+        // past the gap stays unproved even when the group
+        // as a unit is unproved. Tentative seals and bounds
+        // survive only for lines the group did not create:
+        // a later fresh allocation must not inherit a gap
+        // that struck a rolled-back object. Every gap leg —
+        // applied or skipped past the first failure — then
+        // records its discontinuity against proved state,
+        // so a provisional release cannot suppress a loss
+        // seal and a skipped gap row still seals or bounds.
+        let tentative_sealed = state.sealed.clone();
+        let tentative_bounded = state.temporal_bounded.clone();
         state = checkpoint;
-        state.sealed.extend(kept_sealed);
-        state.temporal_bounded.extend(kept_bounded);
+        for key in &tentative_sealed {
+            if state.linked.contains_key(key) {
+                state.sealed.insert(key.clone());
+            }
+        }
+        for key in &tentative_bounded {
+            if state.linked.contains_key(&(key.0.clone(), key.1)) {
+                state.temporal_bounded.insert(key.clone());
+            }
+        }
+        for row in &legs {
+            record_gap(&mut state, row);
+        }
         resolved.truncate(resolved_len);
         failed_joins.truncate(failed_len);
         for row in &legs {
