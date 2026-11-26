@@ -2207,16 +2207,21 @@ pub fn replay(
         // ambiguous.
         let tentative_sealed = state.sealed.clone();
         let tentative_bounded = state.temporal_bounded.clone();
-        // Lines a tentative revert leg left
+        // Lines tentative legs left
         // restoration-uncertain: re-resolution below may
         // see every candidate open again and record
         // nothing, so the tentative uncertainty outlives
         // the rollback exactly like a seal or bound, and
-        // only for lines the group did not create.
+        // only for lines the group did not create. Any
+        // uncertain line counts whatever status a later
+        // tentative leg recorded: a quarantine leg keeps
+        // the unknown certainty while renaming the
+        // status, and the rolled-back rename must not
+        // hide the earlier failed revert.
         let tentative_unknown: Vec<(String, u64)> = state
             .linked
             .iter()
-            .filter(|(_, obj)| obj.status == "unknown" && obj.certainty == "unknown")
+            .filter(|(_, obj)| obj.certainty == "unknown")
             .map(|((token, generation), _)| (token.clone(), *generation))
             .collect();
         state = checkpoint;
@@ -2232,8 +2237,14 @@ pub fn replay(
         }
         for key in &tentative_unknown {
             if let Some(obj) = state.linked.get_mut(key) {
-                obj.status = "unknown".to_string();
-                obj.certainty = "unknown".to_string();
+                // Tentative replay only adds uncertainty:
+                // a line already restoration-uncertain
+                // before the group keeps its checkpoint
+                // state, quarantine status included.
+                if obj.certainty != "unknown" {
+                    obj.status = "unknown".to_string();
+                    obj.certainty = "unknown".to_string();
+                }
             }
         }
         // Each leg re-resolves against its own ledger
