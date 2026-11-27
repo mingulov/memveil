@@ -175,6 +175,8 @@ def test_license_first_party(bundle):
         "GPL-2.0-only"
     assert first["paths"]["bpf/swiotlb_copy.bpf.o"] == \
         "GPL-2.0-only"
+    assert first["paths"]["bpf/conversion_journal.bpf.o"] == \
+        "GPL-2.0-only"
     for rel in first["licenses"].values():
         assert (root / rel).is_file(), "staged text lacks %s" % rel
 

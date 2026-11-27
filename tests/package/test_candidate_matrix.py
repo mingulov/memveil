@@ -34,6 +34,7 @@ def _matrix_manifest(commit='c' * 40, policy_sha='9' * 64):
              'bpf/swiotlb_attempt.bpf.o': 'b' * 64,
              'bpf/swiotlb_lifecycle.bpf.o': 'c' * 64,
              'bpf/swiotlb_copy.bpf.o': 'd' * 64,
+             'bpf/conversion_journal.bpf.o': 'a1' * 32,
              'profiles/test.json': 'f' * 64}
     leaves = {'bundle': 'bundle.tar.gz', 'deb': 'memveil.deb',
               'rpm': 'memveil.rpm', 'source': 'source.tar.gz',

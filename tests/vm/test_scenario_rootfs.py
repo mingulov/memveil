@@ -53,6 +53,8 @@ SEALED_LIFECYCLE = "0cd5a0c9b961605f0c47fbcf0a5377080e5ca3f6" \
     "24d6c9860a57e816aff4527f"
 SEALED_COPY = "daacd9950fec82d00c9dde5a33a7398d7e3c708d" \
     "557455ab93b521aa0cf94227"
+SEALED_JOURNAL = "3f12762bf6bb647603918619e6e44183" \
+    "76bb0cf2a3ce3ec016cbe123d768d1d1"
 
 NEG_SHAS = {"renamed_field": "11" * 32,
             "widened_layout": "22" * 32,
@@ -300,8 +302,15 @@ def _mint_manifest(path, bpf_shas, commit=SEALED_COMMIT):
     files = {"bin/memveil": "aa" * 32,
              "lib/memveil/libmemveil.so.1": "bb" * 32,
              "profiles/p.json": "cc" * 32}
-    for channel, digest in bpf_shas.items():
-        files["bpf/swiotlb_%s.bpf.o" % channel] = digest
+    # The file closure must carry every manifest BPF entry even
+    # when the caller overrides only some channels.
+    merged = dict(_sealed_bpf_shas())
+    merged.update(bpf_shas)
+    for channel, digest in merged.items():
+        leaf = "conversion_journal.bpf.o" \
+            if channel == "journal" \
+            else "swiotlb_%s.bpf.o" % channel
+        files["bpf/" + leaf] = digest
     doc = {
         "schema": "memveil-candidate/2",
         "origin": "local-build",
@@ -328,7 +337,8 @@ def _mint_manifest(path, bpf_shas, commit=SEALED_COMMIT):
 def _sealed_bpf_shas():
     return {"attempt": SEALED_ATTEMPT,
             "lifecycle": SEALED_LIFECYCLE,
-            "copy": SEALED_COPY}
+            "copy": SEALED_COPY,
+            "journal": SEALED_JOURNAL}
 
 
 def test_manifest_needs_env(monkeypatch):

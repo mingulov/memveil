@@ -60,6 +60,7 @@ def sealed(tmp_path):
     engine.chmod(0o755)
     for name in ('lib/memveil/libx.so.1', 'bpf/swiotlb_attempt.bpf.o',
                  'bpf/swiotlb_lifecycle.bpf.o', 'bpf/swiotlb_copy.bpf.o',
+                 'bpf/conversion_journal.bpf.o',
                  'profiles/test.json', 'LICENSE'):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)

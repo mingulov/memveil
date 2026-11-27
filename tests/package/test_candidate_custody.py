@@ -160,6 +160,7 @@ class CustodyBase:
             "bpf/swiotlb_lifecycle.bpf.o":
                 b"synthetic-bpf-lifecycle\n",
             "bpf/swiotlb_copy.bpf.o": b"synthetic-bpf-copy\n",
+            "bpf/conversion_journal.bpf.o": b"synthetic-bpf-journal\n",
             "profiles/manifest.txt": b"p.json\n",
             "profiles/p.json": b"{}\n",
             "docs/quickstart.md": b"# fixture\n",
@@ -184,7 +185,8 @@ class CustodyBase:
                 "bpf": {name: files["bpf/" + name] for name in
                         ("swiotlb_attempt.bpf.o",
                          "swiotlb_lifecycle.bpf.o",
-                         "swiotlb_copy.bpf.o")},
+                         "swiotlb_copy.bpf.o",
+                         "conversion_journal.bpf.o")},
             },
             "clean_tree": True,
             "built_from_source": True,
@@ -215,7 +217,7 @@ class CustodyBase:
             "embedded_bpf": {
                 name: files["bpf/" + name] for name in
                 ("swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
-                 "swiotlb_copy.bpf.o")},
+                 "swiotlb_copy.bpf.o", "conversion_journal.bpf.o")},
             "files": files,
         }
         (bundle / "MANIFEST.json").write_text(

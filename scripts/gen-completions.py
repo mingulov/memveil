@@ -37,7 +37,8 @@ FROZEN_VERBS = ("record", "report", "top", "doctor", "qualify",
 FROZEN_TOP_FLAGS = ("--help", "--version", "-h")
 FROZEN_FLAGS = {
     "record": ("--bridge", "--capability", "--cp-object",
-               "--device", "--duration", "--help", "--lc-object",
+               "--device", "--duration", "--help", "--journal-callers",
+               "--journal-object", "--lc-object",
                "--max-events-bytes", "--object", "--output",
                "--profile", "--profiles-dir", "--strict", "-h"),
     "report": ("--allow-partial", "--format", "--help",
@@ -47,6 +48,7 @@ FROZEN_FLAGS = {
     "top": ("--allow-partial", "--bridge", "--capability",
             "--compact", "--cp-object", "--device",
             "--duration", "--full", "--help", "--interval",
+            "--journal-callers", "--journal-object",
             "--lc-object", "--long-lived-after",
             "--max-events-bytes", "--max-line-bytes",
             "--max-session-bytes", "--object", "--output",
@@ -55,7 +57,8 @@ FROZEN_FLAGS = {
                "--help", "--json", "--lc-object", "--load-check",
                "--object", "--profiles-dir", "-h"),
     "qualify": ("--bridge", "--capability", "--cp-object",
-                "--help", "--lc-object", "--object",
+                "--help", "--journal-callers", "--journal-object",
+                "--lc-object", "--object",
                 "--output", "--profile", "--profiles-dir", "-h"),
     "bind-profile": ("--capability", "--cp-object", "--help",
                      "--lc-object", "--object", "--output",
@@ -64,7 +67,8 @@ FROZEN_FLAGS = {
 }
 FROZEN_FORMAT_VALUES = ("text", "json", "markdown")
 FROZEN_NOVALUE_FLAGS = ("--help", "--allow-partial", "--compact", "--full",
-                          "--json", "--load-check", "--strict", "-h")
+                          "--json", "--load-check", "--strict",
+                          "--journal-callers", "-h")
 
 # One-line zsh descriptions; flag presence (not these words)
 # is what the drift guard pins.
@@ -81,6 +85,8 @@ _ZSH_DESC = {
     "--full": "full report per refresh",
     "--help": "show help",
     "--interval": "refresh interval",
+    "--journal-callers": "journal caller labels",
+    "--journal-object": "journal channel object",
     "--json": "print the JSON report",
     "--lc-object": "lifecycle channel object",
     "--load-check": "load objects without attaching",
