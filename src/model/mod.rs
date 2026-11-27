@@ -8,6 +8,7 @@ pub mod event;
 pub mod exposure;
 pub mod identity;
 pub mod integrity;
+pub mod journal;
 pub mod metric;
 pub mod regions;
 pub mod report;
