@@ -5,6 +5,7 @@ pub mod collector;
 pub mod correlation;
 pub mod exposure_census;
 pub mod exposure_records;
+pub mod journal_capture;
 pub mod kernel;
 pub mod lifecycle;
 pub mod live;

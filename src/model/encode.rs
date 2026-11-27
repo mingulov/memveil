@@ -17,6 +17,9 @@
 
 use super::event::{EVENT_SCHEMA_VERSION, EVENT_SCHEMA_VERSION_PREV, Event};
 use super::integrity::{Integrity, integrity_kind};
+use super::journal::JOURNAL_SCHEMA_VERSION;
+use super::journal_event::encode_journal_event;
+use super::journal_session::encode_journal_session;
 use super::regions::RegionObservation;
 use super::session::{
     Capability, Channel, DeviceEntry, EvidenceItem, PRODUCT_NAME, SESSION_SCHEMA_VERSION,
@@ -275,6 +278,11 @@ fn put_data(buf: &mut Vec<u8>, ev: &Event) -> Result<(), EncodeError> {
         put_opt_u64(buf, r.has_offset, r.offset);
         buf.extend_from_slice(b",\"length\":");
         put_qu64(buf, r.length);
+    } else if ev.kind == "transition_result" && ev.has_journal {
+        let text = encode_journal_event(&ev.journal)
+            .map_err(|_| EncodeError::new("journal", "invalid request/result payload"))?;
+        buf.extend_from_slice(text.as_bytes());
+        return Ok(());
     } else if ev.kind == "transition_result" {
         let t = &ev.transition;
         buf.extend_from_slice(b"{\"region_id\":");
@@ -370,7 +378,9 @@ fn put_data(buf: &mut Vec<u8>, ev: &Event) -> Result<(), EncodeError> {
 
 fn put_event(buf: &mut Vec<u8>, ev: &Event) -> Result<(), EncodeError> {
     buf.extend_from_slice(b"{\"schema_version\":");
-    if ev.kind == "copy" && (ev.copy.pool_private || ev.copy.offset_past_allocation) {
+    if ev.journal_version || ev.has_journal {
+        put_span(buf, JOURNAL_SCHEMA_VERSION.as_bytes())?;
+    } else if ev.kind == "copy" && (ev.copy.pool_private || ev.copy.offset_past_allocation) {
         put_span(buf, EVENT_SCHEMA_VERSION.as_bytes())?;
     } else {
         put_span(buf, EVENT_SCHEMA_VERSION_PREV.as_bytes())?;
@@ -692,7 +702,9 @@ pub fn encode_session(s: &Session) -> Result<String, EncodeError> {
     let mut buf = Vec::new();
     buf.push(b'{');
     put_key(&mut buf, "schema_version")?;
-    if s.has_integrity {
+    if s.has_journal {
+        put_str(&mut buf, JOURNAL_SCHEMA_VERSION)?;
+    } else if s.has_integrity {
         put_str(&mut buf, SESSION_SCHEMA_VERSION_INTEGRITY)?;
     } else {
         put_str(&mut buf, SESSION_SCHEMA_VERSION)?;
@@ -870,6 +882,16 @@ pub fn encode_session(s: &Session) -> Result<String, EncodeError> {
     buf.push(b',');
     put_key(&mut buf, "stop")?;
     put_stop(&mut buf, &s.stop)?;
+    if s.has_journal {
+        s.journal
+            .window(s.window_start_ns, s.finalized)
+            .map_err(|_| EncodeError::new("journal", "invalid window/counters"))?;
+        let text = encode_journal_session(&s.journal)
+            .map_err(|_| EncodeError::new("journal", "invalid window/counters"))?;
+        buf.push(b',');
+        put_key(&mut buf, "journal")?;
+        buf.extend_from_slice(text.as_bytes());
+    }
     if s.has_verdict {
         if s.verdict_loss_bps < 0 || s.verdict_loss_bps > 10000 {
             return Err(EncodeError::new("verdict.loss_ratio_bps", "out of range"));

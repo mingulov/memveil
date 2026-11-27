@@ -14,6 +14,8 @@
 //! Device IDs must be unique within the catalog.
 
 use super::integrity::{Integrity, parse_integrity};
+use super::journal::JOURNAL_SCHEMA_VERSION;
+use super::journal_session::{JournalSession, parse_journal_session};
 use super::regions::{RegionObservation, check_region_space, check_region_state};
 use super::scan::{
     Scanner, array_is_empty, array_next, expect_colon, object_is_empty, object_next,
@@ -164,6 +166,10 @@ pub struct StopState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Session {
+    /// True when a typed journal block was present.
+    pub has_journal: bool,
+    /// Typed journal window and counter evidence.
+    pub journal: JournalSession,
     /// Session identity.
     pub session_id: String,
     /// True when a boot identity was reported.
@@ -1762,7 +1768,8 @@ pub fn parse_session(data: &[u8]) -> Result<Session, ValidationError> {
                     return Err(ValidationError::new("schema_version", "duplicate"));
                 }
                 let v = scan.parse_string("session")?;
-                if v != SESSION_SCHEMA_VERSION_INTEGRITY
+                if v != JOURNAL_SCHEMA_VERSION
+                    && v != SESSION_SCHEMA_VERSION_INTEGRITY
                     && v != SESSION_SCHEMA_VERSION
                     && v != SESSION_SCHEMA_VERSION_PREV
                     && v != SESSION_SCHEMA_VERSION_PREV2
@@ -1823,6 +1830,12 @@ pub fn parse_session(data: &[u8]) -> Result<Session, ValidationError> {
                 out.has_end_reason = c.has_end_reason;
                 out.end_reason = c.end_reason;
                 has_capture = true;
+            } else if key == "journal" {
+                if out.has_journal {
+                    return Err(ValidationError::new("journal", "duplicate"));
+                }
+                out.journal = parse_journal_session(&mut scan)?;
+                out.has_journal = true;
             } else if key == "device_catalog" {
                 if has_catalog {
                     return Err(ValidationError::new("device_catalog", "duplicate"));
@@ -1897,7 +1910,21 @@ pub fn parse_session(data: &[u8]) -> Result<Session, ValidationError> {
             "relations need schema 0.1.2",
         ));
     }
-    if (out_version == SESSION_SCHEMA_VERSION_INTEGRITY) != out.has_integrity {
+    if (out_version == JOURNAL_SCHEMA_VERSION) != out.has_journal {
+        return Err(ValidationError::new("journal", "requires schema 0.2.0"));
+    }
+    if out.has_journal {
+        out.journal.window(out.window_start_ns, out.finalized)?;
+        if out.journal.observation_end_ns != out.window_end_ns {
+            return Err(ValidationError::new(
+                "journal",
+                "observation/capture cut mismatch",
+            ));
+        }
+    }
+    if (out_version == SESSION_SCHEMA_VERSION_INTEGRITY || out_version == JOURNAL_SCHEMA_VERSION)
+        != out.has_integrity
+    {
         return Err(ValidationError::new(
             "capture.integrity",
             "required only by schema 0.1.4",
@@ -1926,7 +1953,10 @@ pub fn parse_session(data: &[u8]) -> Result<Session, ValidationError> {
             "requires schema 0.1.4",
         ));
     }
-    if out_version != SESSION_SCHEMA_VERSION && out_version != SESSION_SCHEMA_VERSION_INTEGRITY {
+    if out_version != SESSION_SCHEMA_VERSION
+        && out_version != SESSION_SCHEMA_VERSION_INTEGRITY
+        && out_version != JOURNAL_SCHEMA_VERSION
+    {
         if out.has_verdict {
             return Err(ValidationError::new(
                 "verdict",
@@ -2204,8 +2234,8 @@ mod tests {
     }
 
     #[test]
-    fn session_versions_accept_four_and_refuse_the_rest() {
-        for bad in ["0.1.0", "0.1.5", "0.2.0", "1.0.0", "1.0.1"] {
+    fn session_versions_accept_five_and_refuse_the_rest() {
+        for bad in ["0.1.0", "0.1.5", "1.0.0", "1.0.1"] {
             let mutated = EV012.replacen(
                 "\"schema_version\": \"0.1.3\"",
                 &format!("\"schema_version\": \"{bad}\""),
@@ -2217,6 +2247,18 @@ mod tests {
                 "version {bad} must refuse"
             );
         }
+        // A 0.2.0 session without a journal block passes the version
+        // gate and refuses at the journal gate instead.
+        let mutated = EV012.replacen(
+            "\"schema_version\": \"0.1.3\"",
+            "\"schema_version\": \"0.2.0\"",
+            1,
+        );
+        assert_eq!(
+            err_of(&mutated),
+            ("journal".to_string(), "requires schema 0.2.0".to_string()),
+            "0.2.0 without journal refuses at the journal gate"
+        );
     }
 
     #[test]
