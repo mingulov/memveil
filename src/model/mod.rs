@@ -9,6 +9,8 @@ pub mod exposure;
 pub mod identity;
 pub mod integrity;
 pub mod journal;
+pub mod journal_event;
+pub mod journal_session;
 pub mod metric;
 pub mod regions;
 pub mod report;

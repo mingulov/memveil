@@ -13,6 +13,8 @@
 //! accepted within the int64 domain; schema maxima for observer cpu,
 //! pid, and tgid are enforced exactly.
 
+use super::journal::JOURNAL_SCHEMA_VERSION;
+use super::journal_event::{JournalEvent, parse_journal_event};
 use super::scan::{
     Scanner, expect_colon, object_is_empty, object_next, parse_id_field, parse_nullable_id,
     parse_nullable_int, parse_nullable_u64, parse_u64_field,
@@ -297,6 +299,12 @@ pub struct Event {
     pub copy: CopyPayload,
     /// Sync-request payload.
     pub sync: SyncRequest,
+    /// True when the line carried the journal schema version.
+    pub journal_version: bool,
+    /// True when a typed journal payload was present.
+    pub has_journal: bool,
+    /// Typed journal payload; default unless `has_journal`.
+    pub journal: JournalEvent,
     /// Transition-result payload.
     pub transition: TransitionResult,
     /// Pool-sample payload.
@@ -1422,7 +1430,12 @@ pub(crate) fn parse_data_span(
     } else if kind == "sync_request" {
         parse_sync(&mut scan, out)?;
     } else if kind == "transition_result" {
-        parse_transition(&mut scan, out)?;
+        if version == JOURNAL_SCHEMA_VERSION {
+            out.journal = parse_journal_event(&mut scan)?;
+            out.has_journal = true;
+        } else {
+            parse_transition(&mut scan, out)?;
+        }
     } else if kind == "pool_sample" {
         parse_pool(&mut scan, out)?;
     } else if kind == "gap" {
@@ -1470,7 +1483,10 @@ pub fn parse_event(data: &[u8]) -> Result<Event, ValidationError> {
                     return Err(ValidationError::new("schema_version", "duplicate"));
                 }
                 let v = scan.parse_string("event")?;
-                if v != EVENT_SCHEMA_VERSION && v != EVENT_SCHEMA_VERSION_PREV {
+                if v != EVENT_SCHEMA_VERSION
+                    && v != EVENT_SCHEMA_VERSION_PREV
+                    && v != JOURNAL_SCHEMA_VERSION
+                {
                     return Err(ValidationError::new("schema_version", "bad const"));
                 }
                 line_version = v;
@@ -1551,8 +1567,18 @@ pub fn parse_event(data: &[u8]) -> Result<Event, ValidationError> {
             "executed copies require observed measurement",
         ));
     }
+    out.journal_version = line_version == JOURNAL_SCHEMA_VERSION;
     let kind = out.kind.clone();
     parse_data_span(&kind, span, &line_version, &mut out)?;
+    if out.has_journal {
+        if out.has_observer {
+            return Err(ValidationError::new(
+                "journal",
+                "observer identity forbidden",
+            ));
+        }
+        out.journal.to_result(out.ts_ns, 0)?;
+    }
     Ok(out)
 }
 
@@ -1725,12 +1751,17 @@ mod tests {
     }
 
     #[test]
-    fn event_versions_accept_two_and_refuse_the_rest() {
+    fn event_versions_accept_three_and_refuse_the_rest() {
         let line = lines_of(EV012)[0].to_string();
         assert!(parse(&line).is_ok());
         let prev = line.replace("0.1.2", "0.1.1");
         assert!(parse(&prev).is_ok());
-        for bad in ["0.1.0", "0.1.3", "0.2.0", "1.0.0", "9.0.0"] {
+        // A 0.2.0 line of a legacy kind parses with the journal mode
+        // flag set and no journal payload.
+        let journal_mode = line.replacen("0.1.2", "0.2.0", 1);
+        let flagged = parse(&journal_mode).expect("0.2.0 line parses");
+        assert!(flagged.journal_version && !flagged.has_journal);
+        for bad in ["0.1.0", "0.1.3", "1.0.0", "9.0.0"] {
             let mutated = line.replacen("0.1.2", bad, 1);
             assert_eq!(
                 err_of(&mutated),
