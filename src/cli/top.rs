@@ -40,7 +40,9 @@ use crate::capture::reader::{
     CaptureReader, DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES,
     ReaderLimits, read_capture, read_capture_os, read_remedy,
 };
-use crate::capture::run::{RecordOptions, repair_warning_for, run_collector_with};
+use crate::capture::run::{
+    RecordOptions, collection_selection, repair_warning_for, run_collector_with,
+};
 use crate::capture::tee::{LiveAnalyzer, RefreshSink, TeeWriter};
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::durations::parse_duration_ns;
@@ -137,8 +139,13 @@ pub fn top_usage() -> String {
         "       [--bridge PATH] [--profile ID|PATH]\n",
         "       [--profiles-dir DIR] [--capability IDS]\n",
         "       [--lc-object PATH] [--cp-object PATH]\n",
+        "       [--journal-object PATH] [--journal-callers]\n",
         "       [--interval DURATION] [--device NAME]\n",
         "       [--strict] [--compact] [--full] [--long-lived-after DURATION]\n",
+        "\n",
+        "Ordinary live channels implicitly include attempt-trace.\n",
+        "Journal-only uses no attempts and rejects --device.\n",
+        "Journal callers are off by default; provisional profiles refuse.\n",
         "\n",
         "Replay the capture in DIR: the common case is memveil top DIR,\n",
         "printing one short headline block per interval of capture time\n",
@@ -277,6 +284,7 @@ fn is_live_flag(tok: &str) -> bool {
             | "--capability"
             | "--lc-object"
             | "--cp-object"
+            | "--journal-object"
             | "--duration"
             | "--max-events-bytes"
     )
@@ -302,6 +310,7 @@ const TOP_VALUE_FLAGS: &[&str] = &[
     "--capability",
     "--lc-object",
     "--cp-object",
+    "--journal-object",
     "--duration",
 ];
 
@@ -321,6 +330,7 @@ const TOP_VALUE_FLAGS_OS: &[&[u8]] = &[
     b"--capability",
     b"--lc-object",
     b"--cp-object",
+    b"--journal-object",
     b"--duration",
 ];
 
@@ -407,6 +417,9 @@ pub fn parse_top_args(args: &[String]) -> Result<TopOptions, CliError> {
         } else if tok == "--full" {
             opts.full = true;
             i += 1;
+        } else if tok == "--journal-callers" {
+            live_args.push(tok.to_string());
+            i += 1;
         } else if is_live_flag(tok) {
             if tok == "--output" {
                 opts.has_output = true;
@@ -459,6 +472,21 @@ pub fn parse_top_args(args: &[String]) -> Result<TopOptions, CliError> {
         }
         opts.live = parse_record_args(&live_args)?;
         opts.live.strict = opts.strict;
+        // Top owns --device itself (render-side), so the live
+        // selection re-validates with top's filter: journal-only
+        // live collection rejects device filtering here too. The
+        // live parser already accepted its own words, so only the
+        // top-owned device combination can fail this check.
+        if let Err(e) = collection_selection(
+            &opts.live.capabilities,
+            opts.live.journal_callers,
+            opts.has_device,
+            !opts.live.journal_object.is_empty(),
+        ) {
+            return Err(CliError {
+                message: e.to_string(),
+            });
+        }
     } else if has_stash {
         opts.max_events_bytes = parse_limit(&stashed_max_events, "--max-events-bytes", 4294967296)?;
     }
@@ -508,6 +536,7 @@ fn is_live_flag_os(tok: &[u8]) -> bool {
             | b"--capability"
             | b"--lc-object"
             | b"--cp-object"
+            | b"--journal-object"
             | b"--duration"
             | b"--max-events-bytes"
     )
@@ -621,6 +650,9 @@ fn parse_top_args_os(args: &[OsString]) -> Result<TopOsArgs, TopOsFail> {
             i += 1;
         } else if tok == b"--full" {
             opts.full = true;
+            i += 1;
+        } else if tok == b"--journal-callers" {
+            has_live_args = true;
             i += 1;
         } else if is_live_flag_os(tok) {
             if tok == b"--output" {

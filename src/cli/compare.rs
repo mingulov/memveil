@@ -11,6 +11,10 @@
 //! unknown names and empty items refuse, planned channels
 //! refuse as unknown until their collection adapter ships,
 //! and journal channels parse but refuse as channel-less.
+//! The frozen journal admission codes (`journal_profile_not_admitted`
+//! and its siblings) answer at the admission points (record, qualify,
+//! bind, doctor); this pure selection stage keeps its own frozen
+//! channel-less code, pinned by the CLI fixtures.
 //!
 //! Selection rules: an absent list selects the default
 //! attempt channel; the sole item `all` expands to the
@@ -206,9 +210,10 @@ fn parse_refusal(reason: &str) -> SelectionOutcome {
 /// Check order is fixed: list shape and names first, the
 /// attempt-base rule, legacy input, the device value, then
 /// the device combination. A parsed journal selection
-/// reports its ids and hook dependency with the
-/// channel-less refusal; only a clean ordinary selection
-/// exits 0.
+/// reports its ids and hook dependency with the frozen
+/// channel-less refusal (`no-record-channel`); only a clean
+/// ordinary selection exits 0. Admission points translate a
+/// conversion-journal selection to `journal_profile_not_admitted`.
 pub fn resolve_cli_selection(request: &SelectionRequest) -> SelectionOutcome {
     let ids: Vec<String> = match request.capabilities.as_deref() {
         None => vec![DEFAULT_CAPABILITY.to_string()],

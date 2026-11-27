@@ -14,8 +14,8 @@
 use crate::ENGINE_VERSION;
 use crate::capture::live::LiveWriter;
 use crate::capture::run::{
-    MAX_PROFILE_DOC_BYTES, RecordOptions, parse_requested_caps, repair_warning_for, resolve_bridge,
-    resolve_object, run_collector_with,
+    MAX_PROFILE_DOC_BYTES, RecordOptions, collection_selection, parse_requested_caps,
+    repair_warning_for, resolve_bridge, resolve_object, run_collector_with,
 };
 use crate::cli::doctor::resolve_profiles_dir;
 use crate::cli::report::{
@@ -29,6 +29,7 @@ use crate::platform::artifact_files::{
 use crate::platform::capabilities::{cap_floor_ok, cap_floor_refusal};
 use crate::platform::clock::wall_ns;
 use crate::platform::evidence::{KernelInfo, detect_environment};
+use crate::platform::journal_profile::journal_profile_reason;
 use crate::platform::narrow::{
     MAX_NARROW_BTF_BYTES, NarrowBindings, check_identity_bindings, measure_live_bindings,
     parse_narrow_note,
@@ -74,6 +75,10 @@ pub struct QualifyOptions {
     pub lc_object: String,
     /// Copy channel object override.
     pub cp_object: String,
+    /// Journal channel object override.
+    pub journal_object: String,
+    /// True when bounded journal caller processing is requested.
+    pub journal_callers: bool,
     /// Requested capability list.
     pub capabilities: String,
 }
@@ -84,8 +89,9 @@ fn is_option(text: &str) -> bool {
 
 /// Value-taking qualify flags: the `--flag=value` set.
 ///
-/// Every option takes a value, so the set names all eight: both
-/// spellings share every error path including the capability list.
+/// Every value option is named here (boolean `--journal-callers`
+/// excepted): both spellings share every error path including the
+/// capability list.
 const QUALIFY_VALUE_FLAGS: &[&str] = &[
     "--output",
     "--object",
@@ -94,6 +100,7 @@ const QUALIFY_VALUE_FLAGS: &[&str] = &[
     "--profiles-dir",
     "--lc-object",
     "--cp-object",
+    "--journal-object",
     "--capability",
 ];
 
@@ -164,6 +171,17 @@ pub fn parse_qualify_args(args: &[String]) -> Result<QualifyOptions, CliError> {
             }
             opts.cp_object = args[i + 1].clone();
             i += 2;
+        } else if tok == "--journal-object" {
+            if i + 1 >= args.len() || args[i + 1].is_empty() {
+                return Err(CliError {
+                    message: "--journal-object needs a value".to_string(),
+                });
+            }
+            opts.journal_object = args[i + 1].clone();
+            i += 2;
+        } else if tok == "--journal-callers" {
+            opts.journal_callers = true;
+            i += 1;
         } else if tok == "--capability" {
             if i + 1 >= args.len() || args[i + 1].is_empty() {
                 return Err(CliError {
@@ -196,6 +214,16 @@ pub fn parse_qualify_args(args: &[String]) -> Result<QualifyOptions, CliError> {
             message: invalid_capability_message(&ask.err),
         });
     }
+    if let Err(e) = collection_selection(
+        &opts.capabilities,
+        opts.journal_callers,
+        false,
+        !opts.journal_object.is_empty(),
+    ) {
+        return Err(CliError {
+            message: e.to_string(),
+        });
+    }
     Ok(opts)
 }
 
@@ -206,6 +234,11 @@ pub fn qualify_usage() -> String {
         "       [--bridge PATH] [--profile ID|PATH]\n",
         "       [--profiles-dir DIR] [--capability IDS]\n",
         "       [--lc-object PATH] [--cp-object PATH]\n",
+        "       [--journal-object PATH] [--journal-callers]\n",
+        "\n",
+        "conversion-journal selects only global wrapper requests/results.\n",
+        "Mixed lists also select attempts. Journal callers are off by default.\n",
+        "Provisional journal profiles refuse with exit 3; no unsafe override.\n",
         "\n",
         "Prove this host can be measured (needs root): the common\n",
         "case is sudo memveil qualify --output DIR --object PATH\n",
@@ -418,7 +451,7 @@ pub fn plan_qualification(root: &str, profiles_dir: &str, opts: &QualifyOptions)
             return refuse_plan("capability conversion-observe has no record channel".to_string());
         }
         if cap == JOURNAL {
-            return refuse_plan("capability conversion-journal has no record channel".to_string());
+            return refuse_plan("journal_profile_not_admitted".to_string());
         }
     }
     let reader = match open_evidence_reader(root) {
@@ -837,6 +870,21 @@ fn missing_channel_object(
 /// local-auto receipt. Refusals print one diagnostic and exit 3
 /// before any receipt exists.
 pub fn run_qualify_with(root: &str, profiles_dir: &str, opts: &QualifyOptions) -> i64 {
+    // Admission precedes every pin and the smoke: journal requests
+    // stop here with the frozen reason, creating nothing.
+    let selection = match collection_selection(
+        &opts.capabilities,
+        opts.journal_callers,
+        false,
+        !opts.journal_object.is_empty(),
+    ) {
+        Ok(selection) => selection,
+        Err(e) => return qualify_failed(&e.to_string()),
+    };
+    if selection.journal {
+        let reason = journal_profile_reason(profiles_dir, &opts.profile, opts.has_profile);
+        return qualify_failed(&reason);
+    }
     let output = opts.output.clone();
     let mut bridge = resolve_bridge(&opts.bridge, opts.has_bridge);
     // Pin the bridge before the smoke: the smoke loads through the
@@ -1300,10 +1348,7 @@ mod tests {
             opts.capabilities = want.to_string();
             let plan = plan_qualification(&host(), &pdir(), &opts);
             assert!(!plan.ok, "{want}");
-            assert_eq!(
-                plan.refusal, "capability conversion-journal has no record channel",
-                "{want}"
-            );
+            assert_eq!(plan.refusal, "journal_profile_not_admitted", "{want}");
         }
     }
 

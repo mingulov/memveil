@@ -23,7 +23,8 @@
 
 use crate::capture::live::LiveWriter;
 use crate::capture::run::{
-    RecordOptions, parse_requested_caps, repair_warning_for, run_collector_with,
+    RecordOptions, collection_selection, parse_requested_caps, repair_warning_for,
+    run_collector_with,
 };
 #[cfg(test)]
 use crate::cli::doctor::default_profiles_dir;
@@ -45,7 +46,12 @@ pub fn record_usage() -> String {
         "       [--bridge PATH] [--profile ID|PATH]\n",
         "       [--profiles-dir DIR] [--capability IDS]\n",
         "       [--lc-object PATH] [--cp-object PATH]\n",
+        "       [--journal-object PATH] [--journal-callers]\n",
         "       [--device NAME] [--strict]\n",
+        "\n",
+        "conversion-journal selects only global wrapper requests/results.\n",
+        "Mixed lists also select attempts. Journal callers are off by default.\n",
+        "Provisional journal profiles refuse with exit 3; no unsafe override.\n",
         "\n",
         "Capture swiotlb bounce attempts into DIR (needs root): the\n",
         "common case is sudo memveil record --output DIR --duration 10.\n",
@@ -61,7 +67,8 @@ pub fn record_usage() -> String {
         "\n",
         "--capability selects extra channels as a comma-separated\n",
         "list without spaces (default: attempt-trace, which is\n",
-        "always required). mapping-lifecycle uses --lc-object\n",
+        "implicitly included for ordinary channels). Journal-only uses no attempts.\n",
+        "mapping-lifecycle uses --lc-object\n",
         "and copy-actual uses --cp-object when given, else the\n",
         "embedded object for that channel; the winning profile\n",
         "must declare each requested capability supported (or\n",
@@ -156,6 +163,7 @@ const RECORD_VALUE_FLAGS: &[&str] = &[
     "--profiles-dir",
     "--lc-object",
     "--cp-object",
+    "--journal-object",
     "--capability",
     "--device",
 ];
@@ -291,6 +299,22 @@ pub fn parse_record_args(args: &[String]) -> Result<RecordOptions, CliError> {
             }
             opts.cp_object = args[i + 1].clone();
             i += 2;
+        } else if tok == "--journal-object" {
+            if i + 1 >= args.len() {
+                return Err(CliError {
+                    message: "--journal-object needs a value".to_string(),
+                });
+            }
+            if args[i + 1].is_empty() {
+                return Err(CliError {
+                    message: "--journal-object needs a value".to_string(),
+                });
+            }
+            opts.journal_object = args[i + 1].clone();
+            i += 2;
+        } else if tok == "--journal-callers" {
+            opts.journal_callers = true;
+            i += 1;
         } else if tok == "--capability" {
             if i + 1 >= args.len() {
                 return Err(CliError {
@@ -348,6 +372,16 @@ pub fn parse_record_args(args: &[String]) -> Result<RecordOptions, CliError> {
     if !ask.ok {
         return Err(CliError {
             message: invalid_capability_message(&ask.err),
+        });
+    }
+    if let Err(e) = collection_selection(
+        &opts.capabilities,
+        opts.journal_callers,
+        opts.has_device,
+        !opts.journal_object.is_empty(),
+    ) {
+        return Err(CliError {
+            message: e.to_string(),
         });
     }
     Ok(opts)
@@ -722,10 +756,15 @@ mod tests {
             "unknown capability: bogus; valid capabilities: attempt-trace, mapping-lifecycle, \
              copy-actual, conversion-observe, conversion-journal, all"
         );
-        let err = parse_record_args(&base(&["--capability", "copy-actual"]))
-            .expect_err("missing base rejects");
+        // Ordinary channels without the base resolve it implicitly.
+        let opts = parse_record_args(&base(&["--capability", "copy-actual"]))
+            .expect("missing base resolves");
+        assert_eq!(opts.capabilities, "copy-actual");
+        let err = parse_record_args(&base(&["--capability", "attempt-trace,attempt-trace"]))
+            .expect_err("duplicate rejects");
         assert!(
-            err.message.starts_with("attempt-trace is required;"),
+            err.message
+                .starts_with("duplicate capability: attempt-trace;"),
             "{}",
             err.message
         );
@@ -736,6 +775,56 @@ mod tests {
             let opts = parse_record_args(&base(&["--capability", good])).expect("good list parses");
             assert_eq!(opts.capabilities, good);
         }
+    }
+
+    #[test]
+    fn record_args_journal_selection() {
+        // Journal options parse and validate at parse time (exit 2):
+        // options without the journal, and a device filter on a
+        // journal-only request, refuse before admission runs.
+        let opts = parse_record_args(&base(&[
+            "--capability",
+            "conversion-journal",
+            "--journal-object",
+            "jr.o",
+            "--journal-callers",
+        ]))
+        .expect("journal selection parses");
+        assert_eq!(opts.journal_object, "jr.o");
+        assert!(opts.journal_callers);
+        let err =
+            parse_record_args(&base(&["--journal-callers"])).expect_err("callers alone reject");
+        assert!(
+            err.message.contains("requires conversion-journal"),
+            "{}",
+            err.message
+        );
+        let err = parse_record_args(&base(&["--journal-object", "jr.o"]))
+            .expect_err("object alone rejects");
+        assert!(
+            err.message.contains("requires conversion-journal"),
+            "{}",
+            err.message
+        );
+        let err = parse_record_args(&base(&["--journal-object"]))
+            .expect_err("missing object value rejects");
+        assert_eq!(err.message, "--journal-object needs a value");
+        let err = parse_record_args(&base(&[
+            "--capability",
+            "conversion-journal",
+            "--device",
+            "eth0",
+        ]))
+        .expect_err("journal-only device rejects");
+        assert!(err.message.contains("global"), "{}", err.message);
+        // The inline spelling shares the spaced error path.
+        let opts = parse_record_args(&base(&["--journal-object=jr.o"]))
+            .expect_err("inline object without journal rejects");
+        assert!(
+            opts.message.contains("requires conversion-journal"),
+            "{}",
+            opts.message
+        );
     }
 
     #[test]
