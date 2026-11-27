@@ -665,8 +665,9 @@ Receipts never claim
 validated. Diagnostics go to stderr.
 
 --capability selects channels as a comma-separated
-list without spaces (default: attempt-trace, which
-is always required). mapping-lifecycle needs
+list without spaces (default: attempt-trace, which is
+implicitly included for ordinary channels). Journal-only uses no attempts.
+mapping-lifecycle needs
 --lc-object and copy-actual needs --cp-object when
 those channels are wanted, else the run refuses
 before the smoke.

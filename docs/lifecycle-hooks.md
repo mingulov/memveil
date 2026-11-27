@@ -52,7 +52,8 @@ memveil record --output DIR --object attempt.bpf.o \
 ```
 
 `--capability` takes a comma-separated list without spaces
-(default: `attempt-trace`, which is always required).
+(default: `attempt-trace`, which ordinary channels include
+implicitly; journal-only selections use no attempts).
 Each channel's BPF object is discovered beside the
 executable or under the system directory; `--lc-object`
 and `--cp-object` are optional overrides for non-bundled
