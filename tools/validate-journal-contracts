@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Validate synthetic journal contract fixtures with independent arithmetic.
+
+Development validator only; does not enable live collection or qualify profiles.
+Uses only Python's standard library. tools/validate-journal-contracts [FIXTURE_ROOT]
+"""
+import hashlib
+from functools import lru_cache
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+LABELS = {
+    'mv_command_set [memveil_region_oracle]': 'owned', 'mv_restore [memveil_region_oracle]': 'owned',
+    'swiotlb_init_late': 'swiotlb', 'swiotlb_alloc_tlb': 'swiotlb', 'swiotlb_free_tlb': 'swiotlb', 'swiotlb_exit': 'swiotlb',
+    'dma_set_decrypted': 'direct_dma', 'dma_set_encrypted': 'direct_dma', 'dma_direct_alloc': 'direct_dma', 'dma_direct_free': 'direct_dma',
+}
+KINDS = ('bounce_attempt', 'map_result', 'unmap', 'copy', 'sync_request', 'transition_result', 'pool_sample', 'gap', 'marker', 'counter_snapshot')
+RANGE_CASES = ['owned-success', 'owned-retained', 'owned-restored', 'request-only-state', 'native-tuple-agreement']
+GUEST_CASES = RANGE_CASES + ['enabled-snp', 'real-io', 'independent-tuples', 'loss-and-cleanup']
+LATE_CASES = ['pre-window-absent', 'baseline-unknown', 'late-owned-tuples', 'request-only-state']
+
+
+def need(condition, reason):
+    if not condition:
+        raise ValueError(reason)
+
+
+def keys(value, names):
+    need(type(value) is dict and set(value) == set(names), 'fields: ' + str(names))
+
+
+def u64(value):
+    need(type(value) is str and re.fullmatch(r'0|[1-9][0-9]{0,19}', value) is not None, 'canonical u64')
+    n = int(value)
+    need(n <= 2**64 - 1, 'u64 overflow')
+    return n
+
+
+def i32(value):
+    need(type(value) is int and -(2**31) <= value < 2**31, 'signed native int')
+    return value
+
+
+SCHEMA_NAMES = ('session-v0.2.0', 'event-v0.2.0', 'report-v0.2.0',
+                'confidential-range-manifest-v1', 'confidential-guest-manifest-v1')
+SCHEMA_WORDS = frozenset(('$schema', '$id', '$defs', '$ref', 'title', 'description',
+    'type', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const',
+    'minimum', 'maximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems',
+    'uniqueItems', 'allOf', 'anyOf', 'not', 'if', 'then', 'else'))
+EXCLUSIONS = (
+    'Boot and pre-attach conversions are excluded.',
+    'MMIO conversions are excluded.',
+    'Kexec and accept paths are excluded.',
+    'Unobserved conversion paths are excluded.',
+)
+REQUEST_ONLY_LIMITATION = 'Synthetic request/results only; no persistent region identity, baseline or global closure.'
+
+
+def schema_reference(root, ref):
+    need(type(ref) is str and ref.startswith('#/$defs/') and ref.count('/') == 2,
+         'schema unsupported reference')
+    name = ref.split('/')[-1]
+    need(name in root.get('$defs', {}), 'schema missing reference')
+    return root['$defs'][name]
+
+
+def audit_schema(schema, root):
+    if type(schema) is bool:
+        return
+    need(type(schema) is dict and not set(schema) - SCHEMA_WORDS, 'schema unsupported vocabulary')
+    if '$ref' in schema:
+        schema_reference(root, schema['$ref'])
+    for keyword in ('properties', '$defs'):
+        for child in schema.get(keyword, {}).values():
+            audit_schema(child, root)
+    for keyword in ('allOf', 'anyOf'):
+        for child in schema.get(keyword, []):
+            audit_schema(child, root)
+    for keyword in ('additionalProperties', 'items', 'not', 'if', 'then', 'else'):
+        if keyword in schema:
+            audit_schema(schema[keyword], root)
+
+
+@lru_cache(maxsize=5)
+def document_schema(name):
+    need(name in SCHEMA_NAMES, 'schema unsupported document')
+    schema = load_json(ROOT / 'schemas' / (name + '.schema.json'))
+    audit_schema(schema, schema)
+    return schema
+
+
+def json_equal(a, b):
+    if type(a) is bool or type(b) is bool:
+        return type(a) is type(b) and a == b
+    if type(a) is dict and type(b) is dict:
+        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
+    if type(a) is list and type(b) is list:
+        return len(a) == len(b) and all(json_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def check_schema(value, schema, root, path='$', depth=0):
+    need(depth <= 128, 'schema evaluation depth')
+    def check(child, item=value, where=path):
+        check_schema(item, child, root, where, depth + 1)
+    def accepts(child):
+        try:
+            check(child)
+        except ValueError:
+            return False
+        return True
+    def require(condition, keyword):
+        need(condition, 'schema ' + path + ' ' + keyword)
+    if type(schema) is bool:
+        require(schema, 'false')
+        return
+    if '$ref' in schema:
+        check(schema_reference(root, schema['$ref']))
+        if schema['$ref'] == '#/$defs/u64':
+            try:
+                u64(value)
+            except ValueError as error:
+                raise ValueError('schema ' + path + ' u64: ' + str(error)) from error
+    if 'type' in schema:
+        types = schema['type'] if type(schema['type']) is list else [schema['type']]
+        matched = {'object': type(value) is dict, 'array': type(value) is list,
+                   'string': type(value) is str, 'boolean': type(value) is bool,
+                   'null': value is None, 'number': type(value) in (int, float),
+                   'integer': type(value) is int or (type(value) is float and value.is_integer())}
+        require(any(matched.get(kind, False) for kind in types), 'type')
+    if 'const' in schema:
+        require(json_equal(value, schema['const']), 'const')
+    if 'enum' in schema:
+        require(any(json_equal(value, item) for item in schema['enum']), 'enum')
+    if type(value) is dict:
+        require(set(schema.get('required', [])) <= value.keys(), 'required')
+        properties = schema.get('properties', {})
+        for name, item in value.items():
+            check(properties.get(name, schema.get('additionalProperties', True)), item, path + '.' + name)
+    if type(value) is list:
+        require(len(value) >= schema.get('minItems', 0), 'minItems')
+        require(len(value) <= schema.get('maxItems', len(value)), 'maxItems')
+        if schema.get('uniqueItems', False):
+            require(all(not json_equal(value[i], value[j]) for i in range(len(value)) for j in range(i)), 'uniqueItems')
+        for i, item in enumerate(value):
+            check(schema.get('items', True), item, path + '[' + str(i) + ']')
+    if type(value) is str:
+        require(len(value) >= schema.get('minLength', 0), 'minLength')
+        require(len(value) <= schema.get('maxLength', len(value)), 'maxLength')
+        if 'pattern' in schema:
+            require(re.search(schema['pattern'], value) is not None, 'pattern')
+    if type(value) in (int, float):
+        require(value >= schema.get('minimum', value), 'minimum')
+        require(value <= schema.get('maximum', value), 'maximum')
+    for child in schema.get('allOf', []):
+        check(child)
+    if 'anyOf' in schema:
+        require(any(accepts(child) for child in schema['anyOf']), 'anyOf')
+    if 'not' in schema:
+        require(not accepts(schema['not']), 'not')
+    if 'if' in schema:
+        check(schema.get('then' if accepts(schema['if']) else 'else', True))
+
+
+def validate_document(value, name):
+    schema = document_schema(name)
+    check_schema(value, schema, schema)
+
+
+def validate_event(e):
+    validate_document(e, 'event-v0.2.0')
+    keys(e, ['schema_version', 'session_id', 'seq', 'ts_ns', 'kind', 'source', 'data'])
+    need(e['schema_version'] == '0.2.0' and e['kind'] == 'transition_result', 'journal version/kind')
+    need(type(e['session_id']) is str and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', e['session_id']) is not None, 'session id')
+    u64(e['seq']); end = u64(e['ts_ns'])
+    s = e['source']
+    keys(s, ['hook', 'backend', 'profile_id', 'measurement', 'correlation'])
+    need(s['backend'] in ('synthetic', 'fentry_fexit') and s['measurement'] == 'observed', 'source')
+    need(s['correlation'] in ('direct', 'unpaired'), 'correlation')
+    need(type(s['profile_id']) is str and 0 < len(s['profile_id']) <= 128, 'profile')
+    d = e['data']
+    keys(d, ['direction', 'requested_state', 'requested_native_pages', 'requested_pages', 'requested_bytes',
+             'size_reason', 'page_size', 'native_result', 'operation_token', 'entry_ns', 'epoch',
+             'membership', 'region', 'region_reason', 'effect', 'caller'])
+    need(d['direction'] in ('decrypt', 'encrypt'), 'direction')
+    need(d['requested_state'] == ('shared' if d['direction'] == 'decrypt' else 'private'), 'target')
+    need(s['hook'] == 'set_memory_' + ('decrypted' if d['direction'] == 'decrypt' else 'encrypted'), 'hook')
+    n = i32(d['requested_native_pages']); i32(d['native_result'])
+    need(d['page_size'] == '4096', 'profile page size')
+    if n < 0:
+        need(d['requested_pages'] is None and d['requested_bytes'] is None and d['size_reason'] == 'invalid_native_pages', 'invalid pages')
+    else:
+        need(u64(d['requested_pages']) == n and u64(d['requested_bytes']) == n * 4096 and d['size_reason'] is None, 'requested size')
+    need(u64(d['epoch']) > 0, 'zero epoch')
+    if d['membership'] == 'admitted':
+        need(0 < u64(d['operation_token']) < 2**64 - 1 and u64(d['entry_ns']) <= end and s['correlation'] == 'direct', 'operation token/entry')
+    else:
+        need(d['membership'] == 'unmatched_exit' and d['operation_token'] is None and d['entry_ns'] is None and s['correlation'] == 'unpaired', 'unmatched exit')
+    need(d['region'] is None and d['region_reason'] == 'request_only_source' and d['effect'] == 'request_only', 'request-only boundary')
+    c = d['caller']; keys(c, ['status', 'class', 'label'])
+    if c['status'] == 'resolved':
+        need(c['label'] in LABELS and c['class'] == LABELS[c['label']], 'caller label/class')
+    else:
+        need(c['status'] in ('disabled', 'unresolved', 'ambiguous', 'truncated') and c['class'] is None and c['label'] is None, 'caller status')
+
+
+def validate_manifest(m, suite, candidate_digest, profile_id, *, qualification=False):
+    guest = suite == 'confidential-real'
+    validate_document(m, 'confidential-' + ('guest' if guest else 'range') + '-manifest-v1')
+    need(suite in ('confidential-ranges', 'confidential-real', 'confidential-late-attach'), 'suite')
+    fields = ['contract', 'candidate_manifest_sha256', 'profile_id', 'required_cases', 'synthetic', 'source_commit',
+              'config_sha256', 'btf_sha256', 'oracle_source_commit', 'oracle_module_sha256', 'ordinary_transport_receipt_sha256']
+    if guest:
+        fields += ['range_manifest_sha256', 'enabled_snp_evidence_sha256', 'io_receipt_sha256', 'tuple_ledger_sha256']
+    keys(m, fields)
+    need(m['contract'] == ('memveil-confidential-guest/1' if guest else 'memveil-confidential-range/1'), 'manifest version')
+    need(m['candidate_manifest_sha256'] == candidate_digest and m['profile_id'] == profile_id, 'candidate/profile binding')
+    need(type(m['synthetic']) is bool, 'synthetic provenance')
+    if qualification:
+        need(not m['synthetic'], 'synthetic input cannot qualify a real candidate')
+    required = GUEST_CASES if guest else (LATE_CASES if suite == 'confidential-late-attach' else RANGE_CASES)
+    need(type(m['required_cases']) is list and len(m['required_cases']) == len(set(m['required_cases'])) and set(m['required_cases']) == set(required), 'required case set')
+    for key in fields:
+        if key.endswith('_sha256'):
+            need(type(m[key]) is str and re.fullmatch('[0-9a-f]{64}', m[key]) is not None, 'digest')
+        if key.endswith('_commit'):
+            need(type(m[key]) is str and re.fullmatch('[0-9a-f]{40}', m[key]) is not None, 'source commit')
+
+
+def pairs(items):
+    out = {}
+    for k, v in items:
+        need(k not in out, 'duplicate JSON key')
+        out[k] = v
+    return out
+
+
+def read_json(raw):
+    need(len(raw) <= 16777216, 'document limit')
+    def finite_number(token):
+        value = float(token)
+        need(math.isfinite(value), 'nonfinite JSON number')
+        return value
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs, parse_float=finite_number, parse_constant=finite_number)
+    except RecursionError as error:
+        raise ValueError('nesting limit') from error
+    def depth(v, n):
+        need(n <= 64, 'nesting limit')
+        if isinstance(v, dict):
+            for item in v.values(): depth(item, n + 1)
+        elif isinstance(v, list):
+            for item in v: depth(item, n + 1)
+    depth(value, 0)
+    return value
+
+
+def load_json(path):
+    with path.open('rb') as stream:
+        return read_json(stream.read(16777217))
+
+
+def capture_evidence(folder):
+    final = (folder / 'session.json').exists()
+    session = load_json(folder / ('session.json' if final else 'checkpoint.json'))
+    validate_document(session, 'session-v0.2.0')
+    need(session['capture']['finalized'] is final, 'session/checkpoint finalization')
+    if not final:
+        need(session['capture']['end_reason'] == 'checkpoint' and u64(session['capture']['checkpoint_generation']) > 0, 'checkpoint generation')
+    need(session['schema_version'] == '0.2.0' and session['synthetic'] is True, 'synthetic contract fixture')
+    need(session['quality']['baseline']['status'] == 'unavailable' and session['quality']['terminal']['status'] == 'unavailable', 'unproved baseline/closure')
+    need(session['baseline'] == {'complete': False, 'region_observations': []}, 'unknown baseline')
+    j = session['journal']
+    need(u64(j['epoch']) > 0, 'zero epoch')
+    need(j['region_identity'] is None and j['region_state'] is None and j['state_reason'] == 'request_only_source', 'session state')
+    counter_keys = ['entries', 'exits', 'matched_results', 'unmatched_exits', 'censored', 'operation_exhaustion', 'nesting_exhaustion', 'token_exhaustion', 'ring_drops', 'invalid_records', 'missed_callbacks']
+    keys(j['counters'], counter_keys); keys(j['counter_reasons'], counter_keys)
+    for key in counter_keys:
+        value = j['counters'][key]; reason = j['counter_reasons'][key]
+        if value is None:
+            need(reason in ('not_observable', 'read_failed', 'overflow'), 'unknown counter reason')
+        else:
+            u64(value); need(reason is None, 'known counter reason')
+    if j['admission_start_reason'] == 'not_opened':
+        need(all(v is None or v == '0' for v in j['counters'].values()), 'nonzero counter before readiness')
+    need(j['closure'] == 'unproved' and j['closure_evidence'] is None, 'provisional closure')
+    end = u64(j['observation_end_ns'])
+    capture_start = u64(session['capture']['window']['start_ns'])
+    need(capture_start <= end and end == u64(session['capture']['window']['end_ns']), 'observation prefix')
+    start = None if j['admission_start_ns'] is None else u64(j['admission_start_ns'])
+    cutoff = None if j['admission_end_ns'] is None else u64(j['admission_end_ns'])
+    if start is None:
+        need(j['admission_start_reason'] in ('not_opened', 'readiness_unproved') and cutoff is None, 'unknown admission start')
+        need(j['admission_end_reason'] == ('not_opened' if j['admission_start_reason'] == 'not_opened' else 'close_unproved'), 'unknown admission end')
+    else:
+        need(j['admission_start_reason'] is None and capture_start <= start <= end, 'admission start')
+        if cutoff is None:
+            need(j['admission_end_reason'] == ('close_unproved' if final else 'admission_open'), 'admission end reason')
+        else:
+            need(j['admission_end_reason'] is None and start <= cutoff <= end, 'admission end')
+    counts = {k: 0 for k in KINDS}; tokens = set(); failures = 0; requests = 0
+    unmatched = 0; requested_bytes = 0; size_reason = None; failed_refs = []
+    digest = hashlib.sha256(); byte_count = 0; line_count = 0
+    with (folder / 'events.ndjson').open('rb') as stream:
+        for line in iter(lambda: stream.readline(65537), b''):
+            need(len(line) <= 65536 and line.endswith(b'\n'), 'line limit/framing')
+            e = read_json(line); validate_event(e)
+            need(j['admission_start_reason'] != 'not_opened', 'result before readiness')
+            need(e['source']['backend'] == 'synthetic' and e['source']['profile_id'] == j['profile_id'], 'event provenance')
+            need(e['session_id'] == session['session_id'] and u64(e['seq']) == line_count, 'identity/sequence')
+            need(capture_start <= u64(e['ts_ns']) < end and e['data']['epoch'] == j['epoch'], 'timestamp/epoch')
+            token = e['data']['operation_token']
+            if token is not None:
+                need(token not in tokens, 'duplicate operation token')
+                need(len(tokens) < 65536, 'development fixture token budget')
+                tokens.add(token)
+                need(start is not None and start <= u64(e['data']['entry_ns']) < (end if cutoff is None else cutoff), 'entry admission window')
+                requests += 1; failures += e['data']['native_result'] != 0
+                if e['data']['native_result'] != 0:
+                    failed_refs.append('event:' + e['seq'])
+                if e['data']['requested_bytes'] is None:
+                    size_reason = 'invalid_native_pages'
+                else:
+                    requested_bytes += u64(e['data']['requested_bytes'])
+                    if requested_bytes > 2**64 - 1 and size_reason is None:
+                        size_reason = 'overflow'
+            else:
+                unmatched += 1
+            counts[e['kind']] += 1
+            digest.update(line); byte_count += len(line); line_count += 1
+    integ = session['capture']['integrity']
+    expected = dict(algorithm='sha256', events_bytes=str(byte_count), line_count=str(line_count),
+                    first_seq='0' if line_count else None, last_seq=str(line_count-1) if line_count else None,
+                    events_sha256=digest.hexdigest(), kinds={k: str(v) for k, v in counts.items()})
+    need(integ == expected, 'literal integrity')
+    summary = dict(requests=str(requests), successes=str(requests - failures), failures=str(failures),
+                   unmatched_exits=str(unmatched), censored=j['counters']['censored'],
+                   censored_reason=j['counter_reasons']['censored'],
+                   requested_bytes=str(requested_bytes) if size_reason is None else None,
+                   requested_bytes_reason=size_reason, shared_bytes=None, unreverted_ranges=None,
+                   state_reason='request_only_source')
+    integrity = dict(status='verified' if final else 'checkpoint_prefix',
+                     verified_bytes=str(byte_count), verified_events=str(line_count))
+    if not final:
+        integrity['unverified_bytes'] = '0'
+    return dict(session=session, journal=summary, integrity=integrity, failed_refs=failed_refs)
+
+
+def validate_capture(folder):
+    evidence = capture_evidence(folder)
+    return int(evidence['journal']['requests']), int(evidence['journal']['failures'])
+
+
+def validate_report(report, evidence):
+    session = evidence['session']
+    for key in ('session_id', 'synthetic', 'environment', 'device_catalog'):
+        need(report[key] == session[key], 'report provenance ' + key)
+    need(report['engine_version'] == 'contract-fixture', 'report provenance engine')
+    if 'capabilities' in report:
+        capabilities = {key: dict(status=value['status'], grade=value.get('grade'), reason=value['reason'])
+                        for key, value in session['capabilities'].items()}
+        need(report['capabilities'] == capabilities, 'report provenance capabilities')
+    need(report['journal'] == evidence['journal'], 'report journal measurements/reasons')
+    need(report['integrity'] == evidence['integrity'], 'report integrity')
+    need(report['quality'] == session['quality'], 'report quality')
+    need(report['metrics'] == [], 'report metrics without ordinary-channel evidence')
+    need(report['verdict'] == dict(name='partial_unknown_loss', loss_ratio_bps='0', delivered='0'),
+         'report verdict for journal-only evidence with unavailable baseline/terminal')
+    findings = report['findings']
+    need(len(findings) == len(evidence['failed_refs']), 'report findings count')
+    for finding, ref in zip(findings, evidence['failed_refs']):
+        need(finding['code'] == 'CONVERSION_FAILED' and finding['severity'] == 'warning'
+             and finding['evidence_refs'] == [ref] and finding['scope'] == 'global conversion journal',
+             'report findings source link')
+        need(finding['explanation'] == 'Observed native wrapper failure; resulting state unknown.'
+             and finding['limitations'] == 'Synthetic request-only fixture.', 'report findings meaning')
+    need(all(item in report['limitations'] for item in EXCLUSIONS), 'report exclusions')
+    need(REQUEST_ONLY_LIMITATION in report['limitations'], 'report request-only limitation')
+
+
+def validate_fixtures(root):
+    count = 0
+    for folder in sorted(root.iterdir()):
+        if not folder.is_dir(): continue
+        expected = load_json(folder / 'expected.json')
+        try:
+            evidence = capture_evidence(folder)
+        except ValueError as e:
+            need(not expected['valid'] and str(e) == 'duplicate operation token', 'unexpected refusal: ' + str(e))
+        else:
+            summary = evidence['journal']
+            need(expected['valid'] and summary['requests'] == expected['requests'] and summary['failures'] == expected['failures'], 'independent counts')
+            report = load_json(folder / 'report.json')
+            validate_document(report, 'report-v0.2.0')
+            validate_report(report, evidence)
+        count += 1
+    for file, suite in [('range-manifest.json', 'confidential-ranges'), ('guest-manifest.json', 'confidential-real'), ('late-manifest.json', 'confidential-late-attach')]:
+        if (root / file).exists():
+            validate_manifest(load_json(root / file), suite, 'a' * 64, 'linux-7.0.14-x86-journal-provisional')
+    return count
+
+if __name__ == '__main__':
+    if len(sys.argv) > 2:
+        raise SystemExit('usage: tools/validate-journal-contracts [FIXTURE_ROOT]')
+    print('journal contract fixtures:', validate_fixtures(Path(sys.argv[1]) if len(sys.argv) == 2 else ROOT / 'tests/fixtures/journal'))

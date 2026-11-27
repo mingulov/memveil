@@ -36,7 +36,20 @@ RUST = REPO
 # file's $id to its name). Schema identity below always verifies
 # against this set; a document's own $id is never trusted.
 VALIDATOR = runpy.run_path(os.path.join(REPO, "tools", "validate-schemas"))
-REGISTERED_SCHEMA_FILES = frozenset(VALIDATOR["SCHEMA_FILES"])
+# Reserved contract-review schemas (provenance gate's
+# reserved pins): shipped for offline validation while
+# current readers still refuse them. Registered here so
+# their verified identity resolves; the observer
+# exemption still covers event schemas alone.
+RESERVED_SCHEMA_FILES = frozenset({
+    "confidential-guest-manifest-v1.schema.json",
+    "confidential-range-manifest-v1.schema.json",
+    "event-v0.2.0.schema.json",
+    "report-v0.2.0.schema.json",
+    "session-v0.2.0.schema.json",
+})
+REGISTERED_SCHEMA_FILES = (frozenset(VALIDATOR["SCHEMA_FILES"])
+                           | RESERVED_SCHEMA_FILES)
 _REGISTERED_DOCS = {}
 
 
