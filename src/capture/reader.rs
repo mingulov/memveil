@@ -1572,6 +1572,34 @@ impl CaptureReader {
                 message: format!("line {lineno}: ts after"),
             });
         }
+        if ev.journal_version != self.session.has_journal {
+            return Err(ReadError {
+                code: READ_INVALID,
+                line_no: lineno,
+                message: format!("line {lineno}: event/session schema mode mismatch"),
+            });
+        }
+        if ev.has_journal {
+            let checked = (|| -> Result<(), ValidationError> {
+                let window = self
+                    .session
+                    .journal
+                    .window(self.session.window_start_ns, self.session.finalized)?;
+                let result = ev.journal.to_result(ev.ts_ns, 0)?;
+                window.validate_result(&result)?;
+                if ev.source_profile_id != self.session.journal.profile_id {
+                    return Err(ValidationError::new("journal", "profile mismatch"));
+                }
+                Ok(())
+            })();
+            if checked.is_err() {
+                return Err(ReadError {
+                    code: READ_INVALID,
+                    line_no: lineno,
+                    message: format!("line {lineno}: journal profile/window mismatch"),
+                });
+            }
+        }
         self.check_identities(ev, lineno)?;
         let tracked = self.ops.len()
             + self.maps.len()
