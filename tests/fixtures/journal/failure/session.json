@@ -1,0 +1,202 @@
+{
+  "schema_version": "0.2.0",
+  "session_id": "journal-failure",
+  "synthetic": true,
+  "product": {
+    "name": "memveil",
+    "version": "0.1.0",
+    "build": null
+  },
+  "environment": {
+    "mode": "unknown",
+    "detection": "unverified",
+    "asserted_mode": null,
+    "attestation": "not_performed",
+    "evidence": []
+  },
+  "capture": {
+    "mode": "synthetic",
+    "window": {
+      "start_ns": "1000000000",
+      "end_ns": "2500000000"
+    },
+    "filters": {
+      "device": null
+    },
+    "finalized": true,
+    "end_reason": "duration",
+    "integrity": {
+      "algorithm": "sha256",
+      "events_bytes": "683",
+      "line_count": "1",
+      "first_seq": "0",
+      "last_seq": "0",
+      "events_sha256": "27db8e86400b93b9654dc3d1ddb01a5624a3e3ed5d3a632ba35b848927225028",
+      "kinds": {
+        "bounce_attempt": "0",
+        "map_result": "0",
+        "unmap": "0",
+        "copy": "0",
+        "sync_request": "0",
+        "transition_result": "1",
+        "pool_sample": "0",
+        "gap": "0",
+        "marker": "0",
+        "counter_snapshot": "0"
+      }
+    }
+  },
+  "device_catalog": {
+    "devices": []
+  },
+  "baseline": {
+    "complete": false,
+    "region_observations": []
+  },
+  "capabilities": {
+    "bounce_attempts": {
+      "status": "unavailable",
+      "reason": "No source for this channel in this synthetic request-only fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "mapping_lifecycle": {
+      "status": "unavailable",
+      "reason": "No source for this channel in this synthetic request-only fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "copy_bytes": {
+      "status": "unavailable",
+      "reason": "No source for this channel in this synthetic request-only fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "sync_requests": {
+      "status": "unavailable",
+      "reason": "No source for this channel in this synthetic request-only fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "conversion_results": {
+      "status": "verified",
+      "reason": "Synthetic contract fixture only.",
+      "hooks": [
+        "set_memory_decrypted",
+        "set_memory_encrypted"
+      ],
+      "profile_id": "linux-7.0.14-x86-journal-provisional"
+    },
+    "region_state": {
+      "status": "unavailable",
+      "reason": "No source for this channel in this synthetic request-only fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "pool_stats": {
+      "status": "unavailable",
+      "reason": "No source for this channel in this synthetic request-only fixture.",
+      "hooks": [],
+      "profile_id": null
+    },
+    "task_context": {
+      "status": "unavailable",
+      "reason": "No source for this channel in this synthetic request-only fixture.",
+      "hooks": [],
+      "profile_id": null
+    }
+  },
+  "quality": {
+    "detail": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "synthetic journal results",
+      "reason": "Authored metadata; never a real-platform admission."
+    },
+    "aggregate": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "counter snapshots",
+      "reason": "No counter snapshots in this fixture."
+    },
+    "correlation": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "region lifetimes",
+      "reason": "No region lifetime source."
+    },
+    "baseline": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "global journal baseline",
+      "reason": "Request-only source; pre-window state and global closure are unproved."
+    },
+    "terminal": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "global journal terminal",
+      "reason": "Request-only source; pre-window state and global closure are unproved."
+    }
+  },
+  "stop": {
+    "outcome": "partial",
+    "reason": "fixture predates stop evidence",
+    "budget_ms": "5000",
+    "elapsed_ms": "0",
+    "admission_closed": false,
+    "quiescence_observed": false,
+    "writers_settled": "0",
+    "in_flight_at_close": "0",
+    "late_submits_drained": "0",
+    "drained_records": "0",
+    "busy_at_drain": false,
+    "counters_valid": false,
+    "open_mappings": "0"
+  },
+  "journal": {
+    "profile_id": "linux-7.0.14-x86-journal-provisional",
+    "evidence_class": "synthetic",
+    "epoch": "1",
+    "admission_start_ns": "1000000000",
+    "admission_end_ns": "2000000000",
+    "admission_start_reason": null,
+    "admission_end_reason": null,
+    "observation_end_ns": "2500000000",
+    "callers": false,
+    "operation_capacity": "4096",
+    "nesting_capacity": "8",
+    "caller_frame_capacity": "16",
+    "ring_bytes": "8388608",
+    "closure": "unproved",
+    "closure_evidence": null,
+    "counter_reasons": {
+      "entries": null,
+      "exits": null,
+      "matched_results": null,
+      "unmatched_exits": null,
+      "censored": null,
+      "operation_exhaustion": null,
+      "nesting_exhaustion": null,
+      "token_exhaustion": null,
+      "ring_drops": null,
+      "invalid_records": null,
+      "missed_callbacks": null
+    },
+    "counters": {
+      "entries": "1",
+      "exits": "1",
+      "matched_results": "1",
+      "unmatched_exits": "0",
+      "censored": "0",
+      "operation_exhaustion": "0",
+      "nesting_exhaustion": "0",
+      "token_exhaustion": "0",
+      "ring_drops": "0",
+      "invalid_records": "0",
+      "missed_callbacks": "0"
+    },
+    "region_identity": null,
+    "region_state": null,
+    "state_reason": "request_only_source"
+  }
+}

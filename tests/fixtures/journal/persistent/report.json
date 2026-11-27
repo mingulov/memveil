@@ -1,0 +1,80 @@
+{
+  "schema_version": "0.2.0",
+  "session_id": "journal-persistent",
+  "synthetic": true,
+  "engine_version": "contract-fixture",
+  "environment": {
+    "mode": "unknown",
+    "detection": "unverified",
+    "asserted_mode": null,
+    "attestation": "not_performed",
+    "evidence": []
+  },
+  "device_catalog": {
+    "devices": []
+  },
+  "quality": {
+    "detail": {
+      "status": "complete_for_scope",
+      "loss_count": "0",
+      "scope": "synthetic journal results",
+      "reason": "Authored metadata; never a real-platform admission."
+    },
+    "aggregate": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "counter snapshots",
+      "reason": "No counter snapshots in this fixture."
+    },
+    "correlation": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "region lifetimes",
+      "reason": "No region lifetime source."
+    },
+    "baseline": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "global journal baseline",
+      "reason": "Request-only source; pre-window state and global closure are unproved."
+    },
+    "terminal": {
+      "status": "unavailable",
+      "loss_count": null,
+      "scope": "global journal terminal",
+      "reason": "Request-only source; pre-window state and global closure are unproved."
+    }
+  },
+  "verdict": {
+    "name": "partial_unknown_loss",
+    "loss_ratio_bps": "0",
+    "delivered": "0"
+  },
+  "metrics": [],
+  "findings": [],
+  "limitations": [
+    "Synthetic request/results only; no persistent region identity, baseline or global closure.",
+    "Boot and pre-attach conversions are excluded.",
+    "MMIO conversions are excluded.",
+    "Kexec and accept paths are excluded.",
+    "Unobserved conversion paths are excluded."
+  ],
+  "integrity": {
+    "status": "verified",
+    "verified_bytes": "685",
+    "verified_events": "1"
+  },
+  "journal": {
+    "requests": "1",
+    "successes": "1",
+    "failures": "0",
+    "unmatched_exits": "0",
+    "censored": "0",
+    "censored_reason": null,
+    "requested_bytes": "4096",
+    "requested_bytes_reason": null,
+    "shared_bytes": null,
+    "unreverted_ranges": null,
+    "state_reason": "request_only_source"
+  }
+}
