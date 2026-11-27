@@ -29,7 +29,6 @@ use crate::platform::artifact_files::{
 use crate::platform::capabilities::{cap_floor_ok, cap_floor_refusal};
 use crate::platform::clock::wall_ns;
 use crate::platform::evidence::{KernelInfo, detect_environment};
-use crate::platform::journal_profile::journal_profile_reason;
 use crate::platform::narrow::{
     MAX_NARROW_BTF_BYTES, NarrowBindings, check_identity_bindings, measure_live_bindings,
     parse_narrow_note,
@@ -882,8 +881,7 @@ pub fn run_qualify_with(root: &str, profiles_dir: &str, opts: &QualifyOptions) -
         Err(e) => return qualify_failed(&e.to_string()),
     };
     if selection.journal {
-        let reason = journal_profile_reason(profiles_dir, &opts.profile, opts.has_profile);
-        return qualify_failed(&reason);
+        return qualify_failed("journal_profile_not_admitted");
     }
     let output = opts.output.clone();
     let mut bridge = resolve_bridge(&opts.bridge, opts.has_bridge);
