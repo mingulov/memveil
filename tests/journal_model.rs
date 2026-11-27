@@ -23,6 +23,7 @@ use memveil::model::journal_session::JOURNAL_COUNTER_COUNT;
 use memveil::model::session::{Session, parse_session};
 use memveil::platform::outcome::OpOut;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// The 12 frozen scenarios carrying reports (`duplicate` has none and is
 /// classified separately).
@@ -507,4 +508,75 @@ fn reader_refuses_journal_profile_and_window_mismatch() {
     assert_eq!(err.line_no, 1);
     assert!(err.message.contains("journal profile/window mismatch"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn replay_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_memveil"))
+}
+
+/// Replay refuses journal captures: exit 2, no report, clear refusal.
+///
+/// The typed boundary accepts journal captures, but the legacy
+/// reducer would fabricate conversion counts for them, so both
+/// replay verbs refuse before reducing (journal reducer follow-on
+/// pending).
+#[test]
+fn replay_refuses_journal_capture() {
+    for (verb, extra) in [("report", &[][..]), ("top", &["--interval", "1s"][..])] {
+        let out = Command::new(replay_bin())
+            .arg(verb)
+            .args(extra)
+            .arg("tests/fixtures/journal/success")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap_or_else(|e| panic!("run {verb} on journal capture: {e}"));
+        assert_eq!(out.status.code(), Some(2), "{verb} exit");
+        assert!(out.stdout.is_empty(), "{verb} produces no report");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("journal capture refused"),
+            "{verb} refusal: {stderr}"
+        );
+        assert!(
+            stderr.contains("journal reducer follow-on pending"),
+            "{verb} follow-on note: {stderr}"
+        );
+    }
+}
+
+/// Legacy captures replay exactly as before through both verbs.
+///
+/// Exit 0 on both, and the final top block body equals report
+/// stdout byte for byte (replay-prefix equivalence), pinning zero
+/// behavior change on the non-journal path.
+#[test]
+fn replay_legacy_capture_unchanged() {
+    let dir = "tests/fixtures/reader/sealed-complete";
+    let report = Command::new(replay_bin())
+        .arg("report")
+        .arg(dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run report on legacy capture");
+    assert_eq!(report.status.code(), Some(0));
+    assert!(!report.stdout.is_empty());
+    assert!(
+        !String::from_utf8_lossy(&report.stderr).contains("journal"),
+        "legacy report names no journal"
+    );
+    let top = Command::new(replay_bin())
+        .arg("top")
+        .arg("--interval")
+        .arg("1s")
+        .arg(dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run top on legacy capture");
+    assert_eq!(top.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&top.stdout);
+    let blocks: Vec<&str> = text.split("--- refresh ").collect();
+    assert!(blocks.len() >= 2, "top prints a final block");
+    let last = blocks[blocks.len() - 1];
+    let body = last.split_once('\n').expect("header line").1;
+    assert_eq!(body.as_bytes(), report.stdout.as_slice());
 }

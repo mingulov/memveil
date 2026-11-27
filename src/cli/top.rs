@@ -1125,6 +1125,13 @@ fn finish_live(dir: &str, opts: &TopOptions, shown: usize, capture_exit: i64) ->
         Ok(reader) => reader,
         Err(e) => return top_read_failed(&e.message),
     };
+    if reader.session.has_journal {
+        return top_failed(
+            "memveil top: ",
+            "journal capture refused: the legacy reducer cannot reduce journal events; \
+             journal reducer follow-on pending",
+        );
+    }
     let mut analyzer = Analyzer::new(reader.session.clone());
     let mut watch = FilterWatch::new(opts);
     if shown > 0 {
@@ -1245,6 +1252,13 @@ pub fn run_top(args: &[String]) -> i64 {
 /// the open: the first block warns with a blanked echo and fails,
 /// exactly like the Mojo block render raise.
 fn run_replay(reader: &mut CaptureReader, opts: &TopOptions, device_unrenderable: bool) -> i64 {
+    if reader.session.has_journal {
+        return top_failed(
+            "memveil top: ",
+            "journal capture refused: the legacy reducer cannot reduce journal events; \
+             journal reducer follow-on pending",
+        );
+    }
     let mut signal = LiveSignalSource::new();
     let armed = signal.setup();
     if !armed.ok {

@@ -956,6 +956,13 @@ fn run_report_parsed(opts: &ReportOptions, dir_os: Option<&OsStr>) -> i64 {
         Ok(reader) => reader,
         Err(e) => return report_read_failed(&e.message),
     };
+    if reader.session.has_journal {
+        return report_failed(
+            "memveil report: ",
+            "journal capture refused: the legacy reducer cannot reduce journal events; \
+             journal reducer follow-on pending",
+        );
+    }
     let mut analyzer = Analyzer::new(reader.session.clone());
     loop {
         let more = match reader.has_more() {
