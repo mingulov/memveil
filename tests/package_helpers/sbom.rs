@@ -200,7 +200,7 @@ fn parse_crate(value: &str) -> CratePin {
 
 /// Emit the frozen SPDX SBOM over the full closure, exactly once.
 ///
-/// The payload files are every copied file (not the 12-entry
+/// The payload files are every copied file (not the 15-entry
 /// subset), reconciled with the full-closure verifier. Delegates
 /// to the release-entry harness library so the custody flow and
 /// the test suite share one emitter. Refuses to overwrite.

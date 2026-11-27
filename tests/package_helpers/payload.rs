@@ -167,7 +167,7 @@ fn extract_roots(
     .collect())
 }
 
-/// Hash the 12 payload members of a package set.
+/// Hash the 15 payload members of a package set.
 pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String, String>, String> {
     let roots = extract_roots(deb, rpm, bundle, "payload-collect")?;
     let mut entries = BTreeMap::new();
@@ -181,7 +181,7 @@ pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String,
     Ok(entries)
 }
 
-/// Read the 12 payload members of a package set; logical path -> bytes.
+/// Read the 15 payload members of a package set; logical path -> bytes.
 pub fn member_bytes(
     deb: &Path,
     rpm: &Path,

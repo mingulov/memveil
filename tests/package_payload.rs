@@ -4,12 +4,12 @@
 //! Collect/check and SPDX emit coverage over the three Rust
 //! packages (ported from the retired harness suites),
 //! adjusting only for the known deltas:
-//! 12 payload entries (no bridge), Cargo crate pins instead of
+//! 15 payload entries (no bridge), Cargo crate pins instead of
 //! the bridge/toolchain lock pins, and no committed byte-pin
 //! manifest (the collected manifest's shape stands in until
 //! requalification pins release bytes).
 //!
-//! A build-path cleanliness gate additionally proves the 12
+//! A build-path cleanliness gate additionally proves the 15
 //! runtime members name no build checkout or home path (both
 //! remapped to fixed prefixes) and carry the remap marker
 //! instead.
