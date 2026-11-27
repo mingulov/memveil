@@ -1587,6 +1587,7 @@ fn guest_program_prepares_on_guest_kernel() {
         eprintln!("guest leg skipped: no built journal object; run cargo build first");
         return;
     };
+    guest_cleanup(&user, &host, &port, "g1");
     let (binary_len, elf_len) = guest_stage(&user, &host, &port, "g1");
     eprintln!("guest prepare: staged binary={binary_len} object={elf_len}");
     let out = ssh_run(
@@ -1637,6 +1638,7 @@ fn guest_end_to_end_attach_oracle_detach() {
         eprintln!("guest leg skipped: no built journal object; run cargo build first");
         return;
     };
+    guest_cleanup(&user, &host, &port, "g2");
     let (binary_len, elf_len) = guest_stage(&user, &host, &port, "g2");
     eprintln!("guest oracle: staged binary={binary_len} object={elf_len}");
     let run = "BASE=$(sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true); \
