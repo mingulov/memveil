@@ -283,11 +283,21 @@ def check_inventory(text):
             fail("control-plane citation %s missing" % token)
 
 
+def target_dir():
+    """Cargo target dir, honoring an explicit CARGO_TARGET_DIR."""
+    override = os.environ.get("CARGO_TARGET_DIR", "")
+    if override:
+        cand = Path(override)
+        return cand if cand.is_absolute() else ROOT / cand
+    return ROOT / "target"
+
+
 def built_object():
-    """Newest linked journal object under the workspace target dir."""
-    cands = sorted(ROOT.glob("target/debug/build/memveil/*/out/ebpf-target/"
+    """Newest linked journal object under the cargo target dir."""
+    base = target_dir()
+    cands = sorted(base.glob("debug/build/memveil/*/out/ebpf-target/"
                              "bpfel-unknown-none/release/memveil-ebpf-journal"))
-    cands += sorted(ROOT.glob("target/release/build/memveil/*/out/ebpf-target/"
+    cands += sorted(base.glob("release/build/memveil/*/out/ebpf-target/"
                               "bpfel-unknown-none/release/memveil-ebpf-journal"))
     if not cands:
         fail("no built journal object; run cargo build first")
@@ -318,7 +328,7 @@ def elf_sections(path):
 
 
 def check_object():
-    """Linked-object inventory: programs, marker, zero relocations."""
+    """Linked-object inventory: programs, marker, zero CO-RE field relocations."""
     sections = elf_sections(built_object())
     progs = sorted(name for name in sections
                    if name.startswith("fentry/") or name.startswith("fexit/"))
@@ -360,7 +370,7 @@ def main():
     print("producer reference: 12 corpus vectors byte-identical "
           "(Aya layout vs Rust capture), C decoder agrees ASan/UBSan "
           "clean, linked object carries 4 programs + marker + zero "
-          "relocations")
+          "CO-RE field relocations")
 
 
 if __name__ == "__main__":

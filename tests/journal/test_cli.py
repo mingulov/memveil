@@ -76,10 +76,16 @@ def main():
                      "global scope, got exit %d: %r"
                      % (verb, got.returncode, got.stderr))
         # Lifecycle-only resolves the attempt base instead of naming
-        # the old missing-base refusal.
+        # the old missing-base refusal: it must reach profile
+        # loading (exit 3), not fail capability parsing (exit 2).
+        # The Rust parser test pins the resolution itself; this
+        # leg pins the end-to-end exit shape.
         got = run(binary, ["record", "--output", str(tmp / "lc"),
                            "--capability", "mapping-lifecycle",
                            "--profiles-dir", str(tmp / "empty-profiles")])
+        if got.returncode != 3:
+            fail("lifecycle-only: want exit 3 past capability parsing, "
+                 "got exit %d: %r" % (got.returncode, got.stderr))
         if "attempt-trace is required" in got.stderr:
             fail("lifecycle-only still names the retired refusal: %r"
                  % got.stderr)

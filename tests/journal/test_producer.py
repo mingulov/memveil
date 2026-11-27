@@ -7,7 +7,7 @@ This replaces the old host simulation run: instead of compiling the
 retired C program, it checks the shippable Aya program compiles for
 the BPF target under the repository pin and runs the host-side
 differential (`producer_reference.py`). Real verifier/load/attach
-stays lease-gated in the completion slice and is never attempted
+stays lease-gated for final integration and is never attempted
 here.
 """
 import os
