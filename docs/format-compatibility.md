@@ -58,8 +58,9 @@ A missing final session can be recovered with `--allow-partial` from an owned, l
 - Session, event and report 0.2.0 are reserved for the opt-in conversion
   request/result journal. It must retain integrity and recovery guarantees;
   successful API results cannot establish physical state or range lifetimes.
-- The reserved journal versions are not accepted or produced and have
-  no schema files yet. Old schema files remain immutable. Product 0.2.0 is
+- The reserved journal versions are not accepted or produced; their frozen
+  schema files ship for contract reference only. Old schema files remain
+  immutable. Product 0.2.0 is
   the hardened ordinary-Linux preview; the journal and real-SNP
   qualification target stays a later, unnumbered release. Neither statement
   is a qualification receipt. The later 0.3.0 security milestone is separate

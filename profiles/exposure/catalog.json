@@ -45,7 +45,7 @@
       "kind": "journal",
       "status": "reserved",
       "requires_attempt_hook": false,
-      "description": "Opt-in conversion request/result journal. Parses but refuses: no record channel exists yet, and no 0.2.0 schema files ship."
+      "description": "Opt-in conversion request/result journal. Parses; refuses without an admitted profile bound to the host's exact config, BTF, and object. The frozen 0.2.0 schemas ship for contract reference."
     },
     {
       "id": "census",
