@@ -411,7 +411,12 @@ fingerprints. See docs/support.md.
        [--bridge PATH] [--profile ID|PATH]
        [--profiles-dir DIR] [--capability IDS]
        [--lc-object PATH] [--cp-object PATH]
+       [--journal-object PATH] [--journal-callers]
        [--device NAME] [--strict]
+
+conversion-journal selects only global wrapper requests/results.
+Mixed lists also select attempts. Journal callers are off by default.
+Provisional journal profiles refuse with exit 3; no unsafe override.
 
 Capture swiotlb bounce attempts into DIR (needs root): the
 common case is sudo memveil record --output DIR --duration 10.
@@ -427,7 +432,8 @@ check) refuses. Diagnostics go to stderr.
 
 --capability selects extra channels as a comma-separated
 list without spaces (default: attempt-trace, which is
-always required). mapping-lifecycle uses --lc-object
+implicitly included for ordinary channels). Journal-only uses no attempts.
+mapping-lifecycle uses --lc-object
 and copy-actual uses --cp-object when given, else the
 embedded object for that channel; the winning profile
 must declare each requested capability supported (or
@@ -525,8 +531,13 @@ fingerprints. See docs/support.md.
        [--bridge PATH] [--profile ID|PATH]
        [--profiles-dir DIR] [--capability IDS]
        [--lc-object PATH] [--cp-object PATH]
+       [--journal-object PATH] [--journal-callers]
        [--interval DURATION] [--device NAME]
        [--strict] [--compact] [--full] [--long-lived-after DURATION]
+
+Ordinary live channels implicitly include attempt-trace.
+Journal-only uses no attempts and rejects --device.
+Journal callers are off by default; provisional profiles refuse.
 
 Replay the capture in DIR: the common case is memveil top DIR,
 printing one short headline block per interval of capture time
@@ -631,6 +642,11 @@ Example:
        [--bridge PATH] [--profile ID|PATH]
        [--profiles-dir DIR] [--capability IDS]
        [--lc-object PATH] [--cp-object PATH]
+       [--journal-object PATH] [--journal-callers]
+
+conversion-journal selects only global wrapper requests/results.
+Mixed lists also select attempts. Journal callers are off by default.
+Provisional journal profiles refuse with exit 3; no unsafe override.
 
 Prove this host can be measured (needs root): the common
 case is sudo memveil qualify --output DIR --object PATH

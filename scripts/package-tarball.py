@@ -147,6 +147,7 @@ CHANNELS = (
     ("attempt", "swiotlb_attempt.bpf.o"),
     ("lifecycle", "swiotlb_lifecycle.bpf.o"),
     ("copy", "swiotlb_copy.bpf.o"),
+    ("journal", "conversion_journal.bpf.o"),
 )
 
 # Channel identity marker: each Aya channel object carries a

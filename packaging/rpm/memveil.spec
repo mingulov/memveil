@@ -127,7 +127,7 @@ install -D -m0755 "$B/bin/memveil" "%{buildroot}/usr/bin/memveil"
 mkdir -p "%{buildroot}/usr/lib/memveil"
 cp -rp "$B"/lib/memveil/*.so* "%{buildroot}/usr/lib/memveil/"
 for obj in swiotlb_attempt.bpf.o swiotlb_lifecycle.bpf.o \
-    swiotlb_copy.bpf.o; do
+    swiotlb_copy.bpf.o conversion_journal.bpf.o; do
   test -f "$B/bpf/$obj" || exit 1
   install -m0644 "$B/bpf/$obj" "%{buildroot}/usr/lib/memveil/$obj"
 done

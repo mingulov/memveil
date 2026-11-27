@@ -145,6 +145,12 @@ OBSERVER_FROZEN = {
 # --strict: parse_report_args/parse_top_args/parse_record_args select partial-evidence exit policy.
 # --profile-id: cli/bind.rs parse_bind_args names the profile being generated.
 # These existing selectors add no collection, environment or payload source.
+# --journal-object: cli/record.rs + cli/qualify.rs (+ top live
+# forwarding) select the journal object override for an explicit
+# path. --journal-callers: the same parsers enable bounded caller
+# classification. Both require conversion-journal (parse-time
+# refusal otherwise), add no data source beyond the journal
+# channel, and never export addresses, frames, or task names.
 ALLOWED_FLAGS = {
     "--allow-partial", "--bridge", "--capability", "--cp-object",
     "--device", "--duration", "--format", "--full", "--help",
@@ -152,6 +158,7 @@ ALLOWED_FLAGS = {
     "--long-lived-after", "--max-events-bytes", "--max-line-bytes",
     "--max-session-bytes", "--object", "--output", "--profile",
     "--profiles-dir", "--compact", "--strict", "--profile-id",
+    "--journal-object", "--journal-callers",
 }
 
 # SUDO_UID/SUDO_GID reviewed 2026-10-11: read once by
@@ -301,6 +308,32 @@ def self_check_flag_audit():
             except SystemExit as exc:
                 rejected = exc.code == 1
         check('flags-sensitivity', rejected, 'flag inventory mutation was accepted')
+
+
+def journal_inventory(code):
+    helpers = set(re.findall(r"\b(bpf_[a-z0-9_]+)\s*\(", code))
+    expected = {"bpf_get_current_task_btf", "bpf_probe_read_kernel",
+                "bpf_ktime_get_ns", "bpf_get_stack",
+                "bpf_get_smp_processor_id"}
+    return (helpers == expected
+            and code.count("bpf_probe_read_kernel(") == 1
+            and code.count("bpf_get_stack(") == 1
+            and "mv_jr_offs" in code
+            and "reserve_bytes(" in code
+            and ".submit(0)" in code
+            and "NO_ADDRESSES" in code
+            and "NO_FRAMES" in code
+            and "NO_TASK_NAMES" in code)
+
+
+def audit_journal_inventory(code):
+    check("journal-helper-field-inventory", journal_inventory(code))
+    for mutant in (code + "\nbpf_unknown_helper();",
+                   code.replace("bpf_probe_read_kernel(",
+                                "bpf_probe_read_user("),
+                   code.replace("reserve_bytes(", "reserve_bytes_x("),
+                   code + "\nbpf_probe_read_kernel(extra);"):
+        check("journal-inventory-sensitivity", not journal_inventory(mutant))
 
 
 def self_check_observer_audit():
@@ -464,7 +497,11 @@ def main():
     # lifecycle reads nothing (fentry args only); channel
     # bins wire programs and maps without reads. A new probe
     # file, or a new read in an old file, fails here until
-    # reviewed.
+    # reviewed. The journal bin reads one u64 (task birth at
+    # the host-resolved tabled offset) through one checked
+    # width reader; pairing keys stay in kernel maps and no
+    # address, frame, or task name reaches the ring (pinned
+    # by the journal inventory audit below).
     read_sites = {
         "attempt.rs": (1, 0, 0),
         "copy.rs": (0, 4, 0),
@@ -473,6 +510,7 @@ def main():
         "bin/attempt.rs": (0, 0, 0),
         "bin/copy.rs": (0, 0, 0),
         "bin/lifecycle.rs": (0, 0, 0),
+        "bin/conversion_journal.rs": (0, 1, 0),
     }
     got_files = sorted(
         os.path.relpath(p, os.path.join(RUST, "crates", "ebpf", "src"))
@@ -483,6 +521,8 @@ def main():
         base = os.path.relpath(
             path, os.path.join(RUST, "crates", "ebpf", "src"))
         text = open(path).read()
+        if base == "bin/conversion_journal.rs":
+            audit_journal_inventory(text)
         for token in FORBIDDEN_BPF:
             check("bpf-no-%s" % token.replace("bpf_", ""),
                   token not in text, base)

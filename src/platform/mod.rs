@@ -11,6 +11,7 @@ pub mod evidence;
 pub mod gzip;
 pub mod hash;
 pub mod iterator;
+pub mod journal_profile;
 pub mod kernelgate;
 pub mod narrow;
 pub mod outcome;

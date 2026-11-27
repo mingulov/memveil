@@ -91,6 +91,7 @@ BPF_OBJECTS = (
     "swiotlb_attempt.bpf.o",
     "swiotlb_lifecycle.bpf.o",
     "swiotlb_copy.bpf.o",
+    "conversion_journal.bpf.o",
 )
 
 CLOSURE_LIB = "libgcc_s.so.1"

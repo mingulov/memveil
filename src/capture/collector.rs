@@ -22,6 +22,8 @@
 //! behavior and the scripted matrix exactly.
 
 use super::correlation::CorrelationRegistry;
+use super::journal_capture::{JournalCapture, JournalKernel, encode_journal_control};
+use super::journal_kernel::JournalKernel as NativeJournalKernel;
 use super::lifecycle::{
     CP_KIND_COPY, CP_LEN, CP_REASON_BOUNDS, CP_REASON_LAYOUT, CP_REASON_MASK_READ, CP_REASON_SHIFT,
     CP_REASON_SLOT_READ, DecodedCopy, DecodedLifecycle, HOOK_BOUNCE, HOOK_MAP_RESULT,
@@ -356,6 +358,14 @@ pub struct CollectorConfig {
     pub has_copy: bool,
     /// Bound copy ring size.
     pub copy_ring_bytes: u32,
+    /// True when the conversion journal channel runs.
+    pub has_journal: bool,
+    /// True when the journal is the only channel (no attempt source).
+    pub journal_only: bool,
+    /// True when bounded journal caller processing runs.
+    pub journal_callers: bool,
+    /// Journal source profile identity.
+    pub journal_profile: String,
     /// True when a device filter selects.
     pub has_device_filter: bool,
     /// Device selector.
@@ -398,6 +408,10 @@ impl Default for CollectorConfig {
             lifecycle_ring_bytes: 0,
             has_copy: false,
             copy_ring_bytes: 0,
+            has_journal: false,
+            journal_only: false,
+            journal_callers: false,
+            journal_profile: String::new(),
             has_device_filter: false,
             device_filter: String::new(),
             attempt_loss_lower_bound: false,
@@ -810,7 +824,14 @@ pub struct Collector {
     stop_evidence: StopEvidence,
     has_stop_evidence: bool,
     live: LivenessTally,
+    journal_data: JournalCapture,
+    journal_counts: Vec<u64>,
+    journal_readable: bool,
+    journal_done: bool,
 }
+
+/// Bounded admission-close drain budget in nanoseconds.
+const JOURNAL_STOP_NS: u64 = 5000000000;
 
 fn stats_out_blank(ok: bool) -> StatsOut {
     StatsOut {
@@ -946,6 +967,17 @@ impl Collector {
             },
             has_stop_evidence: false,
             live: LivenessTally::new(),
+            journal_data: JournalCapture {
+                session: crate::model::journal_session::JournalSession::default(),
+                capture_start: 0,
+                invalid_records: 0,
+                sequence_gaps: 0,
+                sequences: std::collections::HashMap::new(),
+                last_result: 0,
+            },
+            journal_counts: Vec::new(),
+            journal_readable: false,
+            journal_done: false,
         }
     }
 
@@ -1229,22 +1261,255 @@ impl Collector {
         signal: &mut G,
         writer: &mut W,
     ) -> RunResult {
-        let refusal = self.startup(kernel, clock, signal, writer);
+        let mut journal = NativeJournalKernel::new();
+        self.run_with_journal(kernel, &mut journal, clock, signal, writer)
+    }
+
+    /// Full run with an explicit journal source.
+    pub fn run_with_journal<
+        K: KernelSource,
+        J: JournalKernel,
+        C: ClockSource,
+        G: SignalSource,
+        W: WriterSource,
+    >(
+        &mut self,
+        kernel: &mut K,
+        journal: &mut J,
+        clock: &mut C,
+        signal: &mut G,
+        writer: &mut W,
+    ) -> RunResult {
+        let refusal = self.startup_with_journal(kernel, journal, clock, signal, writer);
         if !refusal.is_empty() {
+            if self.cfg.has_journal {
+                let _ = journal.close();
+            }
+            if self.cfg.journal_only {
+                let residual = writer.abandon();
+                return RunResult {
+                    exit_code: if residual.is_empty() {
+                        EXIT_REFUSAL
+                    } else {
+                        EXIT_ERROR
+                    },
+                    end_reason: "unknown".to_string(),
+                    outcome: "refused".to_string(),
+                    diagnostic: refusal,
+                    fix: String::new(),
+                    code: String::new(),
+                    unknown: false,
+                    trusted: false,
+                };
+            }
             return self.refuse(kernel, writer, refusal);
         }
-        let stop = self.poll_loop(kernel, clock, signal, writer);
+        let stop = self.poll_loop_with_journal(kernel, journal, clock, signal, writer);
+        if self.cfg.has_journal {
+            self.close_journal(journal, clock, writer);
+        }
+        if stop == "unfinalizable"
+            || (self.cfg.journal_only && self.result_state == "unfinalizable")
+        {
+            return self.drop_unfinalizable(writer);
+        }
+        if self.cfg.journal_only {
+            return self.finish(clock, writer);
+        }
         if stop == "error-path" {
             return self.error_close(kernel, clock, writer);
-        }
-        if stop == "unfinalizable" {
-            return self.drop_unfinalizable(writer);
         }
         self.normal_close(kernel, clock, writer);
         if self.result_state == "unfinalizable" {
             return self.drop_unfinalizable(writer);
         }
         self.finish(clock, writer)
+    }
+
+    /// Poll one journal record into the capture; "" continues.
+    fn journal_poll<J: JournalKernel, C: ClockSource, W: WriterSource>(
+        &mut self,
+        journal: &mut J,
+        clock: &mut C,
+        writer: &mut W,
+        wait_ms: i64,
+    ) -> String {
+        let polled = journal.poll(wait_ms);
+        if !polled.ok {
+            self.fail("error".to_string());
+            return "error-path".to_string();
+        }
+        if polled.data.is_empty() {
+            return String::new();
+        }
+        let now = clock.now();
+        if now == u64::MAX {
+            self.fail("error".to_string());
+            return "error-path".to_string();
+        }
+        let mut event = match self
+            .journal_data
+            .consume(&polled.data, &self.session_id, now + 1)
+        {
+            Ok(event) => event,
+            Err(_) => {
+                self.fail("error".to_string());
+                return "error-path".to_string();
+            }
+        };
+        event.seq = self.next_seq;
+        let line = match encode_event_line(&event) {
+            Ok(line) => line,
+            Err(_) => {
+                self.fail("error".to_string());
+                return "error-path".to_string();
+            }
+        };
+        let wrote = writer.append(&line);
+        if !wrote.ok {
+            if wrote.kind == "refused" {
+                self.latch("size_limit".to_string());
+                return "closed".to_string();
+            }
+            if wrote.kind == "fatal" || wrote.kind == "misuse" {
+                self.result_state = "unfinalizable".to_string();
+                return "unfinalizable".to_string();
+            }
+            self.fail("error".to_string());
+            return "error-path".to_string();
+        }
+        self.next_seq += 1;
+        self.account_line(&line, "transition_result");
+        if event.ts_ns > self.max_persisted_ts {
+            self.max_persisted_ts = event.ts_ns;
+        }
+        String::new()
+    }
+
+    /// Bounded admission close: close admission, drain, detach, snapshot.
+    fn close_journal<J: JournalKernel, C: ClockSource, W: WriterSource>(
+        &mut self,
+        journal: &mut J,
+        clock: &mut C,
+        writer: &mut W,
+    ) {
+        let close_ns = clock.now();
+        let start = self.journal_data.session.admission_start_ns.value;
+        let epoch = self.journal_data.session.epoch;
+        let control = encode_journal_control(
+            epoch,
+            start,
+            close_ns,
+            false,
+            true,
+            self.cfg.journal_callers,
+        );
+        let closed = journal.control(&control);
+        // Bound admitted callbacks by the completed write/readback, not by
+        // the earlier request instant: callbacks can race the map update.
+        let close_ns = clock.now();
+        if self.journal_data.closed(close_ns, closed.ok).is_err() {
+            self.fail("error".to_string());
+        }
+        let deadline = sat_add_u64(close_ns, JOURNAL_STOP_NS).0;
+        for _ in 0..10000 {
+            if clock.now() >= deadline {
+                break;
+            }
+            let result = self.journal_poll(journal, clock, writer, 10);
+            if !result.is_empty() {
+                break;
+            }
+            let counters = journal.counters();
+            if counters.ok && counters.values.len() == 15 && counters.values[12] == 0 {
+                break;
+            }
+        }
+        let disabled = journal.control(&encode_journal_control(
+            epoch,
+            start,
+            close_ns,
+            false,
+            false,
+            self.cfg.journal_callers,
+        ));
+        let detached = journal.detach();
+        // Detached/quiet is only a bounded observation cut, never closure proof.
+        for _ in 0..10000 {
+            if clock.now() >= deadline {
+                break;
+            }
+            let polled = journal.poll(0);
+            if !polled.ok || polled.data.is_empty() {
+                break;
+            }
+            let event = match self
+                .journal_data
+                .consume(&polled.data, &self.session_id, clock.now())
+            {
+                Ok(event) => event,
+                Err(_) => {
+                    self.fail("error".to_string());
+                    break;
+                }
+            };
+            let mut event = event;
+            event.seq = self.next_seq;
+            let line = match encode_event_line(&event) {
+                Ok(line) => line,
+                Err(_) => {
+                    self.fail("error".to_string());
+                    break;
+                }
+            };
+            let wrote = writer.append(&line);
+            if !wrote.ok {
+                if wrote.kind == "fatal" || wrote.kind == "misuse" {
+                    self.result_state = "unfinalizable".to_string();
+                } else if wrote.kind == "refused" {
+                    self.latch("size_limit".to_string());
+                } else {
+                    self.fail("error".to_string());
+                }
+                break;
+            }
+            self.next_seq += 1;
+            self.account_line(&line, "transition_result");
+            if event.ts_ns > self.max_persisted_ts {
+                self.max_persisted_ts = event.ts_ns;
+            }
+        }
+        let final_counters = journal.counters();
+        self.journal_counts = final_counters.values.clone();
+        self.journal_readable = final_counters.ok && disabled.ok && detached.ok;
+        self.journal_done = true;
+        if !journal.close().ok {
+            self.fail("error".to_string());
+        }
+    }
+
+    /// Open journal admission at readiness.
+    fn open_journal<J: JournalKernel, C: ClockSource>(
+        &mut self,
+        journal: &mut J,
+        clock: &mut C,
+    ) -> String {
+        let start = clock.now();
+        let control = encode_journal_control(
+            self.journal_data.session.epoch,
+            start,
+            0,
+            true,
+            true,
+            self.cfg.journal_callers,
+        );
+        if !journal.control(&control).ok {
+            return "journal readiness control failed".to_string();
+        }
+        if self.journal_data.opened(start).is_err() {
+            return "journal readiness clock invalid".to_string();
+        }
+        String::new()
     }
 
     /// Clean rollback after a pre-readiness failure.
@@ -1361,6 +1626,25 @@ impl Collector {
         signal: &mut G,
         writer: &mut W,
     ) -> String {
+        let mut journal = NativeJournalKernel::new();
+        self.startup_with_journal(kernel, &mut journal, clock, signal, writer)
+    }
+
+    /// Transactional start with an explicit journal source.
+    pub fn startup_with_journal<
+        K: KernelSource,
+        J: JournalKernel,
+        C: ClockSource,
+        G: SignalSource,
+        W: WriterSource,
+    >(
+        &mut self,
+        kernel: &mut K,
+        journal: &mut J,
+        clock: &mut C,
+        signal: &mut G,
+        writer: &mut W,
+    ) -> String {
         let sig_ready = signal.setup();
         if !sig_ready.ok {
             return format!("signal setup: {}", sig_ready.message);
@@ -1368,6 +1652,42 @@ impl Collector {
         self.start_ns = clock.now();
         self.max_persisted_ts = self.start_ns;
         self.session_id = format!("cap-{}-{}", format_u64(self.start_ns), self.cfg.pid);
+        if self.cfg.has_journal {
+            self.journal_data = JournalCapture::new(
+                self.start_ns.max(1),
+                self.start_ns,
+                self.cfg.journal_profile.clone(),
+                self.cfg.journal_callers,
+            );
+            let prepared = journal.prepare(&encode_journal_control(
+                self.journal_data.session.epoch,
+                0,
+                0,
+                false,
+                false,
+                self.cfg.journal_callers,
+            ));
+            if !prepared.ok {
+                return prepared.message;
+            }
+            if self.cfg.journal_only {
+                let made = writer.create(&self.cfg.output, self.cfg.max_events_bytes);
+                if !made.ok {
+                    return "journal output create failed".to_string();
+                }
+                self.attach_ns = clock.now();
+                self.journal_data.capture_start = self.attach_ns;
+                if !journal.attach().ok {
+                    return "journal attach failed".to_string();
+                }
+                self.ready_ns = clock.now();
+                let checkpoint_note = self.checkpoint(writer, self.ready_ns);
+                if !checkpoint_note.is_empty() {
+                    return checkpoint_note;
+                }
+                return self.open_journal(journal, clock);
+            }
+        }
         let opened = kernel.open_session();
         if !opened.ok {
             return format!("open: {}", opened.message);
@@ -1565,9 +1885,21 @@ impl Collector {
         self.ready_ns = clock.now();
         let t_r = sat_add_u64(self.ready_ns, LIVENESS_GUARD_NS).0;
         self.live.retarget(self.attach_ns, t_r);
+        if self.cfg.has_journal {
+            self.journal_data.capture_start = self.attach_ns;
+            if !journal.attach().ok {
+                return "journal attach failed".to_string();
+            }
+        }
         let checkpoint_note = self.checkpoint(writer, self.ready_ns);
         if !checkpoint_note.is_empty() {
             return format!("output readiness checkpoint: {checkpoint_note}");
+        }
+        if self.cfg.has_journal {
+            let note = self.open_journal(journal, clock);
+            if !note.is_empty() {
+                return note;
+            }
         }
         if self.cfg.has_pool_sample {
             // Baseline pool sample, persisted first: the file
@@ -1634,6 +1966,22 @@ impl Collector {
                 return Err(EncodeError::new("checkpoint", "window end overflow"));
             }
             snapshot.window_end_ns = horizon + 1;
+            if self.cfg.has_journal {
+                match self.journal_data.snapshot(
+                    snapshot.window_end_ns,
+                    false,
+                    &self.journal_counts,
+                    self.journal_readable,
+                ) {
+                    Ok(journal) => {
+                        snapshot.journal = journal;
+                        snapshot.has_journal = true;
+                    }
+                    Err(_) => {
+                        return Err(EncodeError::new("journal", "checkpoint snapshot invalid"));
+                    }
+                }
+            }
             snapshot.has_integrity = true;
             snapshot.integrity = self.committed_stream.snapshot();
             if snapshot.integrity.events_bytes != writer.committed_len()
@@ -1722,6 +2070,25 @@ impl Collector {
         signal: &mut G,
         writer: &mut W,
     ) -> String {
+        let mut journal = NativeJournalKernel::new();
+        self.poll_loop_with_journal(kernel, &mut journal, clock, signal, writer)
+    }
+
+    /// Collect with an explicit journal source.
+    pub fn poll_loop_with_journal<
+        K: KernelSource,
+        J: JournalKernel,
+        C: ClockSource,
+        G: SignalSource,
+        W: WriterSource,
+    >(
+        &mut self,
+        kernel: &mut K,
+        journal: &mut J,
+        clock: &mut C,
+        signal: &mut G,
+        writer: &mut W,
+    ) -> String {
         let mut dur_ns = u64::MAX;
         if self.cfg.duration_s <= u64::MAX / 1000000000 {
             dur_ns = self.cfg.duration_s * 1000000000;
@@ -1753,6 +2120,20 @@ impl Collector {
             }
             if now >= self.checkpoint_next_ns || self.next_seq >= self.checkpoint_next_seq {
                 let _ = self.checkpoint(writer, now);
+            }
+            if self.cfg.has_journal {
+                let journal_tick = self.journal_poll(
+                    journal,
+                    clock,
+                    writer,
+                    if self.cfg.journal_only { 10 } else { 0 },
+                );
+                if !journal_tick.is_empty() {
+                    return journal_tick;
+                }
+                if self.cfg.journal_only {
+                    continue;
+                }
             }
             let ptick = self.maybe_sample_pool(clock, writer, now);
             if !ptick.is_empty() {
@@ -2504,6 +2885,7 @@ impl Collector {
 impl Collector {
     /// Stamp the explicit source block on one event.
     fn fill_source(&mut self, ev: &mut Event) {
+        ev.journal_version = self.cfg.has_journal;
         ev.session_id = self.session_id.clone();
         ev.seq = self.next_seq;
         self.next_seq += 1;
@@ -2520,6 +2902,7 @@ impl Collector {
     /// and backend; the registry sets correlation after
     /// this stamp, so evidence refs carry real seqs.
     fn fill_source_hook(&mut self, ev: &mut Event) {
+        ev.journal_version = self.cfg.has_journal;
         ev.session_id = self.session_id.clone();
         ev.seq = self.next_seq;
         self.next_seq += 1;
@@ -2571,6 +2954,7 @@ impl Collector {
         let mut ev = Event {
             session_id: self.session_id.clone(),
             seq,
+            journal_version: self.cfg.has_journal,
             source_hook: "swiotlb:debugfs".to_string(),
             source_backend: "debugfs".to_string(),
             source_profile_id: self.cfg.profile_id.clone(),
@@ -3174,10 +3558,10 @@ impl Collector {
             return self.drop_unfinalizable(writer);
         }
         self.end_ns = top + 1;
-        if !self.evaluate().is_empty() {
+        if !self.cfg.journal_only && !self.evaluate().is_empty() {
             return self.drop_unfinalizable(writer);
         }
-        if !self.closing_records(writer).is_empty() {
+        if !self.cfg.journal_only && !self.closing_records(writer).is_empty() {
             return self.drop_unfinalizable(writer);
         }
         if !self.contained() {
@@ -4150,6 +4534,67 @@ impl Collector {
                 "copy.unknown_shift",
                 &format_u64(self.unknown_copy_shift),
             );
+        }
+        if self.cfg.has_journal {
+            out.has_journal = true;
+            out.finalized = self.journal_done;
+            let cut = self
+                .end_ns
+                .max(self.attach_ns.max(self.max_persisted_ts).saturating_add(1));
+            out.window_end_ns = cut;
+            out.journal = match self.journal_data.snapshot(
+                cut,
+                self.journal_done,
+                &self.journal_counts,
+                self.journal_readable,
+            ) {
+                Ok(journal) => journal,
+                Err(_) => return Err(EncodeError::new("journal", "snapshot invalid")),
+            };
+            out.cap_conversion_results.status = "partial".to_string();
+            out.cap_conversion_results.reason =
+                "Native wrapper requests/results; callback completeness unproved.".to_string();
+            out.cap_conversion_results.profile_id = self.cfg.journal_profile.clone();
+            out.cap_conversion_results.has_profile_id = true;
+            out.cap_conversion_results.hooks = vec![
+                "set_memory_decrypted".to_string(),
+                "set_memory_encrypted".to_string(),
+            ];
+            out.q_terminal.status = "partial".to_string();
+            out.q_terminal.reason =
+                "Journal closure unproved; quiet transport is not synchronization.".to_string();
+            out.q_terminal.has_loss_count = false;
+            out.stop.outcome = "partial".to_string();
+            out.stop.reason = out.q_terminal.reason.clone();
+            out.stop.admission_closed = out.journal.admission_end_ns.has;
+            out.stop.quiescence_observed = false;
+            out.has_verdict = false;
+            if self.cfg.journal_only {
+                Self::unavailable_cap(&mut out.cap_bounce_attempts, "Attempt source not selected.");
+                out.has_baseline_start_ns = false;
+                out.q_detail.status = "partial".to_string();
+                out.q_detail.reason =
+                    "Journal observed results; missed callbacks not observable.".to_string();
+                out.q_detail.scope = "conversion journal".to_string();
+                out.q_detail.has_loss_count = false;
+                out.q_aggregate.status = "partial".to_string();
+                out.q_aggregate.scope = "journal counters".to_string();
+                out.q_aggregate.reason =
+                    "Non-atomic snapshots; counter and detail alternatives are separate."
+                        .to_string();
+                out.q_aggregate.has_loss_count = false;
+                out.q_correlation.status = "unavailable".to_string();
+                out.q_correlation.scope = "journal operation membership".to_string();
+                out.q_correlation.reason =
+                    "Matching tokens do not prove callback completeness.".to_string();
+                out.q_correlation.has_loss_count = false;
+                out.q_baseline.status = "unavailable".to_string();
+                out.q_baseline.scope = "journal baseline".to_string();
+                out.q_baseline.reason =
+                    "Boot/pre-attach, MMIO, kexec/accept and unobserved paths excluded."
+                        .to_string();
+                out.q_baseline.has_loss_count = false;
+            }
         }
         while out.evidence.len() > 64 {
             out.evidence.pop();

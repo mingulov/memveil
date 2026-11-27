@@ -3,6 +3,7 @@
 memveil: binary-from-other-architecture [usr/lib/memveil/swiotlb_attempt.bpf.o]
 memveil: binary-from-other-architecture [usr/lib/memveil/swiotlb_copy.bpf.o]
 memveil: binary-from-other-architecture [usr/lib/memveil/swiotlb_lifecycle.bpf.o]
+memveil: binary-from-other-architecture [usr/lib/memveil/conversion_journal.bpf.o]
 # Both formats ship identical pages from the same generators;
 # compressing only the .deb side would break that identity.
 memveil: uncompressed-manual-page [usr/share/man/man1/memveil.1]

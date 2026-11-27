@@ -652,7 +652,7 @@ pub fn run_bind_with(root: &str, exe_path: &str, profiles_dir: &str, opts: &Bind
             return bind_failed("capability conversion-observe has no record channel");
         }
         if cap == JOURNAL {
-            return bind_failed("capability conversion-journal has no record channel");
+            return bind_failed("journal_profile_not_admitted");
         }
     }
     if opts.has_profile_id && !valid_profile_id(&opts.profile_id) {

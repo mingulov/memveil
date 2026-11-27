@@ -21,11 +21,12 @@
 //! bridge file, so an empty bridge is the normal case,
 //! not a refusal).
 
-use super::collector::{Collector, CollectorConfig, EXIT_REFUSAL, RunResult};
+use super::collector::{Collector, CollectorConfig, EXIT_INVALID, EXIT_REFUSAL, RunResult};
 use super::kernel::AyaKernel;
 use super::live::WriterSource;
 use super::loadcheck::{LoadDiag, LoadRefusal, diagnose_load, parse_load_refusal};
 use super::reader::DEFAULT_MAX_EVENTS_BYTES as REPLAY_MAX_EVENTS_BYTES;
+use crate::model::journal::{JournalSelection, select_journal};
 use crate::model::session::EvidenceItem;
 use crate::model::validate::check_opaque_id;
 use crate::platform::artifact_files::{join_root, open_bridge_snapshot, restore_capture_ownership};
@@ -34,6 +35,7 @@ use crate::platform::capabilities::{attempt_loss_exact, cap_floor_ok, cap_floor_
 use crate::platform::clock::{MonoClock, check_timens_live};
 use crate::platform::evidence::{KernelInfo, detect_environment};
 use crate::platform::hash::sha256_hex;
+use crate::platform::journal_profile::journal_profile_reason;
 use crate::platform::kernelgate::{GateVerdict, kernel_gate, remedy_for};
 use crate::platform::narrow::{
     LiveValue, MAX_NARROW_BTF_BYTES, MAX_NARROW_FORMAT_BYTES, MAX_NARROW_IMAGE_BYTES,
@@ -69,9 +71,11 @@ const ATTEMPT_CAP: &str = "attempt-trace";
 const LIFECYCLE_CAP: &str = "mapping-lifecycle";
 const COPY_CAP: &str = "copy-actual";
 const CONVERT_CAP: &str = "conversion-observe";
-/// Planned journal selector (`docs/format-compatibility.md`): recognized
-/// by the parser so admission answers it explicitly (exit 3, no record
-/// channel) instead of as an unknown id (exit 2).
+/// Journal selector (`docs/conversion-journal.md`): recognized
+/// by the parser so admission answers it with the frozen
+/// admission code (exit 3) instead of as an unknown id (exit 2).
+/// The record channel behind it stays unwired: the positive
+/// admitted-profile path belongs to the completion slice.
 const JOURNAL_CAP: &str = "conversion-journal";
 const RING_LC_MAP: &str = "mv_lifecycle";
 const RING_CP_MAP: &str = "mv_copies";
@@ -103,6 +107,10 @@ pub struct RecordOptions {
     pub lc_object: String,
     /// Explicit copy object path.
     pub cp_object: String,
+    /// Explicit journal object path.
+    pub journal_object: String,
+    /// True when bounded journal caller processing is requested.
+    pub journal_callers: bool,
     /// Requested capabilities list.
     pub capabilities: String,
     /// Device selector.
@@ -128,6 +136,8 @@ impl Default for RecordOptions {
             has_profiles_dir: false,
             lc_object: String::new(),
             cp_object: String::new(),
+            journal_object: String::new(),
+            journal_callers: false,
             capabilities: String::new(),
             device: String::new(),
             has_device: false,
@@ -379,17 +389,38 @@ fn split_caps(text: &str) -> Vec<String> {
     out
 }
 
-/// Parse requested capabilities in order, deduplicated.
+/// Resolve the capability list plus journal options into a selection.
+///
+/// The sole item "all" expands to the three ordinary record channels
+/// (never the opt-in journal); everything else follows the frozen
+/// journal selection contract: duplicates, unknown ids, journal
+/// options without the journal, and a device filter on a
+/// journal-only request refuse.
+pub fn collection_selection(
+    capabilities: &str,
+    callers: bool,
+    device: bool,
+    journal_object: bool,
+) -> Result<JournalSelection, crate::model::validate::ValidationError> {
+    let mut selected = capabilities.to_string();
+    if selected == "all" {
+        selected = "attempt-trace,mapping-lifecycle,copy-actual".to_string();
+    }
+    select_journal(&selected, callers, device, journal_object)
+}
+
+/// Parse requested capabilities in order.
 ///
 /// Empty means attempt-trace alone; the sole item "all"
 /// expands to the three record channels. Unknown ids and
-/// empty items refuse. Requests naming an ordinary
-/// capability without attempt-trace refuse: the attempt
-/// channel is the mandatory base channel. Journal-only
-/// lists (conversion-journal and conversion-observe,
+/// empty items refuse, and duplicate names are usage errors.
+/// Requests naming an ordinary capability resolve attempt-trace
+/// implicitly when it is missing: the attempt channel stays the
+/// mandatory base channel without refusing wellformed lists.
+/// Journal-only lists (conversion-journal and conversion-observe,
 /// which name global conversion collection) need no
 /// attempt hook; every consumer refuses them explicitly
-/// as channel-less (exit 3), never as unknown (exit 2).
+/// (exit 3), never as unknown (exit 2).
 pub fn parse_requested_caps(want: &str) -> CapsOut {
     let mut out = CapsOut::default();
     if want == "all" {
@@ -419,16 +450,13 @@ pub fn parse_requested_caps(want: &str) -> CapsOut {
             out.err = format!("unknown capability: {item}");
             return out;
         }
-        let mut seen = false;
-        for have in &out.caps {
-            if have == item {
-                seen = true;
-                break;
+        for previous in &out.caps {
+            if previous == item {
+                out.err = format!("duplicate capability: {item}");
+                return out;
             }
         }
-        if !seen {
-            out.caps.push(item.clone());
-        }
+        out.caps.push(item.clone());
     }
     let mut has_attempt = false;
     let mut has_ordinary = false;
@@ -441,8 +469,9 @@ pub fn parse_requested_caps(want: &str) -> CapsOut {
         }
     }
     if has_ordinary && !has_attempt {
-        out.err = "attempt-trace is required".to_string();
-        return out;
+        let mut caps = vec![ATTEMPT_CAP.to_string()];
+        caps.extend(out.caps.iter().cloned());
+        out.caps = caps;
     }
     out.ok = true;
     out
@@ -1128,7 +1157,7 @@ pub fn decide_record(
             return refuse_scan("capability conversion-observe has no record channel".to_string());
         }
         if cap == JOURNAL_CAP {
-            return refuse_scan("capability conversion-journal has no record channel".to_string());
+            return refuse_scan("journal_profile_not_admitted".to_string());
         }
     }
     for cap in &ask.caps {
@@ -1784,6 +1813,42 @@ pub fn run_collector_with<W: WriterSource>(
     opts: RecordOptions,
     writer: &mut W,
 ) -> RunResult {
+    let selection = match collection_selection(
+        &opts.capabilities,
+        opts.journal_callers,
+        opts.has_device,
+        !opts.journal_object.is_empty(),
+    ) {
+        Ok(selection) => selection,
+        Err(_) => {
+            return RunResult {
+                exit_code: EXIT_INVALID,
+                end_reason: String::new(),
+                outcome: String::new(),
+                diagnostic: "invalid capability/journal selector".to_string(),
+                fix: String::new(),
+                code: String::new(),
+                unknown: false,
+                trusted: true,
+            };
+        }
+    };
+    if selection.journal {
+        // Admission precedes all native and output creation: the
+        // positive admitted-profile path stays unwired, so every
+        // journal request stops here with the frozen reason.
+        let reason = journal_profile_reason(profiles_dir, &opts.profile, opts.has_profile);
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: reason,
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
     if opts.max_events_bytes < MIN_RECORD_BYTES {
         return RunResult {
             exit_code: EXIT_REFUSAL,
@@ -2215,27 +2280,31 @@ mod tests {
         assert_eq!(all.caps[1], "mapping-lifecycle");
         assert_eq!(all.caps[2], "copy-actual");
         let dup = parse_requested_caps("attempt-trace,copy-actual,attempt-trace");
-        assert!(dup.ok);
-        assert_eq!(dup.caps.len(), 2);
+        assert!(!dup.ok);
+        assert_eq!(dup.err, "duplicate capability: attempt-trace");
         let bad = parse_requested_caps("attempt-trace,,copy-actual");
         assert!(!bad.ok);
         assert_eq!(bad.err, "bad capability list");
         let unknown = parse_requested_caps("attempt-trace,nope");
         assert!(!unknown.ok);
         assert_eq!(unknown.err, "unknown capability: nope");
+        // Ordinary channels without the base resolve it implicitly.
+        let lifecycle = parse_requested_caps("mapping-lifecycle");
+        assert!(lifecycle.ok);
+        assert_eq!(lifecycle.caps, vec!["attempt-trace", "mapping-lifecycle"]);
         let noattempt = parse_requested_caps("copy-actual");
-        assert!(!noattempt.ok);
-        assert_eq!(noattempt.err, "attempt-trace is required");
+        assert!(noattempt.ok);
+        assert_eq!(noattempt.caps, vec!["attempt-trace", "copy-actual"]);
         // Journal-only lists parse without attempt hooks;
-        // mixed journal/ordinary lists keep the requirement.
+        // mixed journal/ordinary lists keep attempts present.
         let journal = parse_requested_caps("conversion-journal");
         assert!(journal.ok);
         assert_eq!(journal.caps, vec!["conversion-journal".to_string()]);
         let observe = parse_requested_caps("conversion-observe");
         assert!(observe.ok);
         let mixed_journal = parse_requested_caps("copy-actual,conversion-journal");
-        assert!(!mixed_journal.ok);
-        assert_eq!(mixed_journal.err, "attempt-trace is required");
+        assert!(mixed_journal.ok);
+        assert_eq!(mixed_journal.caps[0], "attempt-trace");
         let mixed_ok = parse_requested_caps("attempt-trace,conversion-journal");
         assert!(mixed_ok.ok);
     }
@@ -2375,13 +2444,7 @@ mod tests {
                 "",
             );
             assert!(!decision.ok, "{want}");
-            assert!(
-                decision
-                    .refusal
-                    .contains("conversion-journal has no record channel"),
-                "{want}: {}",
-                decision.refusal
-            );
+            assert_eq!(decision.refusal, "journal_profile_not_admitted", "{want}");
         }
     }
 
