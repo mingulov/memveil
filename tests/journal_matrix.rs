@@ -913,6 +913,65 @@ fn dispatch_mixed_admitted_journal_falls_through_to_ordinary() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+fn copy_dir(src: &std::path::Path, dest: &std::path::Path) {
+    std::fs::create_dir_all(dest).expect("copy dest");
+    let entries = std::fs::read_dir(src).expect("copy src");
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
+#[test]
+fn dispatch_mixed_observe_refuses_channel_less() {
+    // Journal-plus-observe mixed request with an admitted
+    // journal: the journal admits, the stripped observe-only
+    // ordinary stage refuses channel-less (observe has no
+    // contract), never with the frozen journal code and never
+    // silently dropped.
+    let Some((_release, arch, pages, config, btf)) = live_bindings() else {
+        eprintln!("skip: live config/BTF unmeasurable on this host");
+        return;
+    };
+    let root = scratch("obs");
+    copy_dir(std::path::Path::new("tests/fixtures/scan/profiles"), &root);
+    let (obj_path, obj_sha) = garbage_object(&root);
+    write_profile(
+        &root,
+        "linux-7.0.14-x86-journal-provisional.json",
+        &admitted_body(&config, &btf, &obj_sha, &arch, pages),
+    );
+    let out = root.join("cap");
+    let opts = RecordOptions {
+        output: out.to_str().expect("utf-8").to_string(),
+        capabilities: "conversion-journal,conversion-observe".to_string(),
+        object: "tests/fixtures/elf/ok.o".to_string(),
+        journal_object: obj_path.to_str().expect("utf-8").to_string(),
+        ..Default::default()
+    };
+    let mut writer = MemWriter::new();
+    let result = run_collector_with("", root.to_str().expect("utf-8"), opts, &mut writer);
+    assert_eq!(result.exit_code, 3, "{}", result.diagnostic);
+    assert!(
+        !result
+            .diagnostic
+            .starts_with("journal_profile_not_admitted"),
+        "journal refused a matching admission: {}",
+        result.diagnostic
+    );
+    assert!(
+        result.diagnostic.contains("has no record channel"),
+        "observe refusal did not surface: {}",
+        result.diagnostic
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn dispatch_mixed_unadmitted_journal_refuses_first() {
     // Mixed request, unadmitted journal: the journal refusal
