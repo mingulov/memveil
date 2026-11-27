@@ -731,8 +731,15 @@ fn built_journal_object() -> Option<Vec<u8>> {
     }
     cands
         .into_iter()
-        .filter_map(|path| std::fs::read(&path).ok())
-        .next()
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok()?;
+            let bytes = std::fs::read(&path).ok()?;
+            Some((modified, bytes))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, bytes)| bytes)
 }
 
 #[test]
@@ -1397,78 +1404,11 @@ fn matrix_writer_reader_roundtrip() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[test]
-fn guest_verifier_accepts_journal_object() {
-    // Lease-gated: the built journal object loads on the
-    // isolated guest kernel, so its verifier accepts the
-    // program. Without a lease this self-skips with a receipt.
-    let Some((user, host, port)) = lease_ssh() else {
-        return;
-    };
-    let Some(elf) = built_journal_object() else {
-        eprintln!("guest leg skipped: no built journal object; run cargo build first");
-        return;
-    };
-    assert!(!elf.is_empty());
-    let stage = scratch("g1");
-    let local = stage.join("memveil-ebpf-journal");
-    std::fs::write(&local, &elf).expect("stage object");
-    let remote = "/tmp/memveil-journal-matrix.o";
-    scp_to(&user, &host, &port, local.to_str().expect("utf-8"), remote);
-    let out = ssh_run(
-        &user,
-        &host,
-        &port,
-        "timeout 120 sudo bpftool prog load /tmp/memveil-journal-matrix.o /sys/fs/bpf/mvjr-matrix 2>&1; code=$?; sudo rm -f /sys/fs/bpf/mvjr-matrix /tmp/memveil-journal-matrix.o; echo GUEST_RC=$code",
-    );
-    let text =
-        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    eprintln!("guest verifier output: {text}");
-    assert!(
-        text.contains("GUEST_RC=0"),
-        "guest verifier rejected the journal object: {text}"
-    );
-    let _ = std::fs::remove_dir_all(&stage);
-}
-
-#[test]
-fn guest_end_to_end_attach_oracle_detach() {
-    // Lease-gated: the lane binary records a short journal-only
-    // capture on the isolated guest under a test-minted admitted
-    // profile (nonqualifying harness; the profile binds the
-    // guest's own live config/BTF/object measurements and is
-    // never shipped). The oracle verdict covers attach (four
-    // tracing links observed mid-run), record validity, and
-    // clean detach (no residual links). Without a lease this
-    // self-skips with a receipt.
-    let Some((user, host, port)) = lease_ssh() else {
-        return;
-    };
-    let Some(elf) = built_journal_object() else {
-        eprintln!("guest leg skipped: no built journal object; run cargo build first");
-        return;
-    };
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let binary = root.join("target").join("debug").join("memveil");
-    assert!(binary.is_file(), "run cargo build first");
-    let stage = scratch("g2");
-    let obj = stage.join("memveil-ebpf-journal");
-    std::fs::write(&obj, &elf).expect("stage object");
-    scp_to(
-        &user,
-        &host,
-        &port,
-        binary.to_str().expect("utf-8"),
-        "/tmp/mv-matrix-memveil",
-    );
-    scp_to(
-        &user,
-        &host,
-        &port,
-        obj.to_str().expect("utf-8"),
-        "/tmp/mv-matrix-journal.o",
-    );
-    let mint = r#"
+/// Test-mint script: writes an admitted-shaped profile binding
+/// the guest's own live config/BTF/object measurements plus its
+/// machine and page size. Nonqualifying harness use only; the
+/// profile is never shipped.
+const MINT_SCRIPT: &str = r#"
 import gzip, hashlib, json, os
 cfg_src = ""
 if os.path.exists("/proc/config.gz"):
@@ -1481,7 +1421,7 @@ else:
     cfg_src = "file"
     cfg = hashlib.sha256(raw).hexdigest()
 btf = hashlib.sha256(open("/sys/kernel/btf/vmlinux", "rb").read()).hexdigest()
-obj = hashlib.sha256(open("/tmp/mv-matrix-journal.o", "rb").read()).hexdigest()
+obj = hashlib.sha256(open("/tmp/mv-matrix-__TAG__-journal.o", "rb").read()).hexdigest()
 arch = os.uname().machine
 pages = str(os.sysconf("SC_PAGE_SIZE"))
 prof = {
@@ -1507,37 +1447,156 @@ prof = {
     "caller_labels": {"a": "owned"},
     "admission_required": ["exact_config_btf_object"],
 }
-os.makedirs("/tmp/mv-matrix-profiles/journal-candidates", exist_ok=True)
-json.dump(prof, open("/tmp/mv-matrix-profiles/journal-candidates/linux-7.0.14-x86-journal-provisional.json", "w"))
+os.makedirs("/tmp/mv-matrix-__TAG__-profiles/journal-candidates", exist_ok=True)
+json.dump(prof, open("/tmp/mv-matrix-__TAG__-profiles/journal-candidates/linux-7.0.14-x86-journal-provisional.json", "w"))
 print("MINTED src=" + cfg_src)
 "#;
+
+/// Ship the lane binary plus the built journal object to the
+/// guest and mint the test profile. `tag` isolates one leg's
+/// guest paths so parallel legs never share files. Returns the
+/// staged binary and object sizes for the receipt.
+fn guest_stage(user: &str, host: &str, port: &str, tag: &str) -> (usize, usize) {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let binary = root.join("target").join("debug").join("memveil");
+    assert!(binary.is_file(), "run cargo build first");
+    let elf = built_journal_object().expect("built journal object");
+    assert!(!elf.is_empty());
+    let stage = scratch(&format!("gstage-{tag}"));
+    let obj = stage.join("memveil-ebpf-journal");
+    std::fs::write(&obj, &elf).expect("stage object");
+    scp_to(
+        user,
+        host,
+        port,
+        binary.to_str().expect("utf-8"),
+        &format!("/tmp/mv-matrix-{tag}-memveil"),
+    );
+    scp_to(
+        user,
+        host,
+        port,
+        obj.to_str().expect("utf-8"),
+        &format!("/tmp/mv-matrix-{tag}-journal.o"),
+    );
+    let mint = MINT_SCRIPT.replace("__TAG__", tag);
     let out = ssh_run(
-        &user,
-        &host,
-        &port,
-        &format!("timeout 60 python3 -c {mint:?}"),
+        user,
+        host,
+        port,
+        &format!("timeout 60 python3 - <<'PYEOF'\n{mint}\nPYEOF"),
     );
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "guest mint failed: {text}");
     assert!(text.contains("MINTED"), "guest mint failed: {text}");
-    let run = "BASE=$(sudo bpftool link show 2>/dev/null | grep -c tracing || true); \
+    let _ = std::fs::remove_dir_all(&stage);
+    (
+        std::fs::metadata(&binary).expect("binary size").len() as usize,
+        elf.len(),
+    )
+}
+
+fn guest_cleanup(user: &str, host: &str, port: &str, tag: &str) {
+    ssh_run(
+        user,
+        host,
+        port,
+        &format!(
+            "rm -rf /tmp/mv-matrix-{tag}-cap /tmp/mv-matrix-{tag}-run.log \
+/tmp/mv-matrix-{tag}-profiles /tmp/mv-matrix-{tag}-memveil /tmp/mv-matrix-{tag}-journal.o"
+        ),
+    );
+}
+
+#[test]
+fn guest_program_prepares_on_guest_kernel() {
+    // Lease-gated prepare gate: a short journal-only record on
+    // the isolated guest kernel must get past the whole prepare
+    // stage (object parse, eight-map geometry, birth-offset
+    // install, initial counters, control write/readback). The
+    // Aya loader is the only load path for this object
+    // (bpftool/libbpf rejects its map sections before any
+    // verifier runs), and tracing programs load lazily at
+    // attach time, so prepare success proves the load path
+    // while the verifier verdict itself comes from the attach
+    // leg below. Without a lease this self-skips with a receipt.
+    let Some((user, host, port)) = lease_ssh() else {
+        return;
+    };
+    let Some(_) = built_journal_object() else {
+        eprintln!("guest leg skipped: no built journal object; run cargo build first");
+        return;
+    };
+    let (binary_len, elf_len) = guest_stage(&user, &host, &port, "g1");
+    eprintln!("guest prepare: staged binary={binary_len} object={elf_len}");
+    let out = ssh_run(
+        &user,
+        &host,
+        &port,
+        "timeout 120 sudo /tmp/mv-matrix-g1-memveil record --output /tmp/mv-matrix-g1-cap \
+--capability conversion-journal --duration 1 \
+--journal-object /tmp/mv-matrix-g1-journal.o \
+--profiles-dir /tmp/mv-matrix-g1-profiles 2>&1; echo GUEST_RC=$?",
+    );
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    eprintln!("guest prepare output: {text}");
+    guest_cleanup(&user, &host, &port, "g1");
+    for stage in [
+        "journal open/load unavailable",
+        "journal map geometry",
+        "journal offsets unavailable",
+        "journal initial counters unavailable",
+        "journal initial counters nonzero",
+        "journal caller map unavailable",
+        "journal control unavailable",
+        "journal control write/readback failed",
+    ] {
+        assert!(
+            !text.contains(stage),
+            "guest prepare failed at {stage}: {text}"
+        );
+    }
+}
+
+#[test]
+fn guest_end_to_end_attach_oracle_detach() {
+    // Lease-gated: the lane binary records a short journal-only
+    // capture on the isolated guest under a test-minted admitted
+    // profile (nonqualifying harness; the profile binds the
+    // guest's own live config/BTF/object measurements and is
+    // never shipped). Four live tracing links prove the kernel
+    // verifier accepted all four programs (tracing programs
+    // load at attach time); the oracle verdict further covers
+    // record validity and clean detach (no residual links).
+    // Without a lease this self-skips with a receipt.
+    let Some((user, host, port)) = lease_ssh() else {
+        return;
+    };
+    let Some(_) = built_journal_object() else {
+        eprintln!("guest leg skipped: no built journal object; run cargo build first");
+        return;
+    };
+    let (binary_len, elf_len) = guest_stage(&user, &host, &port, "g2");
+    eprintln!("guest oracle: staged binary={binary_len} object={elf_len}");
+    let run = "BASE=$(sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true); \
 BASE=${BASE:-0}; \
-timeout 120 sudo /tmp/mv-matrix-memveil record --output /tmp/mv-matrix-cap \
+timeout 120 sudo /tmp/mv-matrix-g2-memveil record --output /tmp/mv-matrix-g2-cap \
 --capability conversion-journal --duration 4 \
---journal-object /tmp/mv-matrix-journal.o \
---profiles-dir /tmp/mv-matrix-profiles > /tmp/mv-matrix-run.log 2>&1 & \
+--journal-object /tmp/mv-matrix-g2-journal.o \
+--profiles-dir /tmp/mv-matrix-g2-profiles > /tmp/mv-matrix-g2-run.log 2>&1 & \
 CAP_PID=$!; PEAK=0; \
 for i in $(seq 1 30); do \
   if ! kill -0 $CAP_PID 2>/dev/null; then break; fi; \
-  N=$(sudo bpftool link show 2>/dev/null | grep -c tracing || true); \
+  N=$(sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true); \
   N=${N:-0}; \
   if [ \"$N\" -gt \"$PEAK\" ]; then PEAK=$N; fi; \
   sleep 0.2; \
 done; \
 wait $CAP_PID; RC=$?; echo GUEST_RC=$RC BASE_LINKS=$BASE PEAK_LINKS=$PEAK; \
-sudo chmod -R a+r /tmp/mv-matrix-cap 2>/dev/null; \
-cat /tmp/mv-matrix-run.log";
+sudo chmod -R a+r /tmp/mv-matrix-g2-cap 2>/dev/null; \
+cat /tmp/mv-matrix-g2-run.log";
     let out = ssh_run(&user, &host, &port, run);
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
@@ -1562,21 +1621,21 @@ cat /tmp/mv-matrix-run.log";
     );
     let verify = r#"
 import json
-sess = json.load(open("/tmp/mv-matrix-cap/session.json"))
+sess = json.load(open("/tmp/mv-matrix-g2-cap/session.json"))
 j = sess.get("journal", {})
 counters = j.get("counters", {})
 print("ORACLE has_journal=%s closure=%s entries=%s drops=%s invalid=%s missed=%s" % (
     "journal" in sess, j.get("closure"), counters.get("entries"),
     counters.get("ring_drops"), counters.get("invalid_records"),
     counters.get("missed_callbacks")))
-lines = [line for line in open("/tmp/mv-matrix-cap/events.ndjson").read().splitlines() if line.strip()]
+lines = [line for line in open("/tmp/mv-matrix-g2-cap/events.ndjson").read().splitlines() if line.strip()]
 print("ORACLE events=%d" % len(lines))
 "#;
     let out = ssh_run(
         &user,
         &host,
         &port,
-        &format!("timeout 60 python3 -c {verify:?}"),
+        &format!("timeout 60 python3 - <<'PYEOF'\n{verify}\nPYEOF"),
     );
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
@@ -1589,11 +1648,11 @@ print("ORACLE events=%d" % len(lines))
         &user,
         &host,
         &port,
-        "timeout 60 sudo bpftool link show 2>/dev/null | grep -c tracing || true; rm -rf /tmp/mv-matrix-cap /tmp/mv-matrix-run.log /tmp/mv-matrix-profiles /tmp/mv-matrix-memveil /tmp/mv-matrix-journal.o",
+        "timeout 60 sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true",
     );
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    guest_cleanup(&user, &host, &port, "g2");
     let after = text.parse::<i64>().unwrap_or(-1);
     assert_eq!(after, base, "residual tracing links after detach: {text}");
     eprintln!("guest oracle: attach +4 links mid-run, detach clean, session verified");
-    let _ = std::fs::remove_dir_all(&stage);
 }

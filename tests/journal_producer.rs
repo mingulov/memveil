@@ -974,8 +974,15 @@ fn built_journal_object() -> Option<Vec<u8>> {
     }
     cands
         .into_iter()
-        .filter_map(|path| std::fs::read(&path).ok())
-        .next()
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok()?;
+            let bytes = std::fs::read(&path).ok()?;
+            Some((modified, bytes))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, bytes)| bytes)
 }
 
 #[test]
