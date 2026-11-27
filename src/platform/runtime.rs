@@ -78,15 +78,16 @@ pub fn exe_root(exe_path: &str) -> String {
 
 /// Embedded Aya ELF bytes for one channel, or None.
 ///
-/// The three channel objects compile into the binary
+/// The four channel objects compile into the binary
 /// through the `DEP_MEMVEIL_EBPF_<CH>_PATH` build contract;
-/// `kind` is `attempt`, `lifecycle`, or `copy`. Anything
-/// else has no artifact.
+/// `kind` is `attempt`, `lifecycle`, `copy`, or `journal`.
+/// Anything else has no artifact.
 pub fn embedded_object(kind: &str) -> Option<&'static [u8]> {
     match kind {
         "attempt" => Some(include_bytes!(env!("DEP_MEMVEIL_EBPF_ATTEMPT_PATH"))),
         "lifecycle" => Some(include_bytes!(env!("DEP_MEMVEIL_EBPF_LIFECYCLE_PATH"))),
         "copy" => Some(include_bytes!(env!("DEP_MEMVEIL_EBPF_COPY_PATH"))),
+        "journal" => Some(include_bytes!(env!("DEP_MEMVEIL_EBPF_JOURNAL_PATH"))),
         _ => None,
     }
 }
@@ -97,22 +98,25 @@ pub fn embedded_object(kind: &str) -> Option<&'static [u8]> {
 /// [`embedded_object`] embeds, so this digest names exactly
 /// the bytes the runtime serves — the identity the packager
 /// binds inspection copies to. `kind` is `attempt`,
-/// `lifecycle`, or `copy`; anything else has no artifact.
+/// `lifecycle`, `copy`, or `journal`; anything else has no
+/// artifact.
 pub fn embedded_digest(kind: &str) -> Option<&'static str> {
     match kind {
         "attempt" => Some(env!("DEP_MEMVEIL_EBPF_ATTEMPT_DIGEST")),
         "lifecycle" => Some(env!("DEP_MEMVEIL_EBPF_LIFECYCLE_DIGEST")),
         "copy" => Some(env!("DEP_MEMVEIL_EBPF_COPY_DIGEST")),
+        "journal" => Some(env!("DEP_MEMVEIL_EBPF_JOURNAL_DIGEST")),
         _ => None,
     }
 }
 
 /// (channel, digest) rows in channel order for `--embedded-manifest`.
-pub fn embedded_manifest() -> [(&'static str, &'static str); 3] {
+pub fn embedded_manifest() -> [(&'static str, &'static str); 4] {
     [
         ("attempt", env!("DEP_MEMVEIL_EBPF_ATTEMPT_DIGEST")),
         ("lifecycle", env!("DEP_MEMVEIL_EBPF_LIFECYCLE_DIGEST")),
         ("copy", env!("DEP_MEMVEIL_EBPF_COPY_DIGEST")),
+        ("journal", env!("DEP_MEMVEIL_EBPF_JOURNAL_DIGEST")),
     ]
 }
 
@@ -221,7 +225,7 @@ mod tests {
         // Retarget: without an explicit override there is no
         // file to find; "" names the embedded artifact, which
         // exists for every known channel.
-        for kind in ["attempt", "lifecycle", "copy"] {
+        for kind in ["attempt", "lifecycle", "copy", "journal"] {
             assert_eq!(discover_object(kind, "", false, EXE), "");
             assert!(embedded_object(kind).is_some(), "kind {kind}");
         }
@@ -236,9 +240,9 @@ mod tests {
 
     #[test]
     fn embedded_artifacts_are_bpf_objects() {
-        // Re-verifies the build artifact contract: three
+        // Re-verifies the build artifact contract: four
         // embedded ELFs, EM_BPF machine.
-        for kind in ["attempt", "lifecycle", "copy"] {
+        for kind in ["attempt", "lifecycle", "copy", "journal"] {
             let bytes = embedded_object(kind).expect("channel embedded");
             assert!(!bytes.is_empty(), "kind {kind}");
             assert_eq!(&bytes[..4], b"\x7fELF", "kind {kind}");
@@ -252,9 +256,12 @@ mod tests {
         // The binding is exact: each baked digest must equal
         // the SHA-256 of the bytes `embedded_object` serves
         // for that channel, and the manifest must carry the
-        // same three rows in channel order.
+        // same four rows in channel order.
         let manifest = embedded_manifest();
-        assert_eq!(manifest.map(|row| row.0), ["attempt", "lifecycle", "copy"]);
+        assert_eq!(
+            manifest.map(|row| row.0),
+            ["attempt", "lifecycle", "copy", "journal"]
+        );
         for (channel, digest) in manifest {
             assert_eq!(Some(digest), embedded_digest(channel));
             let bytes = embedded_object(channel).expect("channel embedded");

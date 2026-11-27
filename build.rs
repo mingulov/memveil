@@ -42,11 +42,12 @@ use std::{
 const BPF_TOOLCHAIN: &str = "nightly-2026-05-20";
 
 /// (channel, `DEP_MEMVEIL_EBPF_<CH>_PATH` suffix): one BPF object per
-/// channel, mirroring the C 3-object design.
-const CHANNELS: [(&str, &str); 3] = [
+/// channel; the journal channel rides the same Aya build.
+const CHANNELS: [(&str, &str); 4] = [
     ("attempt", "ATTEMPT"),
     ("lifecycle", "LIFECYCLE"),
     ("copy", "COPY"),
+    ("journal", "JOURNAL"),
 ];
 
 /// Read the `channel = "..."` value from a `rust-toolchain.toml`. Minimal

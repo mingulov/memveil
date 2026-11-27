@@ -162,7 +162,7 @@ BPF_MARKER_PREFIX = b"memveil-channel:"
 
 # Channels the `--embedded-manifest` probe must report, in
 # dump order.
-MANIFEST_CHANNELS = ("attempt", "lifecycle", "copy")
+MANIFEST_CHANNELS = ("attempt", "lifecycle", "copy", "journal")
 
 # Host license texts for the shipped libgcc, as (staged rel,
 # candidate host paths): the first readable candidate wins.

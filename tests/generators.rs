@@ -46,6 +46,8 @@ const FROZEN_FLAGS: [(&str, &[&str]); 6] = [
             "--device",
             "--duration",
             "--help",
+            "--journal-callers",
+            "--journal-object",
             "--lc-object",
             "--max-events-bytes",
             "--object",
@@ -83,6 +85,8 @@ const FROZEN_FLAGS: [(&str, &[&str]); 6] = [
             "--full",
             "--help",
             "--interval",
+            "--journal-callers",
+            "--journal-object",
             "--lc-object",
             "--long-lived-after",
             "--max-events-bytes",
@@ -118,6 +122,8 @@ const FROZEN_FLAGS: [(&str, &[&str]); 6] = [
             "--capability",
             "--cp-object",
             "--help",
+            "--journal-callers",
+            "--journal-object",
             "--lc-object",
             "--object",
             "--output",
@@ -143,7 +149,7 @@ const FROZEN_FLAGS: [(&str, &[&str]); 6] = [
     ),
 ];
 const FROZEN_FORMAT_VALUES: [&str; 3] = ["text", "json", "markdown"];
-const FROZEN_NOVALUE_FLAGS: [&str; 8] = [
+const FROZEN_NOVALUE_FLAGS: [&str; 9] = [
     "--help",
     "--allow-partial",
     "--compact",
@@ -151,6 +157,7 @@ const FROZEN_NOVALUE_FLAGS: [&str; 8] = [
     "--json",
     "--load-check",
     "--strict",
+    "--journal-callers",
     "-h",
 ];
 const MAN_VERBS: [&str; 6] = [
