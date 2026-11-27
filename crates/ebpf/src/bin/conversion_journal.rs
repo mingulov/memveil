@@ -22,6 +22,17 @@
 //! NO_ADDRESSES (no pointer, address, or offset crosses the ring),
 //! NO_FRAMES (stack frames never cross, only the resolved label),
 //! NO_TASK_NAMES (task identity stays a transient map key).
+//!
+//! Verifier shape: the four hooks are thin stubs over BPF subprograms
+//! (`#[inline(never)]`). The counting CAS loop, pairing-key build,
+//! poisoning sweep, caller classifier, and both pairing paths each
+//! verify once under their own complexity budget instead of once per
+//! inline copy; the 6.8 verifier otherwise explodes the exit path past
+//! its instruction limit. Subprogram boundaries carry scalars and
+//! caller-stack out-pointers only (no multi-word returns), and the
+//! birth-offset bound is sequential direct compares so the verifier
+//! links the bounded range to the added register. Observable behavior
+//! — maps, counters, wire bytes, refusal sets — is unchanged.
 #![no_std]
 #![no_main]
 #![feature(core_intrinsics)]
@@ -229,79 +240,106 @@ static MV_JOURNAL: RingBuf = RingBuf::with_byte_size(MV_JR_RING_BYTES, 0);
 static MV_JR_OFFS: Array<u64> = Array::with_max_entries(1, 0);
 
 /// Set the sticky overflow bit for one counter.
-#[inline(always)]
+#[inline(never)]
 fn mv_overflow(index: u32) {
     if let Some(bits) = MV_JR_COUNTS.get_ptr_mut(MV_JR_OVERFLOW) {
         unsafe { count_or(bits, 1u64 << index) };
     }
 }
 
-/// Checked saturating increment; `None` at the ceiling or on contention.
-#[inline(always)]
-fn mv_increment(index: u32, ceiling: u64) -> Option<u64> {
-    let slot = MV_JR_COUNTS.get_ptr_mut(index)?;
+/// Checked saturating increment: 1 with the new value in `out` on
+/// success, 0 at the ceiling, on contention, or when the slot is
+/// missing. The 16-retry CAS loop is byte-faithful to the retired C
+/// original; as a subprogram it verifies once, not once per counter.
+#[inline(never)]
+fn mv_increment(index: u32, ceiling: u64, out: &mut u64) -> u64 {
+    let slot = match MV_JR_COUNTS.get_ptr_mut(index) {
+        Some(slot) => slot,
+        None => return 0,
+    };
     let mut old = unsafe { *slot };
     for _ in 0..16 {
         if old >= ceiling {
-            return None;
+            return 0;
         }
         let seen = unsafe { count_cas(slot, old, old + 1) };
         if seen == old {
-            return Some(old + 1);
+            *out = old + 1;
+            return 1;
         }
         old = seen;
     }
-    None
+    0
 }
 
 /// Unbounded increment with sticky overflow on wrap.
-#[inline(always)]
+#[inline(never)]
 fn mv_count(index: u32) {
-    if mv_increment(index, u64::MAX).is_none() {
+    let mut next = 0u64;
+    if mv_increment(index, u64::MAX, &mut next) == 0 {
         mv_overflow(index);
     }
 }
 
 /// Release one retained operation.
-#[inline(always)]
+#[inline(never)]
 fn mv_release() {
     if let Some(slot) = MV_JR_COUNTS.get_ptr_mut(MV_JR_ACTIVE) {
         unsafe { count_fetch_add(slot, u64::MAX) };
     }
 }
 
-/// Build the pairing key for the current task, or refuse pairing.
-#[inline(always)]
-fn mv_key(epoch: u64) -> Option<JrKey> {
+/// Build the pairing key for the current task into `out` (1), or
+/// refuse pairing (0).
+#[inline(never)]
+fn mv_key(epoch: u64, out: &mut JrKey) -> u64 {
     let task = unsafe { bpf_get_current_task_btf() };
     if task.is_null() {
         mv_count(MV_JR_IDENTITY_FAILURE);
-        return None;
+        return 0;
     }
     let off = match MV_JR_OFFS.get_ptr(0) {
         Some(slot) => unsafe { *slot },
         None => {
             mv_count(MV_JR_IDENTITY_FAILURE);
-            return None;
+            return 0;
         }
     };
-    if off == 0 || off % 8 != 0 || off >= MV_JR_OFFS_MAX {
+    // Sequential direct compares: each early return hands the
+    // verifier a precise range fact on the fall-through path, so the
+    // birth add below carries a bounded offset. (The retired OR-chain
+    // lowered to a subtract-and-compare the 6.8 verifier could not
+    // link back to the added register.) `off & 7` is exactly
+    // `off % 8` for u64; the refusal set is unchanged: zero,
+    // misaligned, or at/past the ceiling all refuse.
+    if off == 0 {
         mv_count(MV_JR_IDENTITY_FAILURE);
-        return None;
+        return 0;
+    }
+    if off & 7 != 0 {
+        mv_count(MV_JR_IDENTITY_FAILURE);
+        return 0;
+    }
+    if off >= MV_JR_OFFS_MAX {
+        mv_count(MV_JR_IDENTITY_FAILURE);
+        return 0;
     }
     let birth =
         unsafe { bpf_probe_read_kernel((task as *const u8).add(off as usize) as *const u64) };
     match birth {
-        Ok(birth) => Some(JrKey {
-            task: task as u64,
-            birth,
-            epoch,
-            depth: 0,
-            reserved: 0,
-        }),
+        Ok(birth) => {
+            *out = JrKey {
+                task: task as u64,
+                birth,
+                epoch,
+                depth: 0,
+                reserved: 0,
+            };
+            1
+        }
         Err(_) => {
             mv_count(MV_JR_IDENTITY_FAILURE);
-            None
+            0
         }
     }
 }
@@ -311,7 +349,7 @@ fn mv_key(epoch: u64) -> Option<JrKey> {
 /// A failed identity read may have hidden a nested callback, so
 /// pairing stays unavailable for this object lifetime, including
 /// previously retained entries.
-#[inline(always)]
+#[inline(never)]
 fn mv_identity_healthy() -> bool {
     match MV_JR_COUNTS.get_ptr(MV_JR_IDENTITY_FAILURE) {
         Some(slot) => unsafe { *slot == 0 },
@@ -326,7 +364,7 @@ fn mv_identity_healthy() -> bool {
 ///
 /// `task` must be a live map-value pointer from `get_ptr_mut`, as
 /// returned for `key` with depth zero.
-#[inline(always)]
+#[inline(never)]
 unsafe fn mv_poison(key: &mut JrKey, task: *mut JrTask) {
     unsafe { (*task).poisoned = 1 };
     mv_count(MV_JR_POISONED);
@@ -341,7 +379,7 @@ unsafe fn mv_poison(key: &mut JrKey, task: *mut JrTask) {
 }
 
 /// Entry-side pairing: retain one operation under a fresh token.
-#[inline(always)]
+#[inline(never)]
 fn mv_enter(direction: u32, pages: i32) {
     let control = match MV_JR_CONTROL.get_ptr_mut(0) {
         Some(slot) => slot,
@@ -359,10 +397,16 @@ fn mv_enter(direction: u32, pages: i32) {
     if eligible {
         mv_count(MV_JR_ENTRIES);
     }
-    let mut key = match mv_key(epoch) {
-        Some(key) => key,
-        None => return,
+    let mut key = JrKey {
+        task: 0,
+        birth: 0,
+        epoch: 0,
+        depth: 0,
+        reserved: 0,
     };
+    if mv_key(epoch, &mut key) == 0 {
+        return;
+    }
     if !mv_identity_healthy() {
         return;
     }
@@ -401,21 +445,20 @@ fn mv_enter(direction: u32, pages: i32) {
     if unsafe { (*task).poisoned } != 0 || !eligible {
         return;
     }
-    if mv_increment(MV_JR_ACTIVE, MV_JR_OPERATION_CAPACITY).is_none() {
+    let mut active = 0u64;
+    if mv_increment(MV_JR_ACTIVE, MV_JR_OPERATION_CAPACITY, &mut active) == 0 {
         mv_count(MV_JR_OPERATION_EXHAUSTION);
         unsafe { mv_poison(&mut key, task) };
         return;
     }
-    let token = match mv_increment(MV_JR_NEXT_TOKEN, MV_JR_TOKEN_MAX) {
-        Some(token) => token,
-        None => {
-            mv_release();
-            unsafe { (*control).open = 0 };
-            mv_count(MV_JR_TOKEN_EXHAUSTION);
-            unsafe { mv_poison(&mut key, task) };
-            return;
-        }
-    };
+    let mut token = 0u64;
+    if mv_increment(MV_JR_NEXT_TOKEN, MV_JR_TOKEN_MAX, &mut token) == 0 {
+        mv_release();
+        unsafe { (*control).open = 0 };
+        mv_count(MV_JR_TOKEN_EXHAUSTION);
+        unsafe { mv_poison(&mut key, task) };
+        return;
+    }
     key.depth = (seen + 1) as u32;
     let op = JrOp {
         token,
@@ -431,21 +474,92 @@ fn mv_enter(direction: u32, pages: i32) {
 }
 
 /// Finite caller label class: 1 owned, 2 swiotlb, 3 direct_dma.
-#[inline(always)]
-fn mv_label_class(label: u16) -> u16 {
-    if (1..=2).contains(&label) {
+/// Plain comparisons (not range `contains`) so this stays `const`:
+/// the class table below evaluates it at compile time, keeping one
+/// source of truth for the mapping.
+#[inline(never)]
+const fn mv_label_class(label: u16) -> u16 {
+    if label >= 1 && label <= 2 {
         1
-    } else if (3..=6).contains(&label) {
+    } else if label >= 3 && label <= 6 {
         2
-    } else if (7..=10).contains(&label) {
+    } else if label >= 7 && label <= 10 {
         3
     } else {
         0
     }
 }
 
+/// Per-symbol class table, indexed by symbol (label = index + 1).
+/// Compile-time evaluation of [`mv_label_class`]: the ambiguity
+/// scan reads classes from its stack copy instead of calling the
+/// subprogram per match (the verifier re-verifies a callee per
+/// distinct caller state, and per-match calls multiplied past the
+/// instruction limit). The cascade still calls the function for the
+/// single winner/first-class verdict.
+const JR_CLASS_TABLE: [u16; 10] = [
+    mv_label_class(1),
+    mv_label_class(2),
+    mv_label_class(3),
+    mv_label_class(4),
+    mv_label_class(5),
+    mv_label_class(6),
+    mv_label_class(7),
+    mv_label_class(8),
+    mv_label_class(9),
+    mv_label_class(10),
+];
+
+/// First-hit verdict over the ten symbols: the winner label
+/// (`want_class == 0`) or its class (`want_class != 0`), 0 when no
+/// consulted frame falls in any live range. One symbol loop with an
+/// inner frame loop that breaks on the first hit; the continue path
+/// carries nothing but precise zeros, so the verifier meets ~340
+/// states, not the product a carried minimum would fan out to.
+///
+/// # Safety
+///
+/// `frames` must point at 16 consecutive frame words (the caller's
+/// consulted-frame array) and `size` must be the stack-read byte
+/// count that bounds the scan, exactly as `mv_callers` passes them.
+#[inline(never)]
+fn mv_cascade(frames: *const u64, size: u64, want_class: u64) -> u16 {
+    let mut out = 0u16;
+    for index in 0..10u32 {
+        let symbol = match MV_JR_SYMBOLS.get_ptr(index) {
+            Some(symbol) => symbol,
+            None => continue,
+        };
+        let start = unsafe { (*symbol).start };
+        let end = unsafe { (*symbol).end };
+        if start == 0 {
+            continue;
+        }
+        let mut hit = false;
+        for frame in 0..MV_JR_CALLER_FRAMES {
+            if frame as u64 * 8 >= size {
+                break;
+            }
+            let addr = unsafe { *frames.add(frame) };
+            if addr >= start && addr < end {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
+            out = if want_class != 0 {
+                mv_label_class((index + 1) as u16)
+            } else {
+                (index + 1) as u16
+            };
+            break;
+        }
+    }
+    out
+}
+
 /// Bounded caller classification: (status, class, label).
-#[inline(always)]
+#[inline(never)]
 fn mv_callers(ctx: *mut c_void) -> (u16, u16, u16) {
     let mut frames = [0u64; MV_JR_CALLER_FRAMES];
     let size = unsafe {
@@ -463,11 +577,33 @@ fn mv_callers(ctx: *mut c_void) -> (u16, u16, u16) {
         return (4, 0, 0);
     }
     let size = size as u64;
-    let mut winner = 0u16;
-    let mut winning_class = 0u16;
+    // Three verifier-small passes over the same match relation (a
+    // hit is a consulted frame in a live symbol's half-open range;
+    // consulted means frame * 8 < size). Carrying the running
+    // minimum label through one match nest fanned the verifier past
+    // its instruction limit — every in-flight (label, flag) value
+    // is a distinct state at every loop head — so the minimum is
+    // found by cascades that carry nothing but precise zeros, and
+    // the ambiguity scan carries one flag while the winner stays
+    // out of its caller state entirely (recomputed afterwards; the
+    // scan is read-only, so the second cascade agrees with the
+    // first). The outcome is identical to the retired single nest:
+    // the same minimum hit label wins, and the flag is the same
+    // condition (a flagged hit, or hits spanning two classes — the
+    // retired nest set it on a flagged match or a class change
+    // against the running minimum, which holds exactly when the
+    // match set spans two classes, regardless of visit order).
+    let class = JR_CLASS_TABLE;
+    let wclass = mv_cascade(frames.as_ptr(), size, 1);
+    if wclass == 0 {
+        return (2, 0, 0);
+    }
     let mut ambiguous = false;
     for frame in 0..MV_JR_CALLER_FRAMES {
         if frame as u64 * 8 >= size {
+            break;
+        }
+        if ambiguous {
             break;
         }
         for index in 0..10u32 {
@@ -480,27 +616,28 @@ fn mv_callers(ctx: *mut c_void) -> (u16, u16, u16) {
             if start == 0 || frames[frame] < start || frames[frame] >= end {
                 continue;
             }
+            if class[index as usize] != wclass {
+                ambiguous = true;
+            }
             if unsafe { (*symbol).ambiguous } != 0 {
                 ambiguous = true;
             }
-            let found = mv_label_class((index + 1) as u16);
-            if winner != 0 && winning_class != found {
-                ambiguous = true;
-            }
-            if winner == 0 || index + 1 < winner as u32 {
-                winner = (index + 1) as u16;
-                winning_class = found;
+            if ambiguous {
+                break;
             }
         }
     }
     if ambiguous {
         return (3, 0, 0);
     }
-    if winner != 0 {
-        (1, winning_class, winner)
-    } else {
-        (2, 0, 0)
+    let winner = mv_cascade(frames.as_ptr(), size, 0);
+    if winner == 0 {
+        // Defensive only: `wclass != 0` above proves a hit exists
+        // and nothing between the cascades writes frames, size, or
+        // the symbol map, so the second cascade repeats the hit.
+        return (2, 0, 0);
     }
+    (1, wclass, winner)
 }
 
 /// Little-endian field writers over the wire record.
@@ -528,7 +665,7 @@ fn put_i32(wire: &mut [u8; MV_JR_LEN], off: usize, value: i32) {
 }
 
 /// Exit-side pairing and emission: match, sequence, classify, submit.
-#[inline(always)]
+#[inline(never)]
 fn mv_exit(ctx: *mut c_void, direction: u32, pages: i32, result: i32) {
     let control = match MV_JR_CONTROL.get_ptr_mut(0) {
         Some(slot) => slot,
@@ -540,10 +677,31 @@ fn mv_exit(ctx: *mut c_void, direction: u32, pages: i32, result: i32) {
         return;
     }
     let now = unsafe { bpf_ktime_get_ns() };
+    // Classify here, before pairing: the classifier reads only
+    // the context and the host-stable symbol map (no writes, no
+    // counters), so its triple is identical at any point in this
+    // path, and this keeps the caller's state singular at the call
+    // (the verifier re-verifies a callee per distinct caller
+    // state). The pairing block below fans out on token/entry/key
+    // variants; classifying past it would multiply that fan-out
+    // into the classifier's own match exploration.
+    let callers = unsafe { (*control).callers };
+    let (status, cls, label) = if callers != 0 {
+        mv_callers(ctx)
+    } else {
+        (0, 0, 0)
+    };
     let mut token = 0u64;
     let mut entry = 0u64;
     mv_count(MV_JR_EXITS);
-    if let Some(mut key) = mv_key(epoch) {
+    let mut key = JrKey {
+        task: 0,
+        birth: 0,
+        epoch: 0,
+        depth: 0,
+        reserved: 0,
+    };
+    if mv_key(epoch, &mut key) != 0 {
         if let Some(task) = MV_JR_TASKS.get_ptr_mut(&key) {
             if unsafe { (*task).depth } != 0 {
                 if !mv_identity_healthy() {
@@ -598,12 +756,6 @@ fn mv_exit(ctx: *mut c_void, direction: u32, pages: i32, result: i32) {
         return;
     }
     unsafe { *seq_slot = sequence + 1 };
-    let callers = unsafe { (*control).callers };
-    let (status, cls, label) = if callers != 0 {
-        mv_callers(ctx)
-    } else {
-        (0, 0, 0)
-    };
     let mut payload = [0u8; MV_JR_LEN];
     put_u32(&mut payload, MV_JR_OFF_MAGIC, MV_JR_MAGIC);
     put_u16(&mut payload, MV_JR_OFF_VERSION, 1);
