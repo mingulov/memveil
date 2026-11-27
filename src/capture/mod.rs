@@ -5,6 +5,7 @@ pub mod collector;
 pub mod correlation;
 pub mod exposure_census;
 pub mod exposure_records;
+pub mod journal_admission;
 pub mod journal_callers;
 pub mod journal_capture;
 pub mod journal_kernel;

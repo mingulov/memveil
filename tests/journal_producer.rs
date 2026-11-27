@@ -1561,12 +1561,12 @@ fn decide_record_journal_reports_frozen_code() {
 }
 
 #[test]
-fn positive_dispatch_stays_unwired() {
-    // Even a profile file shaped toward admission stops at the
-    // documented refusal point: no admitted registry exists, so
-    // the wiring leg (owned by the completion slice) is the
-    // only way forward. The refusal creates no output and no
-    // native state.
+fn unadmitted_profile_refuses_after_wiring() {
+    // The carried candidate (unadmitted, null bindings) still
+    // refuses at the dispatch gate now that positive dispatch
+    // is wired: only an admitted profile with exactly matching
+    // rebound evidence passes. The refusal creates no output
+    // and no native state.
     let root = std::env::temp_dir().join(format!("memveil-jr-unw-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     write_profile(

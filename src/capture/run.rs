@@ -22,6 +22,11 @@
 //! not a refusal).
 
 use super::collector::{Collector, CollectorConfig, EXIT_INVALID, EXIT_REFUSAL, RunResult};
+use super::journal_admission::{
+    JOURNAL_NOT_ADMITTED, JournalDispatch, JournalReadiness, admit_journal, fix_for_discovery,
+    gather_journal_evidence,
+};
+use super::journal_kernel::JournalKernel as NativeJournalKernel;
 use super::kernel::AyaKernel;
 use super::live::WriterSource;
 use super::loadcheck::{LoadDiag, LoadRefusal, diagnose_load, parse_load_refusal};
@@ -35,7 +40,7 @@ use crate::platform::capabilities::{attempt_loss_exact, cap_floor_ok, cap_floor_
 use crate::platform::clock::{MonoClock, check_timens_live};
 use crate::platform::evidence::{KernelInfo, detect_environment};
 use crate::platform::hash::sha256_hex;
-use crate::platform::journal_profile::journal_profile_reason;
+use crate::platform::journal_profile::discover_journal_binding;
 use crate::platform::kernelgate::{GateVerdict, kernel_gate, remedy_for};
 use crate::platform::narrow::{
     LiveValue, MAX_NARROW_BTF_BYTES, MAX_NARROW_FORMAT_BYTES, MAX_NARROW_IMAGE_BYTES,
@@ -65,7 +70,7 @@ pub const MIN_RECORD_BYTES: u64 = 131072;
 pub const MAX_RECORD_BYTES: u64 = 4294967296;
 /// Profile document read cap in bytes.
 pub const MAX_PROFILE_DOC_BYTES: usize = 1048576;
-const ZLIB: &str = "libz.so.1";
+pub(crate) const ZLIB: &str = "libz.so.1";
 const PROGRAM: &str = "mv_swiotlb_attempt";
 const ATTEMPT_CAP: &str = "attempt-trace";
 const LIFECYCLE_CAP: &str = "mapping-lifecycle";
@@ -74,8 +79,9 @@ const CONVERT_CAP: &str = "conversion-observe";
 /// Journal selector (`docs/conversion-journal.md`): recognized
 /// by the parser so admission answers it with the frozen
 /// admission code (exit 3) instead of as an unknown id (exit 2).
-/// The record channel behind it stays unwired: the positive
-/// admitted-profile path belongs to the completion slice.
+/// The record channel behind it admits only on an exact
+/// rebound-evidence match; anything else refuses before native
+/// or output creation.
 const JOURNAL_CAP: &str = "conversion-journal";
 const RING_LC_MAP: &str = "mv_lifecycle";
 const RING_CP_MAP: &str = "mv_copies";
@@ -1797,6 +1803,168 @@ pub fn render_provenance(source: &str, v: &LiveValue) -> EvidenceItem {
     item
 }
 
+/// Armed journal channel: readiness plus staged object bytes.
+struct JournalArmed {
+    /// Admitted profile id.
+    profile_id: String,
+    /// Staged object bytes the native source loads.
+    elf: Vec<u8>,
+    /// Rebound evidence the decision matched.
+    evidence: crate::capture::journal_admission::JournalRuntimeEvidence,
+}
+
+/// Budget bounds shared by the ordinary and journal-only paths.
+fn check_record_budget(max_events_bytes: u64) -> Option<RunResult> {
+    if max_events_bytes < MIN_RECORD_BYTES {
+        return Some(RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: format!("budget {max_events_bytes} below 131072"),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        });
+    }
+    if max_events_bytes > MAX_RECORD_BYTES {
+        return Some(RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: format!("budget {max_events_bytes} above 4294967296"),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        });
+    }
+    None
+}
+
+/// Resolve the journal object bytes: an explicit path wins
+/// verbatim and is never root-joined, else the embedded
+/// channel artifact. Unreadable or absent resolves to None,
+/// which refuses at the object binding.
+fn resolve_journal_object(explicit: &str) -> Option<Vec<u8>> {
+    if !explicit.is_empty() {
+        return std::fs::read(explicit).ok();
+    }
+    embedded_object("journal").map(|bytes| bytes.to_vec())
+}
+
+/// Strip the journal cap from a mixed capability list.
+fn strip_journal_caps(capabilities: &str) -> String {
+    capabilities
+        .split(',')
+        .filter(|item| *item != JOURNAL_CAP)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Record the rebound journal evidence on the run.
+fn push_journal_evidence(
+    evidence: &mut Vec<EvidenceItem>,
+    profile_id: &str,
+    rebound: &crate::capture::journal_admission::JournalRuntimeEvidence,
+) {
+    evidence.push(value_item(
+        "journal.profile_id".to_string(),
+        profile_id.to_string(),
+    ));
+    evidence.push(value_item(
+        "journal.source".to_string(),
+        format!(
+            "{}/{}/{}",
+            rebound.release, rebound.architecture, rebound.page_size
+        ),
+    ));
+    evidence.push(value_item(
+        "journal.config.sha256".to_string(),
+        rebound.config_sha256.clone(),
+    ));
+    evidence.push(value_item(
+        "journal.btf.sha256".to_string(),
+        rebound.btf_sha256.clone(),
+    ));
+    evidence.push(value_item(
+        "journal.object.sha256".to_string(),
+        rebound.object_sha256.clone(),
+    ));
+}
+
+/// Run one admitted journal-only capture.
+///
+/// Budget and time-namespace gates mirror the ordinary path;
+/// ordinary profiles, receipts, and the kernel floor do not
+/// apply (capability failures surface as prepare/attach
+/// refusals instead). No load-replay tail: journal failures
+/// are fixed messages with no verifier text to recover.
+fn run_journal_only<W: WriterSource>(
+    root: &str,
+    opts: &RecordOptions,
+    writer: &mut W,
+    ready: JournalReadiness,
+    elf: Vec<u8>,
+) -> RunResult {
+    if let Some(refusal) = check_record_budget(opts.max_events_bytes) {
+        return refusal;
+    }
+    let timens = check_timens_live();
+    if !timens.ok {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: "time namespace unverifiable".to_string(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    if timens.offset {
+        return RunResult {
+            exit_code: EXIT_REFUSAL,
+            end_reason: String::new(),
+            outcome: String::new(),
+            diagnostic: "time namespace offset present".to_string(),
+            fix: String::new(),
+            code: String::new(),
+            unknown: false,
+            trusted: true,
+        };
+    }
+    let mut cfg = CollectorConfig {
+        duration_s: opts.duration_s,
+        max_events_bytes: opts.max_events_bytes,
+        output: opts.output.clone(),
+        profile_id: ready.profile_id.clone(),
+        pid: std::process::id() as i64,
+        has_journal: true,
+        journal_only: true,
+        journal_callers: opts.journal_callers,
+        journal_profile: ready.profile_id.clone(),
+        strict: opts.strict,
+        ..Default::default()
+    };
+    if let Some(boot_id) = read_boot_id(root) {
+        cfg.has_boot_id = true;
+        cfg.boot_id = boot_id;
+    }
+    push_journal_evidence(&mut cfg.evidence, &ready.profile_id, &ready.evidence);
+    let mut kernel =
+        AyaKernel::with_channels(Vec::new(), "", "", Vec::new(), false, Vec::new(), false);
+    let mut journal = NativeJournalKernel::new();
+    // No owned module is asserted on the recording host, so
+    // owned-module caller labels stay unresolved (zeroed).
+    journal.setup(elf, false);
+    let mut clock = MonoClock::new();
+    let mut signal = LiveSignalSource::new();
+    let mut collector = Collector::new(cfg);
+    collector.run_with_journal(&mut kernel, &mut journal, &mut clock, &mut signal, writer)
+}
+
 /// Run admission plus collection; return the raw outcome.
 ///
 /// `root` is the evidence root ("" for the live host) and
@@ -1833,45 +2001,72 @@ pub fn run_collector_with<W: WriterSource>(
             };
         }
     };
+    // Capabilities the ordinary stage decides: journal requests
+    // strip the journal cap after the journal admits, so the
+    // ordinary decision never sees it.
+    let mut ordinary_caps = opts.capabilities.clone();
+    // Armed journal channel: readiness plus the staged object
+    // bytes the native source loads.
+    let mut journal_armed: Option<JournalArmed> = None;
     if selection.journal {
-        // Admission precedes all native and output creation: the
-        // positive admitted-profile path stays unwired, so every
-        // journal request stops here with the frozen reason.
-        let reason = journal_profile_reason(profiles_dir, &opts.profile, opts.has_profile);
-        return RunResult {
-            exit_code: EXIT_REFUSAL,
-            end_reason: String::new(),
-            outcome: String::new(),
-            diagnostic: reason,
-            fix: String::new(),
-            code: String::new(),
-            unknown: false,
-            trusted: true,
+        // Admission precedes all native and output creation:
+        // discover the candidate, rebind runtime evidence at
+        // dispatch time, and admit only on an exact match.
+        // Refusals carry the bare frozen code plus the failed
+        // gate; readiness arms the channel (journal-only runs
+        // its own path, mixed requests fall through to ordinary
+        // admission below).
+        let binding = match discover_journal_binding(profiles_dir, &opts.profile, opts.has_profile)
+        {
+            Ok(binding) => binding,
+            Err(failure) => {
+                return RunResult {
+                    exit_code: EXIT_REFUSAL,
+                    end_reason: String::new(),
+                    outcome: String::new(),
+                    diagnostic: JOURNAL_NOT_ADMITTED.to_string(),
+                    fix: fix_for_discovery(failure),
+                    code: String::new(),
+                    unknown: false,
+                    trusted: true,
+                };
+            }
         };
+        let elf = resolve_journal_object(&opts.journal_object);
+        let evidence = gather_journal_evidence(root, elf.as_deref());
+        let sub = JournalSelection {
+            attempts: false,
+            journal: true,
+            callers: selection.callers,
+        };
+        match admit_journal(sub, false, &binding, &evidence) {
+            JournalDispatch::Refused(refusal) => {
+                return RunResult {
+                    exit_code: refusal.exit_code,
+                    end_reason: String::new(),
+                    outcome: String::new(),
+                    diagnostic: refusal.reason,
+                    fix: refusal.fix,
+                    code: String::new(),
+                    unknown: false,
+                    trusted: true,
+                };
+            }
+            JournalDispatch::Ready(ready) => {
+                if !selection.attempts {
+                    return run_journal_only(root, &opts, writer, ready, elf.unwrap_or_default());
+                }
+                ordinary_caps = strip_journal_caps(&opts.capabilities);
+                journal_armed = Some(JournalArmed {
+                    profile_id: ready.profile_id.clone(),
+                    elf: elf.unwrap_or_default(),
+                    evidence: ready.evidence.clone(),
+                });
+            }
+        }
     }
-    if opts.max_events_bytes < MIN_RECORD_BYTES {
-        return RunResult {
-            exit_code: EXIT_REFUSAL,
-            end_reason: String::new(),
-            outcome: String::new(),
-            diagnostic: format!("budget {} below 131072", opts.max_events_bytes),
-            fix: String::new(),
-            code: String::new(),
-            unknown: false,
-            trusted: true,
-        };
-    }
-    if opts.max_events_bytes > MAX_RECORD_BYTES {
-        return RunResult {
-            exit_code: EXIT_REFUSAL,
-            end_reason: String::new(),
-            outcome: String::new(),
-            diagnostic: format!("budget {} above 4294967296", opts.max_events_bytes),
-            fix: String::new(),
-            code: String::new(),
-            unknown: false,
-            trusted: true,
-        };
+    if let Some(refusal) = check_record_budget(opts.max_events_bytes) {
+        return refusal;
     }
     // The statically linked loader needs no bridge file:
     // an empty bridge is the normal case, not a refusal.
@@ -1946,6 +2141,8 @@ pub fn run_collector_with<W: WriterSource>(
             };
         }
     };
+    // Mixed journal requests arrive with the journal cap already
+    // stripped: the ordinary decision sees ordinary caps only.
     let decision = decide_record(
         root,
         &env.kernel,
@@ -1955,7 +2152,7 @@ pub fn run_collector_with<W: WriterSource>(
         &object_path,
         &lc_object,
         &cp_object,
-        &opts.capabilities,
+        &ordinary_caps,
         profiles_dir,
         &bridge_sha,
     );
@@ -2038,6 +2235,12 @@ pub fn run_collector_with<W: WriterSource>(
         strict: opts.strict,
         ..Default::default()
     };
+    if let Some(armed) = &journal_armed {
+        cfg.has_journal = true;
+        cfg.journal_only = false;
+        cfg.journal_callers = opts.journal_callers;
+        cfg.journal_profile = armed.profile_id.clone();
+    }
     if let Some(boot_id) = read_boot_id(root) {
         cfg.has_boot_id = true;
         cfg.boot_id = boot_id;
@@ -2108,6 +2311,9 @@ pub fn run_collector_with<W: WriterSource>(
         "bridge.abi".to_string(),
         "abi-v1 (required)".to_string(),
     ));
+    if let Some(armed) = &journal_armed {
+        push_journal_evidence(&mut cfg.evidence, &armed.profile_id, &armed.evidence);
+    }
     let mut kernel = AyaKernel::with_channels(
         decision.elf.clone(),
         &decision.tp_system,
@@ -2120,7 +2326,17 @@ pub fn run_collector_with<W: WriterSource>(
     let mut clock = MonoClock::new();
     let mut signal = LiveSignalSource::new();
     let mut collector = Collector::new(cfg);
-    let mut out = collector.run(&mut kernel, &mut clock, &mut signal, writer);
+    let mut journal = NativeJournalKernel::new();
+    if let Some(armed) = &journal_armed {
+        // No owned module is asserted on the recording host, so
+        // owned-module caller labels stay unresolved (zeroed).
+        journal.setup(armed.elf.clone(), false);
+    }
+    let mut out = if journal_armed.is_some() {
+        collector.run_with_journal(&mut kernel, &mut journal, &mut clock, &mut signal, writer)
+    } else {
+        collector.run(&mut kernel, &mut clock, &mut signal, writer)
+    };
     // Retain the bridge snapshot through the run above and
     // the load replay below: this explicit binding keeps
     // the fd open across the whole collection.
