@@ -14,8 +14,8 @@
 //! this suite dumps (see `dump_wire_corpus`).
 
 use memveil::capture::collector::{
-    ClockSource, Collector, CollectorConfig, GeomOut, KernelSource, MissOut, PollOut, SignalSource,
-    SnapOut, StatsOut,
+    ClockSource, Collector, CollectorConfig, EXIT_ERROR, GeomOut, KernelSource, MAP_TYPE_ARRAY,
+    MAP_TYPE_RINGBUF, MissOut, PollOut, SignalSource, SnapOut, StatsOut,
 };
 use memveil::capture::journal_callers::{CallerRange, encode_caller_range, resolve_caller_ranges};
 use memveil::capture::journal_capture::{
@@ -34,6 +34,7 @@ use memveil::model::journal::select_journal;
 use memveil::model::session::parse_session;
 use memveil::platform::evidence::KernelInfo;
 use memveil::platform::journal_profile::{JOURNAL_CANDIDATE_ID, journal_profile_reason};
+use memveil::platform::narrow::MV_OFFSETS_TABLE_LEN;
 use memveil::platform::outcome::OpOut;
 use memveil::platform::profiles::load_profiles;
 use memveil::platform::signal::SignalOut;
@@ -69,15 +70,35 @@ impl KernelSource for ScriptKernel {
         ok_out()
     }
 
-    fn map_info(&mut self, _name: &str) -> GeomOut {
+    fn map_info(&mut self, name: &str) -> GeomOut {
         self.calls.push("map_info".to_string());
-        GeomOut {
-            ok: false,
-            map_type: 0,
-            key_size: 0,
-            value_size: 0,
-            max_entries: 0,
-            message: "scripted".to_string(),
+        // Admitted attempt-channel geometry, so a mixed
+        // ordinary/journal run passes startup. Journal-only
+        // legs never reach the kernel, so they observe no
+        // change.
+        let geom = match name {
+            "mv_counts" => Some((MAP_TYPE_ARRAY, 4, 8, 6)),
+            "mv_attempts" => Some((MAP_TYPE_RINGBUF, 0, 0, 0)),
+            "mv_offsets" => Some((MAP_TYPE_ARRAY, 4, MV_OFFSETS_TABLE_LEN as u32, 1)),
+            _ => None,
+        };
+        match geom {
+            Some((map_type, key_size, value_size, max_entries)) => GeomOut {
+                ok: true,
+                map_type,
+                key_size,
+                value_size,
+                max_entries,
+                message: String::new(),
+            },
+            None => GeomOut {
+                ok: false,
+                map_type: 0,
+                key_size: 0,
+                value_size: 0,
+                max_entries: 0,
+                message: "scripted".to_string(),
+            },
         }
     }
 
@@ -234,6 +255,12 @@ struct MemWriter {
     session_bytes: Vec<u8>,
     finalized: bool,
     committed: u64,
+    /// 1-based append ordinal that fails fatal; 0 never fails.
+    fail_append_at: u64,
+    /// Total append/append_closing calls observed.
+    appends: u64,
+    /// Discard calls observed.
+    discards: u64,
 }
 
 impl MemWriter {
@@ -244,6 +271,9 @@ impl MemWriter {
             session_bytes: Vec::new(),
             finalized: false,
             committed: 0,
+            fail_append_at: 0,
+            appends: 0,
+            discards: 0,
         }
     }
 }
@@ -258,6 +288,14 @@ impl WriterSource for MemWriter {
     }
 
     fn append(&mut self, line: &[u8]) -> AppendOut {
+        self.appends += 1;
+        if self.fail_append_at != 0 && self.appends == self.fail_append_at {
+            return AppendOut {
+                ok: false,
+                kind: "fatal".to_string(),
+                message: "scripted close-drain fault".to_string(),
+            };
+        }
         self.lines.push(line.to_vec());
         self.committed += line.len() as u64;
         AppendOut {
@@ -310,7 +348,9 @@ impl WriterSource for MemWriter {
         String::new()
     }
 
-    fn discard(&mut self) {}
+    fn discard(&mut self) {
+        self.discards += 1;
+    }
 
     fn committed_len(&self) -> u64 {
         self.committed
@@ -434,6 +474,107 @@ impl JournalKernel for JournalFixture {
     fn close(&mut self) -> OpOut {
         self.calls.push("release".to_string());
         ok_out()
+    }
+}
+
+/// Journal source that stays quiet while admission is open and
+/// emits exactly one matched record during the post-close drain.
+/// Typed offline injection for the close-drain fault path: the
+/// emitted record is the only writer append in the run, so a
+/// first-append writer fault lands deterministically in the
+/// drain, after the poll loop already latched a clean stop.
+struct DrainEmitJournal {
+    inner: JournalFixture,
+    last_control: Vec<u8>,
+    close_seen: bool,
+    emitted: bool,
+}
+
+impl DrainEmitJournal {
+    fn new() -> Self {
+        Self {
+            inner: JournalFixture::new(),
+            last_control: Vec::new(),
+            close_seen: false,
+            emitted: false,
+        }
+    }
+
+    fn control_u64(&self, offset: usize) -> u64 {
+        let mut value: u64 = 0;
+        for i in 0..8 {
+            value |= u64::from(self.last_control[offset + i]) << (8 * i);
+        }
+        value
+    }
+
+    /// The fixture's matched record, keyed off the close
+    /// control's epoch/start (same positions as the open
+    /// control): matched entry inside admission, exit just
+    /// after it.
+    fn drain_record(&self) -> Vec<u8> {
+        let epoch = self.control_u64(0);
+        let start = self.control_u64(8);
+        let mut raw = vec![0u8; 72];
+        raw[0..4].copy_from_slice(&0x524A_564Du32.to_le_bytes());
+        raw[4..6].copy_from_slice(&1u16.to_le_bytes());
+        raw[6..8].copy_from_slice(&1u16.to_le_bytes());
+        raw[8..10].copy_from_slice(&1u16.to_le_bytes());
+        raw[10..12].copy_from_slice(&1u16.to_le_bytes());
+        raw[16..24].copy_from_slice(&0u64.to_le_bytes());
+        raw[24..32].copy_from_slice(&(start + 1).to_le_bytes());
+        raw[32..40].copy_from_slice(&epoch.to_le_bytes());
+        raw[40..48].copy_from_slice(&1u64.to_le_bytes());
+        raw[48..56].copy_from_slice(&start.to_le_bytes());
+        raw[56..60].copy_from_slice(&3i32.to_le_bytes());
+        raw[60..64].copy_from_slice(&0i32.to_le_bytes());
+        raw
+    }
+}
+
+impl JournalKernel for DrainEmitJournal {
+    fn prepare(&mut self, control: &[u8]) -> OpOut {
+        self.inner.prepare(control)
+    }
+
+    fn attach(&mut self) -> OpOut {
+        self.inner.attach()
+    }
+
+    fn control(&mut self, value: &[u8]) -> OpOut {
+        self.last_control = value.to_vec();
+        if value.len() == 48 && value[24] == 0 {
+            self.close_seen = true;
+        }
+        self.inner.control(value)
+    }
+
+    fn poll(&mut self, _timeout_ms: i64) -> JournalPoll {
+        // Never consult the inner fixture before the close:
+        // its record must not leak into the poll phase.
+        if !self.close_seen || self.emitted || self.last_control.len() != 48 {
+            return JournalPoll {
+                ok: true,
+                data: Vec::new(),
+            };
+        }
+        self.emitted = true;
+        JournalPoll {
+            ok: true,
+            data: self.drain_record(),
+        }
+    }
+
+    fn counters(&mut self) -> JournalCounters {
+        self.inner.counters()
+    }
+
+    fn detach(&mut self) -> OpOut {
+        self.inner.detach()
+    }
+
+    fn close(&mut self) -> OpOut {
+        self.inner.close()
     }
 }
 
@@ -1251,6 +1392,60 @@ fn journal_attach_failure_refuses_cleanly() {
     assert_eq!(result.exit_code, 3);
     assert!(!writer.finalized);
     assert_eq!(journal.calls[journal.calls.len() - 1], "release");
+}
+
+#[test]
+fn mixed_close_drain_fault_still_detaches_ordinary_session() {
+    // Mixed run (attempts + journal): the poll loop latches a
+    // clean duration stop, then the writer fails fatal exactly
+    // on the close-drain record. The run must still detach the
+    // ordinary kernel session through the normal close before
+    // dropping as unfinalizable; skipping straight to the drop
+    // would leak the ordinary session's close side effects.
+    let mut collector = Collector::new(CollectorConfig {
+        has_journal: true,
+        journal_only: false,
+        journal_callers: false,
+        journal_profile: JOURNAL_CANDIDATE_ID.to_string(),
+        duration_s: 1,
+        ..Default::default()
+    });
+    let mut kernel = ScriptKernel::new();
+    let mut journal = DrainEmitJournal::new();
+    let mut clock = ScriptClock::new(1000, 100_000_000);
+    let mut signal = ScriptSignal;
+    let mut writer = MemWriter::new();
+    // The drain record is the only append in the run: quiet
+    // timeout polls persist nothing and checkpoints bypass
+    // append, so the first-append fault lands in the drain.
+    writer.fail_append_at = 1;
+    let result = collector.run_with_journal(
+        &mut kernel,
+        &mut journal,
+        &mut clock,
+        &mut signal,
+        &mut writer,
+    );
+    assert!(
+        journal.close_seen && journal.emitted,
+        "fault path not exercised: close_seen={} emitted={}",
+        journal.close_seen,
+        journal.emitted
+    );
+    assert_eq!(writer.appends, 1, "unexpected append count");
+    assert_eq!(result.exit_code, EXIT_ERROR, "{}", result.diagnostic);
+    assert_eq!(result.outcome, "unfinalizable");
+    assert_eq!(writer.discards, 1);
+    assert!(
+        kernel.calls.iter().any(|call| call == "detach"),
+        "ordinary detach skipped: {:?}",
+        kernel.calls
+    );
+    assert!(
+        journal.inner.calls.iter().any(|call| call == "detach"),
+        "journal detach skipped: {:?}",
+        journal.inner.calls
+    );
 }
 
 #[test]

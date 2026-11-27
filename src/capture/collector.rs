@@ -1308,7 +1308,9 @@ impl Collector {
         if self.cfg.has_journal {
             self.close_journal(journal, clock, writer);
         }
-        if stop == "unfinalizable" || self.result_state == "unfinalizable" {
+        if stop == "unfinalizable"
+            || (self.cfg.journal_only && self.result_state == "unfinalizable")
+        {
             return self.drop_unfinalizable(writer);
         }
         if self.cfg.journal_only {
