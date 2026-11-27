@@ -18,19 +18,15 @@ use memveil::capture::collector::{
     MAP_TYPE_RINGBUF, MissOut, PollOut, SignalSource, SnapOut, StatsOut,
 };
 use memveil::capture::journal_capture::{
-    JOURNAL_NATIVE_COUNTERS, JournalCounters, JournalKernel, JournalPoll, encode_journal_control,
+    JOURNAL_NATIVE_COUNTERS, JournalCounters, JournalKernel, JournalPoll,
 };
-use memveil::capture::live::{
-    AppendOut, CreateOut, FinalOut, GroupOut, LiveWriter, WriterSource,
-};
+use memveil::capture::live::{AppendOut, CreateOut, FinalOut, GroupOut, LiveWriter, WriterSource};
 use memveil::capture::run::{RecordOptions, run_collector_with};
 use memveil::model::event::parse_event;
 use memveil::model::session::parse_session;
 use memveil::platform::hash::sha256_hex;
 use memveil::platform::journal_profile::JOURNAL_CANDIDATE_ID;
-use memveil::platform::narrow::{
-    MAX_NARROW_BTF_BYTES, read_live_bytes, read_live_config,
-};
+use memveil::platform::narrow::{MAX_NARROW_BTF_BYTES, read_live_bytes, read_live_config};
 use memveil::platform::outcome::OpOut;
 use memveil::platform::signal::SignalOut;
 
@@ -233,10 +229,7 @@ struct StepSignal {
 
 impl StepSignal {
     fn new(fire_at: u64) -> Self {
-        Self {
-            checks: 0,
-            fire_at,
-        }
+        Self { checks: 0, fire_at }
     }
 
     fn quiet() -> Self {
@@ -610,9 +603,21 @@ fn admitted_body(config: &str, btf: &str, object: &str, arch: &str, pages: u64) 
             &format!("\"architecture\": \"{arch}\""),
             1,
         )
-        .replacen("\"page_size\": \"4096\"", &format!("\"page_size\": \"{pages}\""), 1)
-        .replacen("\"config_sha256\": null", &format!("\"config_sha256\": \"{config}\""), 1)
-        .replacen("\"btf_sha256\": null", &format!("\"btf_sha256\": \"{btf}\""), 1)
+        .replacen(
+            "\"page_size\": \"4096\"",
+            &format!("\"page_size\": \"{pages}\""),
+            1,
+        )
+        .replacen(
+            "\"config_sha256\": null",
+            &format!("\"config_sha256\": \"{config}\""),
+            1,
+        )
+        .replacen(
+            "\"btf_sha256\": null",
+            &format!("\"btf_sha256\": \"{btf}\""),
+            1,
+        )
         .replacen(
             "\"object_sha256\": null",
             &format!("\"object_sha256\": \"{object}\""),
@@ -819,19 +824,23 @@ fn dispatch_refusal_form_is_bare_code_with_fix() {
 fn dispatch_admitted_profile_with_rebound_evidence_reaches_native() {
     // Positive path: an admitted profile whose bindings match
     // the freshly rebound runtime evidence passes admission, so
-    // output creation runs and the native prepare is attempted.
-    // The staged object is deliberately non-ELF, so prepare
-    // refuses on the magic before any privilege use; the
-    // refusal point past admission is the observable.
+    // the native prepare is attempted. The staged object is
+    // deliberately non-ELF, so prepare refuses on the magic
+    // before any privilege use; the native-attempt diagnostic
+    // (instead of the frozen code) is the observable. Output
+    // creation runs only after a successful prepare, so the
+    // refused native attempt correctly creates no output.
     let Some((release, arch, pages, config, btf)) = live_bindings() else {
         eprintln!("skip: live config/BTF unmeasurable on this host");
         return;
     };
     let root = scratch("pos");
     let (obj_path, obj_sha) = garbage_object(&root);
-    write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &admitted_body(
-        &config, &btf, &obj_sha, &arch, pages,
-    ));
+    write_profile(
+        &root,
+        "linux-7.0.14-x86-journal-provisional.json",
+        &admitted_body(&config, &btf, &obj_sha, &arch, pages),
+    );
     eprintln!("matrix rebound: release={release} arch={arch} pages={pages}");
     eprintln!("matrix rebound: config={config} btf={btf} object={obj_sha}");
     let out = root.join("cap");
@@ -843,14 +852,13 @@ fn dispatch_admitted_profile_with_rebound_evidence_reaches_native() {
     };
     let mut writer = MemWriter::new();
     let result = run_collector_with("", root.to_str().expect("utf-8"), opts, &mut writer);
-    assert!(
-        writer.created,
-        "admission refused: exit={} diag={}",
-        result.exit_code,
-        result.diagnostic
-    );
     assert_eq!(result.exit_code, 3, "{}", result.diagnostic);
-    assert_eq!(result.diagnostic, "journal open/load unavailable");
+    assert_eq!(
+        result.diagnostic, "journal open/load unavailable",
+        "admission refused instead of reaching native"
+    );
+    assert!(!writer.created);
+    assert!(!out.exists());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -866,9 +874,11 @@ fn dispatch_mixed_admitted_journal_falls_through_to_ordinary() {
     };
     let root = scratch("mix");
     let (obj_path, obj_sha) = garbage_object(&root);
-    write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &admitted_body(
-        &config, &btf, &obj_sha, &arch, pages,
-    ));
+    write_profile(
+        &root,
+        "linux-7.0.14-x86-journal-provisional.json",
+        &admitted_body(&config, &btf, &obj_sha, &arch, pages),
+    );
     let out = root.join("cap");
     let opts = RecordOptions {
         output: out.to_str().expect("utf-8").to_string(),
@@ -925,11 +935,8 @@ fn dispatch_profile_edit_alone_never_admits() {
     // bindings that match nothing live) still refuses: a profile
     // edit alone is not admission.
     let root = scratch("edit");
-    let flipped = candidate_body().replacen(
-        "\"status\": \"unadmitted\"",
-        "\"status\": \"admitted\"",
-        1,
-    );
+    let flipped =
+        candidate_body().replacen("\"status\": \"unadmitted\"", "\"status\": \"admitted\"", 1);
     write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &flipped);
     let out = root.join("cap");
     let run = || {
@@ -975,9 +982,21 @@ fn dispatch_evidence_mismatch_matrix() {
     let (obj_path, obj_sha) = garbage_object(&root);
     let wrong = "ff".repeat(32);
     let cases: Vec<(&str, String, &str)> = vec![
-        ("config", admitted_body(&wrong, &btf, &obj_sha, &arch, pages), "config"),
-        ("btf", admitted_body(&config, &wrong, &obj_sha, &arch, pages), "btf"),
-        ("object", admitted_body(&config, &btf, &wrong, &arch, pages), "object"),
+        (
+            "config",
+            admitted_body(&wrong, &btf, &obj_sha, &arch, pages),
+            "config",
+        ),
+        (
+            "btf",
+            admitted_body(&config, &wrong, &obj_sha, &arch, pages),
+            "btf",
+        ),
+        (
+            "object",
+            admitted_body(&config, &btf, &wrong, &arch, pages),
+            "object",
+        ),
     ];
     for (leg, body, fix_word) in cases {
         write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &body);
@@ -1001,9 +1020,17 @@ fn dispatch_evidence_mismatch_matrix() {
     }
     // Architecture and page size bind from the same carried
     // profile fields the live host must match.
-    let wrong_arch = if arch == "aarch64" { "x86_64" } else { "aarch64" };
+    let wrong_arch = if arch == "aarch64" {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
     let arch_body = admitted_body(&config, &btf, &obj_sha, wrong_arch, pages);
-    write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &arch_body);
+    write_profile(
+        &root,
+        "linux-7.0.14-x86-journal-provisional.json",
+        &arch_body,
+    );
     let out = root.join("cap-arch");
     let opts = RecordOptions {
         output: out.to_str().expect("utf-8").to_string(),
@@ -1018,7 +1045,11 @@ fn dispatch_evidence_mismatch_matrix() {
     assert!(result.fix.contains("architecture"), "fix: {}", result.fix);
     let wrong_pages = if pages == 8192 { 4096 } else { 8192 };
     let page_body = admitted_body(&config, &btf, &obj_sha, &arch, wrong_pages);
-    write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &page_body);
+    write_profile(
+        &root,
+        "linux-7.0.14-x86-journal-provisional.json",
+        &page_body,
+    );
     let out = root.join("cap-page");
     let opts = RecordOptions {
         output: out.to_str().expect("utf-8").to_string(),
@@ -1388,8 +1419,8 @@ fn guest_verifier_accepts_journal_object() {
         &port,
         "timeout 120 sudo bpftool prog load /tmp/memveil-journal-matrix.o /sys/fs/bpf/mvjr-matrix 2>&1; code=$?; sudo rm -f /sys/fs/bpf/mvjr-matrix /tmp/memveil-journal-matrix.o; echo GUEST_RC=$code",
     );
-    let text = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     eprintln!("guest verifier output: {text}");
     assert!(
         text.contains("GUEST_RC=0"),
@@ -1421,8 +1452,20 @@ fn guest_end_to_end_attach_oracle_detach() {
     let stage = scratch("g2");
     let obj = stage.join("memveil-ebpf-journal");
     std::fs::write(&obj, &elf).expect("stage object");
-    scp_to(&user, &host, &port, binary.to_str().expect("utf-8"), "/tmp/mv-matrix-memveil");
-    scp_to(&user, &host, &port, obj.to_str().expect("utf-8"), "/tmp/mv-matrix-journal.o");
+    scp_to(
+        &user,
+        &host,
+        &port,
+        binary.to_str().expect("utf-8"),
+        "/tmp/mv-matrix-memveil",
+    );
+    scp_to(
+        &user,
+        &host,
+        &port,
+        obj.to_str().expect("utf-8"),
+        "/tmp/mv-matrix-journal.o",
+    );
     let mint = r#"
 import gzip, hashlib, json, os
 cfg_src = ""
@@ -1466,9 +1509,14 @@ os.makedirs("/tmp/mv-matrix-profiles/journal-candidates", exist_ok=True)
 json.dump(prof, open("/tmp/mv-matrix-profiles/journal-candidates/linux-7.0.14-x86-journal-provisional.json", "w"))
 print("MINTED src=" + cfg_src)
 "#;
-    let out = ssh_run(&user, &host, &port, &format!("timeout 60 python3 -c {mint:?}"));
-    let text = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let out = ssh_run(
+        &user,
+        &host,
+        &port,
+        &format!("timeout 60 python3 -c {mint:?}"),
+    );
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "guest mint failed: {text}");
     assert!(text.contains("MINTED"), "guest mint failed: {text}");
     let run = "BASE=$(sudo bpftool link show 2>/dev/null | grep -c tracing || true); \
@@ -1489,8 +1537,8 @@ wait $CAP_PID; RC=$?; echo GUEST_RC=$RC BASE_LINKS=$BASE PEAK_LINKS=$PEAK; \
 sudo chmod -R a+r /tmp/mv-matrix-cap 2>/dev/null; \
 cat /tmp/mv-matrix-run.log";
     let out = ssh_run(&user, &host, &port, run);
-    let text = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     eprintln!("guest end-to-end output: {text}");
     assert!(text.contains("GUEST_RC=0"), "guest capture failed: {text}");
     let base = text
@@ -1522,11 +1570,19 @@ print("ORACLE has_journal=%s closure=%s entries=%s drops=%s invalid=%s missed=%s
 lines = [line for line in open("/tmp/mv-matrix-cap/events.ndjson").read().splitlines() if line.strip()]
 print("ORACLE events=%d" % len(lines))
 "#;
-    let out = ssh_run(&user, &host, &port, &format!("timeout 60 python3 -c {verify:?}"));
-    let text = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let out = ssh_run(
+        &user,
+        &host,
+        &port,
+        &format!("timeout 60 python3 -c {verify:?}"),
+    );
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     eprintln!("guest oracle output: {text}");
-    assert!(text.contains("ORACLE has_journal=True"), "no journal block: {text}");
+    assert!(
+        text.contains("ORACLE has_journal=True"),
+        "no journal block: {text}"
+    );
     let out = ssh_run(
         &user,
         &host,
