@@ -7,9 +7,10 @@
 //! the Rust journal producer. Every leg is offline: the native
 //! [`JournalKernel`] implementation is exercised through closed-state
 //! and refused-open legs plus typed injection of a scripted source,
-//! never through a live load/attach (the lease-gated completion slice
-//! owns real verifier/load/attach). The Aya program's wire layout is
-//! pinned byte-for-byte against the carried C header by
+//! never through a live load/attach (real verifier/load/attach
+//! stays lease-gated for final integration). The Aya program's
+//! wire layout is pinned byte-for-byte against the carried C
+//! header by
 //! `tests/journal/producer_reference.py`, which consumes the corpus
 //! this suite dumps (see `dump_wire_corpus`).
 
@@ -941,14 +942,23 @@ fn native_kernel_prepare_refuses_offline() {
 /// Newest linked journal object under the workspace target dir, if any.
 fn built_journal_object() -> Option<Vec<u8>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = match std::env::var("CARGO_TARGET_DIR") {
+        Ok(dir) if !dir.is_empty() => {
+            let path = PathBuf::from(&dir);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        }
+        _ => root.join("target"),
+    };
     let mut cands = Vec::new();
     for profile in ["debug", "release"] {
-        let base = root
-            .join("target")
-            .join(profile)
-            .join("build")
-            .join("memveil");
-        let entries = std::fs::read_dir(&base).ok()?;
+        let base = target.join(profile).join("build").join("memveil");
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let obj = entry
                 .path()

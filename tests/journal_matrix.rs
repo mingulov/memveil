@@ -713,7 +713,9 @@ fn built_journal_object() -> Option<Vec<u8>> {
     let mut cands = Vec::new();
     for profile in ["debug", "release"] {
         let base = target.join(profile).join("build").join("memveil");
-        let entries = std::fs::read_dir(&base).ok()?;
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let obj = entry
                 .path()
