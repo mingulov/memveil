@@ -2379,6 +2379,7 @@ def main(argv):
                     "bpf/swiotlb_attempt.bpf.o": "GPL-2.0-only",
                     "bpf/swiotlb_lifecycle.bpf.o": "GPL-2.0-only",
                     "bpf/swiotlb_copy.bpf.o": "GPL-2.0-only",
+                    "bpf/conversion_journal.bpf.o": "GPL-2.0-only",
                 },
             },
             # Inspection-copy digests the binary itself dumps

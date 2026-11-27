@@ -48,13 +48,13 @@ fn flip_first(digest: &str) -> String {
 }
 
 #[test]
-fn collect_covers_twelve_payload_files() {
+fn collect_covers_fifteen_payload_files() {
     let (deb, rpm, bundle) = packages();
     let entries = h::payload::collect(&deb, &rpm, &bundle).expect("collect");
     let mut keys: Vec<String> = entries.keys().cloned().collect();
     keys.sort();
     assert_eq!(keys, h::payload::expected());
-    assert_eq!(keys.len(), 12);
+    assert_eq!(keys.len(), 15);
     for (logical, digest) in &entries {
         assert!(is_hex64(digest), "{logical}");
         assert_ne!(digest, &"0".repeat(64), "{logical}");
@@ -253,7 +253,7 @@ fn packaged_runtime_bytes_name_no_build_machine() {
     // remap keep the old bytes.
     let (deb, rpm, bundle) = packages();
     let members = h::payload::member_bytes(&deb, &rpm, &bundle).expect("member bytes");
-    assert_eq!(members.len(), 12);
+    assert_eq!(members.len(), 15);
     let needles = forbidden_path_needles();
     for (logical, bytes) in &members {
         for needle in &needles {
@@ -312,7 +312,7 @@ fn payload_hashes_match_collect() {
     let out = tmp.join("memveil.spdx.json");
     h::sbom::emit_spdx(&bundle, &deb, &rpm, &lock, &ebpf_lock, &out).expect("emit");
     let entries = h::payload::collect(&deb, &rpm, &bundle).expect("collect");
-    assert_eq!(entries.len(), 12);
+    assert_eq!(entries.len(), 15);
     for (logical, digest) in &entries {
         let probe =
             format!("[f['checksums'] for f in d['files'] if f['fileName'] == 'payload/{logical}']");

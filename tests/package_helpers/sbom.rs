@@ -306,6 +306,7 @@ fn payload_covered(name: &str) -> bool {
         || name == "bpf/swiotlb_attempt.bpf.o"
         || name == "bpf/swiotlb_copy.bpf.o"
         || name == "bpf/swiotlb_lifecycle.bpf.o"
+        || name == "bpf/conversion_journal.bpf.o"
 }
 
 #[allow(clippy::too_many_arguments)]
