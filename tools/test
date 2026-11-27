@@ -13,6 +13,7 @@
 # exposure-protocols, exposure-platforms, exposure-vmbus,
 # exposure-mappings, exposure-context, exposure-cli,
 # exposure-adversarial, exposure-acceptance, exposure-census,
+# journal-contracts,
 # top, oracle-ledger, vm-oracle,
 # profile-semantics, vm-lifecycle, vm-copy, vm-real-io,
 # vm-topwalk, vm-kernels, vm-scenarios, vm-stop,
@@ -1349,6 +1350,11 @@ suite_exposure_census() {
     fast_cargo test --locked --test exposure_census
 }
 
+suite_journal_contracts() {
+    python3 "$ROOT/tests/journal/test_contracts.py" || return 1
+    python3 "$ROOT/tests/journal/test_wire.py"
+}
+
 suite_confidential_hooks() {
     python3 "$ROOT/tests/confidential/test_conversion_hooks.py"
 }
@@ -2456,6 +2462,9 @@ case "$1" in
         ;;
     exposure-census)
         suite_exposure_census
+        ;;
+    journal-contracts)
+        suite_journal_contracts
         ;;
     top)
         suite_top
