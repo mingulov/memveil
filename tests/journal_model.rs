@@ -280,7 +280,7 @@ fn normalization_sequence_and_unknown_counters() {
     let event = capture.consume(&raw, "capture", 31).expect("first result");
     assert_eq!(event.journal.native_result, -5);
     assert_eq!(event.journal.requested_bytes.value, 12288);
-    assert_eq!(event.source_correlation, "unpaired");
+    assert_eq!(event.source_correlation, "direct");
     assert!(capture.consume(&raw, "capture", 31).is_err());
     capture.closed(32, true).expect("admission closes");
     raw[16] = 3;

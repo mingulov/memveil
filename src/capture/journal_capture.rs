@@ -136,7 +136,11 @@ pub(crate) fn normalize_journal_event(
         source_backend: "fentry_fexit".to_string(),
         source_profile_id: profile_id.to_string(),
         source_measurement: "observed".to_string(),
-        source_correlation: "unpaired".to_string(),
+        source_correlation: if result.matched {
+            "direct".to_string()
+        } else {
+            "unpaired".to_string()
+        },
         ..Event::default()
     })
 }
