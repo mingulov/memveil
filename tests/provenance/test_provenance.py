@@ -204,10 +204,12 @@ SCHEMA_FAMILIES = (
 # pin without its file, or a file matching no current/retained/reserved
 # pin, fails exactly like any other schema drift.
 RESERVED_SCHEMAS = {
-    "session": ["0.3.0"],
-    "event": ["0.3.0"],
-    "report": ["0.3.0"],
+    "session": ["0.3.0", "0.2.0"],
+    "event": ["0.3.0", "0.2.0"],
+    "report": ["0.3.0", "0.2.0"],
     "policy": ["0.1.0"],
+    "confidential-guest-manifest": ["1"],
+    "confidential-range-manifest": ["1"],
 }
 
 SCHEMA_CONTRACTS = {
