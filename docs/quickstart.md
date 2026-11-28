@@ -45,7 +45,10 @@ re-hash any file to confirm it.
 
 Doctor loads no BPF and changes nothing. It reports the kernel
 floor check, guest signals, the selected semantic profile, and
-per-capability reasons. The shipped reference profiles admit
+per-capability reasons, plus bounded preflight facts
+(lockdown, signature enforcement, hibernation, kdump, swap
+backing) when the host exposes them; see the support
+envelope for their meanings and limits. The shipped reference profiles admit
 kernels through live interface checks; a bound document
 additionally needs its exact config/BTF/event-format/object
 bindings to hold, and a rebuilt object can fail the binding.
