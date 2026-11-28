@@ -1,0 +1,56 @@
+summary: conversion journal 0 requests (0 successes, 0 failures), 0 unmatched exits in 1.50 s
+summary scope: proves conversion requests were counted; does not prove conversions took effect, state changed, or bytes were shared
+verdict: partial_unknown_loss (loss >=0.00%, 0 delivered)
+integrity: verified (verified bytes=0, events=0); literal capture bytes match SHA-256; no authenticity claim
+memveil report journal-pre-attach (synthetic, engine memveil-0.2.0)
+window: [1000000000,2500000000)
+duration: 1.500000000 s (1500000000 ns)
+environment: mode=unknown detection=unverified attestation=not_performed (recorded, not verified by memveil) evidence=0
+recorded kernel.release: unavailable (no captured provenance)
+recorded profile.decision: unavailable (no captured provenance)
+recorded measurement_scope: unavailable (no captured provenance)
+devices (0):
+capabilities:
+  bounce_attempts: unavailable - No source for this channel in this synthetic request-only fixture.
+  mapping_lifecycle: unavailable - No source for this channel in this synthetic request-only fixture.
+  copy_bytes: unavailable - No source for this channel in this synthetic request-only fixture.
+  sync_requests: unavailable - No source for this channel in this synthetic request-only fixture.
+  conversion_results: verified - Synthetic contract fixture only.
+  region_state: unavailable - No source for this channel in this synthetic request-only fixture.
+  pool_stats: unavailable - No source for this channel in this synthetic request-only fixture.
+  task_context: unavailable - No source for this channel in this synthetic request-only fixture.
+quality:
+  detail: complete_for_scope loss=0
+    scope: synthetic journal results
+    reason: Authored metadata; never a real-platform admission.
+  aggregate: unavailable loss=unknown
+    scope: counter snapshots
+    reason: No counter snapshots in this fixture.
+  correlation: unavailable loss=unknown
+    scope: region lifetimes
+    reason: No region lifetime source.
+  baseline: unavailable loss=unknown
+    scope: global journal baseline
+    reason: Request-only source; pre-window state and global closure are unproved.
+  terminal: unavailable loss=unknown
+    scope: global journal terminal
+    reason: Request-only source; pre-window state and global closure are unproved.
+journal:
+  requests: 0
+  successes: 0
+  failures: 0
+  unmatched exits: 0
+  censored: 0
+  requested bytes: 0 bytes
+  shared bytes: unavailable (request_only_source)
+  unreverted ranges: unavailable (request_only_source)
+regions:
+  established: 0 (request-only source; no region identity)
+  observed results: 0 (request-only; no lifetime netting)
+findings: none
+limitations (5):
+  - Synthetic request/results only; no persistent region identity, baseline or global closure.
+  - Boot and pre-attach conversions are excluded.
+  - MMIO conversions are excluded.
+  - Kexec and accept paths are excluded.
+  - Unobserved conversion paths are excluded.
