@@ -113,7 +113,7 @@ EVIDENCE_QUALIFICATIONS = "packaging/qualifications/"
 ORIGIN = "local-build"
 ROLES = frozenset({"bundle", "deb", "rpm", "source", "sbom", "provenance"})
 BPF_OBJECTS = ("swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
-               "swiotlb_copy.bpf.o")
+               "swiotlb_copy.bpf.o", "conversion_journal.bpf.o")
 DOCUMENT_LIMIT = 16 * 1024 * 1024
 HARNESS_PACKAGE = "memveil-release-entry"
 # Matrix-runner top-level outputs the signed evidence

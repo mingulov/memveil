@@ -6,11 +6,9 @@ Ports the old asset-declaration checks to the Rust packagers: the
 journal BPF object and the candidate profile must be declared in
 every payload list, and the candidate must stay unadmitted with null
 runtime bindings. Full bundle/deb/rpm closure (fresh build, real
-staging, whole-payload gates) belongs to final integration, which
-also owns the native channel wiring these declarations await: the
-build script, the embedded-object table, and the payload gate still
-pin the three ordinary channels (tracked with the wiring change,
-not edited here).
+staging, whole-payload gates) belongs to the completion slice. The
+native channel wiring (build script, embedded-object table, payload
+gate) now covers all four channels including journal.
 
 Counts, reconciled explicitly: the payload gate covers the engine
 binary plus one entry per BPF object in each of the three packages,
@@ -70,9 +68,8 @@ def main():
     if len(re.findall(r"binary-from-other-architecture", overrides)) != 4:
         fail("lintian overrides must name exactly 4 BPF objects")
     # Payload inventory: binary + one BPF object each, in all three
-    # packages. The declaration lists above are the source; the
-    # compiled payload gate pins the pre-journal 12 until its own
-    # authorized repair lands (tracked with the wiring change).
+    # packages. The declaration lists above are the source, matching
+    # the compiled payload gate (engine + 4 objects = 15 entries).
     entries = (1 + len(deb.BPF_OBJECTS)) * 3
     if entries != 15:
         fail("payload inventory closes at %d entries, want 15" % entries)

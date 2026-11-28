@@ -416,7 +416,7 @@ fn mismatched_bpf_inputs_refuse() {
     let tmp = h::scratch("bpf-mismatch");
     let doctored = tmp.join("bpf");
     fs::create_dir_all(&doctored).unwrap();
-    for channel in ["attempt", "lifecycle", "copy"] {
+    for channel in ["attempt", "lifecycle", "copy", "journal"] {
         let name = format!("memveil-ebpf-{channel}");
         let mut bytes = fs::read(out.join(&name)).unwrap();
         if channel == "copy" {
@@ -490,7 +490,7 @@ fn appended_bpf_overlay_refuses() {
 
     let doctored_dir = tmp.join("bpf");
     fs::create_dir_all(&doctored_dir).unwrap();
-    for channel in ["attempt", "lifecycle"] {
+    for channel in ["attempt", "lifecycle", "journal"] {
         let name = format!("memveil-ebpf-{channel}");
         fs::copy(out.join(&name), doctored_dir.join(&name)).unwrap();
     }
@@ -710,7 +710,7 @@ fn planted_loadable_section_refuses() {
 
     let doctored_dir = tmp.join("bpf");
     fs::create_dir_all(&doctored_dir).unwrap();
-    for channel in ["attempt", "lifecycle"] {
+    for channel in ["attempt", "lifecycle", "journal"] {
         let name = format!("memveil-ebpf-{channel}");
         fs::copy(out.join(&name), doctored_dir.join(&name)).unwrap();
     }
@@ -793,8 +793,8 @@ fn planted_loadable_section_refuses() {
     );
     let dumped_text = String::from_utf8_lossy(&dumped.stdout).into_owned();
     let rows: Vec<&str> = dumped_text.lines().collect();
-    assert_eq!(rows.len(), 3, "manifest rows: {rows:?}");
-    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy"]) {
+    assert_eq!(rows.len(), 4, "manifest rows: {rows:?}");
+    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy", "journal"]) {
         let (name, digest) = row.split_once(' ').expect("channel digest row");
         assert_eq!(name, channel);
         assert_eq!(
@@ -853,8 +853,8 @@ fn embedded_manifest_matches_bpf_dir() {
     );
     let text = String::from_utf8(proc.stdout).expect("manifest is UTF-8");
     let rows: Vec<&str> = text.lines().collect();
-    assert_eq!(rows.len(), 3, "manifest rows: {rows:?}");
-    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy"]) {
+    assert_eq!(rows.len(), 4, "manifest rows: {rows:?}");
+    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy", "journal"]) {
         let (name, digest) = row.split_once(' ').expect("channel digest row");
         assert_eq!(name, channel);
         assert_eq!(
@@ -918,16 +918,17 @@ fn binary_without_manifest_flag_refuses() {
 #[test]
 fn embedded_manifest_parser_rejects_malformed() {
     // Pure-helper probes against the script module: a well
-    // formed dump parses to its three digests, while row
+    // formed dump parses to its four digests, while row
     // count, order, channel, and digest deviations refuse
     // instead of binding.
     let script = h::scripts_dir().join("package-tarball.py");
     let digest = |byte: &str| byte.repeat(32);
     let good = format!(
-        "attempt {}\\nlifecycle {}\\ncopy {}\\n",
+        "attempt {}\\nlifecycle {}\\ncopy {}\\njournal {}\\n",
         digest("aa"),
         digest("bb"),
-        digest("cc")
+        digest("cc"),
+        digest("dd")
     );
     // Dumps travel as Python `\n` escapes (Rust Debug would
     // double-escape the newlines into literal backslashes).
@@ -937,12 +938,13 @@ fn embedded_manifest_parser_rejects_malformed() {
          l = importlib.util.spec_from_file_location('m', {script:?}); \
          m = importlib.util.module_from_spec(l); l.loader.exec_module(m); \
          got = m.parse_embedded_manifest('{good}', 'fake-binary'); \
-         assert got == {{'attempt': '{a}', 'lifecycle': '{b}', 'copy': '{c}'}}, got; \
+         assert got == {{'attempt': '{a}', 'lifecycle': '{b}', 'copy': '{c}', 'journal': '{d}'}}, got; \
          print('manifest-ok')",
         good = py(&good),
         a = digest("aa"),
         b = digest("bb"),
         c = digest("cc"),
+        d = digest("dd"),
     );
     let text = h::run_ok("python3", &["-B", "-c", &probe], None);
     assert!(text.contains("manifest-ok"), "{text}");
@@ -954,16 +956,17 @@ fn embedded_manifest_parser_rejects_malformed() {
         ),
         (
             "extra-row",
-            format!("{good}spare {}\n", digest("dd")),
-            "dumps 4 manifest rows",
+            format!("{good}spare {}\n", digest("ee")),
+            "dumps 5 manifest rows",
         ),
         (
             "swapped-order",
             format!(
-                "lifecycle {}\nattempt {}\ncopy {}\n",
+                "lifecycle {}\nattempt {}\ncopy {}\njournal {}\n",
                 digest("bb"),
                 digest("aa"),
-                digest("cc")
+                digest("cc"),
+                digest("dd")
             ),
             "bad manifest row",
         ),
@@ -1391,7 +1394,7 @@ fn staged_bpf_swap_refuses() {
 
     let bpf_dir = tmp.join("bpf");
     fs::create_dir_all(&bpf_dir).unwrap();
-    for channel in ["attempt", "lifecycle"] {
+    for channel in ["attempt", "lifecycle", "journal"] {
         let name = format!("memveil-ebpf-{channel}");
         fs::copy(out.join(&name), bpf_dir.join(&name)).unwrap();
     }
@@ -1573,8 +1576,8 @@ fn staged_binary_exec_split_refuses() {
     );
     let dumped_text = String::from_utf8_lossy(&dumped.stdout).into_owned();
     let rows: Vec<&str> = dumped_text.lines().collect();
-    assert_eq!(rows.len(), 3, "manifest rows: {rows:?}");
-    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy"]) {
+    assert_eq!(rows.len(), 4, "manifest rows: {rows:?}");
+    for (row, channel) in rows.iter().zip(["attempt", "lifecycle", "copy", "journal"]) {
         let (name, digest) = row.split_once(' ').expect("channel digest row");
         assert_eq!(name, channel);
         let want = if channel == "copy" {
@@ -1590,7 +1593,7 @@ fn staged_binary_exec_split_refuses() {
     // passes: only the exec/read split may refuse this run).
     let bpf_dir = tmp.join("bpf");
     fs::create_dir_all(&bpf_dir).unwrap();
-    for channel in ["attempt", "lifecycle"] {
+    for channel in ["attempt", "lifecycle", "journal"] {
         let name = format!("memveil-ebpf-{channel}");
         fs::copy(out.join(&name), bpf_dir.join(&name)).unwrap();
     }
@@ -1857,13 +1860,16 @@ fn swapped_bpf_inputs_refuse() {
     let out = h::bpf_out_dir();
     let script = h::scripts_dir().join("package-tarball.py");
     for (leaf, sources) in [
-        ("swap", ["copy", "lifecycle", "attempt"]),
-        ("both", ["attempt", "lifecycle", "attempt"]),
+        ("swap", ["copy", "lifecycle", "attempt", "journal"]),
+        ("both", ["attempt", "lifecycle", "attempt", "journal"]),
     ] {
         let tmp = h::scratch(&format!("bpf-{leaf}"));
         let renamed = tmp.join("bpf");
         fs::create_dir_all(&renamed).unwrap();
-        for (channel, source) in ["attempt", "lifecycle", "copy"].iter().zip(sources.iter()) {
+        for (channel, source) in ["attempt", "lifecycle", "copy", "journal"]
+            .iter()
+            .zip(sources.iter())
+        {
             let bytes = fs::read(out.join(format!("memveil-ebpf-{source}"))).unwrap();
             fs::write(renamed.join(format!("memveil-ebpf-{channel}")), &bytes).unwrap();
         }

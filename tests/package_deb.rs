@@ -552,6 +552,7 @@ fn bpf_objects_match_build() {
             "bpf/swiotlb_attempt.bpf.o",
             "bpf/swiotlb_lifecycle.bpf.o",
             "bpf/swiotlb_copy.bpf.o",
+            "bpf/conversion_journal.bpf.o",
         ]);
         for name in h::BPF_OBJECTS {
             let want = staged.join("bpf").join(name);
@@ -565,6 +566,7 @@ fn bpf_objects_match_build() {
         ("attempt", h::BPF_OBJECTS[0]),
         ("lifecycle", h::BPF_OBJECTS[1]),
         ("copy", h::BPF_OBJECTS[2]),
+        ("journal", h::BPF_OBJECTS[3]),
     ] {
         let staged = extracted.join("usr").join("lib").join("memveil").join(name);
         assert_eq!(

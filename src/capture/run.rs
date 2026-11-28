@@ -2776,7 +2776,7 @@ mod tests {
         // Explicit bytes win verbatim; an empty path falls back to
         // the embedded artifact; unknown kinds and missing files
         // refuse. Admission and load-check share this rule.
-        for kind in ["attempt", "lifecycle", "copy"] {
+        for kind in ["attempt", "lifecycle", "copy", "journal"] {
             let got = resolve_channel_object("", kind).expect("embedded bytes");
             let want = crate::platform::runtime::embedded_object(kind).expect("embedded");
             assert_eq!(got, want.to_vec());

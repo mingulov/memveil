@@ -66,7 +66,7 @@ VALID_EMPTY = os.environ.get(
     str(ROOT / "tests" / "package" / "valid-empty"))
 
 BPF_OBJECTS = ("swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
-               "swiotlb_copy.bpf.o")
+               "swiotlb_copy.bpf.o", "conversion_journal.bpf.o")
 
 REQUIRED_MEMBERS = ("bin/memveil",
                     "lib/memveil/libgcc_s.so.1",

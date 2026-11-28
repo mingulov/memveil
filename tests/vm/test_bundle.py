@@ -593,7 +593,7 @@ def seal_bundle_with_members(tmp_path, name, members):
     manifest["files"] = files
     bpf = {short: files["bpf/" + short] for short in (
         "swiotlb_attempt.bpf.o", "swiotlb_lifecycle.bpf.o",
-        "swiotlb_copy.bpf.o")}
+        "swiotlb_copy.bpf.o", "conversion_journal.bpf.o")}
     manifest["build_receipt"]["outputs"]["bpf"] = bpf
     manifest["embedded_bpf"] = dict(bpf)
     manifest_path.write_text(

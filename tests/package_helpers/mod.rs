@@ -34,10 +34,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// Shipped BPF object file names (inspection copies).
-pub const BPF_OBJECTS: [&str; 3] = [
+pub const BPF_OBJECTS: [&str; 4] = [
     "swiotlb_attempt.bpf.o",
     "swiotlb_lifecycle.bpf.o",
     "swiotlb_copy.bpf.o",
+    "conversion_journal.bpf.o",
 ];
 
 /// FHS payload members pinned literally, as root-relative paths:
@@ -45,12 +46,13 @@ pub const BPF_OBJECTS: [&str; 3] = [
 /// mirrors, and format-only files. The single source both the .deb
 /// and the .rpm fixed-set gates consume, so the two formats cannot
 /// drift (the .rpm maps each entry to its /-rooted form).
-pub const FHS_FIXED_FILES: [&str; 34] = [
+pub const FHS_FIXED_FILES: [&str; 35] = [
     "usr/bin/memveil",
     "usr/lib/memveil/libgcc_s.so.1",
     "usr/lib/memveil/swiotlb_attempt.bpf.o",
     "usr/lib/memveil/swiotlb_lifecycle.bpf.o",
     "usr/lib/memveil/swiotlb_copy.bpf.o",
+    "usr/lib/memveil/conversion_journal.bpf.o",
     "usr/share/doc/memveil/copyright",
     "usr/share/doc/memveil/LICENSE",
     "usr/share/doc/memveil/THIRD-PARTY-NOTICES.md",
@@ -659,7 +661,7 @@ pub fn bpf_out_dir() -> PathBuf {
     hits.sort();
     let first = &hits[0];
     for other in &hits[1..] {
-        for channel in ["attempt", "lifecycle", "copy"] {
+        for channel in ["attempt", "lifecycle", "copy", "journal"] {
             let name = format!("memveil-ebpf-{channel}");
             assert_eq!(
                 sha256_file(&first.join(&name)),

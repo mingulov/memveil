@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Payload-manifest collect/check port (12 entries, no bridge).
+//! Payload-manifest collect/check port (15 entries, no bridge).
 //!
 //! Collect/check over the Rust release packages (ported from the
-//! retired `tools/payload-gate`): the engine binary plus the three
+//! retired `tools/payload-gate`): the engine binary plus the four
 //! BPF inspection objects in
 //! each of the .deb, the .rpm, and the owner bundle. The two
-//! bridge entries per package are gone with the C bridge
-//! (documented delta: 12 entries, not 15).
+//! bridge entries per package are gone with the C bridge.
 
 use super::BPF_OBJECTS;
 use super::run_ok;
@@ -40,7 +39,7 @@ pub fn spec() -> Vec<(String, String, String)> {
     entries
 }
 
-/// Expected logical paths (12).
+/// Expected logical paths (15: engine + 4 BPF, x3 packages).
 pub fn expected() -> Vec<String> {
     spec().into_iter().map(|(logical, _, _)| logical).collect()
 }
@@ -168,7 +167,7 @@ fn extract_roots(
     .collect())
 }
 
-/// Hash the 12 payload members of a package set.
+/// Hash the 15 payload members of a package set.
 pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String, String>, String> {
     let roots = extract_roots(deb, rpm, bundle, "payload-collect")?;
     let mut entries = BTreeMap::new();
@@ -182,7 +181,7 @@ pub fn collect(deb: &Path, rpm: &Path, bundle: &Path) -> Result<BTreeMap<String,
     Ok(entries)
 }
 
-/// Read the 12 payload members of a package set; logical path -> bytes.
+/// Read the 15 payload members of a package set; logical path -> bytes.
 pub fn member_bytes(
     deb: &Path,
     rpm: &Path,
