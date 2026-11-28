@@ -1520,7 +1520,18 @@ print("MINTED src=" + cfg_src)
 /// leg's links would corrupt the peak assertion either way.
 fn guest_stage(user: &str, host: &str, port: &str, tag: &str) -> (usize, usize) {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let binary = root.join("target").join("debug").join("memveil");
+    let target = match std::env::var("CARGO_TARGET_DIR") {
+        Ok(dir) if !dir.is_empty() => {
+            let path = std::path::PathBuf::from(&dir);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        }
+        _ => root.join("target"),
+    };
+    let binary = target.join("debug").join("memveil");
     assert!(binary.is_file(), "run cargo build first");
     let elf = built_journal_object().expect("built journal object");
     assert!(!elf.is_empty());
