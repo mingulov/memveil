@@ -514,14 +514,12 @@ fn replay_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_memveil"))
 }
 
-/// Replay refuses journal captures: exit 2, no report, clear refusal.
+/// Replay renders journal captures: exit 0 with conversion findings.
 ///
-/// The typed boundary accepts journal captures, but the legacy
-/// reducer would fabricate conversion counts for them, so both
-/// replay verbs refuse before reducing (journal reducer follow-on
-/// pending).
+/// The reducer follow-on retired the exit-2 refusal: both replay
+/// verbs now produce a journal report for journal captures.
 #[test]
-fn replay_refuses_journal_capture() {
+fn replay_renders_journal_capture() {
     for (verb, extra) in [("report", &[][..]), ("top", &["--interval", "1s"][..])] {
         let out = Command::new(replay_bin())
             .arg(verb)
@@ -530,16 +528,15 @@ fn replay_refuses_journal_capture() {
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()
             .unwrap_or_else(|e| panic!("run {verb} on journal capture: {e}"));
-        assert_eq!(out.status.code(), Some(2), "{verb} exit");
-        assert!(out.stdout.is_empty(), "{verb} produces no report");
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{verb} exit");
+        let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            stderr.contains("journal capture refused"),
-            "{verb} refusal: {stderr}"
+            stdout.contains("conversion journal 1 requests (1 successes, 0 failures)"),
+            "{verb} findings: {stdout}"
         );
         assert!(
-            stderr.contains("journal reducer follow-on pending"),
-            "{verb} follow-on note: {stderr}"
+            !stdout.contains("journal capture refused"),
+            "{verb} must not refuse: {stdout}"
         );
     }
 }
