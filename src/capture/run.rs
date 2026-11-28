@@ -1896,10 +1896,11 @@ fn push_journal_evidence(
 /// Run one admitted journal-only capture.
 ///
 /// Budget and time-namespace gates mirror the ordinary path;
-/// ordinary profiles, receipts, and the kernel floor do not
-/// apply (capability failures surface as prepare/attach
-/// refusals instead). No load-replay tail: journal failures
-/// are fixed messages with no verifier text to recover.
+/// ordinary profiles and receipts do not apply (the kernel
+/// floor already applied at admission; capability failures
+/// surface as prepare/attach refusals instead). No
+/// load-replay tail: journal failures are fixed messages
+/// with no verifier text to recover.
 fn run_journal_only<W: WriterSource>(
     root: &str,
     opts: &RecordOptions,

@@ -6,10 +6,12 @@
 //! attempts verdict, one discovered profile binding, and one
 //! rebound evidence set decide attachment readiness or a typed
 //! refusal. It performs no I/O, consults no registry, and honors
-//! no override: readiness needs an `admitted` status word AND an
-//! exact per-leg evidence match, so a profile edit alone never
-//! admits. A zero-style result means attachment readiness only,
-//! never actual attachment or platform qualification.
+//! no override: readiness needs an eligible kernel (the 6.11
+//! floor from the shared capability table) AND an `admitted`
+//! status word AND an exact per-leg evidence match, so a
+//! profile edit alone never admits. A zero-style result means
+//! attachment readiness only, never actual attachment or
+//! platform qualification.
 //!
 //! The refusal keeps one documented form: the bare frozen
 //! `journal_profile_not_admitted` diagnostic (or the frozen
@@ -27,6 +29,7 @@ use super::collector::EXIT_REFUSAL;
 use super::run::ZLIB as GUNZIP_LIB;
 use crate::model::journal::JournalSelection;
 use crate::platform::artifact_files::join_root;
+use crate::platform::capabilities::{cap_floor_ok, cap_floor_refusal};
 use crate::platform::hash::sha256_hex;
 use crate::platform::journal_profile::{JournalDiscoveryFailure, JournalProfileBinding};
 use crate::platform::narrow::{MAX_NARROW_BTF_BYTES, read_live_bytes, read_live_config};
@@ -34,15 +37,19 @@ use crate::platform::narrow::{MAX_NARROW_BTF_BYTES, read_live_bytes, read_live_c
 /// Frozen journal refusal code.
 pub const JOURNAL_NOT_ADMITTED: &str = "journal_profile_not_admitted";
 
+/// Journal capability id as judged by the kernel-floor table.
+const JOURNAL_CAP_ID: &str = "conversion-journal";
+
 /// Runtime evidence rebound at dispatch time.
 ///
 /// Every leg is observed, never declared: empty strings and a
 /// zero page size mean unobservable, and any unobservable leg
-/// refuses. The release is recorded for the oracle; the profile
-/// binds no release string, so it never mismatches.
+/// refuses. The release gates kernel eligibility (the 6.11
+/// floor) and is recorded for the oracle; the profile binds
+/// no release string, so it never profile-matches.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JournalRuntimeEvidence {
-    /// Live kernel release (recorded, never matched).
+    /// Live kernel release (floor-gated, never profile-matched).
     pub release: String,
     /// Live machine architecture.
     pub architecture: String,
@@ -105,11 +112,14 @@ pub fn fix_for_discovery(failure: JournalDiscoveryFailure) -> String {
 
 /// Pure admission: selection plus bindings plus rebound evidence.
 ///
-/// Gate order is fixed: the journal channel decides fully
-/// (status, then source, config, BTF, object bindings) before
-/// the attempts and callers gates run, mirroring the declared
-/// model order. Every binding must be present on both sides and
-/// equal; null bindings and unobservable evidence refuse.
+/// Gate order is fixed: kernel eligibility first (the 6.11
+/// floor from the shared capability table, with its
+/// unknown-rule for unparseable releases), then the journal
+/// channel decides fully (status, then source, config, BTF,
+/// object bindings) before the attempts and callers gates
+/// run, mirroring the declared model order. Every binding
+/// must be present on both sides and equal; null bindings
+/// and unobservable evidence refuse.
 pub fn admit_journal(
     selection: JournalSelection,
     attempts_admitted: bool,
@@ -121,6 +131,10 @@ pub fn admit_journal(
             "journal_not_requested",
             "request conversion-journal to use journal admission",
         );
+    }
+    if !cap_floor_ok(JOURNAL_CAP_ID, &evidence.release) {
+        let fix = cap_floor_refusal(JOURNAL_CAP_ID, &evidence.release);
+        return refused(JOURNAL_NOT_ADMITTED, &fix);
     }
     if binding.status != "admitted" {
         return refused(
@@ -275,6 +289,54 @@ mod tests {
                 assert_eq!(ready.evidence, evidence);
             }
             JournalDispatch::Refused(refusal) => panic!("refused: {:?}", refusal),
+        }
+    }
+
+    #[test]
+    fn floor_refuses_below_611_and_unparseable() {
+        let (binding, _) = bound_pair();
+        for release in ["6.10.14", "6.8.0-147-generic", "5.15.0", "", "bogus"] {
+            let evidence = JournalRuntimeEvidence {
+                release: release.to_string(),
+                architecture: "x86_64".to_string(),
+                page_size: 4096,
+                config_sha256: "aa".to_string(),
+                btf_sha256: "bb".to_string(),
+                object_sha256: "cc".to_string(),
+            };
+            match admit_journal(journal_only(), false, &binding, &evidence) {
+                JournalDispatch::Refused(refusal) => {
+                    assert_eq!(refusal.exit_code, EXIT_REFUSAL, "{release}");
+                    assert_eq!(refusal.reason, JOURNAL_NOT_ADMITTED, "{release}");
+                    if release.is_empty() || release == "bogus" {
+                        assert!(
+                            refusal.fix.contains("unparseable"),
+                            "{release}: {}",
+                            refusal.fix
+                        );
+                    } else {
+                        assert!(refusal.fix.contains("6.11"), "{release}: {}", refusal.fix);
+                    }
+                }
+                JournalDispatch::Ready(_) => panic!("release {release:?} admitted below the floor"),
+            }
+        }
+        for release in ["6.11.0", "7.0.0-43-generic", "9.9.9-test"] {
+            let evidence = JournalRuntimeEvidence {
+                release: release.to_string(),
+                architecture: "x86_64".to_string(),
+                page_size: 4096,
+                config_sha256: "aa".to_string(),
+                btf_sha256: "bb".to_string(),
+                object_sha256: "cc".to_string(),
+            };
+            assert!(
+                matches!(
+                    admit_journal(journal_only(), false, &binding, &evidence),
+                    JournalDispatch::Ready(_)
+                ),
+                "release {release:?} refused at or above the floor"
+            );
         }
     }
 

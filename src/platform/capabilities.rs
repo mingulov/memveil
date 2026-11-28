@@ -10,9 +10,9 @@ use super::evidence::{parse_kernel_triple, triple_ge};
 /// Lowest `major.minor` serving one capability id.
 ///
 /// Attempt-trace rides the tracepoint that is stable from
-/// 6.0 on; lifecycle and copy need the tracing interfaces
-/// verified from 6.11 on. Unknown ids need nothing because
-/// no gate admits them.
+/// 6.0 on; lifecycle, copy, and the conversion journal need
+/// the tracing interfaces verified from 6.11 on. Unknown ids
+/// need nothing because no gate admits them.
 pub fn cap_floor_need(cap_id: &str) -> String {
     if cap_id == "attempt-trace" {
         return "6.0".to_string();
@@ -21,6 +21,9 @@ pub fn cap_floor_need(cap_id: &str) -> String {
         return "6.11".to_string();
     }
     if cap_id == "copy-actual" {
+        return "6.11".to_string();
+    }
+    if cap_id == "conversion-journal" {
         return "6.11".to_string();
     }
     String::new()
@@ -94,6 +97,25 @@ mod tests {
     fn cap_floor_copy_611() {
         assert!(cap_floor_ok("copy-actual", "6.11.0"));
         assert!(!cap_floor_ok("copy-actual", "6.10.14"));
+    }
+
+    #[test]
+    fn cap_floor_journal_611() {
+        assert_eq!(cap_floor_need("conversion-journal"), "6.11");
+        assert!(cap_floor_ok("conversion-journal", "6.11.0"));
+        assert!(cap_floor_ok("conversion-journal", "7.0.0-43-generic"));
+        assert!(!cap_floor_ok("conversion-journal", "6.10.14"));
+        assert!(!cap_floor_ok("conversion-journal", "6.8.0-147-generic"));
+        assert!(!cap_floor_ok("conversion-journal", "bogus"));
+        assert_eq!(
+            cap_floor_refusal("conversion-journal", "6.8.0-147-generic"),
+            "capability conversion-journal needs kernel 6.11+\
+             \u{20}(this kernel: 6.8.0-147-generic)"
+        );
+        assert_eq!(
+            cap_floor_refusal("conversion-journal", "bogus"),
+            "release bogus is unparseable; floor unknown"
+        );
     }
 
     #[test]
