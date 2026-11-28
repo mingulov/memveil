@@ -10,6 +10,8 @@
 
 use super::context::{measured_duration, recorded_value};
 use super::filter::resolve_device_filter;
+use crate::analysis::journal_conversions::{JOURNAL_STATE_REASON, JournalSummary};
+use crate::analysis::journal_regions::JournalRegions;
 use crate::model::metric::Metric;
 use crate::model::report::Report;
 use crate::model::session::Channel;
@@ -614,6 +616,265 @@ pub fn render_text(rep: &Report, device_filter: &str) -> String {
     for limitation in &rep.limitations {
         out.push_str("  - ");
         out.push_str(&escape_text(limitation));
+        out.push('\n');
+    }
+    out
+}
+
+/// Journal summary headlines: requests counted plus the scope proof.
+///
+/// The scope line always states what the numbers do and do not prove:
+/// counted requests never prove state changed or bytes were shared.
+pub fn journal_summary_lines(rep: &Report, summary: &JournalSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+    if rep.window_end_ns < rep.window_start_ns {
+        lines.push(format!(
+            "summary: conversion journal {} requests ({} successes, {} failures), {} unmatched exits (window unavailable: invalid recorded window)",
+            format_u64(summary.requests),
+            format_u64(summary.successes),
+            format_u64(summary.failures),
+            format_u64(summary.unmatched_exits),
+        ));
+    } else {
+        lines.push(format!(
+            "summary: conversion journal {} requests ({} successes, {} failures), {} unmatched exits in {}",
+            format_u64(summary.requests),
+            format_u64(summary.successes),
+            format_u64(summary.failures),
+            format_u64(summary.unmatched_exits),
+            human_seconds(rep.window_end_ns - rep.window_start_ns)
+        ));
+    }
+    lines.push(
+        "summary scope: proves conversion requests were counted; does not prove conversions took effect, state changed, or bytes were shared"
+            .to_string(),
+    );
+    lines
+}
+
+fn journal_censored_text(summary: &JournalSummary) -> String {
+    match summary.censored {
+        Some(n) => format_u64(n),
+        None => format!("unavailable ({})", escape_text(&summary.censored_reason)),
+    }
+}
+
+fn journal_bytes_text(summary: &JournalSummary) -> String {
+    match summary.requested_bytes {
+        Some(n) => human_bytes(n),
+        None => format!(
+            "unavailable ({})",
+            escape_text(&summary.requested_bytes_reason)
+        ),
+    }
+}
+
+/// Render one conversion-journal report as plain text.
+///
+/// Same shell as [`render_text`] (headlines, provenance, quality echo,
+/// findings, limitations) with the journal measurement block and the
+/// synthetic region observation in place of ordinary metric rows. The
+/// device filter names nothing journal-scoped, so it narrows no rows.
+pub fn render_journal_text(
+    rep: &Report,
+    summary: &JournalSummary,
+    regions: &JournalRegions,
+    device_filter: &str,
+) -> String {
+    let _ = device_filter;
+    let mut out = String::new();
+    for line in journal_summary_lines(rep, summary) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str(&verdict_line(rep));
+    out.push('\n');
+    out.push_str(&integrity_line(rep));
+    out.push('\n');
+    out.push_str("memveil report ");
+    out.push_str(&escape_text(&rep.session_id));
+    if rep.synthetic {
+        out.push_str(" (synthetic, engine ");
+    } else {
+        out.push_str(" (live, engine ");
+    }
+    out.push_str(&escape_text(&rep.engine_version));
+    out.push_str(")\n");
+    out.push_str("window: [");
+    out.push_str(&format_u64(rep.window_start_ns));
+    out.push(',');
+    out.push_str(&format_u64(rep.window_end_ns));
+    out.push_str(")\n");
+    out.push_str("duration: ");
+    out.push_str(&measured_duration(rep));
+    out.push('\n');
+    out.push_str("environment: mode=");
+    out.push_str(&escape_text(&rep.env.mode));
+    out.push_str(" detection=");
+    out.push_str(&escape_text(&rep.env.detection));
+    out.push_str(" attestation=");
+    out.push_str(&attestation_text(&rep.env.attestation));
+    if rep.env.has_asserted_mode {
+        out.push_str(" asserted=");
+        out.push_str(&escape_text(&rep.env.asserted_mode));
+    }
+    out.push_str(" evidence=");
+    out.push_str(&rep.env.evidence.len().to_string());
+    out.push('\n');
+    for source in ["kernel.release", "profile.decision", "measurement_scope"] {
+        out.push_str("recorded ");
+        out.push_str(source);
+        out.push_str(": ");
+        out.push_str(&escape_text(&recorded_value(&rep.env.evidence, source)));
+        out.push('\n');
+    }
+    out.push_str("devices (");
+    out.push_str(&rep.devices.len().to_string());
+    out.push_str("):\n");
+    for d in &rep.devices {
+        out.push_str("  ");
+        out.push_str(&escape_text(&d.device_id));
+        out.push(' ');
+        out.push_str(&escape_text(&d.name));
+        out.push_str(" driver=");
+        if d.has_driver {
+            out.push_str(&escape_text(&d.driver));
+        } else {
+            out.push_str("none");
+        }
+        out.push_str(" identity=");
+        out.push_str(&escape_text(&d.identity_status));
+        out.push('\n');
+    }
+    out.push_str("capabilities:\n");
+    for c in &rep.caps {
+        out.push_str("  ");
+        out.push_str(&escape_text(&c.name));
+        out.push_str(": ");
+        out.push_str(&escape_text(&c.status));
+        if c.has_grade {
+            out.push_str(" [");
+            out.push_str(&escape_text(&c.grade));
+            out.push(']');
+        }
+        out.push_str(" - ");
+        out.push_str(&escape_text(&c.reason));
+        out.push('\n');
+    }
+    out.push_str("quality:\n");
+    out.push_str(&channel_block("detail", &rep.q_detail));
+    out.push_str(&channel_block("aggregate", &rep.q_aggregate));
+    out.push_str(&channel_block("correlation", &rep.q_correlation));
+    out.push_str(&channel_block("baseline", &rep.q_baseline));
+    out.push_str(&channel_block("terminal", &rep.q_terminal));
+    out.push_str("journal:\n");
+    out.push_str("  requests: ");
+    out.push_str(&format_u64(summary.requests));
+    out.push_str("\n  successes: ");
+    out.push_str(&format_u64(summary.successes));
+    out.push_str("\n  failures: ");
+    out.push_str(&format_u64(summary.failures));
+    out.push_str("\n  unmatched exits: ");
+    out.push_str(&format_u64(summary.unmatched_exits));
+    out.push_str("\n  censored: ");
+    out.push_str(&journal_censored_text(summary));
+    out.push_str("\n  requested bytes: ");
+    out.push_str(&journal_bytes_text(summary));
+    out.push_str("\n  shared bytes: unavailable (");
+    out.push_str(JOURNAL_STATE_REASON);
+    out.push_str(")\n  unreverted ranges: unavailable (");
+    out.push_str(JOURNAL_STATE_REASON);
+    out.push_str(")\n");
+    out.push_str("regions:\n");
+    out.push_str("  established: 0 (request-only source; no region identity)\n");
+    out.push_str("  observed results: ");
+    out.push_str(&format_u64(regions.observed_results));
+    out.push_str(" (request-only; no lifetime netting)\n");
+    if rep.findings.is_empty() {
+        out.push_str("findings: none\n");
+    } else {
+        out.push_str("findings (");
+        out.push_str(&rep.findings.len().to_string());
+        out.push_str("):\n");
+        for finding in &rep.findings {
+            out.push_str("  [");
+            out.push_str(&escape_text(&finding.severity));
+            out.push_str("] ");
+            out.push_str(&escape_text(&finding.code));
+            out.push_str(": ");
+            out.push_str(&escape_text(&finding.explanation));
+            out.push_str("\n    scope: ");
+            out.push_str(&escape_text(&finding.scope));
+            out.push_str("\n    limitations: ");
+            out.push_str(&escape_text(&finding.limitations));
+            out.push_str("\n    refs: ");
+            for (ri, reference) in finding.evidence_refs.iter().enumerate() {
+                if ri > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&escape_text(reference));
+            }
+            out.push('\n');
+        }
+    }
+    out.push_str("limitations (");
+    out.push_str(&rep.limitations.len().to_string());
+    out.push_str("):\n");
+    for limitation in &rep.limitations {
+        out.push_str("  - ");
+        out.push_str(&escape_text(limitation));
+        out.push('\n');
+    }
+    out
+}
+
+/// Render the per-refresh journal summary: verdict plus headlines.
+pub fn render_journal_compact(rep: &Report, summary: &JournalSummary) -> String {
+    let mut out = verdict_line(rep);
+    out.push('\n');
+    out.push_str(&integrity_line(rep));
+    out.push('\n');
+    out.push_str("conversions: ");
+    out.push_str(&format_u64(summary.requests));
+    out.push_str(" requests (");
+    out.push_str(&format_u64(summary.successes));
+    out.push_str(" successes, ");
+    out.push_str(&format_u64(summary.failures));
+    out.push_str(" failures), ");
+    out.push_str(&format_u64(summary.unmatched_exits));
+    out.push_str(" unmatched exits, requested bytes ");
+    match summary.requested_bytes {
+        Some(n) => out.push_str(&format_u64(n)),
+        None => out.push_str("unavailable"),
+    }
+    out.push('\n');
+    out.push_str("detail: ");
+    out.push_str(&rep.q_detail.status);
+    if rep.q_detail.has_loss_count {
+        out.push_str(", loss ");
+        out.push_str(&format_u64(rep.q_detail.loss_count));
+    } else {
+        out.push_str(", loss unknown");
+    }
+    out.push('\n');
+    out.push_str("terminal: ");
+    out.push_str(&rep.q_terminal.status);
+    out.push('\n');
+    if rep.findings.is_empty() {
+        out.push_str("findings: none\n");
+    } else {
+        out.push_str("findings: ");
+        out.push_str(&rep.findings.len().to_string());
+        out.push_str(": ");
+        for (i, finding) in rep.findings.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&finding.code);
+            out.push('(');
+            out.push_str(&finding.severity);
+            out.push(')');
+        }
         out.push('\n');
     }
     out
