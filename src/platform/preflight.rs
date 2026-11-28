@@ -702,26 +702,41 @@ fn is_loop(name: &[u8]) -> bool {
     !part.is_empty() && part.iter().all(|b| b.is_ascii_digit())
 }
 
-/// True for a dm uuid minted by an encrypting libcryptsetup target.
+/// True for a dm uuid minted by a known encrypting libcryptsetup target.
 ///
-/// The matched forms are the encrypting subset of
-/// libcryptsetup's `CRYPT-<type>-` device-uuid naming,
+/// The matched forms are the known encrypting
+/// libcryptsetup `CRYPT-<type>-` device-uuid namings,
 /// verified against the type tokens in the installed
 /// libcryptsetup (`CRYPT-%s...` with LUKS1, LUKS2, PLAIN,
-/// TCRYPT, BITLK, FVAULT2). Non-encrypting targets sharing
-/// the family prefix (`CRYPT-INTEGRITY-`, `CRYPT-VERITY-`)
-/// are not encryption layers. Matching is exact bytes in
-/// memory; uuid bytes never reach a fact.
+/// TCRYPT, BITLK, FVAULT2, LOOPAES). Targets sharing the
+/// family prefix but known not to encrypt
+/// (`CRYPT-INTEGRITY-`, `CRYPT-VERITY-`; see
+/// `is_plain_crypt_uuid`) are not encryption layers, and
+/// any other `CRYPT-` prefix is unknown evidence the
+/// walker fails to `unknown`, never a resolved negative.
+/// Matching is exact bytes in memory; uuid bytes never
+/// reach a fact.
 fn is_encrypting_uuid(raw: &[u8]) -> bool {
-    const FORMS: [&[u8]; 6] = [
+    const FORMS: [&[u8]; 7] = [
         b"CRYPT-LUKS1-",
         b"CRYPT-LUKS2-",
         b"CRYPT-PLAIN-",
         b"CRYPT-TCRYPT-",
         b"CRYPT-BITLK-",
         b"CRYPT-FVAULT2-",
+        b"CRYPT-LOOPAES-",
     ];
     FORMS.iter().any(|form| raw.starts_with(form))
+}
+
+/// True for a dm uuid minted by an explicitly non-encrypting libcryptsetup target.
+///
+/// Only the two integrity-only family members qualify.
+/// Every other `CRYPT-` prefix is unknown evidence: the
+/// walker fails its branch to `unknown` rather than
+/// treating it as a resolved negative.
+fn is_plain_crypt_uuid(raw: &[u8]) -> bool {
+    raw.starts_with(b"CRYPT-INTEGRITY-") || raw.starts_with(b"CRYPT-VERITY-")
 }
 
 /// One branch verdict under construction.
@@ -862,7 +877,9 @@ fn resolve_mapper(reader: &EvidenceReader, want: &[u8]) -> MapperHit {
 /// walk resolves to unresolved, never to a verdict. Revisits
 /// report a cycle; depth and node caps report truncated. A
 /// crypt layer is an encrypting libcryptsetup uuid form
-/// matched in memory; uuid bytes never reach a fact. A loop
+/// matched in memory; uuid bytes never reach a fact. An
+/// unrecognized `CRYPT-` uuid form is unknown evidence and
+/// fails the branch unknown. A loop
 /// node is a file indirection the allowlist never resolves:
 /// unsupported, never a resolved negative.
 ///
@@ -908,7 +925,15 @@ fn walk_node(reader: &EvidenceReader, node: &str, depth: usize, walk: &mut WalkS
     match preflight_state(reader, &uuid_path) {
         EVIDENCE_OK => match read_preflight(reader, &uuid_path, DM_ID_CAP) {
             Ok(raw) => {
-                node_crypt = is_encrypting_uuid(&raw);
+                if is_encrypting_uuid(&raw) {
+                    node_crypt = true;
+                } else if !is_plain_crypt_uuid(&raw) && raw.starts_with(b"CRYPT-") {
+                    // An unrecognized libcryptsetup type is
+                    // unknown evidence, never a resolved
+                    // negative.
+                    walk.failure = Some("unknown_crypt_type".to_string());
+                    return Subtree::Plain;
+                }
             }
             Err(e) => {
                 walk.failure = Some(read_failure_reason(e.code));
@@ -1804,11 +1829,20 @@ mod tests {
             "CRYPT-TCRYPT-x",
             "CRYPT-BITLK-x",
             "CRYPT-FVAULT2-x",
+            "CRYPT-LOOPAES-x",
         ] {
             assert!(is_encrypting_uuid(form.as_bytes()), "{form}");
+            assert!(!is_plain_crypt_uuid(form.as_bytes()), "{form}");
         }
-        for form in ["CRYPT-INTEGRITY-x", "CRYPT-VERITY-x", "CRYPT-", "LVM-x", ""] {
+        // Only the two integrity-only family members are
+        // explicitly non-encrypting.
+        for form in ["CRYPT-INTEGRITY-x", "CRYPT-VERITY-x"] {
             assert!(!is_encrypting_uuid(form.as_bytes()), "{form}");
+            assert!(is_plain_crypt_uuid(form.as_bytes()), "{form}");
+        }
+        for form in ["CRYPT-", "CRYPT-FUTURE-x", "LVM-x", ""] {
+            assert!(!is_encrypting_uuid(form.as_bytes()), "{form}");
+            assert!(!is_plain_crypt_uuid(form.as_bytes()), "{form}");
         }
         // Standalone dm-integrity is not an encryption layer.
         let tmp = tree();
@@ -1828,6 +1862,42 @@ mod tests {
         );
         assert_eq!(branch.verdict, "no_encryption_observed");
         assert_eq!(branch.device, "dev:dm-0");
+        // LOOPAES is an ordinary dm-crypt target: encrypted.
+        std::fs::write(
+            tmp.path().join("sys/block/dm-0/dm/uuid"),
+            b"CRYPT-LOOPAES-x\n",
+        )
+        .expect("uuid");
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/dm-0".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(
+            (branch.verdict.as_str(), branch.device.as_str()),
+            ("encrypted", "dev:dm-0")
+        );
+        // An unrecognized CRYPT- type is unknown evidence,
+        // never a resolved negative.
+        std::fs::write(
+            tmp.path().join("sys/block/dm-0/dm/uuid"),
+            b"CRYPT-FUTURE-x\n",
+        )
+        .expect("uuid");
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/dm-0".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(
+            (branch.verdict.as_str(), branch.reason.as_str()),
+            ("unknown", "unknown_crypt_type")
+        );
+        assert!(branch.device.is_empty());
     }
 
     #[test]

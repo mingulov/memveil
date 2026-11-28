@@ -182,7 +182,8 @@ pub struct PreflightSigEnforce {
     /// On-sources (`sysfs`, `config`, `cmdline`, `+`-joined)
     /// when enforced, observed off-sources when not enforced,
     /// else the unknown cause (`conflicting`, `malformed`,
-    /// `denied`, `missing`), or `""` when nothing observed.
+    /// `denied`, `runtime_unobserved`), or `""` when nothing
+    /// observed.
     pub reason: String,
 }
 
