@@ -1515,6 +1515,9 @@ print("MINTED src=" + cfg_src)
 /// guest and mint the test profile. `tag` isolates one leg's
 /// guest paths so parallel legs never share files. Returns the
 /// staged binary and object sizes for the receipt.
+/// Tracing-link counting is guest-global, so the two guest legs
+/// must still run serially (`--test-threads=1`): a concurrent
+/// leg's links would corrupt the peak assertion either way.
 fn guest_stage(user: &str, host: &str, port: &str, tag: &str) -> (usize, usize) {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let binary = root.join("target").join("debug").join("memveil");
@@ -1631,6 +1634,11 @@ fn guest_end_to_end_attach_oracle_detach() {
     // load at attach time); the oracle verdict further covers
     // record validity and clean detach (no residual links).
     // Without a lease this self-skips with a receipt.
+    // Duration 12 covers the measured attach latency on the
+    // 6.8 harness (about 3 s prepare plus a 2.4 s verifier
+    // load of the second program) with headroom for the hold
+    // phase the peak sampler must observe; the sampler ceiling
+    // covers the whole run.
     let Some((user, host, port)) = lease_ssh() else {
         return;
     };
@@ -1644,11 +1652,11 @@ fn guest_end_to_end_attach_oracle_detach() {
     let run = "BASE=$(sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true); \
 BASE=${BASE:-0}; \
 timeout 120 sudo /tmp/mv-matrix-g2-memveil record --output /tmp/mv-matrix-g2-cap \
---capability conversion-journal --duration 4 \
+--capability conversion-journal --duration 12 \
 --journal-object /tmp/mv-matrix-g2-journal.o \
 --profiles-dir /tmp/mv-matrix-g2-profiles > /tmp/mv-matrix-g2-run.log 2>&1 & \
 CAP_PID=$!; PEAK=0; \
-for i in $(seq 1 30); do \
+for i in $(seq 1 70); do \
   if ! kill -0 $CAP_PID 2>/dev/null; then break; fi; \
   N=$(sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true); \
   N=${N:-0}; \
