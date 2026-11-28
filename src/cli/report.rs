@@ -944,10 +944,10 @@ pub fn run_report(args: &[String]) -> i64 {
 /// Run the journal report pipeline; return the exit code.
 ///
 /// Mirrors the ordinary pipeline with the journal reducer: duplicate
-/// tokens refuse on the consume path, findings come from the reducer
-/// alone (no legacy diagnosis), the checkpoint prefix keeps the
-/// session quality echo verbatim, and the journal renderers print the
-/// reduction. Exits match the ordinary convention exactly.
+/// tokens and mixed evidence refuse on the consume path, findings
+/// come from the reducer alone (no legacy diagnosis), the checkpoint
+/// prefix demotes any complete channel, and the journal renderers
+/// print the reduction. Exits match the ordinary convention exactly.
 fn run_journal_report(reader: &mut CaptureReader, opts: &ReportOptions) -> i64 {
     let mut analyzer = JournalAnalyzer::new(reader.session.clone());
     loop {

@@ -26,10 +26,16 @@ pub const JOURNAL_STATE_REASON: &str = "request_only_source";
 pub const JOURNAL_REPLAY_INTERVAL_BUDGET: usize = 65536;
 /// Duplicate-token refusal reason.
 pub const JOURNAL_DUPLICATE_TOKEN: &str = "duplicate operation token";
+/// Mixed-evidence refusal reason: the journal reducer admits
+/// journal `transition_result` lines only.
+pub const JOURNAL_MIXED_EVIDENCE: &str =
+    "unsupported mixed evidence: journal reduction admits transition_result only";
 /// Token-history exhaustion reason: a resource refusal, never a
 /// corruption claim.
 pub const JOURNAL_TOKEN_RESOURCE_LIMIT: &str = "journal_token_resource_limit";
-/// Schema bound on findings rows; failure counts stay exact past it.
+/// Stored failure-reference cap; the findings total stays within
+/// the schema bound with the incomplete-coverage finding retained,
+/// and failure counts stay exact past it.
 pub const JOURNAL_MAX_FAILURE_REFS: usize = 2048;
 /// Limitation carried on every journal report: request-only scope.
 pub const JOURNAL_REQUEST_ONLY_LIMITATION: &str =
@@ -134,14 +140,18 @@ impl JournalAnalyzer {
 
     /// Fold one event into the request counts.
     ///
-    /// Only journal-typed results participate; any other line the reader
-    /// yields is transport, not a conversion request. A repeated nonzero
-    /// token within one epoch refuses; a zero token (unmatched exit)
-    /// needs no history. Callers never affect counts: unknown callers
-    /// are not findings.
+    /// Only journal-typed results participate. Any other 0.2.0 line
+    /// (ordinary kinds, gaps) refuses as unsupported mixed evidence
+    /// rather than dropping silently: a quiet drop would echo the
+    /// session's `complete_for_scope` Detail while hiding observed
+    /// loss, and gap accounting belongs to the ordinary reducer, not
+    /// to an invented journal Detail adjustment here. A repeated
+    /// nonzero token within one epoch refuses; a zero token
+    /// (unmatched exit) needs no history. Callers never affect
+    /// counts: unknown callers are not findings.
     pub fn consume(&mut self, ev: &Event) -> Result<(), JournalError> {
         if !ev.has_journal || !ev.journal_version {
-            return Ok(());
+            return Err(JournalError::new(JOURNAL_MIXED_EVIDENCE.to_string()));
         }
         self.regions.observe(ev);
         if !ev.journal.operation_token.has {
@@ -319,8 +329,9 @@ impl JournalAnalyzer {
         // No counter/detail comparison is performed: counters and
         // detail events are alternative measurements, so the counters
         // leg is vacuously agreed and the verdict ranges over the
-        // detail and terminal legs only. Journal evidence carries no
-        // bounce records, so delivered stays zero.
+        // detail and terminal legs only. Mixed evidence refuses at
+        // consume, so only journal-only reductions reach here and
+        // delivered stays zero.
         let term = terminal_loss_leg(&self.session.q_terminal.status, &self.session.stop);
         out.verdict = verdict_for_counts(
             true,
@@ -332,16 +343,29 @@ impl JournalAnalyzer {
             term.2,
             0,
         );
-        out.findings = journal_findings(
+        let (findings, findings_truncated) = journal_findings(
             &self.failed_refs,
+            self.failures,
             &self.session,
             &out.verdict.name,
             out.verdict.loss_ratio_bps,
         );
+        out.findings = findings;
         out.limitations
             .push(JOURNAL_REQUEST_ONLY_LIMITATION.to_string());
         for exclusion in JOURNAL_EXCLUSIONS {
             out.limitations.push(exclusion.to_string());
+        }
+        if findings_truncated {
+            let kept = out
+                .findings
+                .iter()
+                .filter(|f| f.code == "CONVERSION_FAILED")
+                .count();
+            out.limitations.push(format!(
+                "Failure evidence truncated: {kept} of {} failure references shown; journal.failures carries the exact count.",
+                self.failures
+            ));
         }
         JournalReport {
             report: out,
@@ -351,12 +375,45 @@ impl JournalAnalyzer {
     }
 }
 
-/// Bind a checkpoint prefix without touching the quality echo.
+/// Bind a checkpoint prefix, demoting any complete claim.
 ///
-/// The frozen checkpoint reports carry the session quality verbatim,
-/// so the journal path sets only the integrity fields: the legacy
-/// checkpoint helper would prefix every channel reason.
+/// Mirrors the legacy checkpoint binder: every `complete_for_scope`
+/// channel drops to `partial` with the checkpoint note prefixed, the
+/// verdict forces to `partial_unknown_loss`, and metric coverages
+/// demote (journal reports carry no metrics, so that leg is
+/// vacuous). Channels already partial or unavailable keep their
+/// reasons verbatim, so the frozen checkpoint oracles (all partial)
+/// compare equal. The frozen report schema forbids
+/// `complete_for_scope` under `checkpoint_prefix`, so echoing a
+/// complete claim verbatim would emit schema-invalid output.
 pub fn apply_journal_checkpoint(rep: &mut Report, bytes: u64, events: u64, suffix: u64) {
+    const NOTE: &str = "Checkpoint prefix only; measurement window remains open; ";
+    fn demote(channel: &mut crate::model::session::Channel) {
+        if channel.status != "complete_for_scope" {
+            return;
+        }
+        channel.status = "partial".to_string();
+        let reason = core::mem::take(&mut channel.reason);
+        channel.reason = NOTE.to_string();
+        let keep = 1024usize.saturating_sub(NOTE.chars().count());
+        for ch in reason.chars().take(keep) {
+            channel.reason.push(ch);
+        }
+    }
+    demote(&mut rep.q_detail);
+    demote(&mut rep.q_aggregate);
+    demote(&mut rep.q_correlation);
+    demote(&mut rep.q_corr_mapping);
+    demote(&mut rep.q_corr_copy);
+    demote(&mut rep.q_corr_sync);
+    demote(&mut rep.q_baseline);
+    demote(&mut rep.q_terminal);
+    rep.verdict.name = "partial_unknown_loss".to_string();
+    for m in &mut rep.metrics {
+        if m.coverage == "complete_for_scope" {
+            m.coverage = "partial".to_string();
+        }
+    }
     rep.integrity_status = "checkpoint_prefix".to_string();
     rep.verified_bytes = bytes;
     rep.verified_events = events;

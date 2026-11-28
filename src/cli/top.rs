@@ -1288,11 +1288,6 @@ pub fn run_top(args: &[String]) -> i64 {
     run_replay(&mut reader, &opts, false)
 }
 
-/// Stream one opened capture to periodic summaries; return the exit code.
-///
-/// `device_unrenderable` carries a non-UTF-8 `--device` value past
-/// the open: the first block warns with a blanked echo and fails,
-/// exactly like the Mojo block render raise.
 /// Render one journal refresh body: compact headlines or full text.
 fn render_journal_block(
     reduced: &crate::analysis::journal_conversions::JournalReport,
@@ -1367,8 +1362,8 @@ fn journal_snapshot_block(
 /// Drain the rest quietly, print the journal final summary and code.
 ///
 /// Mirrors [`finish_after_signal`]: the final block is always the
-/// full journal report, and the checkpoint prefix keeps the session
-/// quality echo verbatim.
+/// full journal report, and the checkpoint prefix demotes any
+/// complete channel.
 fn journal_finish_after_signal(
     reader: &mut CaptureReader,
     analyzer: &mut JournalAnalyzer,
@@ -1596,6 +1591,11 @@ fn run_journal_replay(
     exit_for_report(&reduced.report, opts.strict)
 }
 
+/// Stream one opened capture to periodic summaries; return the exit code.
+///
+/// `device_unrenderable` carries a non-UTF-8 `--device` value past
+/// the open: the first block warns with a blanked echo and fails,
+/// exactly like the Mojo block render raise.
 fn run_replay(reader: &mut CaptureReader, opts: &TopOptions, device_unrenderable: bool) -> i64 {
     if reader.session.has_journal {
         return run_journal_replay(reader, opts, device_unrenderable);

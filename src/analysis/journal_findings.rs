@@ -24,6 +24,8 @@ pub const CONVERSION_FAILED_LIVE_LIMITATIONS: &str =
     "Request-only conversion evidence; no region identity.";
 /// Limitations carried by the incomplete-coverage finding.
 pub const CAPTURE_INCOMPLETE_LIMITATIONS: &str = "Counts exclude missing evidence. Terminal completeness requires a proven settlement protocol; repeating a capture does not by itself establish settlement.";
+/// Schema bound on the findings array (`maxItems: 2048`).
+pub const JOURNAL_MAX_FINDINGS: usize = 2048;
 
 /// Derive journal findings for one reduction.
 ///
@@ -31,20 +33,33 @@ pub const CAPTURE_INCOMPLETE_LIMITATIONS: &str = "Counts exclude missing evidenc
 /// its `event:N` evidence ref, plus at most one `CAPTURE_INCOMPLETE`
 /// when finalized evidence leaves the Detail channel incomplete. A
 /// checkpoint prefix explains its own partial Detail, so it never
-/// adds the incomplete-coverage finding.
+/// adds the incomplete-coverage finding. The total never exceeds
+/// [`JOURNAL_MAX_FINDINGS`]: the incomplete-coverage finding is
+/// retained and failure refs yield the slot. The second return tells
+/// the caller the evidence list was cut, so the report can record
+/// the truncation; `journal.failures` always stays exact.
 pub fn journal_findings(
     failed_refs: &[String],
+    failures: u64,
     session: &Session,
     verdict_name: &str,
     loss_ratio_bps: i64,
-) -> Vec<Finding> {
+) -> (Vec<Finding>, bool) {
+    let wants_incomplete = session.finalized && session.q_detail.status != "complete_for_scope";
+    let failure_budget = if wants_incomplete {
+        JOURNAL_MAX_FINDINGS - 1
+    } else {
+        JOURNAL_MAX_FINDINGS
+    };
+    let kept = failed_refs.len().min(failure_budget);
+    let truncated = failures > kept as u64;
     let mut out = Vec::new();
     let limitations = if session.synthetic {
         CONVERSION_FAILED_SYNTHETIC_LIMITATIONS
     } else {
         CONVERSION_FAILED_LIVE_LIMITATIONS
     };
-    for reference in failed_refs {
+    for reference in failed_refs.iter().take(kept) {
         out.push(Finding {
             code: "CONVERSION_FAILED".to_string(),
             severity: "warning".to_string(),
@@ -54,7 +69,7 @@ pub fn journal_findings(
             limitations: limitations.to_string(),
         });
     }
-    if session.finalized && session.q_detail.status != "complete_for_scope" {
+    if wants_incomplete {
         let mut expl = format!(
             "Capture incomplete: Detail evidence incomplete: {}.",
             session.q_detail.reason
@@ -72,5 +87,5 @@ pub fn journal_findings(
             limitations: CAPTURE_INCOMPLETE_LIMITATIONS.to_string(),
         });
     }
-    out
+    (out, truncated)
 }

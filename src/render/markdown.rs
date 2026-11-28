@@ -319,7 +319,7 @@ pub fn render_journal_markdown(
     out.push_str(&rep.devices.len().to_string());
     out.push_str("\n\n## Devices\n\n");
     out.push_str("| device_id | name | driver | identity |\n");
-    out.push_str("| --- | --- | --- |\n");
+    out.push_str("| --- | --- | --- | --- |\n");
     for d in &rep.devices {
         out.push_str("| ");
         out.push_str(&escape_markdown(&d.device_id));

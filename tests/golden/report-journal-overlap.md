@@ -17,7 +17,7 @@
 ## Devices
 
 | device_id | name | driver | identity |
-| --- | --- | --- |
+| --- | --- | --- | --- |
 
 ## Capabilities
 

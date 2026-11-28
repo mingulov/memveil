@@ -474,7 +474,11 @@ fn stage_journal(
 ) -> PathBuf {
     let lines: Vec<&str> = events.split_inclusive('\n').collect();
     let bytes = events.len() as u64;
-    let count = lines.len() as u64;
+    let count = if events.is_empty() {
+        0
+    } else {
+        lines.len() as u64
+    };
     let mut session = std::fs::read_to_string("tests/fixtures/journal/success/session.json")
         .expect("read success session template");
     session = session.replacen(
@@ -543,6 +547,15 @@ fn run_report_dir(dir: &std::path::Path, extra: &[&str]) -> std::process::Output
     cmd.output().expect("run memveil report")
 }
 
+fn run_top_dir(dir: &std::path::Path, extra: &[&str]) -> std::process::Output {
+    let mut args: Vec<&str> = vec!["--interval", "1s"];
+    args.extend(extra.iter().copied());
+    let mut cmd = Command::new(replay_bin());
+    cmd.arg("top").args(&args).arg(dir);
+    cmd.current_dir(env!("CARGO_MANIFEST_DIR"));
+    cmd.output().expect("run memveil top")
+}
+
 /// One synthetic journal event for in-process reducer legs.
 fn synthetic_event(seq: u64, token: u64, bytes: Option<u64>) -> Event {
     Event {
@@ -603,6 +616,18 @@ fn journal_values_above_double_range_stay_exact() {
     assert!(
         String::from_utf8_lossy(&text_out.stdout).contains("9015995343564800"),
         "text keeps the exact integer"
+    );
+    let md_out = run_report_dir(&dir, &["--format", "markdown"]);
+    assert_eq!(md_out.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&md_out.stdout).contains("9015995343564800"),
+        "markdown keeps the exact integer"
+    );
+    let top_out = run_top_dir(&dir, &[]);
+    assert_eq!(top_out.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&top_out.stdout).contains("9015995343564800"),
+        "top keeps the exact integer"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1008,4 +1033,340 @@ fn journal_no_unattributed_exact_physical_union() {
             "{name} text withholds shared bytes"
         );
     }
+}
+
+/// Mixed journal/ordinary evidence refuses: exit 2, no silent drop.
+///
+/// A 0.2.0 capture carrying one journal result plus the ordinary gap
+/// line must not reduce to `complete_for_scope` with the gap quietly
+/// discarded. Both verbs refuse, naming unsupported mixed evidence.
+#[test]
+fn journal_mixed_evidence_refuses() {
+    let gap_template = std::fs::read_to_string("tests/fixtures/reader/detail-gap/events.ndjson")
+        .expect("read gap template");
+    let gap_src = gap_template.lines().nth(1).expect("gap line").to_string();
+    let mut gap = gap_src.replacen("\"0.1.1\"", "\"0.2.0\"", 1);
+    assert_ne!(gap, gap_src, "schema edit applies");
+    let next = gap.replacen("attempts-3-session", "journal-staged-mixed", 1);
+    assert_ne!(next, gap, "session edit applies");
+    gap = next;
+    let next = gap.replacen("\"seq\": \"2\"", "\"seq\": \"1\"", 1);
+    assert_ne!(next, gap, "seq edit applies");
+    gap = next;
+    let next = gap.replacen("\"1150000000\"", "\"1000000200\"", 1);
+    assert_ne!(next, gap, "ts edit applies");
+    gap = next;
+    let next = gap.replacen(
+        "synthetic-attempts-1",
+        "linux-7.0.14-x86-journal-provisional",
+        1,
+    );
+    assert_ne!(next, gap, "profile edit applies");
+    gap = next;
+    let mut events = String::new();
+    events.push_str(&StagedLine::admitted(0, 1).render("journal-staged-mixed"));
+    events.push_str(&gap);
+    events.push('\n');
+    let dir = stage_journal(
+        "mixed",
+        "journal-staged-mixed",
+        &events,
+        &[
+            (
+                "\"transition_result\": \"2\"",
+                "\"transition_result\": \"1\"",
+            ),
+            ("\"gap\": \"0\"", "\"gap\": \"1\""),
+        ],
+    );
+    for verb in ["report", "top"] {
+        let out = if verb == "report" {
+            run_report_dir(&dir, &[])
+        } else {
+            run_top_dir(&dir, &[])
+        };
+        assert_eq!(out.status.code(), Some(2), "{verb} exit");
+        assert!(out.stdout.is_empty(), "{verb} prints no report");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("unsupported mixed evidence"),
+            "{verb} names the refusal: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A checkpoint claiming a complete channel is demoted, schema-valid.
+///
+/// The frozen checkpoint oracles already carry partial quality; this
+/// stages a checkpoint with Detail flipped to `complete_for_scope`/0
+/// and pins the demotion plus the forced verdict.
+#[test]
+fn journal_checkpoint_complete_channel_demoted() {
+    let dir = stage_path("checkpoint-demote");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("stage dir");
+    let checkpoint =
+        std::fs::read_to_string("tests/fixtures/journal/open-checkpoint/checkpoint.json")
+            .expect("read checkpoint template");
+    let next = checkpoint.replacen(
+        "\"status\": \"partial\"",
+        "\"status\": \"complete_for_scope\"",
+        1,
+    );
+    assert_ne!(next, checkpoint, "detail status edit applies");
+    let checkpoint = next;
+    let next = checkpoint.replacen("\"loss_count\": null", "\"loss_count\": \"0\"", 1);
+    assert_ne!(next, checkpoint, "detail loss edit applies");
+    let checkpoint = next;
+    parse_session(checkpoint.as_bytes()).expect("staged checkpoint parses");
+    std::fs::write(dir.join("checkpoint.json"), &checkpoint).expect("stage checkpoint");
+    let events = std::fs::read("tests/fixtures/journal/open-checkpoint/events.ndjson")
+        .expect("read checkpoint events");
+    std::fs::write(dir.join("events.ndjson"), &events).expect("stage events");
+    let out = run_report_dir(&dir, &["--allow-partial", "--format", "json"]);
+    assert_eq!(out.status.code(), Some(4));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("\"status\": \"checkpoint_prefix\""),
+        "checkpoint integrity"
+    );
+    assert!(
+        !text.contains("complete_for_scope"),
+        "no complete channel survives a checkpoint prefix"
+    );
+    let generated = dir.join("report.json");
+    std::fs::write(&generated, &out.stdout).expect("stage generated JSON");
+    assert_schema_valid(&generated);
+    let script = r#"
+import json, sys
+d = json.load(open(sys.argv[1]))
+detail = d["quality"]["detail"]
+assert detail["status"] == "partial", detail
+assert d["verdict"]["name"] == "partial_unknown_loss", d["verdict"]
+assert detail["reason"].startswith("Checkpoint prefix only;"), detail["reason"]
+print("demote-ok")
+"#;
+    let probe = Command::new("python3")
+        .args(["-c", script, generated.to_str().expect("utf8 path")])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run demotion probe");
+    assert!(
+        probe.status.success(),
+        "demotion probe: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "demote-ok");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Findings never exceed the schema bound; the incomplete-coverage
+/// finding is retained and the cut is recorded.
+///
+/// 2048 native failures plus finalized-partial Detail would be 2049
+/// rows uncapped. The report keeps 2047 failure refs plus
+/// `CAPTURE_INCOMPLETE`, records the truncation in limitations, and
+/// keeps `journal.failures` exact.
+#[test]
+fn journal_findings_capped_with_incomplete_retained() {
+    let mut events = String::new();
+    for i in 0..2048u64 {
+        let mut line = StagedLine::admitted(i, i + 1);
+        line.native_result = -5;
+        events.push_str(&line.render("journal-staged-cap"));
+    }
+    let dir = stage_journal(
+        "cap",
+        "journal-staged-cap",
+        &events,
+        &[
+            (
+                "\"status\": \"complete_for_scope\"",
+                "\"status\": \"partial\"",
+            ),
+            ("\"loss_count\": \"0\"", "\"loss_count\": null"),
+        ],
+    );
+    let out = run_report_dir(&dir, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let generated = dir.join("report.json");
+    std::fs::write(&generated, &out.stdout).expect("stage generated JSON");
+    assert_schema_valid(&generated);
+    let script = r#"
+import json, sys
+d = json.load(open(sys.argv[1]))
+findings = d["findings"]
+assert len(findings) <= 2048, len(findings)
+codes = [f["code"] for f in findings]
+assert codes.count("CAPTURE_INCOMPLETE") == 1, "incomplete retained"
+assert codes.count("CONVERSION_FAILED") == 2047, codes.count("CONVERSION_FAILED")
+assert d["journal"]["failures"] == "2048", d["journal"]["failures"]
+assert any("truncated" in lim for lim in d["limitations"]), d["limitations"]
+print("cap-ok")
+"#;
+    let probe = Command::new("python3")
+        .args(["-c", script, generated.to_str().expect("utf8 path")])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run cap probe");
+    assert!(
+        probe.status.success(),
+        "cap probe: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "cap-ok");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Past-cap failures truncate with the count exact and the cut recorded.
+///
+/// 2049 native failures under complete Detail keep 2048
+/// `CONVERSION_FAILED` findings, record the truncation in
+/// limitations, and keep `journal.failures` exact at 2049.
+#[test]
+fn journal_findings_truncate_past_cap() {
+    let mut events = String::new();
+    for i in 0..2049u64 {
+        let mut line = StagedLine::admitted(i, i + 1);
+        line.native_result = -5;
+        events.push_str(&line.render("journal-staged-pastcap"));
+    }
+    let dir = stage_journal("pastcap", "journal-staged-pastcap", &events, &[]);
+    let out = run_report_dir(&dir, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let generated = dir.join("report.json");
+    std::fs::write(&generated, &out.stdout).expect("stage generated JSON");
+    assert_schema_valid(&generated);
+    let script = r#"
+import json, sys
+d = json.load(open(sys.argv[1]))
+findings = d["findings"]
+assert len(findings) == 2048, len(findings)
+codes = [f["code"] for f in findings]
+assert set(codes) == {"CONVERSION_FAILED"}, set(codes)
+assert d["journal"]["failures"] == "2049", d["journal"]["failures"]
+assert any("truncated" in lim for lim in d["limitations"]), d["limitations"]
+print("pastcap-ok")
+"#;
+    let probe = Command::new("python3")
+        .args(["-c", script, generated.to_str().expect("utf8 path")])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run pastcap probe");
+    assert!(
+        probe.status.success(),
+        "pastcap probe: {}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "pastcap-ok");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Top refreshes cross capture-time boundaries: the intermediate
+/// compact block covers the prefix consumed so far.
+///
+/// Two admitted lines straddle the 1s boundary; the first refresh
+/// shows 1 request in compact form and the final full block shows 2.
+#[test]
+fn journal_top_refresh_crosses_boundary() {
+    let mut events = String::new();
+    events.push_str(&StagedLine::admitted(0, 1).render("journal-staged-refresh"));
+    let mut second = StagedLine::admitted(1, 2);
+    second.ts_ns = 2100000000;
+    events.push_str(&second.render("journal-staged-refresh"));
+    let dir = stage_journal("refresh", "journal-staged-refresh", &events, &[]);
+    let out = run_top_dir(&dir, &[]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let blocks: Vec<&str> = text.split("--- refresh ").collect();
+    assert_eq!(blocks.len(), 3, "one intermediate plus final: {text}");
+    let first = blocks[1].split_once('\n').expect("header line").1;
+    assert!(
+        first.contains("conversions: 1 requests (1 successes, 0 failures)"),
+        "intermediate compact covers the prefix: {first}"
+    );
+    assert!(
+        !first.contains("memveil report "),
+        "intermediate stays compact: {first}"
+    );
+    let last = blocks[2].split_once('\n').expect("header line").1;
+    assert!(last.contains("  requests: 2\n"), "final covers both");
+    let report = run_report_dir(&dir, &[]);
+    assert_eq!(report.status.code(), Some(0));
+    assert_eq!(last.as_bytes(), report.stdout.as_slice(), "final block");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Multiple boundaries render in order, each covering its prefix.
+///
+/// Three admitted lines across a 3s window with 1s refreshes yield
+/// two compact intermediates (1 then 2 requests) plus the final 3.
+#[test]
+fn journal_top_refresh_multi_boundary() {
+    let mut events = String::new();
+    events.push_str(&StagedLine::admitted(0, 1).render("journal-staged-multi"));
+    let mut second = StagedLine::admitted(1, 2);
+    second.ts_ns = 2100000000;
+    events.push_str(&second.render("journal-staged-multi"));
+    let mut third = StagedLine::admitted(2, 3);
+    third.ts_ns = 3100000000;
+    events.push_str(&third.render("journal-staged-multi"));
+    let dir = stage_journal(
+        "multi",
+        "journal-staged-multi",
+        &events,
+        &[
+            ("\"end_ns\": \"2500000000\"", "\"end_ns\": \"4000000000\""),
+            (
+                "\"observation_end_ns\": \"2500000000\"",
+                "\"observation_end_ns\": \"4000000000\"",
+            ),
+        ],
+    );
+    let out = run_top_dir(&dir, &[]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let blocks: Vec<&str> = text.split("--- refresh ").collect();
+    assert_eq!(blocks.len(), 4, "two intermediates plus final: {text}");
+    let first = blocks[1].split_once('\n').expect("header line").1;
+    let second_body = blocks[2].split_once('\n').expect("header line").1;
+    let last = blocks[3].split_once('\n').expect("header line").1;
+    assert!(
+        first.contains("conversions: 1 requests"),
+        "first intermediate: {first}"
+    );
+    assert!(
+        second_body.contains("conversions: 2 requests"),
+        "second intermediate: {second_body}"
+    );
+    assert!(last.contains("  requests: 3\n"), "final covers all three");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An empty finalized capture reports zero requests on every verb.
+///
+/// No events means no refreshes: top prints only the final block,
+/// equal to report stdout, and the JSON stays schema-valid.
+#[test]
+fn journal_empty_capture_reports_zero() {
+    let dir = stage_journal("empty", "journal-staged-empty", "", &[]);
+    let out = run_report_dir(&dir, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\"requests\": \"0\""), "zero requests");
+    assert!(text.contains("\"findings\": []"), "no findings");
+    let generated = dir.join("report.json");
+    std::fs::write(&generated, &out.stdout).expect("stage generated JSON");
+    assert_schema_valid(&generated);
+    let report = run_report_dir(&dir, &[]);
+    assert_eq!(report.status.code(), Some(0));
+    let top = run_top_dir(&dir, &[]);
+    assert_eq!(top.status.code(), Some(0));
+    let top_text = String::from_utf8_lossy(&top.stdout);
+    let blocks: Vec<&str> = top_text.split("--- refresh ").collect();
+    assert_eq!(blocks.len(), 2, "final block only: {top_text}");
+    let body = blocks[1].split_once('\n').expect("header line").1;
+    assert_eq!(body.as_bytes(), report.stdout.as_slice(), "final block");
+    let _ = std::fs::remove_dir_all(&dir);
 }
