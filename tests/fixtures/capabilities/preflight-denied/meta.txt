@@ -1,0 +1,4 @@
+arch=x86_64
+release=7.0.0-34-generic
+euid=1001
+denied=/proc/swaps,/sys/module/module/parameters/sig_enforce,/proc/sys/kernel/modules_disabled,/sys/power/state,/sys/kernel/kexec_crash_loaded

@@ -13,8 +13,9 @@
 //! Only a broken standard error escapes as a failure.
 //!
 //! Text and `--json` render the same DoctorReport2; the JSON matches the
-//! doctor-v0.1.1 schema exactly. Every interpolated evidence fragment is
-//! sanitized for its sink.
+//! doctor-v0.1.1 schema exactly. Observed preflight facts ride the
+//! existing notes channel as `preflight ...` lines. Every
+//! interpolated evidence fragment is sanitized for its sink.
 
 use crate::bpf::session::declares_copy_table;
 use crate::bpf::{SessionError, resolve_copy_offsets, verify_lifecycle_dirs};
@@ -30,9 +31,12 @@ use crate::cli::report::{
 };
 use crate::platform::btf::read_object_map_bytes;
 use crate::platform::capabilities::attempt_loss_exact;
-use crate::platform::evidence::{EnvironmentEvidence, GuestInfo, KernelInfo, detect_environment};
+use crate::platform::evidence::{
+    EnvironmentEvidence, GuestInfo, KernelInfo, PreflightFacts, detect_environment,
+};
 use crate::platform::kernelgate::{BtfFacts, LockdownState, kernel_gate, remedy_for};
 use crate::platform::prechecks::{PreCheck, check_memcg, check_privilege, check_unprivileged_bpf};
+use crate::platform::preflight::collect_preflight;
 use crate::platform::profiles::{Profile, load_profiles, manifest_readable, select_profile_bound};
 use crate::platform::reader::{
     EVIDENCE_ABSENT, EVIDENCE_OK, EvidenceError, EvidenceReader, bytes_to_text, file_state,
@@ -306,7 +310,8 @@ impl Default for DoctorOptions {
 /// `btf`/`lockdown` carry the kernel gate facts,
 /// `requested`/`prechecks`/`load`/`notes` record the judgment inputs,
 /// and every capability gains a machine `reason_code` plus evidence
-/// lines.
+/// lines. `preflight` carries the bounded confidential-preflight
+/// facts; when empty the report renders its pre-preflight shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport2 {
     /// `live` or `fixture`.
@@ -349,6 +354,8 @@ pub struct DoctorReport2 {
     pub load: Vec<LoadResult>,
     /// Advisory notes.
     pub notes: Vec<String>,
+    /// Bounded confidential-preflight facts.
+    pub preflight: PreflightFacts,
 }
 
 impl Default for DoctorReport2 {
@@ -394,6 +401,7 @@ impl Default for DoctorReport2 {
             prechecks: Vec::new(),
             load: Vec::new(),
             notes: Vec::new(),
+            preflight: PreflightFacts::default(),
         }
     }
 }
@@ -643,7 +651,10 @@ fn apply_copy_preflight(
 /// `run_doctor_opts`. Under `--load-check` on the live host, every
 /// admitted object loads without attaching: loaded objects read
 /// `available` and the verdict is `ready` only when every requested
-/// object loaded.
+/// object loaded. Preflight facts collect alongside the gate facts
+/// from the same reader; error reports keep them empty. Observed
+/// facts append `preflight ...` notes after the existing ones, so
+/// the JSON keeps its schema and empty facts render nothing.
 ///
 /// The loader links statically, so an empty bridge is the normal case,
 /// not a load failure: the bridge override only binds receipts through
@@ -696,6 +707,7 @@ pub fn assess_doctor(opts: &DoctorOptions) -> DoctorReport2 {
     let gated = kernel_gate(&reader, &env.kernel.release, ZLIB, &ask.caps);
     out.btf = gated.btf.clone();
     out.lockdown = gated.lockdown.clone();
+    out.preflight = collect_preflight(&reader, &env.kernel.release, &out.lockdown, ZLIB);
     let object_path = resolve_object(&opts.object);
     let lc_path = resolve_object(&opts.lc_object);
     let cp_path = resolve_object(&opts.cp_object);
@@ -1013,7 +1025,101 @@ pub fn assess_doctor(opts: &DoctorOptions) -> DoctorReport2 {
     if unp.state == "pass" {
         out.notes.push(unp.reason.clone());
     }
+    // At most 2 existing notes precede 7 fact notes, 6 branch
+    // notes, and 1 truncation note: the schema cap of 16 always
+    // holds, and the guard below never fires.
+    if !out.preflight.is_empty() {
+        for note in preflight_notes(&out.preflight) {
+            if out.notes.len() < 16 {
+                out.notes.push(note);
+            }
+        }
+    }
     out
+}
+
+/// Most swap-branch notes per report; more collapse into one truncation note.
+///
+/// The notes channel caps at 16 entries: at most 2 existing
+/// notes, 7 preflight fact notes, 6 branch notes, and 1
+/// truncation note always fit.
+const MAX_PREFLIGHT_BRANCH_NOTES: usize = 6;
+
+/// Render observed preflight facts as `preflight ...` note lines.
+///
+/// The caller gates on non-empty: seven fact notes in fixed
+/// order, then one note per swap branch in file order (past
+/// the branch cap, one truncation note instead of the rest).
+/// Typed words and sanitized labels only; the renderers
+/// sanitize again for their sink.
+fn preflight_notes(pre: &PreflightFacts) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut lockdown = format!("preflight lockdown: {}", pre.lockdown.mode);
+    if pre.lockdown.src != "none" {
+        lockdown += &format!(" ({})", pre.lockdown.src);
+    }
+    notes.push(lockdown);
+    let mut sig = format!("preflight module-signature: {}", pre.module_signature.state);
+    if !pre.module_signature.reason.is_empty() {
+        sig += &format!(" ({})", pre.module_signature.reason);
+    }
+    notes.push(sig);
+    for (name, sys) in [
+        ("modules-disabled", &pre.modules_disabled),
+        ("kexec", &pre.kexec),
+    ] {
+        let mut line = format!("preflight {name}: {}", sys.state);
+        if !sys.level.is_empty() {
+            line += &format!(" level {}", sys.level);
+        }
+        if sys.src != "none" {
+            line += &format!(" ({})", sys.src);
+        }
+        notes.push(line);
+    }
+    notes.push(format!(
+        "preflight hibernation: runtime {}, method {}, resume {}, compiled {}",
+        pre.hibernation.runtime,
+        pre.hibernation.method,
+        pre.hibernation.resume,
+        pre.hibernation.compiled
+    ));
+    let mut kdump = format!("preflight kdump: image {}", pre.kdump.image);
+    if !pre.kdump.reservation.is_empty() {
+        kdump += &format!(" reservation {}B", pre.kdump.reservation);
+    }
+    notes.push(kdump);
+    let mut swap = format!(
+        "preflight swap: {}, zswap {}",
+        pre.swap.swap_presence, pre.swap.zswap
+    );
+    if pre.swap.backing_protection.is_empty() {
+        swap += &format!(" backing null ({})", pre.swap.backing_reason);
+    } else {
+        swap += &format!(" backing {}", pre.swap.backing_protection);
+        if !pre.swap.backing_reason.is_empty() {
+            swap += &format!(" ({})", pre.swap.backing_reason);
+        }
+    }
+    notes.push(swap);
+    let mut shown = 0;
+    for branch in &pre.swap.branches {
+        if shown >= MAX_PREFLIGHT_BRANCH_NOTES {
+            notes.push("preflight branches truncated".to_string());
+            break;
+        }
+        let mut line = format!("preflight branch {}", branch.source);
+        if !branch.device.is_empty() {
+            line += &format!(" [{}]", branch.device);
+        }
+        line += &format!(": {}", branch.verdict);
+        if !branch.reason.is_empty() {
+            line += &format!(" ({})", branch.reason);
+        }
+        notes.push(line);
+        shown += 1;
+    }
+    notes
 }
 
 /// Render one DoctorReport2 as doctor-v0.1.1 JSON.
@@ -3453,5 +3559,520 @@ mod tests {
         let caps = crate::capture::run::parse_requested_caps(",");
         assert!(!caps.ok);
         assert_eq!(caps.err, "bad capability list");
+    }
+
+    #[test]
+    fn doctor2_preflight_swap_none() {
+        let drep = drep2_for("preflight-swap-none", &profiles_dir());
+        assert_eq!(drep.preflight.swap.swap_presence, "none");
+        assert_eq!(drep.preflight.swap.backing_protection, "");
+        assert_eq!(drep.preflight.swap.backing_reason, "not_applicable");
+        assert!(drep.preflight.swap.branches.is_empty());
+    }
+
+    /// Preflight notes of one report, in order.
+    fn preflight_notes_of(drep: &super::DoctorReport2) -> Vec<String> {
+        drep.notes
+            .iter()
+            .filter(|n| n.starts_with("preflight"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn doctor2_preflight_absent_renders_legacy() {
+        let drep = drep2_for("preflight-absent", &profiles_dir());
+        assert!(drep.preflight.is_empty());
+        assert!(preflight_notes_of(&drep).is_empty());
+        let js = render_doctor_json2(&drep);
+        assert!(js.contains("\"schema_version\": \"0.1.1\""));
+        assert!(!js.contains("preflight"));
+        let text = render_doctor_text2(&drep);
+        assert!(!text.contains("preflight"));
+    }
+
+    #[test]
+    fn doctor2_preflight_existing_fixtures_stay_empty() {
+        for fxname in [
+            "ordinary-7.0",
+            "snp-7.0",
+            "user-asserted-snp",
+            "kernel-6.0",
+            "kernel-6.11",
+            "kernel-6.8",
+            "kernel-7.3",
+            "ready-validated",
+            "denied-tracepoint",
+            "denied-guest-node",
+            "conflicting-evidence",
+            "meta-release-hostile",
+        ] {
+            let drep = drep2_for(fxname, &profiles_dir());
+            assert!(drep.preflight.is_empty(), "{fxname}");
+        }
+        // The SNP classifier verdicts are untouched by the wiring.
+        let snp = drep2_for("snp-7.0", &profiles_dir());
+        assert_eq!(snp.guest.tech, "snp");
+        let asserted = drep2_for("user-asserted-snp", &profiles_dir());
+        assert_eq!(asserted.guest.tech, "snp");
+        assert!(asserted.guest.asserted);
+    }
+
+    #[test]
+    fn doctor2_preflight_lockdown_modes() {
+        let none = drep2_for("preflight-lockdown-none", &profiles_dir());
+        assert_eq!(none.preflight.lockdown.mode, "none");
+        assert_eq!(none.preflight.lockdown.src, "securityfs");
+        let integrity = drep2_for("preflight-lockdown-integrity", &profiles_dir());
+        assert_eq!(integrity.preflight.lockdown.mode, "integrity");
+        assert_eq!(integrity.preflight.lockdown.src, "securityfs");
+        let cmdline = drep2_for("preflight-lockdown-cmdline", &profiles_dir());
+        assert_eq!(cmdline.preflight.lockdown.mode, "integrity");
+        assert_eq!(cmdline.preflight.lockdown.src, "cmdline");
+        // Confidentiality is a typed inability, never a bypass:
+        // the mode surfaces while allowlisted reads still serve.
+        let conf = drep2_for("preflight-lockdown-confidentiality", &profiles_dir());
+        assert_eq!(conf.preflight.lockdown.mode, "confidentiality");
+        assert_eq!(conf.preflight.lockdown.src, "securityfs");
+        assert_eq!(conf.preflight.swap.swap_presence, "present");
+        assert_eq!(
+            conf.preflight.swap.backing_protection,
+            "kernel_reports_encrypted"
+        );
+    }
+
+    #[test]
+    fn doctor2_preflight_signature_votes() {
+        let on = drep2_for("preflight-sigenforce-on", &profiles_dir());
+        assert_eq!(on.preflight.module_signature.state, "enforced");
+        assert_eq!(on.preflight.module_signature.reason, "sysfs");
+        let off = drep2_for("preflight-sigenforce-off", &profiles_dir());
+        assert_eq!(off.preflight.module_signature.state, "not_enforced");
+        assert_eq!(off.preflight.module_signature.reason, "sysfs+config");
+        let force = drep2_for("preflight-sigenforce-force", &profiles_dir());
+        assert_eq!(force.preflight.module_signature.state, "enforced");
+        assert_eq!(force.preflight.module_signature.reason, "config");
+        let cmd = drep2_for("preflight-sigenforce-cmdline", &profiles_dir());
+        assert_eq!(cmd.preflight.module_signature.state, "enforced");
+        assert_eq!(cmd.preflight.module_signature.reason, "cmdline");
+        let clash = drep2_for("preflight-sigenforce-conflict", &profiles_dir());
+        assert_eq!(clash.preflight.module_signature.state, "unknown");
+        assert_eq!(clash.preflight.module_signature.reason, "conflicting");
+    }
+
+    #[test]
+    fn doctor2_preflight_sysctls() {
+        let drep = drep2_for("preflight-sysctl", &profiles_dir());
+        assert_eq!(drep.preflight.modules_disabled.state, "disabled");
+        assert_eq!(drep.preflight.modules_disabled.level, "1");
+        assert_eq!(drep.preflight.modules_disabled.src, "proc");
+        assert_eq!(drep.preflight.kexec.state, "allowed");
+        assert_eq!(drep.preflight.kexec.level, "0");
+        assert_eq!(drep.preflight.kexec.src, "proc");
+        let bad = drep2_for("preflight-sysctl-malformed", &profiles_dir());
+        assert_eq!(bad.preflight.modules_disabled.state, "unknown");
+        assert_eq!(bad.preflight.kexec.state, "unknown");
+        assert!(bad.preflight.is_empty());
+    }
+
+    #[test]
+    fn doctor2_preflight_hibernation() {
+        let on = drep2_for("preflight-hibernate-on", &profiles_dir());
+        assert_eq!(on.preflight.hibernation.runtime, "available");
+        assert_eq!(on.preflight.hibernation.method, "platform");
+        assert_eq!(on.preflight.hibernation.resume, "yes");
+        assert_eq!(on.preflight.hibernation.compiled, "yes");
+        // The resume target value never reaches any rendering.
+        let js = render_doctor_json2(&on);
+        assert!(!js.contains("46d5a3c2b-1e04-4f3a-8d7c-6b5a4e3f2a19"));
+        let text = render_doctor_text2(&on);
+        assert!(!text.contains("46d5a3c2b-1e04-4f3a-8d7c-6b5a4e3f2a19"));
+        assert!(text.contains("note: preflight hibernation: runtime available"));
+        let off = drep2_for("preflight-hibernate-off", &profiles_dir());
+        assert_eq!(off.preflight.hibernation.runtime, "unavailable");
+        assert_eq!(off.preflight.hibernation.method, "unknown");
+        assert_eq!(off.preflight.hibernation.resume, "no");
+        assert_eq!(off.preflight.hibernation.compiled, "no");
+    }
+
+    #[test]
+    fn doctor2_preflight_kdump() {
+        let loaded = drep2_for("preflight-kdump-loaded", &profiles_dir());
+        assert_eq!(loaded.preflight.kdump.image, "loaded");
+        assert_eq!(loaded.preflight.kdump.reservation, "268435456");
+        let text = render_doctor_text2(&loaded);
+        assert!(text.contains("note: preflight kdump: image loaded reservation 268435456B"));
+        // The ceiling kernel parses the same stable kdump interface.
+        let ceiling = drep2_for("preflight-kdump-73", &profiles_dir());
+        assert_eq!(ceiling.preflight.kdump.image, "not_loaded");
+        assert_eq!(ceiling.preflight.kdump.reservation, "0");
+        assert!(ceiling.kernel.eligible_floor);
+    }
+
+    #[test]
+    fn doctor2_preflight_swap_positive() {
+        let drep = drep2_for("preflight-swap-encrypted", &profiles_dir());
+        assert_eq!(drep.guest.tech, "ordinary");
+        assert_eq!(drep.preflight.swap.swap_presence, "present");
+        assert_eq!(
+            drep.preflight.swap.backing_protection,
+            "kernel_reports_encrypted"
+        );
+        assert_eq!(drep.preflight.swap.backing_reason, "");
+        assert_eq!(drep.preflight.swap.branches.len(), 1);
+        let branch = &drep.preflight.swap.branches[0];
+        assert_eq!(branch.source, "dev:dm-0");
+        assert_eq!(branch.device, "dev:dm-0");
+        assert_eq!(branch.verdict, "encrypted");
+        assert_eq!(branch.reason, "");
+        // The dm uuid never reaches any rendering.
+        let js = render_doctor_json2(&drep);
+        assert!(js.contains("\"schema_version\": \"0.1.1\""));
+        assert!(!js.contains("CRYPT-"));
+        assert!(!js.contains("46d5a3c2b1e04f3a8d7c6b5a4e3f2a19"));
+        assert!(js.contains("preflight branch dev:dm-0 [dev:dm-0]: encrypted"));
+        let text = render_doctor_text2(&drep);
+        assert!(!text.contains("CRYPT-"));
+        assert!(text.contains("note: preflight branch dev:dm-0 [dev:dm-0]: encrypted"));
+    }
+
+    #[test]
+    fn doctor2_preflight_swap_resolved_negative() {
+        let drep = drep2_for("preflight-swap-plain", &profiles_dir());
+        assert_eq!(drep.preflight.swap.swap_presence, "present");
+        assert_eq!(
+            drep.preflight.swap.backing_protection,
+            "no_guest_encryption_observed"
+        );
+        assert_eq!(drep.preflight.swap.branches.len(), 1);
+        let branch = &drep.preflight.swap.branches[0];
+        assert_eq!(branch.source, "dev:sda3");
+        assert_eq!(branch.device, "dev:sda/sda3");
+        assert_eq!(branch.verdict, "no_encryption_observed");
+    }
+
+    #[test]
+    fn doctor2_preflight_swap_mixed_retains_branches() {
+        let drep = drep2_for("preflight-swap-mixed", &profiles_dir());
+        assert_eq!(drep.preflight.swap.swap_presence, "present");
+        assert_eq!(drep.preflight.swap.backing_protection, "unknown");
+        assert_eq!(drep.preflight.swap.backing_reason, "mixed");
+        assert_eq!(drep.preflight.swap.branches.len(), 2);
+        assert_eq!(drep.preflight.swap.branches[0].verdict, "encrypted");
+        assert_eq!(drep.preflight.swap.branches[0].device, "dev:dm-0");
+        assert_eq!(
+            drep.preflight.swap.branches[1].verdict,
+            "no_encryption_observed"
+        );
+        assert_eq!(drep.preflight.swap.branches[1].device, "dev:sda");
+    }
+
+    #[test]
+    fn doctor2_preflight_presence_backing_separate() {
+        // Presence and backing are independent fields on every
+        // swap shape; unknown or denied evidence never asserts
+        // either direction.
+        for (fxname, presence, backing, reason, tech) in [
+            (
+                "preflight-swap-none",
+                "none",
+                "",
+                "not_applicable",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-encrypted",
+                "present",
+                "kernel_reports_encrypted",
+                "",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-plain",
+                "present",
+                "no_guest_encryption_observed",
+                "",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-mixed",
+                "present",
+                "unknown",
+                "mixed",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-noswaps",
+                "unknown",
+                "unknown",
+                "presence_unknown",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-denied",
+                "unknown",
+                "unknown",
+                "presence_denied",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-uuid-denied",
+                "present",
+                "unknown",
+                "denied",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-zram",
+                "present",
+                "",
+                "memory_only_no_writeback",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-zram-writeback",
+                "present",
+                "unknown",
+                "unproved_writeback",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-zswap",
+                "present",
+                "no_guest_encryption_observed",
+                "",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-file",
+                "present",
+                "unknown",
+                "unsupported_swap_file",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-alias",
+                "present",
+                "kernel_reports_encrypted",
+                "",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-cycle",
+                "present",
+                "unknown",
+                "cycle",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-cap",
+                "present",
+                "unknown",
+                "truncated",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-race-symlink",
+                "present",
+                "unknown",
+                "denied",
+                "ordinary",
+            ),
+            (
+                "preflight-swap-deleted",
+                "present",
+                "unknown",
+                "deleted",
+                "ordinary",
+            ),
+            (
+                "preflight-hostile",
+                "present",
+                "unknown",
+                "unresolved",
+                "ordinary",
+            ),
+        ] {
+            let drep = drep2_for(fxname, &profiles_dir());
+            assert_eq!(drep.guest.tech, tech, "{fxname} tech");
+            assert_eq!(
+                drep.preflight.swap.swap_presence, presence,
+                "{fxname} presence"
+            );
+            assert_eq!(
+                drep.preflight.swap.backing_protection, backing,
+                "{fxname} backing"
+            );
+            assert_eq!(
+                drep.preflight.swap.backing_reason, reason,
+                "{fxname} backing reason"
+            );
+            // No unknown or denied input asserts a direction.
+            if backing.is_empty() || backing == "unknown" {
+                assert_ne!(
+                    drep.preflight.swap.backing_protection, "kernel_reports_encrypted",
+                    "{fxname}"
+                );
+                assert_ne!(
+                    drep.preflight.swap.backing_protection, "no_guest_encryption_observed",
+                    "{fxname}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn doctor2_preflight_swap_alias_same_device() {
+        let drep = drep2_for("preflight-swap-alias", &profiles_dir());
+        assert_eq!(drep.preflight.swap.branches.len(), 2);
+        let first = &drep.preflight.swap.branches[0];
+        let second = &drep.preflight.swap.branches[1];
+        assert_eq!(first.source, "dev:dm-0");
+        assert_eq!(second.source, "mapper:cryptswap");
+        assert_eq!(first.device, "dev:dm-0");
+        assert_eq!(second.device, "dev:dm-0");
+        assert_eq!(first.verdict, "encrypted");
+        assert_eq!(second.verdict, "encrypted");
+    }
+
+    #[test]
+    fn doctor2_preflight_swap_zram_shapes() {
+        let ram = drep2_for("preflight-swap-zram", &profiles_dir());
+        assert_eq!(ram.preflight.swap.branches.len(), 1);
+        assert_eq!(ram.preflight.swap.branches[0].verdict, "memory_only");
+        assert_eq!(ram.preflight.swap.branches[0].device, "dev:zram0");
+        let js = render_doctor_json2(&ram);
+        assert!(js.contains(
+            "preflight swap: present, zswap unknown backing null (memory_only_no_writeback)"
+        ));
+        let wb = drep2_for("preflight-swap-zram-writeback", &profiles_dir());
+        assert_eq!(wb.preflight.swap.branches[0].verdict, "unknown");
+        assert_eq!(wb.preflight.swap.branches[0].reason, "unproved_writeback");
+        assert!(wb.preflight.swap.branches[0].device.is_empty());
+        // zswap is a cache: the persistent backing still decides.
+        let zs = drep2_for("preflight-swap-zswap", &profiles_dir());
+        assert_eq!(zs.preflight.swap.zswap, "enabled");
+        assert_eq!(
+            zs.preflight.swap.backing_protection,
+            "no_guest_encryption_observed"
+        );
+    }
+
+    #[test]
+    fn doctor2_preflight_swap_race_symlink_denied() {
+        // The probe said OK (the link target reads); the
+        // contained read refused the link. The read wins:
+        // denied, never a verdict.
+        let drep = drep2_for("preflight-swap-race-symlink", &profiles_dir());
+        assert_eq!(drep.preflight.swap.branches.len(), 1);
+        assert_eq!(drep.preflight.swap.branches[0].verdict, "unknown");
+        assert_eq!(drep.preflight.swap.branches[0].reason, "denied");
+    }
+
+    #[test]
+    fn doctor2_preflight_hostile_stays_unresolved() {
+        let drep = drep2_for("preflight-hostile", &profiles_dir());
+        assert_eq!(drep.preflight.swap.branches.len(), 3);
+        let first = &drep.preflight.swap.branches[0];
+        // A crypt layer was seen, but the slave never
+        // resolved: no verdict, and no device identity.
+        assert_eq!(first.verdict, "unknown");
+        assert_eq!(first.reason, "unresolved");
+        assert!(first.device.is_empty());
+        assert_eq!(drep.preflight.swap.branches[1].source, "invalid");
+        assert_eq!(drep.preflight.swap.branches[1].reason, "invalid_source");
+        assert_eq!(drep.preflight.swap.branches[2].reason, "deleted");
+        let js = render_doctor_json2(&drep);
+        assert!(!js.contains("CRYPT-"));
+        assert!(!js.contains(".."));
+        assert!(!js.contains("evil"));
+        if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+            let name = hostname.trim();
+            if !name.is_empty() {
+                assert!(!js.contains(name), "link target leaked");
+            }
+        }
+        let text = render_doctor_text2(&drep);
+        assert!(!text.contains("CRYPT-"));
+        assert!(!text.contains(".."));
+    }
+
+    #[test]
+    fn doctor2_preflight_denied_stays_unknown() {
+        let drep = drep2_for("preflight-denied", &profiles_dir());
+        assert_eq!(drep.preflight.module_signature.state, "unknown");
+        assert_eq!(drep.preflight.module_signature.reason, "denied");
+        assert_eq!(drep.preflight.modules_disabled.state, "unknown");
+        assert_eq!(drep.preflight.kexec.state, "unknown");
+        assert_eq!(drep.preflight.hibernation.runtime, "unknown");
+        assert_eq!(drep.preflight.kdump.image, "unknown");
+        assert_eq!(drep.preflight.swap.swap_presence, "unknown");
+        assert_eq!(drep.preflight.swap.backing_protection, "unknown");
+        assert_eq!(drep.preflight.swap.backing_reason, "presence_denied");
+        assert!(drep.preflight.swap.branches.is_empty());
+        assert!(!drep.preflight.is_empty());
+    }
+
+    #[test]
+    fn doctor2_preflight_notes_exact() {
+        let drep = drep2_for("preflight-swap-none", &profiles_dir());
+        assert_eq!(
+            preflight_notes_of(&drep),
+            vec![
+                "preflight lockdown: unknown".to_string(),
+                "preflight module-signature: unknown".to_string(),
+                "preflight modules-disabled: unknown".to_string(),
+                "preflight kexec: unknown".to_string(),
+                "preflight hibernation: runtime unknown, method unknown, resume unknown, compiled unknown"
+                    .to_string(),
+                "preflight kdump: image unknown".to_string(),
+                "preflight swap: none, zswap unknown backing null (not_applicable)".to_string(),
+            ]
+        );
+        let text = render_doctor_text2(&drep);
+        assert!(
+            text.contains(
+                "note: preflight swap: none, zswap unknown backing null (not_applicable)\n"
+            )
+        );
+        let drep = drep2_for("preflight-swap-encrypted", &profiles_dir());
+        let notes = preflight_notes_of(&drep);
+        assert_eq!(notes.len(), 8);
+        assert_eq!(
+            notes[6],
+            "preflight swap: present, zswap unknown backing kernel_reports_encrypted"
+        );
+        assert_eq!(notes[7], "preflight branch dev:dm-0 [dev:dm-0]: encrypted");
+        // The JSON keeps its schema: facts ride the notes array.
+        let js = render_doctor_json2(&drep);
+        assert!(js.contains("\"schema_version\": \"0.1.1\""));
+        assert!(!js.contains("\"preflight\""));
+        assert!(
+            js.contains("preflight swap: present, zswap unknown backing kernel_reports_encrypted")
+        );
+    }
+
+    #[test]
+    fn doctor2_preflight_notes_cap() {
+        use crate::platform::evidence::{PreflightFacts, PreflightSwapBranch};
+        let mut facts = PreflightFacts::default();
+        facts.swap.swap_presence = "present".to_string();
+        for n in 0..8 {
+            facts.swap.branches.push(PreflightSwapBranch {
+                source: format!("dev:s{n}"),
+                device: format!("dev:s{n}"),
+                verdict: "no_encryption_observed".to_string(),
+                reason: String::new(),
+            });
+        }
+        let notes = super::preflight_notes(&facts);
+        assert_eq!(notes.len(), 7 + 6 + 1);
+        assert_eq!(notes[7 + 6], "preflight branches truncated");
+        for note in &notes {
+            assert!(note.len() <= 512, "{note}");
+        }
+        // Worst case still fits the channel: 2 existing notes
+        // plus the longest preflight tail never exceed 16.
+        assert!(2 + notes.len() <= 16);
     }
 }
