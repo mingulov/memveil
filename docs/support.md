@@ -93,6 +93,55 @@ and Debian 12, AL2023, and RHEL 9 userlands below the
 applicable glibc floor. External BTF files and a kprobe
 fallback are not provided.
 
+## Confidential preflight facts
+
+`memveil doctor` also reports bounded preflight facts when
+the host exposes them: lockdown mode, effective
+module-signature enforcement, the module and kexec sysctls,
+hibernation state, kdump image presence, and swap presence
+with backing protection. Every fact is a typed observation
+from world-readable status files; nothing is a safety
+verdict, and nothing changes a kernel setting.
+
+- Lockdown reports the same mode the admission gate reads
+  (`none`, `integrity`, `confidentiality`). Under
+  `confidentiality` collection is impossible; the report
+  carries that typed inability and attempts no bypass.
+- Module-signature enforcement combines the sysfs
+  parameter, the kernel config force option, and the
+  command-line token. The sysfs parameter is runtime truth:
+  a config force or command-line token alone never asserts
+  enforcement without it. Any disagreement is `unknown`.
+- Hibernation reports the `/sys/power/state`
+  advertisement, the selected method, whether a resume
+  target is configured (never the target itself), and the
+  build option. Advertisement is not proof a transition
+  would succeed.
+- Kdump reports crash-image presence plus the reservation
+  size. Presence reveals nothing about the second kernel's
+  initramfs, filter, target, or whether a dump ever
+  completed.
+- Swap presence (`none`, `present`, `unknown`) and backing
+  protection stay separate. The positive backing value
+  needs every persistent swap branch to report its
+  encryption layer; the resolved-negative value needs
+  every branch resolved with no guest encryption layer
+  observed, and means only that observed configuration
+  fact, never plaintext, host-read, or hardware-encryption
+  proof. Mixed, denied, unresolved, unsupported, or
+  unproved branches keep the aggregate `unknown` while
+  each branch keeps its own fact; paths that disagree
+  inside one branch report that branch `unknown` with
+  reason `mixed`. No configured swap, or
+  RAM-only zram without writeback, yields a null backing
+  with its reason.
+
+Unknown or denied evidence never becomes an
+encrypted/unencrypted assertion. Observed facts ride the
+report's notes as `preflight ...` lines in both text and
+`--json`; reports without any observed fact render no
+preflight notes.
+
 ## Limits
 
 - Passive doctor can read `ready (load not checked)`

@@ -147,6 +147,244 @@ pub struct EnvironmentEvidence {
     pub denied: Vec<String>,
 }
 
+/// Confidential-preflight lockdown fact: the kernel gate mode, surfaced.
+///
+/// Under `confidentiality` collection is impossible; the fact
+/// reports that typed inability and the collector attempts no
+/// alternative read to complete any other fact, never a bypass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightLockdown {
+    /// `none`, `integrity`, `confidentiality`, or `unknown`.
+    pub mode: String,
+    /// `securityfs`, `cmdline`, `config`, or `none`.
+    pub src: String,
+}
+
+impl Default for PreflightLockdown {
+    fn default() -> Self {
+        Self {
+            mode: "unknown".to_string(),
+            src: "none".to_string(),
+        }
+    }
+}
+
+/// Effective module-signature enforcement from three sources.
+///
+/// The sysfs parameter is runtime truth; kernel config
+/// (`CONFIG_MODULE_SIG_FORCE`) and the `module.sig_enforce`
+/// command-line token corroborate it. Any disagreement, or a
+/// malformed runtime read, is `unknown`, never a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightSigEnforce {
+    /// `enforced`, `not_enforced`, or `unknown`.
+    pub state: String,
+    /// On-sources (`sysfs`, `config`, `cmdline`, `+`-joined)
+    /// when enforced, observed off-sources when not enforced,
+    /// else the unknown cause (`conflicting`, `malformed`,
+    /// `denied`, `runtime_unobserved`), or `""` when nothing
+    /// observed.
+    pub reason: String,
+}
+
+impl Default for PreflightSigEnforce {
+    fn default() -> Self {
+        Self {
+            state: "unknown".to_string(),
+            reason: String::new(),
+        }
+    }
+}
+
+/// One 0/1/2 sysctl fact: module loading or kexec loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightSysctl {
+    /// `enabled`/`allowed`, `disabled`, or `unknown`.
+    pub state: String,
+    /// Observed level word (`0`, `1`, `2`), else `""`.
+    pub level: String,
+    /// `proc` when read, else `none`.
+    pub src: String,
+}
+
+impl Default for PreflightSysctl {
+    fn default() -> Self {
+        Self {
+            state: "unknown".to_string(),
+            level: String::new(),
+            src: "none".to_string(),
+        }
+    }
+}
+
+/// Hibernation state: runtime advertisement and build facts.
+///
+/// `runtime` reads the `/sys/power/state` advertisement only;
+/// it never claims a hibernate transition would succeed.
+/// `resume` records only whether a resume target is
+/// configured; the target value is never read into a fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightHibernation {
+    /// `available`, `unavailable`, or `unknown`.
+    pub runtime: String,
+    /// `platform`, `shutdown`, `reboot`, `suspend`,
+    /// `test_resume`, or `unknown`.
+    pub method: String,
+    /// `yes`, `no`, or `unknown`.
+    pub resume: String,
+    /// `yes`, `no`, or `unknown`.
+    pub compiled: String,
+}
+
+impl Default for PreflightHibernation {
+    fn default() -> Self {
+        Self {
+            runtime: "unknown".to_string(),
+            method: "unknown".to_string(),
+            resume: "unknown".to_string(),
+            compiled: "unknown".to_string(),
+        }
+    }
+}
+
+/// Kdump state: crash-image presence plus reservation context.
+///
+/// `image` is image presence only: it reveals nothing about
+/// the second kernel's initramfs, filter, target, or whether
+/// a dump ever completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightKdump {
+    /// `loaded`, `not_loaded`, or `unknown`.
+    pub image: String,
+    /// Canonical decimal reservation bytes, else `""`.
+    pub reservation: String,
+}
+
+impl Default for PreflightKdump {
+    fn default() -> Self {
+        Self {
+            image: "unknown".to_string(),
+            reservation: String::new(),
+        }
+    }
+}
+
+/// One swap source and its resolved backing verdict.
+///
+/// Labels are sanitized (`dev:` or `file:` plus an
+/// allowlisted name, bare `mapper`, or `invalid`); raw paths,
+/// mapper names, and dm uuids never reach a fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightSwapBranch {
+    /// Sanitized source label.
+    pub source: String,
+    /// Sanitized canonical device label, else `""`.
+    pub device: String,
+    /// `encrypted`, `no_encryption_observed`, `memory_only`,
+    /// or `unknown`.
+    pub verdict: String,
+    /// Unknown cause, else `""`.
+    pub reason: String,
+}
+
+/// Swap presence and backing protection, kept separate.
+///
+/// Presence answers whether swap is configured; backing
+/// answers what the resolved guest-side topology reports.
+/// Unknown or denied evidence never becomes an
+/// encrypted/unencrypted assertion in either field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightSwap {
+    /// `none`, `present`, or `unknown`.
+    pub swap_presence: String,
+    /// `enabled`, `disabled`, or `unknown`. A cache only:
+    /// never hides the configured persistent backing.
+    pub zswap: String,
+    /// `kernel_reports_encrypted`,
+    /// `no_guest_encryption_observed`, `unknown`, or `""`
+    /// (null: no swap, or RAM-only zram without writeback).
+    pub backing_protection: String,
+    /// Null/unknown cause, else `""`.
+    pub backing_reason: String,
+    /// One entry per observed swap source, in file order.
+    pub branches: Vec<PreflightSwapBranch>,
+}
+
+impl Default for PreflightSwap {
+    fn default() -> Self {
+        Self {
+            swap_presence: "unknown".to_string(),
+            zswap: "unknown".to_string(),
+            backing_protection: String::new(),
+            backing_reason: String::new(),
+            branches: Vec::new(),
+        }
+    }
+}
+
+/// Bounded confidential-preflight facts for one evidence reader.
+///
+/// Every field degrades to an explicit unknown; the struct is
+/// empty exactly when nothing was observed, and only then
+/// does the doctor render its pre-preflight shape.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreflightFacts {
+    /// Lockdown mode, surfaced from the kernel gate.
+    pub lockdown: PreflightLockdown,
+    /// Effective module-signature enforcement.
+    pub module_signature: PreflightSigEnforce,
+    /// Module-loading sysctl.
+    pub modules_disabled: PreflightSysctl,
+    /// Kexec-loading sysctl.
+    pub kexec: PreflightSysctl,
+    /// Hibernation state.
+    pub hibernation: PreflightHibernation,
+    /// Kdump state.
+    pub kdump: PreflightKdump,
+    /// Swap presence and backing.
+    pub swap: PreflightSwap,
+}
+
+impl PreflightFacts {
+    /// True when no preflight fact was observed at all.
+    ///
+    /// Observed absence (`none` swap, `not_loaded` image) is
+    /// knowledge and counts as non-empty; only the full
+    /// unknown shape renders the legacy doctor document.
+    pub fn is_empty(&self) -> bool {
+        if self.lockdown.mode != "unknown" {
+            return false;
+        }
+        if self.module_signature.state != "unknown" || !self.module_signature.reason.is_empty() {
+            return false;
+        }
+        if self.modules_disabled.state != "unknown" || self.kexec.state != "unknown" {
+            return false;
+        }
+        let h = &self.hibernation;
+        if h.runtime != "unknown" || h.method != "unknown" || h.resume != "unknown" {
+            return false;
+        }
+        if h.compiled != "unknown" {
+            return false;
+        }
+        if self.kdump.image != "unknown" || !self.kdump.reservation.is_empty() {
+            return false;
+        }
+        let s = &self.swap;
+        if s.swap_presence != "unknown" || s.zswap != "unknown" {
+            return false;
+        }
+        if !s.backing_protection.is_empty() || !s.backing_reason.is_empty() {
+            return false;
+        }
+        if !s.branches.is_empty() {
+            return false;
+        }
+        true
+    }
+}
+
 /// Parse `major[.minor[.patch]]` from a release string.
 ///
 /// Leading digits are the major (required); an optional dotted
@@ -1071,5 +1309,24 @@ mod tests {
     #[test]
     fn btf_cap_is_shared() {
         assert_eq!(evidence_btf_cap(), 67_108_864);
+    }
+
+    #[test]
+    fn preflight_empty_shape() {
+        use super::PreflightFacts;
+        assert!(PreflightFacts::default().is_empty());
+        let mut facts = PreflightFacts::default();
+        facts.lockdown.mode = "none".to_string();
+        assert!(!facts.is_empty());
+        let mut facts = PreflightFacts::default();
+        facts.swap.swap_presence = "none".to_string();
+        facts.swap.backing_reason = "not_applicable".to_string();
+        assert!(!facts.is_empty());
+        let mut facts = PreflightFacts::default();
+        facts.kdump.reservation = "0".to_string();
+        assert!(!facts.is_empty());
+        let mut facts = PreflightFacts::default();
+        facts.module_signature.reason = "denied".to_string();
+        assert!(!facts.is_empty());
     }
 }

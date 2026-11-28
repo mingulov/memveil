@@ -1,0 +1,1 @@
+BOOT_IMAGE=/vmlinuz root=UUID=9d1a2b3c-4d5e-4f6a-8b9c-0d1e2f3a4b5c ro resume=UUID=46d5a3c2b-1e04-4f3a-8d7c-6b5a4e3f2a19 quiet

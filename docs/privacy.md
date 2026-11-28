@@ -84,6 +84,19 @@ not rely on slashes in prose. (`doctor` stdout keeps the full
 probe paths from the operator's own profile: naming the denied
 path is that report's operational purpose.)
 
+## Doctor preflight facts
+
+The `preflight ...` note lines in a doctor report keep the
+same bounds. Every fact is a typed word (`enforced`,
+`available`, `loaded`, `present`) or a sanitized label:
+swap sources render as `dev:` or `file:` plus an allowlisted
+name, or bare `mapper`, and hostile bytes collapse to
+`renamed` or `invalid`. Resume target values, mapper names,
+and dm uuids never reach a fact; only their observed
+presence shapes the verdict. A resolved-negative backing
+value means no guest encryption layer was observed in the
+resolved topology, never that any bytes are plaintext.
+
 ## Handling notes
 
 - Capture files are mode 0600 in a mode 0700 directory.
