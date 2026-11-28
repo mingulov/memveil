@@ -1102,8 +1102,7 @@ fn preflight_notes(pre: &PreflightFacts) -> Vec<String> {
         }
     }
     notes.push(swap);
-    let mut shown = 0;
-    for branch in &pre.swap.branches {
+    for (shown, branch) in pre.swap.branches.iter().enumerate() {
         if shown >= MAX_PREFLIGHT_BRANCH_NOTES {
             notes.push("preflight branches truncated".to_string());
             break;
@@ -1117,7 +1116,6 @@ fn preflight_notes(pre: &PreflightFacts) -> Vec<String> {
             line += &format!(" ({})", branch.reason);
         }
         notes.push(line);
-        shown += 1;
     }
     notes
 }
