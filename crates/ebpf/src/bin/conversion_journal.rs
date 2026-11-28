@@ -29,10 +29,12 @@
 //! verify once under their own complexity budget instead of once per
 //! inline copy; the 6.8 verifier otherwise explodes the exit path past
 //! its instruction limit. Subprogram boundaries carry scalars and
-//! caller-stack out-pointers only (no multi-word returns), and the
-//! birth-offset bound is sequential direct compares so the verifier
-//! links the bounded range to the added register. Observable behavior
-//! — maps, counters, wire bytes, refusal sets — is unchanged.
+//! borrowed pointers only — context and map-value pointers down,
+//! stack out-pointers and one stack in-pointer across — never
+//! multi-word returns, and the birth-offset bound is sequential
+//! direct compares so the verifier links the bounded range to the
+//! added register. Observable behavior — maps, counters, wire
+//! bytes, refusal sets — is unchanged.
 #![no_std]
 #![no_main]
 #![feature(core_intrinsics)]
@@ -103,6 +105,14 @@ const MV_JR_OPERATION_CAPACITY: u64 = 4096;
 const MV_JR_NESTING_CAPACITY: u64 = 8;
 /// Transient caller frames resolved per sample.
 const MV_JR_CALLER_FRAMES: usize = 16;
+/// `bpf_get_stack` skip count: the helper now runs two BPF frames
+/// below the fexit program (`mv_exit` -> `mv_callers`), and each
+/// BPF-to-BPF call is a real JIT frame the unwinder walks, so skip
+/// 2 restores the exact pre-rework window (helper called from the
+/// program's own frame with skip 0) and its truncation rule. Must
+/// stay equal to the subprogram nesting depth between the hook and
+/// the helper call; the low 8 flag bits carry the skip count.
+const MV_JR_STACK_SKIP: u64 = 2;
 /// Journal ring capacity in bytes.
 const MV_JR_RING_BYTES: u32 = 8388608;
 /// Highest assignable operation token; the final u64 is exhaustion.
@@ -523,7 +533,7 @@ const JR_CLASS_TABLE: [u16; 10] = [
 /// consulted-frame array) and `size` must be the stack-read byte
 /// count that bounds the scan, exactly as `mv_callers` passes them.
 #[inline(never)]
-fn mv_cascade(frames: *const u64, size: u64, want_class: u64) -> u16 {
+unsafe fn mv_cascade(frames: *const u64, size: u64, want_class: u64) -> u16 {
     let mut out = 0u16;
     for index in 0..10u32 {
         let symbol = match MV_JR_SYMBOLS.get_ptr(index) {
@@ -562,12 +572,15 @@ fn mv_cascade(frames: *const u64, size: u64, want_class: u64) -> u16 {
 #[inline(never)]
 fn mv_callers(ctx: *mut c_void) -> (u16, u16, u16) {
     let mut frames = [0u64; MV_JR_CALLER_FRAMES];
+    // Skip the two enclosing BPF frames (`mv_exit`, `mv_callers`)
+    // so the captured window and the truncation rule below match
+    // the pre-rework program exactly (skip 0 from its own frame).
     let size = unsafe {
         bpf_get_stack(
             ctx,
             frames.as_mut_ptr() as *mut c_void,
             (MV_JR_CALLER_FRAMES * 8) as u32,
-            0,
+            MV_JR_STACK_SKIP,
         )
     };
     if size < 0 {
@@ -594,7 +607,9 @@ fn mv_callers(ctx: *mut c_void) -> (u16, u16, u16) {
     // against the running minimum, which holds exactly when the
     // match set spans two classes, regardless of visit order).
     let class = JR_CLASS_TABLE;
-    let wclass = mv_cascade(frames.as_ptr(), size, 1);
+    // SAFETY: `frames` is the live 16-word consulted-frame array
+    // and `size` is the stack-read byte count bounding the scan.
+    let wclass = unsafe { mv_cascade(frames.as_ptr(), size, 1) };
     if wclass == 0 {
         return (2, 0, 0);
     }
@@ -630,7 +645,9 @@ fn mv_callers(ctx: *mut c_void) -> (u16, u16, u16) {
     if ambiguous {
         return (3, 0, 0);
     }
-    let winner = mv_cascade(frames.as_ptr(), size, 0);
+    // SAFETY: same as the first cascade above; the scan between
+    // them is read-only, so frames, size, and symbols agree.
+    let winner = unsafe { mv_cascade(frames.as_ptr(), size, 0) };
     if winner == 0 {
         // Defensive only: `wclass != 0` above proves a hit exists
         // and nothing between the cascades writes frames, size, or
