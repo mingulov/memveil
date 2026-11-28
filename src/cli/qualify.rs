@@ -29,7 +29,6 @@ use crate::platform::artifact_files::{
 use crate::platform::capabilities::{cap_floor_ok, cap_floor_refusal};
 use crate::platform::clock::wall_ns;
 use crate::platform::evidence::{KernelInfo, detect_environment};
-use crate::platform::journal_profile::journal_profile_reason;
 use crate::platform::narrow::{
     MAX_NARROW_BTF_BYTES, NarrowBindings, check_identity_bindings, measure_live_bindings,
     parse_narrow_note,
@@ -257,8 +256,9 @@ pub fn qualify_usage() -> String {
         "validated. Diagnostics go to stderr.\n",
         "\n",
         "--capability selects channels as a comma-separated\n",
-        "list without spaces (default: attempt-trace, which\n",
-        "is always required). mapping-lifecycle needs\n",
+        "list without spaces (default: attempt-trace, which is\n",
+        "implicitly included for ordinary channels). Journal-only uses no attempts.\n",
+        "mapping-lifecycle needs\n",
         "--lc-object and copy-actual needs --cp-object when\n",
         "those channels are wanted, else the run refuses\n",
         "before the smoke.\n",
@@ -882,8 +882,7 @@ pub fn run_qualify_with(root: &str, profiles_dir: &str, opts: &QualifyOptions) -
         Err(e) => return qualify_failed(&e.to_string()),
     };
     if selection.journal {
-        let reason = journal_profile_reason(profiles_dir, &opts.profile, opts.has_profile);
-        return qualify_failed(&reason);
+        return qualify_failed("journal_profile_not_admitted");
     }
     let output = opts.output.clone();
     let mut bridge = resolve_bridge(&opts.bridge, opts.has_bridge);

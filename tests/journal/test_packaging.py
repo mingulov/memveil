@@ -6,7 +6,7 @@ Ports the old asset-declaration checks to the Rust packagers: the
 journal BPF object and the candidate profile must be declared in
 every payload list, and the candidate must stay unadmitted with null
 runtime bindings. Full bundle/deb/rpm closure (fresh build, real
-staging, whole-payload gates) belongs to the completion slice. The
+staging, whole-payload gates) is covered by the package suites. The
 native channel wiring (build script, embedded-object table, payload
 gate) now covers all four channels including journal.
 

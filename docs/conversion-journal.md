@@ -36,7 +36,7 @@ enabled SNP evidence, independent owned native tuples, window/loss checks and
 caller measurements when requested. Kernel eligibility starts at 6.11; version
 alone admits nothing. The upstream snapshot does not admit a distribution image.
 Any kprobe alternative needs its own profile and equivalent evidence; no fallback
-is implicit. The existing libbpf-mojo 0.2.3 tracing interface remains sufficient
+is implicit. The existing statically linked loader interface remains sufficient
 for the selected fentry/fexit route; no dependency revision is implied here.
 
 ## Selection
@@ -54,9 +54,10 @@ requires the journal and enables bounded caller processing; it is off by default
 `--device` is invalid with journal-only (exit 2). In mixed captures it filters
 ordinary DMA metrics only; journal observations remain global. Help, doctor,
 qualify, record and live top must expose the same selection/admission semantics.
-The pure `select_journal` model freezes these rules for CLI integration.
-`journal_admission` returns an exit code and fixed reason after checking the
-requested channels against declared profile admission. A zero result means
+The pure `select_journal` model (`src/model/journal.rs`) freezes these rules
+for CLI integration. `journal_admission` returns an exit code and fixed
+reason after checking the requested channels against declared profile
+admission. A zero result means
 `ready_for_attachment`, never actual attachment or platform qualification.
 Provisional, unadmitted and unknown requested journal profiles return 3; an
 unrequested channel cannot cause refusal. Other ordinary capabilities retain
@@ -65,8 +66,9 @@ their existing independent admission checks.
 ## Fixed wire
 
 The journal has an independent wire version 1, magic `MVJR` (0x524a564d),
-exactly 72 packed little-endian bytes. The bridge frame is separate. Decoders
-must read bytes at these offsets, never cast an unaligned native struct.
+exactly 72 packed little-endian bytes. Any transport framing is separate.
+Decoders must read bytes at these offsets, never cast an unaligned native
+struct.
 The declarations live in `bpf/include/memveil_journal.h`, which includes the
 unchanged shared `memveil_events.h`. Existing attempt/lifecycle/copy layouts
 and object bytes are unchanged.
@@ -172,8 +174,9 @@ prefix cut while `capture.finalized=false`, not settled terminal observation.
 A known admission timestamp has a null reason. Unknown readiness uses null start
 with `readiness_unproved`, never zero; it cannot admit matched results. Unknown
 final closure uses null end with `close_unproved`. A finalized known window has
-actual start/end with null reasons. `JournalWindow` validates these states and
-result membership without turning a prefix cut into closure proof.
+actual start/end with null reasons. `JournalWindow` (`src/model/journal.rs`)
+validates these states and result membership without turning a prefix cut
+into closure proof.
 An exit without an admitted entry remains `unmatched_exit`, not an in-window
 request, even if its exit falls in the observation window. Startup census and
 pre-window state are unavailable. The task/depth key is transient and never

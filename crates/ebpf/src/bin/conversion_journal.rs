@@ -98,6 +98,8 @@ const MV_JR_OFF_CALLER_CLASS: usize = 66;
 const MV_JR_OFF_CALLER_LABEL: usize = 68;
 /// Wire reserved field offset.
 const MV_JR_OFF_RESERVED: usize = 70;
+/// Layout check: the 2-byte reserved field ends the record.
+const _: () = assert!(MV_JR_OFF_RESERVED + 2 == MV_JR_LEN);
 
 /// Outstanding conversion operations retained across task stacks.
 const MV_JR_OPERATION_CAPACITY: u64 = 4096;

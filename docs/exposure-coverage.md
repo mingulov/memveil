@@ -30,9 +30,9 @@ confidential-guest claim.
 | `exposure-context` | Egress, control and configuration facts | Independently configured swap, dump, driver and NIC-mode facts |
 
 The `conversion-journal` capability stays reserved: it
-parses but refuses, has no record channel and no 0.2.0
-schema files. Journal-sourced rows below depend on it and
-are unavailable until it ships.
+parses but refuses without an admitted profile, and the frozen
+0.2.0 schemas ship for contract reference. Journal-sourced rows
+below depend on it and are unavailable until it ships.
 
 ## Claim strength and limits
 

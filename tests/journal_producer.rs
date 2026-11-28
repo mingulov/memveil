@@ -7,9 +7,10 @@
 //! the Rust journal producer. Every leg is offline: the native
 //! [`JournalKernel`] implementation is exercised through closed-state
 //! and refused-open legs plus typed injection of a scripted source,
-//! never through a live load/attach (the lease-gated completion slice
-//! owns real verifier/load/attach). The Aya program's wire layout is
-//! pinned byte-for-byte against the carried C header by
+//! never through a live load/attach (real verifier/load/attach
+//! stays lease-gated for final integration). The Aya program's
+//! wire layout is pinned byte-for-byte against the carried C
+//! header by
 //! `tests/journal/producer_reference.py`, which consumes the corpus
 //! this suite dumps (see `dump_wire_corpus`).
 
@@ -33,7 +34,9 @@ use memveil::model::event::parse_event;
 use memveil::model::journal::select_journal;
 use memveil::model::session::parse_session;
 use memveil::platform::evidence::KernelInfo;
-use memveil::platform::journal_profile::{JOURNAL_CANDIDATE_ID, journal_profile_reason};
+use memveil::platform::journal_profile::{
+    JOURNAL_CANDIDATE_ID, JournalDiscoveryFailure, discover_journal_binding,
+};
 use memveil::platform::narrow::MV_OFFSETS_TABLE_LEN;
 use memveil::platform::outcome::OpOut;
 use memveil::platform::profiles::load_profiles;
@@ -939,14 +942,23 @@ fn native_kernel_prepare_refuses_offline() {
 /// Newest linked journal object under the workspace target dir, if any.
 fn built_journal_object() -> Option<Vec<u8>> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = match std::env::var("CARGO_TARGET_DIR") {
+        Ok(dir) if !dir.is_empty() => {
+            let path = PathBuf::from(&dir);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        }
+        _ => root.join("target"),
+    };
     let mut cands = Vec::new();
     for profile in ["debug", "release"] {
-        let base = root
-            .join("target")
-            .join(profile)
-            .join("build")
-            .join("memveil");
-        let entries = std::fs::read_dir(&base).ok()?;
+        let base = target.join(profile).join("build").join("memveil");
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let obj = entry
                 .path()
@@ -962,8 +974,15 @@ fn built_journal_object() -> Option<Vec<u8>> {
     }
     cands
         .into_iter()
-        .filter_map(|path| std::fs::read(&path).ok())
-        .next()
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok()?;
+            let bytes = std::fs::read(&path).ok()?;
+            Some((modified, bytes))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, bytes)| bytes)
 }
 
 #[test]
@@ -1088,41 +1107,47 @@ fn profile_reason_matrix() {
     std::fs::create_dir_all(&root).expect("scratch");
     // Missing profiles tree: unavailable, never admitted.
     assert_eq!(
-        journal_profile_reason(root.to_str().expect("utf-8"), "", false),
-        "journal_profile_not_admitted: candidate profile unavailable"
+        discover_journal_binding(root.to_str().expect("utf-8"), "", false),
+        Err(JournalDiscoveryFailure::Unavailable)
     );
-    // Carried candidate: present but unadmitted.
+    // Carried candidate: present but unadmitted, null bindings.
     write_profile(
         &root,
         "linux-7.0.14-x86-journal-provisional.json",
         &candidate_body(),
     );
-    assert_eq!(
-        journal_profile_reason(root.to_str().expect("utf-8"), "", false),
-        "journal_profile_not_admitted"
-    );
+    let carried = discover_journal_binding(root.to_str().expect("utf-8"), "", false)
+        .expect("carried candidate discovers");
+    assert_eq!(carried.profile_id, JOURNAL_CANDIDATE_ID);
+    assert_eq!(carried.status, "unadmitted");
+    assert_eq!(carried.architecture, "x86_64");
+    assert_eq!(carried.page_size, 4096);
+    assert!(carried.callers_admitted);
+    assert!(carried.config_sha256.is_empty());
+    assert!(carried.btf_sha256.is_empty());
+    assert!(carried.object_sha256.is_empty());
     // Explicit foreign id resolves as a path and fails closed.
     assert_eq!(
-        journal_profile_reason(root.to_str().expect("utf-8"), "foreign.json", true),
-        "journal_profile_not_admitted: candidate profile unavailable"
+        discover_journal_binding(root.to_str().expect("utf-8"), "foreign.json", true),
+        Err(JournalDiscoveryFailure::Unavailable)
     );
-    // Explicit candidate id resolves to the same refusal.
-    assert_eq!(
-        journal_profile_reason(root.to_str().expect("utf-8"), JOURNAL_CANDIDATE_ID, true),
-        "journal_profile_not_admitted"
-    );
-    // Invalid JSON fails closed as unavailable.
+    // Explicit candidate id resolves to the same bindings.
+    let explicit =
+        discover_journal_binding(root.to_str().expect("utf-8"), JOURNAL_CANDIDATE_ID, true)
+            .expect("explicit candidate discovers");
+    assert_eq!(explicit, carried);
+    // Invalid JSON fails closed as invalid.
     let bad = root.join("bad.json");
     std::fs::write(&bad, "{not json").expect("bad profile");
     assert_eq!(
-        journal_profile_reason(
+        discover_journal_binding(
             root.to_str().expect("utf-8"),
             bad.to_str().expect("utf-8"),
             true
         ),
-        "journal_profile_not_admitted: candidate profile unavailable"
+        Err(JournalDiscoveryFailure::Invalid)
     );
-    // A tampered contract reads as unadmitted, never admitted.
+    // A tampered contract is invalid, never admitted.
     let tampered = candidate_body().replacen("memveil-journal-profile/1", "forged/9", 1);
     write_profile(
         &root,
@@ -1130,23 +1155,22 @@ fn profile_reason_matrix() {
         &tampered,
     );
     assert_eq!(
-        journal_profile_reason(root.to_str().expect("utf-8"), "", false),
-        "journal_profile_not_admitted: no admitted registry entry"
+        discover_journal_binding(root.to_str().expect("utf-8"), "", false),
+        Err(JournalDiscoveryFailure::Invalid)
     );
     // Trailing bytes past the document read as invalid, while
     // trailing whitespace stays wellformed.
     let trailed = candidate_body() + "x";
     write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &trailed);
     assert_eq!(
-        journal_profile_reason(root.to_str().expect("utf-8"), "", false),
-        "journal_profile_not_admitted: invalid profile"
+        discover_journal_binding(root.to_str().expect("utf-8"), "", false),
+        Err(JournalDiscoveryFailure::Invalid)
     );
     let spaced = candidate_body() + " \n";
     write_profile(&root, "linux-7.0.14-x86-journal-provisional.json", &spaced);
-    assert_eq!(
-        journal_profile_reason(root.to_str().expect("utf-8"), "", false),
-        "journal_profile_not_admitted"
-    );
+    let spaced_back = discover_journal_binding(root.to_str().expect("utf-8"), "", false)
+        .expect("whitespace-framed candidate discovers");
+    assert_eq!(spaced_back, carried);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1554,12 +1578,12 @@ fn decide_record_journal_reports_frozen_code() {
 }
 
 #[test]
-fn positive_dispatch_stays_unwired() {
-    // Even a profile file shaped toward admission stops at the
-    // documented refusal point: no admitted registry exists, so
-    // the wiring leg (owned by the completion slice) is the
-    // only way forward. The refusal creates no output and no
-    // native state.
+fn unadmitted_profile_refuses_after_wiring() {
+    // The carried candidate (unadmitted, null bindings) still
+    // refuses at the dispatch gate now that positive dispatch
+    // is wired: only an admitted profile with exactly matching
+    // rebound evidence passes. The refusal creates no output
+    // and no native state.
     let root = std::env::temp_dir().join(format!("memveil-jr-unw-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     write_profile(

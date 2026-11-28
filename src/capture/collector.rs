@@ -1282,17 +1282,42 @@ impl Collector {
     ) -> RunResult {
         let refusal = self.startup_with_journal(kernel, journal, clock, signal, writer);
         if !refusal.is_empty() {
-            if self.cfg.has_journal {
-                let _ = journal.close();
-            }
             if self.cfg.journal_only {
+                // Journal-only rollback mirrors the ordinary
+                // refusal path: a clean rollback refuses with
+                // the bare reason, while a writer residual or
+                // a failed close reports
+                // refusal-rollback-failed with the detail.
+                let closed = if self.cfg.has_journal {
+                    journal.close()
+                } else {
+                    OpOut {
+                        ok: true,
+                        message: String::new(),
+                    }
+                };
                 let residual = writer.abandon();
+                if !residual.is_empty() || !closed.ok {
+                    let mut diag = refusal;
+                    if !residual.is_empty() {
+                        diag += &format!("; writer residual: {residual}");
+                    }
+                    if !closed.ok {
+                        diag += &format!("; close: {}", closed.message);
+                    }
+                    return RunResult {
+                        exit_code: EXIT_ERROR,
+                        end_reason: "unknown".to_string(),
+                        outcome: "refusal-rollback-failed".to_string(),
+                        diagnostic: diag,
+                        fix: String::new(),
+                        code: String::new(),
+                        unknown: false,
+                        trusted: false,
+                    };
+                }
                 return RunResult {
-                    exit_code: if residual.is_empty() {
-                        EXIT_REFUSAL
-                    } else {
-                        EXIT_ERROR
-                    },
+                    exit_code: EXIT_REFUSAL,
                     end_reason: "unknown".to_string(),
                     outcome: "refused".to_string(),
                     diagnostic: refusal,
@@ -1301,6 +1326,9 @@ impl Collector {
                     unknown: false,
                     trusted: false,
                 };
+            }
+            if self.cfg.has_journal {
+                let _ = journal.close();
             }
             return self.refuse(kernel, writer, refusal);
         }
