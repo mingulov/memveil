@@ -17,6 +17,7 @@ pub mod narrow;
 pub mod outcome;
 pub mod policy_reader;
 pub mod prechecks;
+pub mod preflight;
 pub mod profiles;
 pub mod reader;
 pub mod runtime;
