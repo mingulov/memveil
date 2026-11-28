@@ -7,11 +7,14 @@
 //! Offline legs run unconditionally on the build host through
 //! typed injection plus the real admission entry point; they
 //! never load, attach, or need privileges. Guest legs run ONLY
-//! when `MEMVEIL_JOURNAL_LEASE` names the controller-owned
-//! isolated harness as `user@host:port`; without it they
-//! self-skip with a printed receipt. They never fail, hang
-//! (every remote command carries timeouts), provision, or
-//! touch any other machine.
+//! when a lease variable names the leased isolated harness as
+//! `user@host:port`: `MEMVEIL_JOURNAL_LEASE` for the eligible
+//! (6.11+) harness running the positive legs, and
+//! `MEMVEIL_JOURNAL_LEASE_SUBFLOOR` for the below-floor
+//! harness running the refusal legs. Without its lease a leg
+//! self-skips with a printed receipt. Guest legs never fail
+//! for a missing lease, hang (every remote command carries
+//! timeouts), provision, or touch any other machine.
 
 use memveil::capture::collector::{
     ClockSource, Collector, CollectorConfig, EXIT_ERROR, GeomOut, KernelSource, MAP_TYPE_ARRAY,
@@ -636,20 +639,33 @@ fn garbage_object(dir: &std::path::Path) -> (std::path::PathBuf, String) {
     (path, sha256_hex(&bytes))
 }
 
-/// Lease endpoint from the environment, or None with a receipt.
-fn lease_ssh() -> Option<(String, String, String)> {
-    let raw = std::env::var("MEMVEIL_JOURNAL_LEASE").unwrap_or_default();
+/// Parse one `user@host:port` lease value, or None with a
+/// printed receipt when the variable is unset or malformed.
+/// No lease shape ever skips silently.
+fn parse_lease(var: &str, raw: &str) -> Option<(String, String, String)> {
     if raw.is_empty() {
-        eprintln!("guest leg skipped: no lease (set MEMVEIL_JOURNAL_LEASE=user@host:port)");
+        eprintln!("guest leg skipped: no lease (set {var}=user@host:port)");
         return None;
     }
-    let (user_host, port) = raw.rsplit_once(':')?;
-    let (user, host) = user_host.split_once('@')?;
+    let (user_host, port) = raw.rsplit_once(':').unwrap_or(("", ""));
+    let (user, host) = user_host.split_once('@').unwrap_or(("", ""));
     if user.is_empty() || host.is_empty() || port.is_empty() {
-        eprintln!("guest leg skipped: malformed MEMVEIL_JOURNAL_LEASE");
+        eprintln!("guest leg skipped: malformed {var} (want user@host:port)");
         return None;
     }
     Some((user.to_string(), host.to_string(), port.to_string()))
+}
+
+/// Eligible-harness lease for the positive guest legs.
+fn lease_ssh() -> Option<(String, String, String)> {
+    let raw = std::env::var("MEMVEIL_JOURNAL_LEASE").unwrap_or_default();
+    parse_lease("MEMVEIL_JOURNAL_LEASE", &raw)
+}
+
+/// Below-floor-harness lease for the refusal guest legs.
+fn lease_ssh_subfloor() -> Option<(String, String, String)> {
+    let raw = std::env::var("MEMVEIL_JOURNAL_LEASE_SUBFLOOR").unwrap_or_default();
+    parse_lease("MEMVEIL_JOURNAL_LEASE_SUBFLOOR", &raw)
 }
 
 fn ssh_args(user: &str, host: &str, port: &str) -> Vec<String> {
@@ -1511,11 +1527,11 @@ json.dump(prof, open("/tmp/mv-matrix-__TAG__-profiles/journal-candidates/linux-7
 print("MINTED src=" + cfg_src)
 "#;
 
-/// Ship the lane binary plus the built journal object to the
+/// Ship the test binary plus the built journal object to the
 /// guest and mint the test profile. `tag` isolates one leg's
 /// guest paths so parallel legs never share files. Returns the
 /// staged binary and object sizes for the receipt.
-/// Tracing-link counting is guest-global, so the two guest legs
+/// Tracing-link counting is guest-global, so the guest legs
 /// must still run serially (`--test-threads=1`): a concurrent
 /// leg's links would corrupt the peak assertion either way.
 fn guest_stage(user: &str, host: &str, port: &str, tag: &str) -> (usize, usize) {
@@ -1584,16 +1600,17 @@ fn guest_cleanup(user: &str, host: &str, port: &str, tag: &str) {
 
 #[test]
 fn guest_program_prepares_on_guest_kernel() {
-    // Lease-gated prepare gate: a short journal-only record on
-    // the isolated guest kernel must get past the whole prepare
-    // stage (object parse, eight-map geometry, birth-offset
-    // install, initial counters, control write/readback). The
-    // Aya loader is the only load path for this object
-    // (bpftool/libbpf rejects its map sections before any
-    // verifier runs), and tracing programs load lazily at
-    // attach time, so prepare success proves the load path
-    // while the verifier verdict itself comes from the attach
-    // leg below. Without a lease this self-skips with a receipt.
+    // Lease-gated prepare gate on the eligible (6.11+)
+    // harness: a short journal-only record must finalize with
+    // exit 0 past the whole prepare stage (object parse,
+    // eight-map geometry, birth-offset install, initial
+    // counters, control write/readback). The Aya loader is the
+    // only load path for this object (bpftool/libbpf rejects
+    // its map sections before any verifier runs), and tracing
+    // programs load lazily at attach time, so prepare success
+    // proves the load path while the verifier verdict itself
+    // comes from the attach leg below. Without a lease this
+    // self-skips with a receipt.
     let Some((user, host, port)) = lease_ssh() else {
         return;
     };
@@ -1617,6 +1634,14 @@ fn guest_program_prepares_on_guest_kernel() {
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     eprintln!("guest prepare output: {text}");
     guest_cleanup(&user, &host, &port, "g1");
+    assert!(
+        text.contains("GUEST_RC=0"),
+        "guest prepare did not exit 0: {text}"
+    );
+    assert!(
+        text.contains("outcome=finalized"),
+        "guest prepare did not finalize: {text}"
+    );
     for stage in [
         "journal open/load unavailable",
         "journal map geometry",
@@ -1636,17 +1661,19 @@ fn guest_program_prepares_on_guest_kernel() {
 
 #[test]
 fn guest_end_to_end_attach_oracle_detach() {
-    // Lease-gated: the lane binary records a short journal-only
-    // capture on the isolated guest under a test-minted admitted
-    // profile (nonqualifying harness; the profile binds the
-    // guest's own live config/BTF/object measurements and is
-    // never shipped). Four live tracing links prove the kernel
-    // verifier accepted all four programs (tracing programs
-    // load at attach time); the oracle verdict further covers
-    // record validity and clean detach (no residual links).
-    // Without a lease this self-skips with a receipt.
+    // Lease-gated: the test binary records a short journal-only
+    // capture on the eligible (6.11+) isolated guest under a
+    // test-minted admitted profile (nonqualifying harness; the
+    // profile binds the guest's own live config/BTF/object
+    // measurements and is never shipped). Four live tracing
+    // links prove the kernel verifier accepted all four
+    // programs (tracing programs load at attach time); the
+    // oracle check further covers the session shape (a journal
+    // block is present) and clean detach (no residual links).
+    // It asserts shape only, not record validity. Without a
+    // lease this self-skips with a receipt.
     // Duration 12 covers the measured attach latency on the
-    // 6.8 harness (about 3 s prepare plus a 2.4 s verifier
+    // eligible harness (about 3 s prepare plus a slow verifier
     // load of the second program) with headroom for the hold
     // phase the peak sampler must observe; the sampler ceiling
     // covers the whole run.
@@ -1734,5 +1761,115 @@ print("ORACLE events=%d" % len(lines))
     guest_cleanup(&user, &host, &port, "g2");
     let after = text.parse::<i64>().unwrap_or(-1);
     assert_eq!(after, base, "residual tracing links after detach: {text}");
-    eprintln!("guest oracle: attach +4 links mid-run, detach clean, session verified");
+    eprintln!("guest oracle: attach +4 links mid-run, detach clean, session shape checked");
+}
+
+#[test]
+fn guest_floor_refuses_prepare_below_611() {
+    // Lease-gated floor refusal on the below-floor harness: a
+    // journal-only record refuses with the frozen exit-3 code
+    // before any native or output creation, and the fix line
+    // names the 6.11 floor. Without a lease this self-skips
+    // with a receipt.
+    let Some((user, host, port)) = lease_ssh_subfloor() else {
+        return;
+    };
+    let Some(_) = built_journal_object() else {
+        eprintln!("guest leg skipped: no built journal object; run cargo build first");
+        return;
+    };
+    guest_cleanup(&user, &host, &port, "g3");
+    let (binary_len, elf_len) = guest_stage(&user, &host, &port, "g3");
+    eprintln!("guest floor-refusal: staged binary={binary_len} object={elf_len}");
+    let out = ssh_run(
+        &user,
+        &host,
+        &port,
+        "timeout 120 sudo /tmp/mv-matrix-g3-memveil record --output /tmp/mv-matrix-g3-cap \
+--capability conversion-journal --duration 1 \
+--journal-object /tmp/mv-matrix-g3-journal.o \
+--profiles-dir /tmp/mv-matrix-g3-profiles 2>&1; echo GUEST_RC=$?; \
+test -e /tmp/mv-matrix-g3-cap && echo CAP_EXISTS || echo CAP_ABSENT",
+    );
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    eprintln!("guest floor-refusal output: {text}");
+    guest_cleanup(&user, &host, &port, "g3");
+    assert!(
+        text.contains("GUEST_RC=3"),
+        "below-floor record did not refuse with exit 3: {text}"
+    );
+    assert!(
+        text.contains("memveil record: journal_profile_not_admitted"),
+        "below-floor refusal lacks the frozen code: {text}"
+    );
+    assert!(
+        text.contains("memveil record: fix: capability conversion-journal needs kernel 6.11+"),
+        "below-floor refusal fix does not name the floor: {text}"
+    );
+    assert!(
+        text.contains("CAP_ABSENT"),
+        "below-floor refusal created output: {text}"
+    );
+    assert!(
+        !text.contains("outcome=finalized"),
+        "below-floor refusal finalized: {text}"
+    );
+}
+
+#[test]
+fn guest_floor_refuses_attach_below_611() {
+    // Lease-gated floor refusal with link accounting on the
+    // below-floor harness: the record refuses with the frozen
+    // exit-3 code and creates no tracing links, so the link
+    // count after the run equals the baseline. Without a lease
+    // this self-skips with a receipt.
+    let Some((user, host, port)) = lease_ssh_subfloor() else {
+        return;
+    };
+    let Some(_) = built_journal_object() else {
+        eprintln!("guest leg skipped: no built journal object; run cargo build first");
+        return;
+    };
+    guest_cleanup(&user, &host, &port, "g4");
+    let (binary_len, elf_len) = guest_stage(&user, &host, &port, "g4");
+    eprintln!("guest floor-attach-refusal: staged binary={binary_len} object={elf_len}");
+    let run = "BASE=$(sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true); \
+BASE=${BASE:-0}; \
+timeout 120 sudo /tmp/mv-matrix-g4-memveil record --output /tmp/mv-matrix-g4-cap \
+--capability conversion-journal --duration 4 \
+--journal-object /tmp/mv-matrix-g4-journal.o \
+--profiles-dir /tmp/mv-matrix-g4-profiles 2>&1; RC=$?; \
+AFTER=$(sudo bpftool link show 2>/dev/null | grep -cE '^[0-9]+: tracing' || true); \
+AFTER=${AFTER:-0}; \
+echo GUEST_RC=$RC BASE_LINKS=$BASE AFTER_LINKS=$AFTER";
+    let out = ssh_run(&user, &host, &port, run);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    eprintln!("guest floor-attach-refusal output: {text}");
+    guest_cleanup(&user, &host, &port, "g4");
+    assert!(
+        text.contains("GUEST_RC=3"),
+        "below-floor record did not refuse with exit 3: {text}"
+    );
+    assert!(
+        text.contains("memveil record: journal_profile_not_admitted"),
+        "below-floor refusal lacks the frozen code: {text}"
+    );
+    let base = text
+        .split("BASE_LINKS=")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .expect("baseline link count");
+    let after = text
+        .split("AFTER_LINKS=")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .expect("after link count");
+    assert_eq!(
+        after, base,
+        "below-floor refusal created tracing links: {text}"
+    );
 }
