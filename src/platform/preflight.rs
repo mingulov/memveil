@@ -274,11 +274,14 @@ struct SigVotes {
 /// explicit off command line, or an off-runtime against a
 /// config force or an on command line, is conflicting. A
 /// malformed runtime read fails closed regardless of the other
-/// votes. Without the runtime read, a config force or an on
-/// command line enforces (a force is not vetoed by an off
-/// command line); any other observed vote leaves enforcement
-/// off; nothing observed is unknown, denied when any source
-/// refused.
+/// votes. Without the runtime read, a refused source
+/// poisons the static picture before any vote is counted,
+/// and a config force or an on command
+/// line never asserts enforcement on its own: on a kernel
+/// built without module-signature support the parameter does
+/// not exist and the token/force does nothing. Any other
+/// observed vote leaves enforcement off; nothing observed is
+/// unknown.
 fn combine_sig(v: &SigVotes) -> PreflightSigEnforce {
     let mut out = PreflightSigEnforce::default();
     if v.sys_malformed {
@@ -303,18 +306,18 @@ fn combine_sig(v: &SigVotes) -> PreflightSigEnforce {
         out.reason = off_voters(true, v.cfg == 0, v.cmd == 0);
         return out;
     }
+    if v.sys_denied || v.cfg_denied || v.cmd_denied {
+        out.reason = "denied".to_string();
+        return out;
+    }
     if v.cfg == 1 || v.cmd == 1 {
-        out.state = "enforced".to_string();
-        out.reason = on_voters(false, v.cfg == 1, v.cmd == 1);
+        out.reason = "runtime_unobserved".to_string();
         return out;
     }
     if v.cfg != -1 || v.cmd != -1 {
         out.state = "not_enforced".to_string();
         out.reason = off_voters(false, v.cfg == 0, v.cmd == 0);
         return out;
-    }
-    if v.sys_denied || v.cfg_denied || v.cmd_denied {
-        out.reason = "denied".to_string();
     }
     out
 }
@@ -604,10 +607,11 @@ struct ParsedSource {
 /// Validate one swap source path.
 ///
 /// Absolute paths only, no NUL, no `..` segment, valid UTF-8.
-/// `/dev/mapper/<name>` resolves through a dm-name scan;
-/// single-level `/dev` names resolve as block nodes; every
-/// other absolute path is an unsupported swap file, never
-/// resolved. The label is sanitized; hostile bytes collapse.
+/// `/dev/mapper/<name>` resolves through a dm-name scan but
+/// labels bare: mapper names never reach a fact. Single-level
+/// `/dev` names resolve as block nodes; every other absolute
+/// path is an unsupported swap file, never resolved. The
+/// label is sanitized; hostile bytes collapse.
 fn parse_source(source: &[u8]) -> ParsedSource {
     let invalid = ParsedSource {
         kind: SourceKind::Invalid,
@@ -639,10 +643,9 @@ fn parse_source(source: &[u8]) -> ParsedSource {
             if mapper.is_empty() || mapper.contains(&b'/') {
                 return invalid;
             }
-            let label = format!("mapper:{}", output_label(mapper));
             return ParsedSource {
                 kind: SourceKind::Mapper,
-                label,
+                label: "mapper".to_string(),
                 name: mapper.to_vec(),
             };
         }
@@ -676,6 +679,51 @@ fn is_zram(name: &[u8]) -> bool {
     !rest.is_empty() && rest.iter().all(|b| b.is_ascii_digit())
 }
 
+/// True for `loop<N>` device names, with or without a `p<M>` partition suffix.
+fn is_loop(name: &[u8]) -> bool {
+    let rest = match name.strip_prefix(b"loop") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    let mut digits = 0;
+    while digits < rest.len() && rest[digits].is_ascii_digit() {
+        digits += 1;
+    }
+    if digits == 0 {
+        return false;
+    }
+    if digits == rest.len() {
+        return true;
+    }
+    if rest[digits] != b'p' {
+        return false;
+    }
+    let part = &rest[digits + 1..];
+    !part.is_empty() && part.iter().all(|b| b.is_ascii_digit())
+}
+
+/// True for a dm uuid minted by an encrypting libcryptsetup target.
+///
+/// The matched forms are the encrypting subset of
+/// libcryptsetup's `CRYPT-<type>-` device-uuid naming,
+/// verified against the type tokens in the installed
+/// libcryptsetup (`CRYPT-%s...` with LUKS1, LUKS2, PLAIN,
+/// TCRYPT, BITLK, FVAULT2). Non-encrypting targets sharing
+/// the family prefix (`CRYPT-INTEGRITY-`, `CRYPT-VERITY-`)
+/// are not encryption layers. Matching is exact bytes in
+/// memory; uuid bytes never reach a fact.
+fn is_encrypting_uuid(raw: &[u8]) -> bool {
+    const FORMS: [&[u8]; 6] = [
+        b"CRYPT-LUKS1-",
+        b"CRYPT-LUKS2-",
+        b"CRYPT-PLAIN-",
+        b"CRYPT-TCRYPT-",
+        b"CRYPT-BITLK-",
+        b"CRYPT-FVAULT2-",
+    ];
+    FORMS.iter().any(|form| raw.starts_with(form))
+}
+
 /// One branch verdict under construction.
 fn branch_of(source: String, device: String, verdict: &str, reason: &str) -> PreflightSwapBranch {
     PreflightSwapBranch {
@@ -691,10 +739,17 @@ fn branch_of(source: String, device: String, verdict: &str, reason: &str) -> Pre
 struct WalkState {
     /// Canonical node ids in visit order (cycle detection).
     visited: Vec<String>,
-    /// True once any walked node reported a crypt layer.
-    crypt_seen: bool,
     /// First failure reason, if the walk went unresolved.
     failure: Option<String>,
+}
+
+/// Outcome of one walked subtree, meaningful only while the walk holds no failure.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Subtree {
+    /// A crypt layer covers every clean path below this node.
+    Encrypted,
+    /// Resolved with no crypt layer on any path below this node.
+    Plain,
 }
 
 /// One slave-name resolution: the node, or the failure class.
@@ -806,48 +861,63 @@ fn resolve_mapper(reader: &EvidenceReader, want: &[u8]) -> MapperHit {
 /// that vanishes between the presence read and the backing
 /// walk resolves to unresolved, never to a verdict. Revisits
 /// report a cycle; depth and node caps report truncated. A
-/// crypt layer is the `CRYPT-` uuid prefix matched in memory;
-/// uuid bytes never reach a fact.
-fn walk_node(reader: &EvidenceReader, node: &str, depth: usize, walk: &mut WalkState) {
+/// crypt layer is an encrypting libcryptsetup uuid form
+/// matched in memory; uuid bytes never reach a fact. A loop
+/// node is a file indirection the allowlist never resolves:
+/// unsupported, never a resolved negative.
+///
+/// Encryption accounts per path, never walk-global: a crypt
+/// layer at this node covers every clean path below it, while
+/// sibling subtrees that disagree (one encrypted, one plain)
+/// make the node mixed. The return value is meaningful only
+/// while the walk holds no failure.
+fn walk_node(reader: &EvidenceReader, node: &str, depth: usize, walk: &mut WalkState) -> Subtree {
     if walk.failure.is_some() {
-        return;
+        return Subtree::Plain;
     }
     if depth > MAX_WALK_DEPTH || walk.visited.len() >= MAX_WALK_NODES {
         walk.failure = Some("truncated".to_string());
-        return;
+        return Subtree::Plain;
     }
     if walk.visited.iter().any(|v| v == node) {
         walk.failure = Some("cycle".to_string());
-        return;
+        return Subtree::Plain;
     }
     match preflight_state(reader, node) {
         EVIDENCE_OK => {}
         EVIDENCE_DENIED => {
             walk.failure = Some("denied".to_string());
-            return;
+            return Subtree::Plain;
         }
         _ => {
             walk.failure = Some("unresolved".to_string());
-            return;
+            return Subtree::Plain;
         }
     }
     walk.visited.push(node.to_string());
+    if node
+        .rsplit('/')
+        .next()
+        .is_some_and(|base| is_loop(base.as_bytes()))
+    {
+        walk.failure = Some("unsupported_loop_backing".to_string());
+        return Subtree::Plain;
+    }
     let uuid_path = format!("{node}/dm/uuid");
+    let mut node_crypt = false;
     match preflight_state(reader, &uuid_path) {
         EVIDENCE_OK => match read_preflight(reader, &uuid_path, DM_ID_CAP) {
             Ok(raw) => {
-                if raw.starts_with(b"CRYPT-") {
-                    walk.crypt_seen = true;
-                }
+                node_crypt = is_encrypting_uuid(&raw);
             }
             Err(e) => {
                 walk.failure = Some(read_failure_reason(e.code));
-                return;
+                return Subtree::Plain;
             }
         },
         EVIDENCE_DENIED => {
             walk.failure = Some("denied".to_string());
-            return;
+            return Subtree::Plain;
         }
         _ => {}
     }
@@ -856,44 +926,76 @@ fn walk_node(reader: &EvidenceReader, node: &str, depth: usize, walk: &mut WalkS
         EVIDENCE_OK => {}
         EVIDENCE_DENIED => {
             walk.failure = Some("denied".to_string());
-            return;
+            return Subtree::Plain;
         }
-        _ => return,
+        _ => {
+            return if node_crypt {
+                Subtree::Encrypted
+            } else {
+                Subtree::Plain
+            };
+        }
     }
     let slaves = match list_preflight_dir(reader, &slaves_path, MAX_SLAVES) {
         Ok(slaves) => slaves,
         Err(e) => {
             walk.failure = Some(read_failure_reason(e.code));
-            return;
+            return Subtree::Plain;
         }
     };
+    let mut child_encrypted = false;
+    let mut child_plain = false;
     for slave in &slaves {
         if walk.failure.is_some() {
-            return;
+            return Subtree::Plain;
         }
         if !preflight_device_segment(slave) {
             walk.failure = Some("unresolved".to_string());
-            return;
+            return Subtree::Plain;
         }
         match resolve_child(reader, slave) {
-            ChildNode::Node { path, .. } => walk_node(reader, &path, depth + 1, walk),
+            ChildNode::Node { path, .. } => {
+                let child = walk_node(reader, &path, depth + 1, walk);
+                if walk.failure.is_some() {
+                    return Subtree::Plain;
+                }
+                match child {
+                    Subtree::Encrypted => child_encrypted = true,
+                    Subtree::Plain => child_plain = true,
+                }
+            }
             ChildNode::Denied => {
                 walk.failure = Some("denied".to_string());
-                return;
+                return Subtree::Plain;
             }
             ChildNode::Truncated => {
                 walk.failure = Some("truncated".to_string());
-                return;
+                return Subtree::Plain;
             }
             ChildNode::Missing => {
                 walk.failure = Some("unresolved".to_string());
-                return;
+                return Subtree::Plain;
             }
         }
     }
+    if walk.failure.is_some() {
+        return Subtree::Plain;
+    }
+    if node_crypt {
+        return Subtree::Encrypted;
+    }
+    if child_encrypted && child_plain {
+        walk.failure = Some("mixed".to_string());
+        return Subtree::Plain;
+    }
+    if child_encrypted {
+        Subtree::Encrypted
+    } else {
+        Subtree::Plain
+    }
 }
 
-/// Finish one walked branch: the failure, the crypt layer, or the leaf.
+/// Finish one walked branch: the failure, the subtree outcome, or the leaf.
 ///
 /// The canonical device label persists only on a clean walk;
 /// a failed walk proves no identity.
@@ -901,12 +1003,13 @@ fn finish_walk(
     source: String,
     device: String,
     walk: &WalkState,
+    outcome: Subtree,
     zram_leaf: bool,
 ) -> PreflightSwapBranch {
     if let Some(reason) = &walk.failure {
         return branch_of(source, String::new(), "unknown", reason);
     }
-    if walk.crypt_seen {
+    if outcome == Subtree::Encrypted {
         return branch_of(source, device, "encrypted", "");
     }
     if zram_leaf {
@@ -960,8 +1063,14 @@ fn resolve_zram(reader: &EvidenceReader, parsed: &ParsedSource) -> PreflightSwap
         }
     }
     let mut walk = WalkState::default();
-    walk_node(reader, &node, 0, &mut walk);
-    finish_walk(parsed.label.clone(), format!("dev:{name}"), &walk, true)
+    let outcome = walk_node(reader, &node, 0, &mut walk);
+    finish_walk(
+        parsed.label.clone(),
+        format!("dev:{name}"),
+        &walk,
+        outcome,
+        true,
+    )
 }
 
 /// Resolve one whole/partition block-device swap source.
@@ -973,8 +1082,8 @@ fn resolve_device(reader: &EvidenceReader, parsed: &ParsedSource) -> PreflightSw
     match resolve_child(reader, &name) {
         ChildNode::Node { path, label } => {
             let mut walk = WalkState::default();
-            walk_node(reader, &path, 0, &mut walk);
-            finish_walk(parsed.label.clone(), label, &walk, false)
+            let outcome = walk_node(reader, &path, 0, &mut walk);
+            finish_walk(parsed.label.clone(), label, &walk, outcome, false)
         }
         ChildNode::Denied => branch_of(parsed.label.clone(), String::new(), "unknown", "denied"),
         ChildNode::Truncated => {
@@ -1001,8 +1110,14 @@ fn resolve_mapper_source(reader: &EvidenceReader, parsed: &ParsedSource) -> Pref
                 }
             }
             let mut walk = WalkState::default();
-            walk_node(reader, &node, 0, &mut walk);
-            finish_walk(parsed.label.clone(), format!("dev:dm-{n}"), &walk, false)
+            let outcome = walk_node(reader, &node, 0, &mut walk);
+            finish_walk(
+                parsed.label.clone(),
+                format!("dev:dm-{n}"),
+                &walk,
+                outcome,
+                false,
+            )
         }
         MapperHit::Denied => branch_of(parsed.label.clone(), String::new(), "unknown", "denied"),
         MapperHit::Missing => {
@@ -1029,6 +1144,16 @@ fn resolve_branch(reader: &EvidenceReader, entry: &SwapEntry) -> PreflightSwapBr
         SourceKind::Device => {
             if is_zram(&parsed.name) {
                 resolve_zram(reader, &parsed)
+            } else if is_loop(&parsed.name) {
+                // A loop device is a file indirection the
+                // allowlist never resolves: unsupported, never a
+                // resolved negative.
+                branch_of(
+                    parsed.label,
+                    String::new(),
+                    "unknown",
+                    "unsupported_loop_backing",
+                )
             } else {
                 resolve_device(reader, &parsed)
             }
@@ -1304,14 +1429,18 @@ mod tests {
             (off.state.as_str(), off.reason.as_str()),
             ("not_enforced", "sysfs+config+cmdline")
         );
-        // A config force is not vetoed by an off command line.
+        // A static on-vote without the runtime parameter
+        // never asserts enforcement.
         let force = combine_sig(&votes(-1, 1, 0));
         assert_eq!(
             (force.state.as_str(), force.reason.as_str()),
-            ("enforced", "config")
+            ("unknown", "runtime_unobserved")
         );
         let cmd = combine_sig(&votes(-1, -1, 1));
-        assert_eq!(cmd.reason, "cmdline");
+        assert_eq!(
+            (cmd.state.as_str(), cmd.reason.as_str()),
+            ("unknown", "runtime_unobserved")
+        );
         let cfg_off = combine_sig(&votes(-1, 0, -1));
         assert_eq!(
             (cfg_off.state.as_str(), cfg_off.reason.as_str()),
@@ -1325,6 +1454,26 @@ mod tests {
         let mut denied = votes(-1, -1, -1);
         denied.sys_denied = true;
         assert_eq!(combine_sig(&denied).reason, "denied");
+        // A denied runtime read plus a static vote is denied,
+        // never an assertion in either direction.
+        let mut denied_off = votes(-1, 0, -1);
+        denied_off.sys_denied = true;
+        assert_eq!(
+            (
+                combine_sig(&denied_off).state.as_str(),
+                combine_sig(&denied_off).reason.as_str()
+            ),
+            ("unknown", "denied")
+        );
+        let mut denied_on = votes(-1, -1, 1);
+        denied_on.sys_denied = true;
+        assert_eq!(
+            (
+                combine_sig(&denied_on).state.as_str(),
+                combine_sig(&denied_on).reason.as_str()
+            ),
+            ("unknown", "denied")
+        );
         let mut bad = votes(-1, 1, 1);
         bad.sys_malformed = true;
         let malformed = combine_sig(&bad);
@@ -1371,7 +1520,12 @@ mod tests {
         assert_eq!(dev.name, b"dm-0");
         let mapper = parse_source(b"/dev/mapper/crypt");
         assert!(matches!(mapper.kind, SourceKind::Mapper));
-        assert_eq!(mapper.label, "mapper:crypt");
+        assert_eq!(mapper.label, "mapper");
+        // A LUKS-UUID mapper name leaves no trace in the label.
+        let luks = parse_source(b"/dev/mapper/luks-46d5a3c2-1e04-4f3a-8d7c-6b5a4e3f2a19");
+        assert!(matches!(luks.kind, SourceKind::Mapper));
+        assert_eq!(luks.label, "mapper");
+        assert!(!luks.label.contains("luks-"));
         let file = parse_source(b"/swapfile");
         assert!(matches!(file.kind, SourceKind::File));
         assert_eq!(file.label, "file:swapfile");
@@ -1545,9 +1699,9 @@ mod tests {
         }
         let r = reader_for(&tmp);
         let mut walk = WalkState::default();
-        walk_node(&r, "/sys/block/dm-0", 0, &mut walk);
+        let outcome = walk_node(&r, "/sys/block/dm-0", 0, &mut walk);
         assert_eq!(walk.failure, Some("truncated".to_string()));
-        assert!(!walk.crypt_seen);
+        assert_eq!(outcome, Subtree::Plain);
     }
 
     #[test]
@@ -1563,8 +1717,9 @@ mod tests {
         }
         let r = reader_for(&tmp);
         let mut walk = WalkState::default();
-        walk_node(&r, "/sys/block/dm-0", 0, &mut walk);
+        let outcome = walk_node(&r, "/sys/block/dm-0", 0, &mut walk);
         assert_eq!(walk.failure, Some("truncated".to_string()));
+        assert_eq!(outcome, Subtree::Plain);
         assert_eq!(walk.visited.len(), 64);
     }
 
@@ -1589,6 +1744,136 @@ mod tests {
         assert_eq!(branch.verdict, "unknown");
         assert_eq!(branch.reason, "truncated");
         assert!(branch.device.is_empty());
+    }
+
+    #[test]
+    fn fanout_mixed_paths_report_unknown() {
+        // One dm-crypt slave plus one plain slave under an
+        // unencrypted parent is mixed, never encrypted.
+        let tmp = tree();
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-2/dm")).expect("dm");
+        std::fs::write(tmp.path().join("sys/block/dm-2/dm/uuid"), b"LVM-x\n").expect("uuid");
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-2/slaves")).expect("slaves");
+        std::fs::write(tmp.path().join("sys/block/dm-2/slaves/dm-0"), b"").expect("slave");
+        std::fs::write(tmp.path().join("sys/block/dm-2/slaves/sdb"), b"").expect("slave");
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-0/dm")).expect("dm");
+        std::fs::write(
+            tmp.path().join("sys/block/dm-0/dm/uuid"),
+            b"CRYPT-LUKS2-x\n",
+        )
+        .expect("uuid");
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-0/slaves")).expect("slaves");
+        std::fs::create_dir_all(tmp.path().join("sys/block/sdb")).expect("leaf");
+        let r = reader_for(&tmp);
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/dm-2".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(branch.verdict, "unknown");
+        assert_eq!(branch.reason, "mixed");
+        assert!(branch.device.is_empty());
+        // A crypt layer at the walked node itself still
+        // covers every clean path below it.
+        std::fs::write(
+            tmp.path().join("sys/block/dm-2/dm/uuid"),
+            b"CRYPT-LUKS2-top\n",
+        )
+        .expect("uuid");
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/dm-2".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(
+            (branch.verdict.as_str(), branch.device.as_str()),
+            ("encrypted", "dev:dm-2")
+        );
+    }
+
+    #[test]
+    fn uuid_prefix_matches_encrypting_targets_only() {
+        for form in [
+            "CRYPT-LUKS1-x",
+            "CRYPT-LUKS2-x",
+            "CRYPT-PLAIN-swap",
+            "CRYPT-TCRYPT-x",
+            "CRYPT-BITLK-x",
+            "CRYPT-FVAULT2-x",
+        ] {
+            assert!(is_encrypting_uuid(form.as_bytes()), "{form}");
+        }
+        for form in ["CRYPT-INTEGRITY-x", "CRYPT-VERITY-x", "CRYPT-", "LVM-x", ""] {
+            assert!(!is_encrypting_uuid(form.as_bytes()), "{form}");
+        }
+        // Standalone dm-integrity is not an encryption layer.
+        let tmp = tree();
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-0/dm")).expect("dm");
+        std::fs::write(
+            tmp.path().join("sys/block/dm-0/dm/uuid"),
+            b"CRYPT-INTEGRITY-x\n",
+        )
+        .expect("uuid");
+        let r = reader_for(&tmp);
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/dm-0".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(branch.verdict, "no_encryption_observed");
+        assert_eq!(branch.device, "dev:dm-0");
+    }
+
+    #[test]
+    fn loop_backing_is_unsupported_never_negative() {
+        assert!(is_loop(b"loop0"));
+        assert!(is_loop(b"loop12"));
+        assert!(is_loop(b"loop0p1"));
+        assert!(!is_loop(b"loop"));
+        assert!(!is_loop(b"loopx"));
+        assert!(!is_loop(b"sda"));
+        assert!(!is_loop(b"loop0p"));
+        // A loop device is a file indirection the allowlist
+        // never resolves: unknown, never a resolved negative.
+        let tmp = tree();
+        std::fs::create_dir_all(tmp.path().join("sys/block/loop0")).expect("loop");
+        let r = reader_for(&tmp);
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/loop0".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(
+            (branch.verdict.as_str(), branch.reason.as_str()),
+            ("unknown", "unsupported_loop_backing")
+        );
+        assert_eq!(branch.source, "dev:loop0");
+        assert!(branch.device.is_empty());
+        // The same holds one level down: a loop slave under
+        // an unencrypted parent is unsupported, not negative.
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-0/dm")).expect("dm");
+        std::fs::write(tmp.path().join("sys/block/dm-0/dm/uuid"), b"LVM-x\n").expect("uuid");
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-0/slaves")).expect("slaves");
+        std::fs::write(tmp.path().join("sys/block/dm-0/slaves/loop0"), b"").expect("slave");
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/dm-0".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(
+            (branch.verdict.as_str(), branch.reason.as_str()),
+            ("unknown", "unsupported_loop_backing")
+        );
     }
 
     #[test]

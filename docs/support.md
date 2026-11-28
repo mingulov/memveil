@@ -109,7 +109,9 @@ verdict, and nothing changes a kernel setting.
   carries that typed inability and attempts no bypass.
 - Module-signature enforcement combines the sysfs
   parameter, the kernel config force option, and the
-  command-line token. Any disagreement is `unknown`.
+  command-line token. The sysfs parameter is runtime truth:
+  a config force or command-line token alone never asserts
+  enforcement without it. Any disagreement is `unknown`.
 - Hibernation reports the `/sys/power/state`
   advertisement, the selected method, whether a resume
   target is configured (never the target itself), and the
@@ -128,7 +130,9 @@ verdict, and nothing changes a kernel setting.
   fact, never plaintext, host-read, or hardware-encryption
   proof. Mixed, denied, unresolved, unsupported, or
   unproved branches keep the aggregate `unknown` while
-  each branch keeps its own fact. No configured swap, or
+  each branch keeps its own fact; paths that disagree
+  inside one branch report that branch `unknown` with
+  reason `mixed`. No configured swap, or
   RAM-only zram without writeback, yields a null backing
   with its reason.
 

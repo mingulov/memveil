@@ -3647,12 +3647,17 @@ mod tests {
         let off = drep2_for("preflight-sigenforce-off", &profiles_dir());
         assert_eq!(off.preflight.module_signature.state, "not_enforced");
         assert_eq!(off.preflight.module_signature.reason, "sysfs+config");
+        // A static on-vote without the runtime parameter
+        // never asserts enforcement.
         let force = drep2_for("preflight-sigenforce-force", &profiles_dir());
-        assert_eq!(force.preflight.module_signature.state, "enforced");
-        assert_eq!(force.preflight.module_signature.reason, "config");
+        assert_eq!(force.preflight.module_signature.state, "unknown");
+        assert_eq!(
+            force.preflight.module_signature.reason,
+            "runtime_unobserved"
+        );
         let cmd = drep2_for("preflight-sigenforce-cmdline", &profiles_dir());
-        assert_eq!(cmd.preflight.module_signature.state, "enforced");
-        assert_eq!(cmd.preflight.module_signature.reason, "cmdline");
+        assert_eq!(cmd.preflight.module_signature.state, "unknown");
+        assert_eq!(cmd.preflight.module_signature.reason, "runtime_unobserved");
         let clash = drep2_for("preflight-sigenforce-conflict", &profiles_dir());
         assert_eq!(clash.preflight.module_signature.state, "unknown");
         assert_eq!(clash.preflight.module_signature.reason, "conflicting");
@@ -3926,7 +3931,7 @@ mod tests {
         let first = &drep.preflight.swap.branches[0];
         let second = &drep.preflight.swap.branches[1];
         assert_eq!(first.source, "dev:dm-0");
-        assert_eq!(second.source, "mapper:cryptswap");
+        assert_eq!(second.source, "mapper");
         assert_eq!(first.device, "dev:dm-0");
         assert_eq!(second.device, "dev:dm-0");
         assert_eq!(first.verdict, "encrypted");

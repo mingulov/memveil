@@ -89,8 +89,8 @@ path is that report's operational purpose.)
 The `preflight ...` note lines in a doctor report keep the
 same bounds. Every fact is a typed word (`enforced`,
 `available`, `loaded`, `present`) or a sanitized label:
-swap sources render as `dev:`, `mapper:`, or `file:` plus
-an allowlisted name, and hostile bytes collapse to
+swap sources render as `dev:` or `file:` plus an allowlisted
+name, or bare `mapper`, and hostile bytes collapse to
 `renamed` or `invalid`. Resume target values, mapper names,
 and dm uuids never reach a fact; only their observed
 presence shapes the verdict. A resolved-negative backing

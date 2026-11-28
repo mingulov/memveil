@@ -270,9 +270,9 @@ impl Default for PreflightKdump {
 
 /// One swap source and its resolved backing verdict.
 ///
-/// Labels are sanitized (`dev:`, `mapper:`, `file:` plus an
-/// allowlisted name, or `invalid`); raw paths, mapper names,
-/// and dm uuids never reach a fact.
+/// Labels are sanitized (`dev:` or `file:` plus an
+/// allowlisted name, bare `mapper`, or `invalid`); raw paths,
+/// mapper names, and dm uuids never reach a fact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreflightSwapBranch {
     /// Sanitized source label.
