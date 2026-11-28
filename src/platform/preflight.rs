@@ -1569,6 +1569,29 @@ mod tests {
     }
 
     #[test]
+    fn oversized_uuid_truncates_branch() {
+        let tmp = tree();
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-0/dm")).expect("dm");
+        std::fs::write(
+            tmp.path().join("sys/block/dm-0/dm/uuid"),
+            vec![b'C'; DM_ID_CAP + 44],
+        )
+        .expect("uuid");
+        std::fs::create_dir_all(tmp.path().join("sys/block/dm-0/slaves")).expect("slaves");
+        let r = reader_for(&tmp);
+        let branch = resolve_branch(
+            &r,
+            &SwapEntry {
+                source: b"/dev/dm-0".to_vec(),
+                deleted: false,
+            },
+        );
+        assert_eq!(branch.verdict, "unknown");
+        assert_eq!(branch.reason, "truncated");
+        assert!(branch.device.is_empty());
+    }
+
+    #[test]
     fn mapper_scan_miss_and_denial() {
         let tmp = tree();
         let r = reader_for(&tmp);
