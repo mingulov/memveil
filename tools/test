@@ -13,7 +13,7 @@
 # exposure-protocols, exposure-platforms, exposure-vmbus,
 # exposure-mappings, exposure-context, exposure-cli,
 # exposure-adversarial, exposure-acceptance, exposure-census,
-# journal-contracts,
+# journal-contracts, journal-reports,
 # top, oracle-ledger, vm-oracle,
 # profile-semantics, vm-lifecycle, vm-copy, vm-real-io,
 # vm-topwalk, vm-kernels, vm-scenarios, vm-stop,
@@ -1355,6 +1355,92 @@ suite_journal_contracts() {
     python3 "$ROOT/tests/journal/test_wire.py"
 }
 
+suite_journal_reports() {
+    BIN="$(memveil_bin)"
+    if [ ! -x "$BIN" ]; then
+        echo "journal-reports: missing $BIN (run $(memveil_build_hint) first)" >&2
+        return 1
+    fi
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    report_pass=0
+    report_fail=0
+    for s in success failure orphan-encrypt overlap pre-attach unresolved \
+            disabled persistent invalid-pages censored; do
+        expect_stdout "journal-$s-text" \
+            "tests/golden/report-journal-$s.txt" 0 \
+            report "$ROOT/tests/fixtures/journal/$s"
+        expect_stdout "journal-$s-markdown" \
+            "tests/golden/report-journal-$s.md" 0 \
+            report --format markdown "$ROOT/tests/fixtures/journal/$s"
+    done
+    for s in initial-checkpoint open-checkpoint; do
+        expect_stdout "journal-$s-text" \
+            "tests/golden/report-journal-$s.txt" 4 \
+            report --allow-partial "$ROOT/tests/fixtures/journal/$s"
+        expect_stdout "journal-$s-markdown" \
+            "tests/golden/report-journal-$s.md" 4 \
+            report --format markdown --allow-partial \
+            "$ROOT/tests/fixtures/journal/$s"
+    done
+    expect_error "journal-duplicate-report" 2 \
+        report "$ROOT/tests/fixtures/journal/duplicate"
+    expect_error "journal-duplicate-top" 2 \
+        top --interval 1s "$ROOT/tests/fixtures/journal/duplicate"
+    expect_text_exit "journal-success-strict" \
+        tests/fixtures/journal/success 4 --strict
+    expect_text_exit "journal-checkpoint-strict" \
+        tests/fixtures/journal/open-checkpoint 4 --allow-partial --strict
+    for s in success failure orphan-encrypt overlap pre-attach unresolved \
+            disabled persistent invalid-pages censored; do
+        "$BIN" report --format json "$ROOT/tests/fixtures/journal/$s" \
+            >"$TMP/journal-$s.json" 2>"$TMP/err"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            report_bad "journal-$s-json: exit $rc, want 0"
+            continue
+        fi
+        if ! python3 - "$ROOT/tools/validate-journal-contracts" "$TMP/journal-$s.json" <<'PYEOF'
+import importlib.machinery, json, sys
+loader = importlib.machinery.SourceFileLoader("journal_contracts", sys.argv[1])
+contract = loader.load_module()
+contract.validate_document(json.load(open(sys.argv[2])), "report-v0.2.0")
+PYEOF
+        then
+            report_bad "journal-$s-json: fails report-v0.2.0 schema"
+            continue
+        fi
+        report_ok "journal-$s-json (exit 0, schema valid)"
+    done
+    for s in initial-checkpoint open-checkpoint; do
+        "$BIN" report --format json --allow-partial \
+            "$ROOT/tests/fixtures/journal/$s" \
+            >"$TMP/journal-$s.json" 2>"$TMP/err"
+        rc=$?
+        if [ "$rc" -ne 4 ]; then
+            report_bad "journal-$s-json: exit $rc, want 4"
+            continue
+        fi
+        if ! python3 - "$ROOT/tools/validate-journal-contracts" "$TMP/journal-$s.json" <<'PYEOF'
+import importlib.machinery, json, sys
+loader = importlib.machinery.SourceFileLoader("journal_contracts", sys.argv[1])
+contract = loader.load_module()
+contract.validate_document(json.load(open(sys.argv[2])), "report-v0.2.0")
+PYEOF
+        then
+            report_bad "journal-$s-json: fails report-v0.2.0 schema"
+            continue
+        fi
+        report_ok "journal-$s-json (exit 4, schema valid)"
+    done
+    (cd "$ROOT" && fast_cargo test --locked --test journal_reports) || return 1
+    echo "journal-reports: $report_pass passed, $report_fail failed"
+    if [ "$report_fail" -ne 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
 suite_confidential_hooks() {
     python3 "$ROOT/tests/confidential/test_conversion_hooks.py"
 }
@@ -2465,6 +2551,9 @@ case "$1" in
         ;;
     journal-contracts)
         suite_journal_contracts
+        ;;
+    journal-reports)
+        suite_journal_reports
         ;;
     top)
         suite_top

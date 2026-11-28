@@ -10,12 +10,15 @@
 //! empty.
 
 use super::filter::resolve_device_filter;
+use crate::analysis::journal_conversions::{JOURNAL_STATE_REASON, JournalSummary};
 use crate::model::report::Report;
 use crate::model::session::Channel;
 use crate::model::validate::format_u64;
 
 /// Report schema version stamped on every JSON document.
 pub const REPORT_SCHEMA_VERSION: &str = "0.1.4";
+/// Journal report schema version stamped on journal JSON documents.
+pub const JOURNAL_REPORT_SCHEMA_VERSION: &str = "0.2.0";
 
 fn hex_nibble(v: u8) -> u8 {
     if v < 10 { b'0' + v } else { b'a' + v - 10 }
@@ -387,6 +390,297 @@ pub fn render_json(rep: &Report, device_filter: &str) -> String {
         }
         out.push_str("  ]\n");
     }
+    out.push_str("}\n");
+    out
+}
+
+fn journal_nullable(value: Option<u64>) -> String {
+    match value {
+        Some(n) => format!("\"{}\"", format_u64(n)),
+        None => "null".to_string(),
+    }
+}
+
+fn journal_reason(value: &Option<u64>, reason: &str) -> String {
+    if value.is_some() {
+        "null".to_string()
+    } else {
+        escape_json(reason)
+    }
+}
+
+/// Render one conversion-journal report as pretty JSON per
+/// report-v0.2.0.schema.json.
+///
+/// Same shell as [`render_json`] (provenance, quality echo, verdict,
+/// findings, limitations, integrity) with the journal measurement
+/// block and without the capabilities block the 0.2.0 oracles omit.
+/// Every number is an exact quoted decimal; large values never pass
+/// through a float. The device filter names nothing journal-scoped,
+/// so it narrows no rows.
+pub fn render_journal_json(rep: &Report, summary: &JournalSummary, device_filter: &str) -> String {
+    let _ = device_filter;
+    let mut out = String::from("{\n");
+    out.push_str(&format!(
+        "  \"schema_version\": \"{JOURNAL_REPORT_SCHEMA_VERSION}\",\n"
+    ));
+    out.push_str(&format!(
+        "  \"session_id\": {},\n",
+        escape_json(&rep.session_id)
+    ));
+    if rep.synthetic {
+        out.push_str("  \"synthetic\": true,\n");
+    } else {
+        out.push_str("  \"synthetic\": false,\n");
+    }
+    out.push_str(&format!(
+        "  \"engine_version\": {},\n",
+        escape_json(&rep.engine_version)
+    ));
+    out.push_str("  \"environment\": {\n");
+    out.push_str(&format!("    \"mode\": {},\n", escape_json(&rep.env.mode)));
+    out.push_str(&format!(
+        "    \"detection\": {},\n",
+        escape_json(&rep.env.detection)
+    ));
+    if rep.env.asserted_mode_present {
+        out.push_str("    \"asserted_mode\": ");
+        if rep.env.has_asserted_mode {
+            out.push_str(&escape_json(&rep.env.asserted_mode));
+        } else {
+            out.push_str("null");
+        }
+        out.push_str(",\n");
+    }
+    out.push_str(&format!(
+        "    \"attestation\": {},\n",
+        escape_json(&rep.env.attestation)
+    ));
+    if rep.env.evidence.is_empty() {
+        out.push_str("    \"evidence\": []\n");
+    } else {
+        out.push_str("    \"evidence\": [\n");
+        for (i, e) in rep.env.evidence.iter().enumerate() {
+            out.push_str(&format!(
+                "      {{\"type\": {}, \"source\": {}, \"interpretation\": {}}}",
+                escape_json(&e.item_type),
+                escape_json(&e.source),
+                escape_json(&e.interpretation)
+            ));
+            if i + 1 < rep.env.evidence.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("    ]\n");
+    }
+    out.push_str("  },\n");
+    out.push_str("  \"device_catalog\": {\n");
+    if rep.devices.is_empty() {
+        out.push_str("    \"devices\": []\n");
+    } else {
+        out.push_str("    \"devices\": [\n");
+        for (i, d) in rep.devices.iter().enumerate() {
+            out.push_str(&format!(
+                "      {{\"device_id\": {}, \"name\": {}",
+                escape_json(&d.device_id),
+                escape_json(&d.name)
+            ));
+            if d.driver_present {
+                out.push_str(", \"driver\": ");
+                if d.has_driver {
+                    out.push_str(&escape_json(&d.driver));
+                } else {
+                    out.push_str("null");
+                }
+            }
+            out.push_str(&format!(
+                ", \"identity_status\": {}}}",
+                escape_json(&d.identity_status)
+            ));
+            if i + 1 < rep.devices.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("    ]\n");
+    }
+    out.push_str("  },\n");
+    out.push_str("  \"quality\": {\n");
+    out.push_str(&channel_json("detail", &rep.q_detail, 2));
+    out.push_str(",\n");
+    out.push_str(&channel_json("aggregate", &rep.q_aggregate, 2));
+    out.push_str(",\n");
+    out.push_str(&correlation_json(rep, 2));
+    out.push_str(",\n");
+    out.push_str(&channel_json("baseline", &rep.q_baseline, 2));
+    out.push_str(",\n");
+    out.push_str(&channel_json("terminal", &rep.q_terminal, 2));
+    out.push('\n');
+    out.push_str("  },\n");
+    out.push_str("  \"verdict\": {\n");
+    out.push_str(&format!(
+        "    \"name\": {},\n",
+        escape_json(&rep.verdict.name)
+    ));
+    out.push_str(&format!(
+        "    \"loss_ratio_bps\": \"{}\",\n",
+        format_u64(u64::try_from(rep.verdict.loss_ratio_bps).expect("loss_ratio_bps non-negative"))
+    ));
+    out.push_str(&format!(
+        "    \"delivered\": \"{}\"\n",
+        format_u64(rep.detail_delivered)
+    ));
+    out.push_str("  },\n");
+    if rep.metrics.is_empty() {
+        out.push_str("  \"metrics\": [],\n");
+    } else {
+        out.push_str("  \"metrics\": [\n");
+        for (i, m) in rep.metrics.iter().enumerate() {
+            out.push_str(&format!("    {{\"name\": {}", escape_json(&m.name)));
+            out.push_str(", \"value\": ");
+            if m.has_value {
+                out.push_str(&format!("\"{}\"", format_u64(m.value)));
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(&format!(
+                ", \"unit\": {}, \"measurement\": {}, \"coverage\": {}, \"confidence\": {}",
+                escape_json(&m.unit),
+                escape_json(&m.measurement),
+                escape_json(&m.coverage),
+                escape_json(&m.confidence)
+            ));
+            out.push_str(", \"aggregation\": ");
+            if m.has_aggregation {
+                out.push_str(&escape_json(&m.aggregation));
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(", \"sample_count\": ");
+            if m.has_sample_count {
+                out.push_str(&format!("\"{}\"", format_u64(m.sample_count)));
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(", \"dimensions\": {\"device_id\": ");
+            if m.has_device_id {
+                out.push_str(&escape_json(&m.device_id));
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(", \"pool_id\": ");
+            if m.has_pool_id {
+                out.push_str(&escape_json(&m.pool_id));
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(&format!(
+                "}}, \"scope\": {}, \"notes\": {}}}",
+                escape_json(&m.scope),
+                escape_json(&m.notes)
+            ));
+            if i + 1 < rep.metrics.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
+    }
+    if rep.findings.is_empty() {
+        out.push_str("  \"findings\": [],\n");
+    } else {
+        out.push_str("  \"findings\": [\n");
+        for (i, finding) in rep.findings.iter().enumerate() {
+            out.push_str(&format!(
+                "    {{\"code\": {}, \"severity\": {}, \"explanation\": {}, \"evidence_refs\": [",
+                escape_json(&finding.code),
+                escape_json(&finding.severity),
+                escape_json(&finding.explanation)
+            ));
+            for (ri, reference) in finding.evidence_refs.iter().enumerate() {
+                if ri > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&escape_json(reference));
+            }
+            out.push_str(&format!(
+                "], \"scope\": {}, \"limitations\": {}}}",
+                escape_json(&finding.scope),
+                escape_json(&finding.limitations)
+            ));
+            if i + 1 < rep.findings.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
+    }
+    if rep.limitations.is_empty() {
+        out.push_str("  \"limitations\": [],\n");
+    } else {
+        out.push_str("  \"limitations\": [\n");
+        for (i, limitation) in rep.limitations.iter().enumerate() {
+            out.push_str(&format!("    {}", escape_json(limitation)));
+            if i + 1 < rep.limitations.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  ],\n");
+    }
+    out.push_str(&format!(
+        "  \"integrity\": {{\"status\": {}, \"verified_bytes\": \"{}\", \"verified_events\": \"{}\"",
+        escape_json(&rep.integrity_status),
+        format_u64(rep.verified_bytes),
+        format_u64(rep.verified_events)
+    ));
+    if rep.integrity_status == "checkpoint_prefix" {
+        out.push_str(&format!(
+            ", \"unverified_bytes\": \"{}\"",
+            format_u64(rep.unverified_bytes)
+        ));
+    }
+    out.push_str("},\n");
+    out.push_str("  \"journal\": {\n");
+    out.push_str(&format!(
+        "    \"requests\": \"{}\",\n",
+        format_u64(summary.requests)
+    ));
+    out.push_str(&format!(
+        "    \"successes\": \"{}\",\n",
+        format_u64(summary.successes)
+    ));
+    out.push_str(&format!(
+        "    \"failures\": \"{}\",\n",
+        format_u64(summary.failures)
+    ));
+    out.push_str(&format!(
+        "    \"unmatched_exits\": \"{}\",\n",
+        format_u64(summary.unmatched_exits)
+    ));
+    out.push_str(&format!(
+        "    \"censored\": {},\n",
+        journal_nullable(summary.censored)
+    ));
+    out.push_str(&format!(
+        "    \"censored_reason\": {},\n",
+        journal_reason(&summary.censored, &summary.censored_reason)
+    ));
+    out.push_str(&format!(
+        "    \"requested_bytes\": {},\n",
+        journal_nullable(summary.requested_bytes)
+    ));
+    out.push_str(&format!(
+        "    \"requested_bytes_reason\": {},\n",
+        journal_reason(&summary.requested_bytes, &summary.requested_bytes_reason)
+    ));
+    out.push_str("    \"shared_bytes\": null,\n");
+    out.push_str("    \"unreverted_ranges\": null,\n");
+    out.push_str(&format!(
+        "    \"state_reason\": \"{JOURNAL_STATE_REASON}\"\n"
+    ));
+    out.push_str("  }\n");
     out.push_str("}\n");
     out
 }

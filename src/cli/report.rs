@@ -13,15 +13,18 @@
 
 use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
+use crate::analysis::journal_conversions::{JournalAnalyzer, apply_journal_checkpoint};
 use crate::capture::reader::{
-    DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES, ReaderLimits,
-    read_capture, read_capture_os, read_remedy,
+    CaptureReader, DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES,
+    ReaderLimits, read_capture, read_capture_os, read_remedy,
 };
 use crate::cli::durations::parse_duration_ns;
 use crate::model::report::{Report, apply_checkpoint, apply_integrity};
 use crate::platform::stdout::write_stdout;
+use crate::render::json::render_journal_json;
+use crate::render::markdown::render_journal_markdown;
 use crate::render::render::render;
-use crate::render::text::escape_text;
+use crate::render::text::{escape_text, render_journal_text};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 
@@ -938,6 +941,81 @@ pub fn run_report(args: &[String]) -> i64 {
     run_report_parsed(&opts, None)
 }
 
+/// Run the journal report pipeline; return the exit code.
+///
+/// Mirrors the ordinary pipeline with the journal reducer: duplicate
+/// tokens and mixed evidence refuse on the consume path, findings
+/// come from the reducer alone (no legacy diagnosis), the checkpoint
+/// prefix demotes any complete channel, and the journal renderers
+/// print the reduction. Exits match the ordinary convention exactly.
+fn run_journal_report(reader: &mut CaptureReader, opts: &ReportOptions) -> i64 {
+    let mut analyzer = JournalAnalyzer::new(reader.session.clone());
+    loop {
+        let more = match reader.has_more() {
+            Ok(more) => more,
+            Err(e) => {
+                return report_read_failed(&e.message);
+            }
+        };
+        if !more {
+            break;
+        }
+        let ev = match reader.next_event() {
+            Ok(ev) => ev,
+            Err(e) => {
+                return report_read_failed(&e.message);
+            }
+        };
+        if let Err(e) = analyzer.consume(&ev) {
+            return report_failed("memveil report: cannot reduce capture: ", &e.message);
+        }
+    }
+    let mut reduced = match analyzer.finish(reader.session.window_end_ns, reader.partial) {
+        Ok(reduced) => reduced,
+        Err(e) => {
+            return report_failed("memveil report: ", &analysis_error_text(&e.message));
+        }
+    };
+    if reader.checkpoint_prefix {
+        apply_journal_checkpoint(
+            &mut reduced.report,
+            reader.session.integrity.events_bytes,
+            reader.session.integrity.line_count,
+            reader.unverified_bytes,
+        );
+    } else {
+        apply_integrity(
+            &mut reduced.report,
+            reader.integrity_verified,
+            reader.session.integrity.events_bytes,
+            reader.session.integrity.line_count,
+        );
+    }
+    let text = match opts.format.as_str() {
+        "json" => render_journal_json(&reduced.report, &reduced.summary, ""),
+        "markdown" => {
+            render_journal_markdown(&reduced.report, &reduced.summary, &reduced.regions, "")
+        }
+        _ => render_journal_text(&reduced.report, &reduced.summary, &reduced.regions, ""),
+    };
+    if let Err(e) = check_rendered_size(&text, MAX_RENDERED_BYTES) {
+        return report_failed("memveil report: ", &e.message);
+    }
+    if write_stdout(&text).is_err() {
+        let _ = write_stderr("memveil report: cannot write stdout\n");
+        return EXIT_INTERNAL;
+    }
+    let raw = text.as_bytes();
+    if (raw.is_empty() || raw[raw.len() - 1] != 0x0a) && write_stdout("\n").is_err() {
+        let _ = write_stderr("memveil report: cannot write stdout\n");
+        return EXIT_INTERNAL;
+    }
+    if reader.checkpoint_prefix {
+        return EXIT_INCOMPLETE;
+    }
+    exit_for_report(&reduced.report, opts.strict)
+}
+
 /// Run the report pipeline over parsed options; return the exit code.
 ///
 /// `dir_os` carries the raw capture directory when the words did
@@ -957,11 +1035,7 @@ fn run_report_parsed(opts: &ReportOptions, dir_os: Option<&OsStr>) -> i64 {
         Err(e) => return report_read_failed(&e.message),
     };
     if reader.session.has_journal {
-        return report_failed(
-            "memveil report: ",
-            "journal capture refused: the legacy reducer cannot reduce journal events; \
-             journal reducer follow-on pending",
-        );
+        return run_journal_report(&mut reader, opts);
     }
     let mut analyzer = Analyzer::new(reader.session.clone());
     loop {

@@ -36,6 +36,7 @@ use std::cell::RefCell;
 use crate::ENGINE_VERSION;
 use crate::analysis::diagnostics::diagnose_report;
 use crate::analysis::engine::Analyzer;
+use crate::analysis::journal_conversions::{JournalAnalyzer, apply_journal_checkpoint};
 use crate::capture::reader::{
     CaptureReader, DEFAULT_MAX_EVENTS_BYTES, DEFAULT_MAX_LINE_BYTES, DEFAULT_MAX_SESSION_BYTES,
     ReaderLimits, read_capture, read_capture_os, read_remedy,
@@ -62,7 +63,7 @@ use crate::platform::signal::{LiveSignalSource, SignalOut};
 use crate::platform::stdout::write_stdout;
 use crate::render::filter::device_filter_resolves;
 use crate::render::render::render;
-use crate::render::text::render_compact;
+use crate::render::text::{render_compact, render_journal_compact, render_journal_text};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 
@@ -1158,10 +1159,19 @@ fn finish_live(dir: &str, opts: &TopOptions, shown: usize, capture_exit: i64) ->
         Err(e) => return top_read_failed(&e.message),
     };
     if reader.session.has_journal {
-        return top_failed(
-            "memveil top: ",
-            "journal capture refused: the legacy reducer cannot reduce journal events; \
-             journal reducer follow-on pending",
+        let mut journal = JournalAnalyzer::new(reader.session.clone());
+        let mut journal_watch = FilterWatch::new(opts);
+        if shown > 0 {
+            journal_watch.warned = true;
+        }
+        return journal_finish_after_signal(
+            &mut reader,
+            &mut journal,
+            opts,
+            shown as i64,
+            &mut journal_watch,
+            capture_exit,
+            dir,
         );
     }
     let mut analyzer = Analyzer::new(reader.session.clone());
@@ -1278,6 +1288,309 @@ pub fn run_top(args: &[String]) -> i64 {
     run_replay(&mut reader, &opts, false)
 }
 
+/// Render one journal refresh body: compact headlines or full text.
+fn render_journal_block(
+    reduced: &crate::analysis::journal_conversions::JournalReport,
+    compact: bool,
+    filt: &str,
+) -> String {
+    if compact {
+        return render_journal_compact(&reduced.report, &reduced.summary);
+    }
+    render_journal_text(&reduced.report, &reduced.summary, &reduced.regions, filt)
+}
+
+/// Render and print one journal refresh block.
+///
+/// Journal findings come from the reducer alone, so no legacy
+/// diagnosis runs here. Returns the exit code: 0 printed, 2
+/// oversized. Render and stdout failures return Err.
+fn emit_journal_report(
+    reduced: &mut crate::analysis::journal_conversions::JournalReport,
+    filt: &str,
+    seq: i64,
+    horizon_ns: u64,
+    start_ns: u64,
+    compact: bool,
+) -> Result<i64, ()> {
+    let text = render_journal_block(reduced, compact, filt);
+    if check_rendered_size(&text, MAX_RENDERED_BYTES).is_err() {
+        return Ok(top_failed("memveil top: ", "report exceeds size limit"));
+    }
+    print_block(&text, seq, horizon_ns, start_ns, filt)?;
+    Ok(0)
+}
+
+/// Render and print one journal refresh.
+///
+/// Mirrors [`snapshot_block`]: the prefix is unverified, the filter
+/// warns once, and an unrenderable filter fails with no stdout.
+fn journal_snapshot_block(
+    analyzer: &mut JournalAnalyzer,
+    opts: &TopOptions,
+    horizon_ns: u64,
+    seq: i64,
+    watch: &mut FilterWatch,
+    start_ns: u64,
+) -> i64 {
+    let mut reduced = match analyzer.snapshot(horizon_ns, false) {
+        Ok(reduced) => reduced,
+        Err(_) => return EXIT_INTERNAL,
+    };
+    apply_integrity(&mut reduced.report, false, 0, 0);
+    reduced.report.integrity_context = "replay prefix".to_string();
+    let line = watch.warn_for(&reduced.report);
+    if !line.is_empty() {
+        let _ = write_stderr(&line);
+    }
+    if watch.device_unrenderable() {
+        return EXIT_INTERNAL;
+    }
+    match emit_journal_report(
+        &mut reduced,
+        &watch.filt,
+        seq,
+        horizon_ns,
+        start_ns,
+        !opts.full,
+    ) {
+        Ok(rc) => rc,
+        Err(_) => EXIT_INTERNAL,
+    }
+}
+
+/// Drain the rest quietly, print the journal final summary and code.
+///
+/// Mirrors [`finish_after_signal`]: the final block is always the
+/// full journal report, and the checkpoint prefix demotes any
+/// complete channel.
+fn journal_finish_after_signal(
+    reader: &mut CaptureReader,
+    analyzer: &mut JournalAnalyzer,
+    opts: &TopOptions,
+    seq: i64,
+    watch: &mut FilterWatch,
+    capture_exit: i64,
+    retained_path: &str,
+) -> i64 {
+    loop {
+        let more = match reader.has_more() {
+            Ok(more) => more,
+            Err(e) => return top_read_failed(&e.message),
+        };
+        if !more {
+            break;
+        }
+        let ev = match reader.next_event() {
+            Ok(ev) => ev,
+            Err(e) => return top_read_failed(&e.message),
+        };
+        if let Err(e) = analyzer.consume(&ev) {
+            return top_failed("memveil top: cannot reduce capture: ", &e.message);
+        }
+    }
+    let mut reduced = match analyzer.finish(reader.session.window_end_ns, false) {
+        Ok(reduced) => reduced,
+        Err(e) => return top_failed("memveil top: ", &analysis_error_text(&e.message)),
+    };
+    if reader.checkpoint_prefix {
+        apply_journal_checkpoint(
+            &mut reduced.report,
+            reader.session.integrity.events_bytes,
+            reader.session.integrity.line_count,
+            reader.unverified_bytes,
+        );
+    } else {
+        apply_integrity(
+            &mut reduced.report,
+            reader.integrity_verified,
+            reader.session.integrity.events_bytes,
+            reader.session.integrity.line_count,
+        );
+    }
+    let line = watch.warn_for(&reduced.report);
+    if !line.is_empty() {
+        let _ = write_stderr(&line);
+    }
+    if watch.device_unrenderable() {
+        return EXIT_INTERNAL;
+    }
+    let text = render_journal_block(&reduced, false, &watch.filt);
+    if check_rendered_size(&text, MAX_RENDERED_BYTES).is_err() {
+        return top_failed("memveil top: ", "report exceeds size limit");
+    }
+    if print_block(
+        &text,
+        seq + 1,
+        reader.session.window_end_ns,
+        reader.session.window_start_ns,
+        &watch.filt,
+    )
+    .is_err()
+    {
+        if capture_exit >= 0 {
+            let _ = write_capture_location(retained_path, "");
+            return capture_exit;
+        }
+        return EXIT_INTERNAL;
+    }
+    if reader.checkpoint_prefix {
+        return 4;
+    }
+    exit_for_report(&reduced.report, opts.strict)
+}
+
+/// Replay one journal capture with refresh blocks.
+///
+/// Mirrors [`drain`]: every boundary the event crosses renders before
+/// the event is consumed, a stop latches and finishes quietly, and
+/// the final block is the full journal report.
+fn run_journal_replay(
+    reader: &mut CaptureReader,
+    opts: &TopOptions,
+    device_unrenderable: bool,
+) -> i64 {
+    let mut signal = LiveSignalSource::new();
+    let armed = signal.setup();
+    if !armed.ok {
+        let _ = write_stderr(&format!(
+            "memveil top: cannot arm signals: {}\n",
+            sanitize_diagnostic(&armed.message)
+        ));
+        return EXIT_INTERNAL;
+    }
+    let mut analyzer = JournalAnalyzer::new(reader.session.clone());
+    let mut clock = MonoClock::new();
+    let mut cursor = BoundaryCursor::new(
+        reader.session.window_start_ns,
+        reader.session.window_end_ns,
+        opts.interval_ns,
+    );
+    let mut seq = 0;
+    let mut watch = FilterWatch::new(opts);
+    if device_unrenderable {
+        watch.mark_device_unrenderable();
+    }
+    loop {
+        let more = match reader.has_more() {
+            Ok(more) => more,
+            Err(e) => {
+                signal.teardown();
+                return top_read_failed(&e.message);
+            }
+        };
+        if !more {
+            break;
+        }
+        let ev = match reader.next_event() {
+            Ok(ev) => ev,
+            Err(e) => {
+                signal.teardown();
+                return top_read_failed(&e.message);
+            }
+        };
+        let ts = ev.ts_ns;
+        let mut stopped = false;
+        let wait_ms = (opts.interval_ns / 1_000_000) as i64;
+        while cursor.has_due(ts) && !stopped {
+            let horizon = cursor.pop();
+            seq += 1;
+            let rc = journal_snapshot_block(
+                &mut analyzer,
+                opts,
+                horizon,
+                seq,
+                &mut watch,
+                reader.session.window_start_ns,
+            );
+            if rc != 0 {
+                signal.teardown();
+                return rc;
+            }
+            let wait = wait_interval(&mut clock, &mut signal, wait_ms);
+            if wait.state == "error" {
+                signal.teardown();
+                return signal_failed(&wait.message);
+            }
+            stopped = wait.state != "none";
+        }
+        if let Err(e) = analyzer.consume(&ev) {
+            signal.teardown();
+            return top_failed("memveil top: cannot reduce capture: ", &e.message);
+        }
+        if stopped {
+            let rc =
+                journal_finish_after_signal(reader, &mut analyzer, opts, seq, &mut watch, -1, "");
+            signal.teardown();
+            return rc;
+        }
+        let got = signal.check();
+        if got.state != "none" {
+            if got.state == "error" {
+                signal.teardown();
+                return signal_failed(&got.message);
+            }
+            let rc =
+                journal_finish_after_signal(reader, &mut analyzer, opts, seq, &mut watch, -1, "");
+            signal.teardown();
+            return rc;
+        }
+    }
+    seq += 1;
+    let mut reduced = match analyzer.finish(reader.session.window_end_ns, false) {
+        Ok(reduced) => reduced,
+        Err(e) => {
+            signal.teardown();
+            return top_failed("memveil top: ", &analysis_error_text(&e.message));
+        }
+    };
+    if reader.checkpoint_prefix {
+        apply_journal_checkpoint(
+            &mut reduced.report,
+            reader.session.integrity.events_bytes,
+            reader.session.integrity.line_count,
+            reader.unverified_bytes,
+        );
+    } else {
+        apply_integrity(
+            &mut reduced.report,
+            reader.integrity_verified,
+            reader.session.integrity.events_bytes,
+            reader.session.integrity.line_count,
+        );
+    }
+    let line = watch.warn_for(&reduced.report);
+    if !line.is_empty() {
+        let _ = write_stderr(&line);
+    }
+    if watch.device_unrenderable() {
+        signal.teardown();
+        return EXIT_INTERNAL;
+    }
+    let text = render_journal_block(&reduced, false, &watch.filt);
+    if check_rendered_size(&text, MAX_RENDERED_BYTES).is_err() {
+        signal.teardown();
+        return top_failed("memveil top: ", "report exceeds size limit");
+    }
+    if print_block(
+        &text,
+        seq,
+        reader.session.window_end_ns,
+        reader.session.window_start_ns,
+        &watch.filt,
+    )
+    .is_err()
+    {
+        signal.teardown();
+        return EXIT_INTERNAL;
+    }
+    signal.teardown();
+    if reader.checkpoint_prefix {
+        return 4;
+    }
+    exit_for_report(&reduced.report, opts.strict)
+}
+
 /// Stream one opened capture to periodic summaries; return the exit code.
 ///
 /// `device_unrenderable` carries a non-UTF-8 `--device` value past
@@ -1285,11 +1598,7 @@ pub fn run_top(args: &[String]) -> i64 {
 /// exactly like the Mojo block render raise.
 fn run_replay(reader: &mut CaptureReader, opts: &TopOptions, device_unrenderable: bool) -> i64 {
     if reader.session.has_journal {
-        return top_failed(
-            "memveil top: ",
-            "journal capture refused: the legacy reducer cannot reduce journal events; \
-             journal reducer follow-on pending",
-        );
+        return run_journal_replay(reader, opts, device_unrenderable);
     }
     let mut signal = LiveSignalSource::new();
     let armed = signal.setup();
