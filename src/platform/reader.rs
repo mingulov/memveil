@@ -889,6 +889,266 @@ pub fn read_evidence(
     read_bounded_contained(&reader.root, path, path, cap)
 }
 
+/// Exact sysfs/procfs files the confidential preflight may read.
+///
+/// Every entry is a world-readable kernel status interface; the
+/// preflight opens each read-only through the shared evidence
+/// reader and never writes. Block topology below `/sys/block`
+/// is allowlisted separately by shape in
+/// [`preflight_path_allowed`]. Kernel config arrives through
+/// the shared narrow helper over its own fixed paths, and the
+/// lockdown mode through the kernel gate; those readers own
+/// their paths, this list owns the preflight's direct reads.
+pub const PREFLIGHT_EXACT_PATHS: &[&str] = &[
+    "/proc/swaps",
+    "/proc/cmdline",
+    "/proc/sys/kernel/modules_disabled",
+    "/proc/sys/kernel/kexec_load_disabled",
+    "/sys/power/state",
+    "/sys/power/disk",
+    "/sys/kernel/kexec_crash_loaded",
+    "/sys/kernel/kexec_crash_size",
+    "/sys/module/zswap/parameters/enabled",
+    "/sys/module/module/parameters/sig_enforce",
+];
+
+/// Longest sysfs device-name segment the preflight resolves.
+pub const PREFLIGHT_SEGMENT_MAX: usize = 64;
+
+/// True when `name` is a safe single sysfs path segment.
+///
+/// ASCII letters, digits, `_`, `-`, `.`, 1..=64 bytes; `.`
+/// and `..` refused outright. Resolution callers refuse
+/// anything else, so a hostile segment leaves its branch
+/// unresolved instead of wandering the tree.
+pub fn preflight_device_segment(name: &str) -> bool {
+    if name == "." || name == ".." {
+        return false;
+    }
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > PREFLIGHT_SEGMENT_MAX {
+        return false;
+    }
+    for &b in bytes {
+        let ok = b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.';
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when `path` is an allowlisted confidential-preflight read.
+///
+/// Exact files come from [`PREFLIGHT_EXACT_PATHS`]; below
+/// `/sys/block` only node probes (`/<dev>`,
+/// `/<parent>/<part>`), slave listings (`.../slaves`), mapper
+/// identity (`.../dm/uuid`, `.../dm/name`), and zram writeback
+/// state (`/<dev>/backing_dev`) qualify, every segment
+/// validated by [`preflight_device_segment`]. Anything else —
+/// `/dev` nodes, debugfs, `/proc/kcore`, deeper sysfs — is
+/// refused, so a denied fact can never be bypassed through
+/// another tree.
+pub fn preflight_path_allowed(path: &str) -> bool {
+    if PREFLIGHT_EXACT_PATHS.contains(&path) {
+        return true;
+    }
+    let rest = match path.strip_prefix("/sys/block") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let tail = match rest.strip_prefix('/') {
+        Some(tail) => tail,
+        None => return false,
+    };
+    if tail.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = tail.split('/').collect();
+    match parts.len() {
+        1 => preflight_device_segment(parts[0]),
+        2 => {
+            if !preflight_device_segment(parts[0]) {
+                return false;
+            }
+            if parts[1] == "slaves" || parts[1] == "backing_dev" {
+                return true;
+            }
+            if parts[1] == "dm" {
+                return false;
+            }
+            preflight_device_segment(parts[1])
+        }
+        3 => {
+            if !preflight_device_segment(parts[0]) {
+                return false;
+            }
+            if parts[1] == "dm" {
+                return parts[2] == "uuid" || parts[2] == "name";
+            }
+            if !preflight_device_segment(parts[1]) {
+                return false;
+            }
+            parts[2] == "slaves"
+        }
+        4 => {
+            preflight_device_segment(parts[0])
+                && preflight_device_segment(parts[1])
+                && parts[2] == "dm"
+                && (parts[3] == "uuid" || parts[3] == "name")
+        }
+        _ => false,
+    }
+}
+
+/// Read one allowlisted preflight file, capped at `cap` bytes.
+///
+/// Paths outside [`preflight_path_allowed`] fail with
+/// E_DENIED without touching the filesystem; the swap walk
+/// treats that like any other refusal and stays unresolved.
+pub fn read_preflight(
+    reader: &EvidenceReader,
+    path: &str,
+    cap: usize,
+) -> Result<Vec<u8>, EvidenceError> {
+    if !preflight_path_allowed(path) {
+        return Err(EvidenceError::new(
+            E_DENIED,
+            format!("{path}: not an allowlisted preflight path"),
+        ));
+    }
+    read_evidence(reader, path, cap)
+}
+
+/// Classify one allowlisted preflight path: OK, ABSENT, or DENIED.
+///
+/// Paths outside [`preflight_path_allowed`] report DENIED:
+/// refused by policy, never absent.
+pub fn preflight_state(reader: &EvidenceReader, path: &str) -> i32 {
+    if !preflight_path_allowed(path) {
+        return EVIDENCE_DENIED;
+    }
+    file_state(reader, path)
+}
+
+/// True when `path` is an allowlisted preflight directory listing.
+///
+/// Only `/sys/block` (partition-parent scan) and `.../slaves`
+/// (topology walk) list; every other allowlisted path reads
+/// as a file.
+fn preflight_listable(path: &str) -> bool {
+    if path == "/sys/block" {
+        return true;
+    }
+    if !preflight_path_allowed(path) {
+        return false;
+    }
+    path.ends_with("/slaves")
+}
+
+/// Classify a directory-open failure: only missing is absent.
+fn dir_open_error(path: &str, err: std::io::Error) -> EvidenceError {
+    use std::io::ErrorKind;
+    match err.kind() {
+        ErrorKind::NotFound => EvidenceError::new(E_ABSENT, format!("{path}: absent")),
+        ErrorKind::PermissionDenied => EvidenceError::new(E_DENIED, format!("{path}: denied")),
+        _ => EvidenceError::new(E_IO, format!("{path}: cannot list")),
+    }
+}
+
+/// Drain one directory to sorted names, bounded at `cap` entries.
+///
+/// Fails with E_TOO_BIG past the cap and E_IO on a read
+/// failure or a non-UTF-8 name: an undecodable entry fails
+/// the listing closed rather than being skipped, since a
+/// skipped slave could hide an encryption layer below it.
+/// Callers re-validate every name through
+/// [`preflight_device_segment`] before resolving it.
+fn drain_dir_names(
+    read: std::fs::ReadDir,
+    what: &str,
+    cap: usize,
+) -> Result<Vec<String>, EvidenceError> {
+    let mut out = Vec::new();
+    for entry in read {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                return Err(EvidenceError::new(E_IO, format!("{what}: cannot list")));
+            }
+        };
+        let bytes = entry.file_name().as_encoded_bytes().to_vec();
+        if !is_valid_utf8(&bytes) {
+            return Err(EvidenceError::new(
+                E_IO,
+                format!("{what}: entry name not UTF-8"),
+            ));
+        }
+        if out.len() + 1 > cap {
+            return Err(EvidenceError::new(E_TOO_BIG, format!("{what} too large")));
+        }
+        out.push(bytes_to_text(&bytes));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// List one live directory: links followed, like live reads.
+fn list_dir_live(path: &str, cap: usize) -> Result<Vec<String>, EvidenceError> {
+    match std::fs::read_dir(path) {
+        Ok(read) => drain_dir_names(read, path, cap),
+        Err(err) => Err(dir_open_error(path, err)),
+    }
+}
+
+/// List one fixture directory without following links.
+///
+/// The contained open walks root-relative with O_NOFOLLOW on
+/// every component; the listing then reopens the held fd
+/// through `/proc/self/fd`, which duplicates the description
+/// instead of re-resolving any path, so a fixture symlink
+/// cannot redirect the read.
+fn list_dir_contained(root: &str, path: &str, cap: usize) -> Result<Vec<String>, EvidenceError> {
+    let fd = contained_fd(root, path)?;
+    let via = format!("/proc/self/fd/{fd}");
+    let out = match std::fs::read_dir(&via) {
+        Ok(read) => drain_dir_names(read, path, cap),
+        Err(err) => Err(dir_open_error(path, err)),
+    };
+    close_quiet_local(fd);
+    out
+}
+
+/// List one allowlisted preflight directory, bounded and sorted.
+///
+/// Names come back sorted byte-wise for deterministic walks.
+/// Fails with E_DENIED outside the listing allowlist or on a
+/// fixture-denied path, E_ABSENT when the directory is
+/// missing, E_TOO_BIG past `cap` entries, E_IO on read
+/// failure or a non-UTF-8 name.
+pub fn list_preflight_dir(
+    reader: &EvidenceReader,
+    path: &str,
+    cap: usize,
+) -> Result<Vec<String>, EvidenceError> {
+    if !preflight_listable(path) {
+        return Err(EvidenceError::new(
+            E_DENIED,
+            format!("{path}: not an allowlisted preflight listing"),
+        ));
+    }
+    if is_denied(reader, path) {
+        return Err(EvidenceError::new(E_DENIED, format!("{path}: denied")));
+    }
+    if reader.root.is_empty() {
+        return list_dir_live(path, cap);
+    }
+    list_dir_contained(&reader.root, path, cap)
+}
+
 /// Read one small host file (profile, manifest), capped at `cap` bytes.
 ///
 /// Unlike `read_evidence` this never maps a fixture root: profile
@@ -1419,5 +1679,163 @@ mod tests {
         // helper resolves one here so path rot fails fast.
         let r = open_evidence_reader(&gate_fixture("base")).expect("gate base opens");
         assert!(!r.release.is_empty());
+    }
+
+    #[test]
+    fn preflight_allowlist_exact() {
+        for path in PREFLIGHT_EXACT_PATHS {
+            assert!(preflight_path_allowed(path), "{path}");
+        }
+        assert_eq!(PREFLIGHT_EXACT_PATHS.len(), 10);
+    }
+
+    #[test]
+    fn preflight_allowlist_families() {
+        for path in [
+            "/sys/block",
+            "/sys/block/dm-0",
+            "/sys/block/sda",
+            "/sys/block/nvme0n1",
+            "/sys/block/zram0",
+            "/sys/block/dm-0/slaves",
+            "/sys/block/dm-0/dm/uuid",
+            "/sys/block/dm-0/dm/name",
+            "/sys/block/zram0/backing_dev",
+            "/sys/block/sda/sda2",
+            "/sys/block/sda/sda2/slaves",
+            "/sys/block/nvme0n1/nvme0n1p1/dm/uuid",
+            "/sys/block/dm-0/dm/name",
+        ] {
+            assert!(preflight_path_allowed(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn preflight_allowlist_refusals() {
+        // Bypass-shaped paths: device nodes, debugfs, kcore,
+        // deeper sysfs, escapes, bad segments. (Self-memory
+        // paths refuse the same way by falling outside the
+        // allowlist; the privacy audit forbids spelling them
+        // outside comments, so they pin no vector here.)
+        let long = format!("/sys/block/{}", "d".repeat(65));
+        for path in [
+            "/dev/null",
+            "/dev/dm-0",
+            "/dev/mapper/crypt",
+            "/proc/kcore",
+            "/sys/kernel/debug/swiotlb",
+            "/sys/block/dm-0/dm",
+            "/sys/block/dm-0/dm/uuid/extra",
+            "/sys/block/dm-0/slaves/sda2",
+            "/sys/block/dm-0/backing_dev/x",
+            "/sys/block/sda/sda2/backing_dev",
+            "/sys/block/a/b/c/d/e",
+            "/sys/block/../power/state",
+            "/sys/block/.",
+            "/sys/block/..",
+            "/sys/block/",
+            "/sys/block",
+            "/proc/swaps/x",
+            "/sys/power",
+            "",
+            "relative/path",
+            long.as_str(),
+            "/sys/block/has space/dm/uuid",
+            "/sys/block/has/slash/x/dm/uuid",
+        ] {
+            if path == "/sys/block" {
+                assert!(preflight_path_allowed(path), "{path}");
+            } else {
+                assert!(!preflight_path_allowed(path), "{path}");
+            }
+        }
+        assert!(!preflight_device_segment(""));
+        assert!(!preflight_device_segment("."));
+        assert!(!preflight_device_segment(".."));
+        assert!(!preflight_device_segment("has space"));
+        assert!(!preflight_device_segment("has/slash"));
+        assert!(!preflight_device_segment(&"d".repeat(65)));
+        assert!(preflight_device_segment(&"d".repeat(64)));
+        assert!(preflight_device_segment("dm-0"));
+        assert!(preflight_device_segment("nvme0n1p1"));
+    }
+
+    #[test]
+    fn preflight_refuses_before_touch() {
+        // /dev/null reads on every host: refusal must precede it.
+        let live = open_evidence_reader("").expect("live opens");
+        let err = read_preflight(&live, "/dev/null", 8).unwrap_err();
+        assert_eq!(err.code, E_DENIED);
+        assert_eq!(preflight_state(&live, "/dev/null"), EVIDENCE_DENIED);
+        assert_eq!(preflight_state(&live, "/proc/kcore"), EVIDENCE_DENIED);
+        let err = list_preflight_dir(&live, "/proc", 8).unwrap_err();
+        assert_eq!(err.code, E_DENIED);
+        let err = list_preflight_dir(&live, "/proc/swaps", 8).unwrap_err();
+        assert_eq!(err.code, E_DENIED);
+    }
+
+    /// Scratch fixture tree with only a meta header.
+    fn preflight_tree() -> TestDir {
+        let tmp = TestDir::create("memveil-preflight").expect("mkdtemp");
+        std::fs::write(
+            tmp.path().join("meta.txt"),
+            b"arch=x86_64\nrelease=7.0.0-test\neuid=1001\n",
+        )
+        .expect("meta");
+        tmp
+    }
+
+    #[test]
+    fn preflight_list_fixture_sorted_and_capped() {
+        let tmp = preflight_tree();
+        let slaves = tmp.path().join("sys/block/dm-0/slaves");
+        std::fs::create_dir_all(&slaves).expect("slaves");
+        for name in ["sda3", "sda1", "sda2"] {
+            std::fs::write(slaves.join(name), b"").expect("slave");
+        }
+        let r = open_evidence_reader(tmp.as_str()).expect("opens");
+        let names = list_preflight_dir(&r, "/sys/block/dm-0/slaves", 64).expect("lists");
+        assert_eq!(names, vec!["sda1", "sda2", "sda3"]);
+        let err = list_preflight_dir(&r, "/sys/block/dm-0/slaves", 2).unwrap_err();
+        assert_eq!(err.code, E_TOO_BIG);
+        let block = list_preflight_dir(&r, "/sys/block", 64).expect("block lists");
+        assert_eq!(block, vec!["dm-0"]);
+        let err = list_preflight_dir(&r, "/sys/block/sda/slaves", 64).unwrap_err();
+        assert_eq!(err.code, E_ABSENT);
+    }
+
+    #[test]
+    fn preflight_list_contained_and_typed() {
+        let tmp = preflight_tree();
+        std::fs::create_dir_all(tmp.path().join("sys/block")).expect("block");
+        std::fs::write(tmp.path().join("sys/block/plain"), b"x").expect("file");
+        std::os::unix::fs::symlink("plain", tmp.path().join("sys/block/link")).expect("symlink");
+        let r = open_evidence_reader(tmp.as_str()).expect("opens");
+        // A symlink final component is denied, never followed.
+        let err = list_preflight_dir(&r, "/sys/block/link/slaves", 64).unwrap_err();
+        assert_eq!(err.code, E_DENIED);
+        // A regular file mid-path fails the contained walk closed.
+        let err = list_preflight_dir(&r, "/sys/block/plain/slaves", 64).unwrap_err();
+        assert_eq!(err.code, E_DENIED);
+        // Slave entry symlinks list by name; resolution never
+        // follows them (the swap walk re-validates names).
+        let slaves = tmp.path().join("sys/block/dm-1/slaves");
+        std::fs::create_dir_all(&slaves).expect("slaves");
+        std::os::unix::fs::symlink("/etc/hostname", slaves.join("sda9")).expect("slave link");
+        let names = list_preflight_dir(&r, "/sys/block/dm-1/slaves", 64).expect("lists");
+        assert_eq!(names, vec!["sda9"]);
+    }
+
+    #[test]
+    fn preflight_list_rejects_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let tmp = preflight_tree();
+        let slaves = tmp.path().join("sys/block/dm-0/slaves");
+        std::fs::create_dir_all(&slaves).expect("slaves");
+        let hostile = std::ffi::OsString::from_vec(vec![0x66, 0xFF, 0x66]);
+        std::fs::write(slaves.join(hostile), b"").expect("hostile");
+        let r = open_evidence_reader(tmp.as_str()).expect("opens");
+        let err = list_preflight_dir(&r, "/sys/block/dm-0/slaves", 64).unwrap_err();
+        assert_eq!(err.code, E_IO);
     }
 }
